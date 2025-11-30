@@ -106,8 +106,25 @@ my $loop = IO::Async::Loop->new;
 my $server = PAGI::Server->new(%server_opts);
 $loop->add($server);
 
-# Start listening
-$server->listen->get;
+# Start listening with proper error handling
+eval {
+    $server->listen->get;
+};
+if ($@) {
+    my $error = $@;
+    # Clean up common IO::Async error messages
+    if ($error =~ /Cannot bind\(\).*Address already in use/i) {
+        die "Error: Port $opts{port} is already in use\n";
+    }
+    elsif ($error =~ /Cannot bind\(\).*Permission denied/i) {
+        die "Error: Permission denied to bind to port $opts{port}\n";
+    }
+    elsif ($error =~ /Cannot bind\(\)/) {
+        $error =~ s/\s+at\s+\S+\s+line\s+\d+.*//s;  # Strip stack trace
+        die "Error: $error\n";
+    }
+    die "Error starting server: $error\n";
+}
 
 # Run the event loop
 $loop->run;
