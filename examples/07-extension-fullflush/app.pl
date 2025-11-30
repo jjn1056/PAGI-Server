@@ -3,8 +3,12 @@ use warnings;
 use Future::AsyncAwait;
 use experimental 'signatures';
 
-async sub base_app ($scope, $receive, $send) {
-    die "Unsupported scope" if $scope->{type} ne 'http';
+# Demonstrates fullflush extension during streaming response.
+# The fullflush event forces immediate TCP buffer flush, useful for
+# Server-Sent Events or real-time streaming where latency matters.
+
+async sub app ($scope, $receive, $send) {
+    die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
     # Drain request body if present
     while (1) {
@@ -13,24 +17,32 @@ async sub base_app ($scope, $receive, $send) {
         last unless $event->{more};
     }
 
+    # Check if server supports fullflush extension
+    my $supports_fullflush = exists $scope->{extensions}{fullflush};
+
     await $send->({
         type    => 'http.response.start',
         status  => 200,
         headers => [ [ 'content-type', 'text/plain' ] ],
     });
 
-    await $send->({ type => 'http.response.body', body => "Body sent", more => 0 });
-}
+    # Stream chunks with flush after each (if supported)
+    my @chunks = ("Line 1\n", "Line 2\n", "Line 3\n");
 
-sub fullflush_middleware ($app) {
-    return async sub ($scope, $receive, $send) {
-        my $supports_fullflush = exists $scope->{extensions}{fullflush};
-        await $app->($scope, $receive, $send);
-        if ($supports_fullflush && $scope->{type} eq 'http') {
+    for my $i (0 .. $#chunks) {
+        my $is_last = ($i == $#chunks);
+        await $send->({
+            type => 'http.response.body',
+            body => $chunks[$i],
+            more => $is_last ? 0 : 1,
+        });
+
+        # Flush immediately after each chunk so client sees it right away
+        # Only send if server advertises support and not the final chunk
+        if ($supports_fullflush && !$is_last) {
             await $send->({ type => 'http.fullflush' });
         }
-    };
+    }
 }
 
-my $wrapped = fullflush_middleware(\&base_app);
-return $wrapped unless caller;
+return \&app unless caller;
