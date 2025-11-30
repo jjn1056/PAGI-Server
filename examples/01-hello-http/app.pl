@@ -20,4 +20,4 @@ async sub app ($scope, $receive, $send) {
     });
 }
 
-return \&app unless caller;
+\&app;  # Return coderef when loaded via do
