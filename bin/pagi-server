@@ -4,6 +4,10 @@ use warnings;
 use experimental 'signatures';
 use Getopt::Long;
 use Pod::Usage;
+use IO::Async::Loop;
+
+use lib 'lib';
+use PAGI::Server;
 
 =head1 NAME
 
@@ -66,22 +70,47 @@ if ($opts{ssl_cert} || $opts{ssl_key}) {
     die "SSL key not found: $opts{ssl_key}\n" unless -f $opts{ssl_key};
 }
 
-# Load the app
-my $app = do $opts{app};
+# Load the app - convert to absolute path for proper do() behavior
+use File::Spec;
+my $app_path = File::Spec->rel2abs($opts{app});
+my $app = do $app_path;
 die "Failed to load app: $@" if $@;
 die "App file must return a coderef" unless ref $app eq 'CODE';
 
-# TODO: Start server (implement in Step 1)
-unless ($opts{quiet}) {
-    print STDERR "PAGI Server starting...\n";
-    print STDERR "  Host: $opts{host}\n";
-    print STDERR "  Port: $opts{port}\n";
-    print STDERR "  App:  $opts{app}\n";
-    print STDERR "\n";
+# Build server options
+my %server_opts = (
+    app   => $app,
+    host  => $opts{host},
+    port  => $opts{port},
+    quiet => $opts{quiet} ? 1 : 0,
+);
+
+# Add SSL config if provided
+if ($opts{ssl_cert} && $opts{ssl_key}) {
+    $server_opts{ssl} = {
+        cert_file => $opts{ssl_cert},
+        key_file  => $opts{ssl_key},
+    };
 }
 
-# Placeholder - actual server implementation in Step 1
-warn "Server implementation pending - see Step 1 in app_spec.txt\n";
+# Add access log if provided
+if ($opts{access_log}) {
+    open my $log_fh, '>>', $opts{access_log}
+        or die "Cannot open access log $opts{access_log}: $!\n";
+    $server_opts{access_log} = $log_fh;
+}
+
+# Create event loop and server
+my $loop = IO::Async::Loop->new;
+
+my $server = PAGI::Server->new(%server_opts);
+$loop->add($server);
+
+# Start listening
+$server->listen->get;
+
+# Run the event loop
+$loop->run;
 
 __END__
 
