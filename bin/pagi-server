@@ -1,0 +1,96 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use experimental 'signatures';
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+pagi-server - PAGI Reference Server CLI
+
+=head1 SYNOPSIS
+
+    pagi-server --app app.pl [options]
+
+    Options:
+        --app, -a       Path to .pl file returning PAGI app coderef (required)
+        --host, -h      Bind address (default: 127.0.0.1)
+        --port, -p      Bind port (default: 5000)
+        --workers, -w   Number of worker processes (default: 1)
+        --ssl-cert      Path to SSL certificate (enables HTTPS)
+        --ssl-key       Path to SSL private key
+        --access-log    Path to access log file (default: STDERR)
+        --quiet, -q     Suppress startup banner
+        --help          Show this help
+
+=head1 EXAMPLES
+
+    # Start with a simple app
+    pagi-server --app examples/01-hello-http/app.pl --port 8080
+
+    # Start with HTTPS
+    pagi-server -a myapp.pl -p 3000 --ssl-cert cert.pem --ssl-key key.pem
+
+=cut
+
+my %opts = (
+    host    => '127.0.0.1',
+    port    => 5000,
+    workers => 1,
+);
+
+GetOptions(
+    'app|a=s'       => \$opts{app},
+    'host|h=s'      => \$opts{host},
+    'port|p=i'      => \$opts{port},
+    'workers|w=i'   => \$opts{workers},
+    'ssl-cert=s'    => \$opts{ssl_cert},
+    'ssl-key=s'     => \$opts{ssl_key},
+    'access-log=s'  => \$opts{access_log},
+    'quiet|q'       => \$opts{quiet},
+    'help'          => \$opts{help},
+) or pod2usage(2);
+
+pod2usage(1) if $opts{help};
+pod2usage("--app is required") unless $opts{app};
+
+# Validate app file exists
+die "App file not found: $opts{app}\n" unless -f $opts{app};
+
+# Validate SSL options
+if ($opts{ssl_cert} || $opts{ssl_key}) {
+    die "--ssl-cert and --ssl-key must be specified together\n"
+        unless $opts{ssl_cert} && $opts{ssl_key};
+    die "SSL cert not found: $opts{ssl_cert}\n" unless -f $opts{ssl_cert};
+    die "SSL key not found: $opts{ssl_key}\n" unless -f $opts{ssl_key};
+}
+
+# Load the app
+my $app = do $opts{app};
+die "Failed to load app: $@" if $@;
+die "App file must return a coderef" unless ref $app eq 'CODE';
+
+# TODO: Start server (implement in Step 1)
+unless ($opts{quiet}) {
+    print STDERR "PAGI Server starting...\n";
+    print STDERR "  Host: $opts{host}\n";
+    print STDERR "  Port: $opts{port}\n";
+    print STDERR "  App:  $opts{app}\n";
+    print STDERR "\n";
+}
+
+# Placeholder - actual server implementation in Step 1
+warn "Server implementation pending - see Step 1 in app_spec.txt\n";
+
+__END__
+
+=head1 AUTHOR
+
+John Napiorkowski E<lt>jjnapiork@cpan.orgE<gt>
+
+=head1 LICENSE
+
+This software is licensed under the same terms as Perl itself.
+
+=cut
