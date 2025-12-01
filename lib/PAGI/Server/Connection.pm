@@ -98,6 +98,16 @@ sub start ($self) {
     my $stream = $self->{stream};
     weaken(my $weak_self = $self);
 
+    # Enable TCP_NODELAY to reduce latency for small responses
+    my $handle = $stream->write_handle // $stream->read_handle;
+    if ($handle && $handle->can('setsockopt')) {
+        require Socket;
+        eval {
+            $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+        };
+        # Ignore errors - not all sockets support this
+    }
+
     # Set up idle timeout timer
     if ($self->{timeout} && $self->{timeout} > 0 && $self->{server}) {
         my $timer = IO::Async::Timer::Countdown->new(
@@ -360,7 +370,8 @@ sub _create_scope ($self, $request) {
         headers      => $request->{headers},
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
-        state        => { %{$self->{state}} },  # Shallow copy per spec
+        # Optimized: avoid hash copy when state is empty (common case)
+        state        => %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
     };
 
@@ -1012,7 +1023,8 @@ sub _create_sse_scope ($self, $request) {
         headers      => $request->{headers},
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
-        state        => { %{$self->{state}} },  # Shallow copy per spec
+        # Optimized: avoid hash copy when state is empty (common case)
+        state        => %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
     };
 
@@ -1247,7 +1259,8 @@ sub _create_websocket_scope ($self, $request) {
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
         subprotocols => \@subprotocols,
-        state        => { %{$self->{state}} },  # Shallow copy per spec
+        # Optimized: avoid hash copy when state is empty (common case)
+        state        => %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
     };
 

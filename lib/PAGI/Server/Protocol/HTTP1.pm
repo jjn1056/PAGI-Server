@@ -77,6 +77,10 @@ Serializes HTTP trailers.
 
 =cut
 
+# Cached Date header (regenerated at most once per second)
+my $_cached_date;
+my $_cached_date_time = 0;
+
 # HTTP status code reason phrases
 my %STATUS_PHRASES = (
     100 => 'Continue',
@@ -153,9 +157,10 @@ sub parse_request ($self, $buffer_ref) {
     my @cookie_values;
 
     for my $key (keys %env) {
-        if ($key =~ /^HTTP_(.+)/) {
-            my $header_name = lc($1);
-            $header_name =~ s/_/-/g;
+        # Optimized: use index() + substr() instead of regex (faster per NYTProf)
+        if (index($key, 'HTTP_') == 0) {
+            my $header_name = lc(substr($key, 5));
+            $header_name =~ tr/_/-/;  # Optimized: tr/// is faster than s///g
             my $value = $env{$key};
 
             # Handle Cookie header normalization
@@ -192,10 +197,10 @@ sub parse_request ($self, $buffer_ref) {
         $content_length = $env{CONTENT_LENGTH} + 0;
     }
 
-    # Determine HTTP version
+    # Determine HTTP version (optimized: substr instead of regex)
     my $http_version = '1.1';
-    if ($env{SERVER_PROTOCOL} && $env{SERVER_PROTOCOL} =~ m{HTTP/(\d+\.\d+)}) {
-        $http_version = $1;
+    if ($env{SERVER_PROTOCOL} && index($env{SERVER_PROTOCOL}, 'HTTP/') == 0) {
+        $http_version = substr($env{SERVER_PROTOCOL}, 5);
     }
 
     my $request = {
@@ -269,12 +274,17 @@ sub serialize_trailers ($self, $headers) {
 }
 
 sub format_date ($self) {
-    my @days = qw(Sun Mon Tue Wed Thu Fri Sat);
-    my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
-    my @gmt = gmtime(time);
-    return sprintf("%s, %02d %s %04d %02d:%02d:%02d GMT",
-        $days[$gmt[6]], $gmt[3], $months[$gmt[4]], $gmt[5] + 1900,
-        $gmt[2], $gmt[1], $gmt[0]);
+    my $now = time();
+    if ($now != $_cached_date_time) {
+        $_cached_date_time = $now;
+        my @days = qw(Sun Mon Tue Wed Thu Fri Sat);
+        my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+        my @gmt = gmtime($now);
+        $_cached_date = sprintf("%s, %02d %s %04d %02d:%02d:%02d GMT",
+            $days[$gmt[6]], $gmt[3], $months[$gmt[4]], $gmt[5] + 1900,
+            $gmt[2], $gmt[1], $gmt[0]);
+    }
+    return $_cached_date;
 }
 
 =head2 parse_chunked_body
