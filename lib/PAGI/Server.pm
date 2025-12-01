@@ -116,20 +116,25 @@ Returns true if the server is accepting connections.
 =cut
 
 sub _init ($self, $params) {
-    $self->{app}        = delete $params->{app} or die "app is required";
-    $self->{host}       = delete $params->{host} // '127.0.0.1';
-    $self->{port}       = delete $params->{port} // 5000;
-    $self->{ssl}        = delete $params->{ssl};
-    $self->{extensions} = delete $params->{extensions} // {};
-    $self->{on_error}   = delete $params->{on_error} // sub { warn @_ };
-    $self->{access_log} = delete $params->{access_log} // \*STDERR;
-    $self->{quiet}      = delete $params->{quiet} // 0;
+    $self->{app}             = delete $params->{app} or die "app is required";
+    $self->{host}            = delete $params->{host} // '127.0.0.1';
+    $self->{port}            = delete $params->{port} // 5000;
+    $self->{ssl}             = delete $params->{ssl};
+    $self->{extensions}      = delete $params->{extensions} // {};
+    $self->{on_error}        = delete $params->{on_error} // sub { warn @_ };
+    $self->{access_log}      = delete $params->{access_log} // \*STDERR;
+    $self->{quiet}           = delete $params->{quiet} // 0;
+    $self->{timeout}         = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
+    $self->{max_header_size} = delete $params->{max_header_size} // 8192;  # Max header size in bytes
+    $self->{max_body_size}   = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
     $self->{listener}    = undef;
     $self->{connections} = [];
-    $self->{protocol}    = PAGI::Server::Protocol::HTTP1->new;
+    $self->{protocol}    = PAGI::Server::Protocol::HTTP1->new(
+        max_header_size => $self->{max_header_size},
+    );
     $self->{state}       = {};  # Shared state from lifespan
 
     $self->SUPER::_init($params);
@@ -159,6 +164,15 @@ sub configure ($self, %params) {
     }
     if (exists $params{quiet}) {
         $self->{quiet} = delete $params{quiet};
+    }
+    if (exists $params{timeout}) {
+        $self->{timeout} = delete $params{timeout};
+    }
+    if (exists $params{max_header_size}) {
+        $self->{max_header_size} = delete $params{max_header_size};
+    }
+    if (exists $params{max_body_size}) {
+        $self->{max_body_size} = delete $params{max_body_size};
     }
 
     $self->SUPER::configure(%params);
@@ -244,13 +258,16 @@ sub _on_connection ($self, $stream) {
     weaken(my $weak_self = $self);
 
     my $conn = PAGI::Server::Connection->new(
-        stream      => $stream,
-        app         => $self->{app},
-        protocol    => $self->{protocol},
-        server      => $self,
-        extensions  => $self->{extensions},
-        state       => $self->{state},
-        tls_enabled => $self->{tls_enabled} // 0,
+        stream        => $stream,
+        app           => $self->{app},
+        protocol      => $self->{protocol},
+        server        => $self,
+        extensions    => $self->{extensions},
+        state         => $self->{state},
+        tls_enabled   => $self->{tls_enabled} // 0,
+        timeout       => $self->{timeout},
+        max_body_size => $self->{max_body_size},
+        access_log    => $self->{quiet} ? undef : $self->{access_log},
     );
 
     # Track the connection

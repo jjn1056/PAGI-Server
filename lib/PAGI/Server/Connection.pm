@@ -9,6 +9,8 @@ use Protocol::WebSocket::Handshake::Server;
 use Protocol::WebSocket::Frame;
 use Digest::SHA qw(sha1_base64);
 use Encode;
+use IO::Async::Timer::Countdown;
+use Time::HiRes qw(gettimeofday tv_interval);
 
 our $VERSION = '0.001';
 
@@ -51,17 +53,23 @@ connection. It handles:
 
 sub new ($class, %args) {
     my $self = bless {
-        stream      => $args{stream},
-        app         => $args{app},
-        protocol    => $args{protocol},
-        server      => $args{server},
-        extensions  => $args{extensions} // {},
-        state       => $args{state} // {},
-        tls_enabled => $args{tls_enabled} // 0,
-        tls_info    => undef,  # Populated on first request if TLS
-        buffer      => '',
-        closed      => 0,
+        stream        => $args{stream},
+        app           => $args{app},
+        protocol      => $args{protocol},
+        server        => $args{server},
+        extensions    => $args{extensions} // {},
+        state         => $args{state} // {},
+        tls_enabled   => $args{tls_enabled} // 0,
+        timeout       => $args{timeout} // 60,  # Idle timeout in seconds
+        max_body_size => $args{max_body_size},  # undef = unlimited
+        access_log    => $args{access_log},     # Filehandle for access logging
+        tls_info      => undef,  # Populated on first request if TLS
+        buffer        => '',
+        closed        => 0,
         response_started => 0,
+        response_status  => undef,  # Track response status for logging
+        request_start    => undef,  # Track request start time for logging
+        idle_timer    => undef,  # IO::Async::Timer for idle timeout
         # Event queue for $receive
         receive_queue   => [],
         receive_pending => undef,
@@ -90,10 +98,29 @@ sub start ($self) {
     my $stream = $self->{stream};
     weaken(my $weak_self = $self);
 
+    # Set up idle timeout timer
+    if ($self->{timeout} && $self->{timeout} > 0 && $self->{server}) {
+        my $timer = IO::Async::Timer::Countdown->new(
+            delay => $self->{timeout},
+            on_expire => sub {
+                return unless $weak_self;
+                return if $weak_self->{closed};
+                # Close idle connection
+                $weak_self->_close;
+            },
+        );
+        $self->{idle_timer} = $timer;
+        $self->{server}->add_child($timer);
+        $timer->start;
+    }
+
     # Set up read handler
     $stream->configure(
         on_read => sub ($s, $buffref, $eof) {
             return 0 unless $weak_self;
+
+            # Reset idle timer on any read activity
+            $weak_self->_reset_idle_timer;
 
             $weak_self->{buffer} .= $$buffref;
             $$buffref = '';
@@ -126,6 +153,17 @@ sub start ($self) {
     );
 }
 
+sub _reset_idle_timer ($self) {
+    return unless $self->{idle_timer};
+    $self->{idle_timer}->reset;
+    $self->{idle_timer}->start unless $self->{idle_timer}->is_running;
+}
+
+sub _stop_idle_timer ($self) {
+    return unless $self->{idle_timer};
+    $self->{idle_timer}->stop if $self->{idle_timer}->is_running;
+}
+
 sub _try_handle_request ($self) {
     return if $self->{closed};
     return if $self->{handling_request};
@@ -145,6 +183,15 @@ sub _try_handle_request ($self) {
         return;
     }
 
+    # Check Content-Length against max_body_size limit
+    if (defined $self->{max_body_size} && defined $request->{content_length}) {
+        if ($request->{content_length} > $self->{max_body_size}) {
+            $self->_send_error_response(413, 'Payload Too Large');
+            $self->_close;
+            return;
+        }
+    }
+
     # Check if this is a WebSocket upgrade request
     my $is_websocket = $self->_is_websocket_upgrade($request);
 
@@ -153,6 +200,8 @@ sub _try_handle_request ($self) {
 
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
+    $self->{request_start} = [gettimeofday];
+    $self->{current_request} = $request;  # Store for access logging
 
     if ($is_websocket) {
         $self->{request_future} = $self->_handle_websocket_request($request);
@@ -223,6 +272,9 @@ async sub _handle_request ($self, $request) {
         warn "PAGI application error: $error\n";
     }
 
+    # Write access log entry
+    $self->_write_access_log;
+
     # Determine if we should keep the connection alive
     my $keep_alive = $self->_should_keep_alive($request);
 
@@ -230,6 +282,9 @@ async sub _handle_request ($self, $request) {
         # Reset for next request
         $self->{handling_request} = 0;
         $self->{response_started} = 0;
+        $self->{response_status} = undef;
+        $self->{request_start} = undef;
+        $self->{current_request} = undef;
         $self->{request_future} = undef;
 
         # Check if there's more data in the buffer (pipelining)
@@ -401,6 +456,17 @@ sub _create_receive ($self, $request) {
                 if ($consumed > 0) {
                     substr($weak_self->{buffer}, 0, $consumed) = '';
 
+                    # Track total bytes read for max_body_size check
+                    $bytes_read += length($data // '');
+
+                    # Check max_body_size for chunked requests
+                    if (defined $weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
+                        # Body too large - close connection
+                        $weak_self->_send_error_response(413, 'Payload Too Large');
+                        $weak_self->_close;
+                        return { type => 'http.disconnect' };
+                    }
+
                     if ($complete) {
                         $body_complete = 1;
                     }
@@ -509,6 +575,7 @@ sub _create_send ($self, $request) {
             return if $response_started;
             $response_started = 1;
             $weak_self->{response_started} = 1;
+            $weak_self->{response_status} = $event->{status} // 200;  # Track for logging
             $expects_trailers = $event->{trailers} // 0;
 
             my $status = $event->{status} // 200;
@@ -643,6 +710,43 @@ sub _send_error_response ($self, $status, $message) {
 
     $self->{stream}->write($response);
     $self->{response_started} = 1;
+    $self->{response_status} = $status;  # Track for logging
+}
+
+sub _write_access_log ($self) {
+    return unless $self->{access_log};
+    return unless $self->{current_request};
+
+    my $request = $self->{current_request};
+    my $method = $request->{method} // '-';
+    my $path = $request->{raw_path} // '/';
+    my $query = $request->{query_string};
+    $path .= "?$query" if defined $query && length $query;
+
+    my $status = $self->{response_status} // '-';
+
+    # Calculate request duration
+    my $duration = '-';
+    if ($self->{request_start}) {
+        $duration = sprintf("%.3f", tv_interval($self->{request_start}));
+    }
+
+    # Get client IP
+    my $client_ip = '-';
+    my $handle = $self->{stream} ? $self->{stream}->read_handle : undef;
+    if ($handle && $handle->can('peerhost')) {
+        $client_ip = $handle->peerhost // '-';
+    }
+
+    # Format: client_ip - - [timestamp] "METHOD /path" status duration
+    my @gmt = gmtime(time);
+    my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+    my $timestamp = sprintf("%02d/%s/%04d:%02d:%02d:%02d +0000",
+        $gmt[3], $months[$gmt[4]], $gmt[5] + 1900,
+        $gmt[2], $gmt[1], $gmt[0]);
+
+    my $log = $self->{access_log};
+    print $log "$client_ip - - [$timestamp] \"$method $path\" $status ${duration}s\n";
 }
 
 sub _handle_disconnect ($self) {
@@ -669,6 +773,9 @@ sub _handle_disconnect ($self) {
 sub _close ($self) {
     return if $self->{closed};
     $self->{closed} = 1;
+
+    # Stop idle timer
+    $self->_stop_idle_timer;
 
     # Complete any pending receive with disconnect
     $self->_handle_disconnect;
@@ -862,6 +969,9 @@ async sub _handle_sse_request ($self, $request) {
         $self->{stream}->write("0\r\n\r\n");
     }
 
+    # Write access log entry (logs at connection close with total duration)
+    $self->_write_access_log;
+
     # Close connection after SSE stream ends
     $self->_close;
 }
@@ -969,6 +1079,7 @@ sub _create_sse_send ($self, $request) {
             $weak_self->{response_started} = 1;
 
             my $status = $event->{status} // 200;
+            $weak_self->{response_status} = $status;  # Track for access logging
             my $headers = $event->{headers} // [];
 
             # Ensure Content-Type is text/event-stream
@@ -1074,6 +1185,9 @@ async sub _handle_websocket_request ($self, $request) {
         }
         warn "PAGI application error (WebSocket): $error\n";
     }
+
+    # Write access log entry (logs at connection close with total duration)
+    $self->_write_access_log;
 
     # Close connection after WebSocket session ends
     $self->_close;
@@ -1254,6 +1368,7 @@ sub _create_websocket_send ($self, $request) {
             $weak_self->{websocket_mode} = 1;
             $weak_self->{websocket_accepted} = 1;
             $weak_self->{websocket_frame} = Protocol::WebSocket::Frame->new;
+            $weak_self->{response_status} = 101;  # Track for access logging
 
             # Notify any waiting receive
             if ($weak_self->{receive_pending} && !$weak_self->{receive_pending}->is_ready) {
