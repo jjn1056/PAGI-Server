@@ -249,7 +249,7 @@ sub _create_scope ($self, $request) {
         headers      => $request->{headers},
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
-        state        => $self->{state},
+        state        => { %{$self->{state}} },  # Shallow copy per spec
         extensions   => $self->{extensions},
     };
 
@@ -654,7 +654,7 @@ sub _create_sse_scope ($self, $request) {
         headers      => $request->{headers},
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
-        state        => $self->{state},
+        state        => { %{$self->{state}} },  # Shallow copy per spec
         extensions   => $self->{extensions},
     };
 
@@ -870,7 +870,7 @@ sub _create_websocket_scope ($self, $request) {
         client       => [$client_host, $client_port],
         server       => [$server_host, $server_port],
         subprotocols => \@subprotocols,
-        state        => $self->{state},
+        state        => { %{$self->{state}} },  # Shallow copy per spec
         extensions   => $self->{extensions},
     };
 

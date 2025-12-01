@@ -45,4 +45,4 @@ async sub app ($scope, $receive, $send) {
     die "Unsupported scope type: $scope->{type}";
 }
 
-return \&app unless caller;
+\&app;

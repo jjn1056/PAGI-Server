@@ -85,6 +85,23 @@ subtest 'HTTP scope contains all required keys' => sub {
     my $captured_scope;
 
     my $scope_test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope (required by all apps)
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
         $captured_scope = $scope;
 
         await $send->({
@@ -138,6 +155,22 @@ subtest 'HTTP scope contains all required keys' => sub {
 # Test 7: App exception results in 500 response
 subtest 'App exception results in 500 response' => sub {
     my $error_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope first
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        # For HTTP requests, throw an error
         die "Intentional test error";
     };
 

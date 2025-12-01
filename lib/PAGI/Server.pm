@@ -168,6 +168,16 @@ async sub listen ($self) {
 
     weaken(my $weak_self = $self);
 
+    # Run lifespan startup before accepting connections
+    my $startup_result = await $self->_run_lifespan_startup;
+
+    if (!$startup_result->{success}) {
+        my $message = $startup_result->{message} // 'Lifespan startup failed';
+        my $log = $self->{access_log};
+        print $log "PAGI Server startup failed: $message\n";
+        die "Lifespan startup failed: $message\n";
+    }
+
     my $listener = IO::Async::Listener->new(
         on_stream => sub ($listener, $stream) {
             return unless $weak_self;
@@ -225,6 +235,141 @@ sub _on_connection ($self, $stream) {
     $self->add_child($stream);
 }
 
+# Lifespan Protocol Implementation
+
+async sub _run_lifespan_startup ($self) {
+    # Create lifespan scope
+    my $scope = {
+        type => 'lifespan',
+        pagi => {
+            version      => '0.1',
+            spec_version => '0.1',
+        },
+        state => $self->{state},  # App can populate this
+    };
+
+    # Create receive/send for lifespan protocol
+    my @send_queue;
+    my $receive_pending;
+    my $startup_complete = Future->new;
+    my $lifespan_supported = 1;  # Track if app supports lifespan
+
+    # $receive for the app - returns events from the server
+    my $receive = sub {
+        if (@send_queue) {
+            return Future->done(shift @send_queue);
+        }
+        $receive_pending = Future->new;
+        return $receive_pending;
+    };
+
+    # $send for the app - handles app responses
+    my $send = async sub ($event) {
+        my $type = $event->{type} // '';
+
+        if ($type eq 'lifespan.startup.complete') {
+            $startup_complete->done({ success => 1 });
+        }
+        elsif ($type eq 'lifespan.startup.failed') {
+            my $message = $event->{message} // '';
+            $startup_complete->done({ success => 0, message => $message });
+        }
+        elsif ($type eq 'lifespan.shutdown.complete') {
+            # Store for shutdown handling
+            $self->{shutdown_complete} = 1;
+            if ($self->{shutdown_pending}) {
+                $self->{shutdown_pending}->done({ success => 1 });
+            }
+        }
+        elsif ($type eq 'lifespan.shutdown.failed') {
+            my $message = $event->{message} // '';
+            $self->{shutdown_complete} = 1;
+            if ($self->{shutdown_pending}) {
+                $self->{shutdown_pending}->done({ success => 0, message => $message });
+            }
+        }
+
+        return;
+    };
+
+    # Queue the startup event
+    push @send_queue, { type => 'lifespan.startup' };
+    if ($receive_pending && !$receive_pending->is_ready) {
+        my $f = $receive_pending;
+        $receive_pending = undef;
+        $f->done(shift @send_queue);
+    }
+
+    # Store lifespan handlers for shutdown
+    $self->{lifespan_receive} = $receive;
+    $self->{lifespan_send} = $send;
+    $self->{lifespan_send_queue} = \@send_queue;
+    $self->{lifespan_receive_pending} = \$receive_pending;
+
+    # Start the lifespan app handler
+    # We run it in the background and wait for startup.complete
+    my $app_future = (async sub {
+        eval {
+            await $self->{app}->($scope, $receive, $send);
+        };
+        if (my $error = $@) {
+            # Per spec: if the app throws an exception for lifespan scope,
+            # the server should continue without lifespan support
+            $lifespan_supported = 0;
+            if (!$startup_complete->is_ready) {
+                # Check if it's an "unsupported scope type" error
+                if ($error =~ /unsupported.*scope.*type|unsupported.*lifespan/i) {
+                    # App doesn't support lifespan - that's OK, continue without it
+                    $startup_complete->done({ success => 1, lifespan_supported => 0 });
+                }
+                else {
+                    # Some other error - could be a real startup failure
+                    warn "PAGI lifespan handler error: $error\n";
+                    $startup_complete->done({ success => 0, message => "Exception: $error" });
+                }
+            }
+        }
+    })->();
+
+    # Keep the app future so we can trigger shutdown later
+    $self->{lifespan_app_future} = $app_future;
+    $app_future->retain;
+
+    # Wait for startup complete (with timeout)
+    my $result = await $startup_complete;
+
+    # Track if lifespan is supported
+    $self->{lifespan_supported} = $result->{lifespan_supported} // 1;
+
+    return $result;
+}
+
+async sub _run_lifespan_shutdown ($self) {
+    # If lifespan is not supported or no lifespan was started, just return success
+    return { success => 1 } unless $self->{lifespan_supported};
+    return { success => 1 } unless $self->{lifespan_send_queue};
+
+    $self->{shutdown_pending} = Future->new;
+
+    # Queue the shutdown event
+    my $send_queue = $self->{lifespan_send_queue};
+    my $receive_pending_ref = $self->{lifespan_receive_pending};
+
+    push @$send_queue, { type => 'lifespan.shutdown' };
+
+    # Trigger pending receive if waiting
+    if ($$receive_pending_ref && !$$receive_pending_ref->is_ready) {
+        my $f = $$receive_pending_ref;
+        $$receive_pending_ref = undef;
+        $f->done(shift @$send_queue);
+    }
+
+    # Wait for shutdown complete
+    my $result = await $self->{shutdown_pending};
+
+    return $result;
+}
+
 async sub shutdown ($self) {
     return unless $self->{running};
     $self->{running} = 0;
@@ -235,8 +380,14 @@ async sub shutdown ($self) {
         $self->{listener} = undef;
     }
 
-    # TODO: Wait for existing connections to complete
-    # TODO: Emit lifespan.shutdown events (Step 6)
+    # Run lifespan shutdown
+    my $shutdown_result = await $self->_run_lifespan_shutdown;
+
+    if (!$shutdown_result->{success}) {
+        my $message = $shutdown_result->{message} // 'Lifespan shutdown failed';
+        my $log = $self->{access_log};
+        print $log "PAGI Server shutdown warning: $message\n";
+    }
 
     return $self;
 }

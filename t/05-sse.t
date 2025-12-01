@@ -89,6 +89,21 @@ subtest 'SSE scope type is sse' => sub {
     my $scope_type = '';
 
     my $test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
         $scope_type = $scope->{type};
 
         await $send->({

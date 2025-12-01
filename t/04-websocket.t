@@ -194,6 +194,21 @@ subtest 'WebSocket scope type is websocket' => sub {
     my $scope_type = '';
 
     my $test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
         $scope_type = $scope->{type};
 
         my $event = await $receive->();
@@ -226,6 +241,21 @@ subtest 'Subprotocol parsing' => sub {
     my $app_called = 0;
 
     my $test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
         @received_subprotocols = @{$scope->{subprotocols} // []};
         $app_called = 1;
 
@@ -279,6 +309,21 @@ subtest 'Subprotocol parsing' => sub {
 # Test 7: WebSocket upgrade rejection returns 403
 subtest 'WebSocket rejection returns 403' => sub {
     my $test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
         my $event = await $receive->();
         # Reject the connection before accepting
         await $send->({ type => 'websocket.close' });
