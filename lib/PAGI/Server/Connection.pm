@@ -71,6 +71,9 @@ sub new ($class, %args) {
         websocket_mode    => 0,
         websocket_frame   => undef,  # Protocol::WebSocket::Frame for parsing
         websocket_accepted => 0,
+        # SSE state
+        sse_mode          => 0,
+        sse_started       => 0,
     }, $class;
 
     return $self;
@@ -131,11 +134,16 @@ sub _try_handle_request ($self) {
     # Check if this is a WebSocket upgrade request
     my $is_websocket = $self->_is_websocket_upgrade($request);
 
+    # Check if this is an SSE request
+    my $is_sse = !$is_websocket && $self->_is_sse_request($request);
+
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
 
     if ($is_websocket) {
         $self->{request_future} = $self->_handle_websocket_request($request);
+    } elsif ($is_sse) {
+        $self->{request_future} = $self->_handle_sse_request($request);
     } else {
         $self->{request_future} = $self->_handle_request($request);
     }
@@ -166,6 +174,24 @@ sub _is_websocket_upgrade ($self, $request) {
     }
 
     return $has_upgrade && $has_connection_upgrade && $has_ws_key;
+}
+
+sub _is_sse_request ($self, $request) {
+    # SSE detection per spec:
+    # - HTTP method is GET
+    # - Accept header includes text/event-stream
+    # - Request has not been upgraded to WebSocket (already checked)
+    return 0 unless $request->{method} eq 'GET';
+
+    for my $header (@{$request->{headers}}) {
+        my ($name, $value) = @$header;
+        if ($name eq 'accept') {
+            # Check if Accept header includes text/event-stream
+            return 1 if $value =~ m{text/event-stream};
+        }
+    }
+
+    return 0;
 }
 
 async sub _handle_request ($self, $request) {
@@ -517,6 +543,8 @@ sub _handle_disconnect ($self) {
     my $disconnect_event;
     if ($self->{websocket_mode}) {
         $disconnect_event = { type => 'websocket.disconnect', code => 1006, reason => '' };
+    } elsif ($self->{sse_mode}) {
+        $disconnect_event = { type => 'sse.disconnect' };
     } else {
         $disconnect_event = { type => 'http.disconnect' };
     }
@@ -539,9 +567,14 @@ sub _close ($self) {
     $self->_handle_disconnect;
 
     # Determine disconnect event type based on mode
-    my $disconnect_event = $self->{websocket_mode}
-        ? { type => 'websocket.disconnect', code => 1006, reason => '' }
-        : { type => 'http.disconnect' };
+    my $disconnect_event;
+    if ($self->{websocket_mode}) {
+        $disconnect_event = { type => 'websocket.disconnect', code => 1006, reason => '' };
+    } elsif ($self->{sse_mode}) {
+        $disconnect_event = { type => 'sse.disconnect' };
+    } else {
+        $disconnect_event = { type => 'http.disconnect' };
+    }
 
     # Cancel any tracked receive Futures that are still pending
     for my $future (@{$self->{receive_futures}}) {
@@ -556,6 +589,203 @@ sub _close ($self) {
     if ($self->{stream}) {
         $self->{stream}->close_when_empty;
     }
+}
+
+#
+# SSE (Server-Sent Events) Support Methods
+#
+
+async sub _handle_sse_request ($self, $request) {
+    $self->{sse_mode} = 1;
+
+    my $scope = $self->_create_sse_scope($request);
+    my $receive = $self->_create_sse_receive($request);
+    my $send = $self->_create_sse_send($request);
+
+    eval {
+        await $self->{app}->($scope, $receive, $send);
+    };
+
+    if (my $error = $@) {
+        # If SSE not yet started, send HTTP error
+        if (!$self->{sse_started}) {
+            $self->_send_error_response(500, "Internal Server Error");
+        }
+        warn "PAGI application error (SSE): $error\n";
+    }
+
+    # Close connection after SSE stream ends
+    $self->_close;
+}
+
+sub _create_sse_scope ($self, $request) {
+    my $stream = $self->{stream};
+    my $handle = $stream->read_handle;
+
+    # Get client and server addresses
+    my ($client_host, $client_port) = ('127.0.0.1', 0);
+    my ($server_host, $server_port) = ('127.0.0.1', 5000);
+
+    if ($handle && $handle->can('peerhost')) {
+        $client_host = $handle->peerhost // '127.0.0.1';
+        $client_port = $handle->peerport // 0;
+        $server_host = $handle->sockhost // '127.0.0.1';
+        $server_port = $handle->sockport // 5000;
+    }
+
+    # Get the event loop from the server for async operations
+    my $loop = $self->{server} ? $self->{server}->loop : undef;
+
+    my $scope = {
+        type         => 'sse',
+        pagi         => {
+            version      => '0.1',
+            spec_version => '0.1',
+            features     => {},
+            loop         => $loop,
+        },
+        http_version => $request->{http_version},
+        method       => $request->{method},
+        scheme       => 'http',  # Will be 'https' when TLS is enabled
+        path         => $request->{path},
+        raw_path     => $request->{raw_path},
+        query_string => $request->{query_string},
+        root_path    => '',
+        headers      => $request->{headers},
+        client       => [$client_host, $client_port],
+        server       => [$server_host, $server_port],
+        state        => $self->{state},
+        extensions   => $self->{extensions},
+    };
+
+    return $scope;
+}
+
+sub _create_sse_receive ($self, $request) {
+    weaken(my $weak_self = $self);
+
+    return sub {
+        return Future->done({ type => 'sse.disconnect' })
+            unless $weak_self;
+        return Future->done({ type => 'sse.disconnect' })
+            if $weak_self->{closed};
+
+        my $future = (async sub {
+            return { type => 'sse.disconnect' }
+                unless $weak_self;
+            return { type => 'sse.disconnect' }
+                if $weak_self->{closed};
+
+            # Check queue first
+            if (@{$weak_self->{receive_queue}}) {
+                return shift @{$weak_self->{receive_queue}};
+            }
+
+            # Wait for disconnect
+            while (1) {
+                if (@{$weak_self->{receive_queue}}) {
+                    return shift @{$weak_self->{receive_queue}};
+                }
+
+                return { type => 'sse.disconnect' }
+                    if $weak_self->{closed};
+
+                if (!$weak_self->{receive_pending}) {
+                    $weak_self->{receive_pending} = Future->new;
+                }
+                await $weak_self->{receive_pending};
+                $weak_self->{receive_pending} = undef;
+            }
+        })->();
+
+        # Track this Future
+        push @{$weak_self->{receive_futures}}, $future;
+        @{$weak_self->{receive_futures}} = grep { !$_->is_ready } @{$weak_self->{receive_futures}};
+
+        return $future;
+    };
+}
+
+sub _create_sse_send ($self, $request) {
+    weaken(my $weak_self = $self);
+
+    return async sub ($event) {
+        return Future->done unless $weak_self;
+        return Future->done if $weak_self->{closed};
+
+        my $type = $event->{type} // '';
+
+        if ($type eq 'sse.start') {
+            return if $weak_self->{sse_started};
+            $weak_self->{sse_started} = 1;
+            $weak_self->{response_started} = 1;
+
+            my $status = $event->{status} // 200;
+            my $headers = $event->{headers} // [];
+
+            # Ensure Content-Type is text/event-stream
+            my $has_content_type = 0;
+            for my $h (@$headers) {
+                if (lc($h->[0]) eq 'content-type') {
+                    $has_content_type = 1;
+                    last;
+                }
+            }
+
+            my @final_headers = @$headers;
+            if (!$has_content_type) {
+                push @final_headers, ['content-type', 'text/event-stream'];
+            }
+
+            # Add Cache-Control and Connection headers for SSE
+            push @final_headers, ['cache-control', 'no-cache'];
+            push @final_headers, ['connection', 'keep-alive'];
+            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+
+            # SSE uses chunked encoding implicitly (no Content-Length)
+            my $response = $weak_self->{protocol}->serialize_response_start(
+                $status, \@final_headers, 1  # chunked = 1
+            );
+
+            $weak_self->{stream}->write($response);
+        }
+        elsif ($type eq 'sse.send') {
+            return unless $weak_self->{sse_started};
+
+            # Format SSE event
+            my $sse_data = '';
+
+            # event: field (optional)
+            if (defined $event->{event} && length $event->{event}) {
+                $sse_data .= "event: $event->{event}\n";
+            }
+
+            # data: field (required) - handle multi-line data
+            my $data = $event->{data} // '';
+            for my $line (split /\n/, $data, -1) {
+                $sse_data .= "data: $line\n";
+            }
+
+            # id: field (optional)
+            if (defined $event->{id} && length $event->{id}) {
+                $sse_data .= "id: $event->{id}\n";
+            }
+
+            # retry: field (optional)
+            if (defined $event->{retry}) {
+                $sse_data .= "retry: $event->{retry}\n";
+            }
+
+            # Empty line to end the event
+            $sse_data .= "\n";
+
+            # Send as chunked data
+            my $len = sprintf("%x", length($sse_data));
+            $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
+        }
+
+        return;
+    };
 }
 
 #

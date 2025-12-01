@@ -34,4 +34,4 @@ async sub app ($scope, $receive, $send) {
     $disconnect->cancel if $disconnect->can('cancel') && !$disconnect->is_ready;
 }
 
-return \&app unless caller;
+\&app;  # Return coderef when loaded via do
