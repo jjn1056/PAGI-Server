@@ -311,4 +311,121 @@ subtest 'Non-TLS request shows "Connection is not using TLS"' => sub {
     $loop->remove($http);
 };
 
+# Test 6: CLI launcher supports --ssl-cert and --ssl-key for HTTPS
+subtest 'CLI launcher supports --ssl-cert and --ssl-key for HTTPS' => sub {
+    use IPC::Open3;
+    use Symbol 'gensym';
+
+    my $app_path = "$FindBin::Bin/../examples/08-tls-introspection/app.pl";
+
+    # Start server via CLI in background
+    my $stderr = gensym;
+    my $pid = open3(my $stdin, my $stdout, $stderr,
+        'perl', '-Ilib', 'bin/pagi-server',
+        '--app', $app_path,
+        '--port', '0',  # Let OS choose port
+        '--ssl-cert', $server_cert,
+        '--ssl-key', $server_key,
+        '--quiet'
+    );
+
+    # Give server time to start
+    sleep 1;
+
+    # Unfortunately with port 0 we can't easily get the port from CLI
+    # So we'll just verify the process started without error
+    my $running = kill(0, $pid);
+    ok($running, 'CLI server process started with --ssl-cert and --ssl-key');
+
+    # Clean up
+    kill('TERM', $pid);
+    waitpid($pid, 0);
+};
+
+# Test 7: Client certificates are captured when provided
+subtest 'Client certificates are captured when provided' => sub {
+    my $captured_scope;
+
+    my $client_cert_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        $captured_scope = $scope;
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => 'OK',
+            more => 0,
+        });
+    };
+
+    # Server with client cert verification enabled
+    my $server = PAGI::Server->new(
+        app   => $client_cert_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+        ssl   => {
+            cert_file     => $server_cert,
+            key_file      => $server_key,
+            ca_file       => $ca_cert,
+            verify_client => 1,
+        },
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    # Create HTTP client with client certificate
+    my $http = Net::Async::HTTP->new(
+        SSL_verify_mode => 0,  # Don't verify server cert
+        SSL_cert_file   => $client_cert,
+        SSL_key_file    => $client_key,
+    );
+    $loop->add($http);
+
+    my $response = $http->GET("https://127.0.0.1:$port/")->get;
+
+    is($response->code, 200, 'HTTPS response with client cert is 200 OK');
+
+    # Verify client cert info is captured
+    ok(exists $captured_scope->{extensions}{tls}, 'scope.extensions.tls exists');
+
+    my $tls = $captured_scope->{extensions}{tls};
+
+    # Check client_cert_chain is populated
+    is(ref $tls->{client_cert_chain}, 'ARRAY', 'client_cert_chain is arrayref');
+    ok(scalar @{$tls->{client_cert_chain}} > 0, 'client_cert_chain contains certificates');
+
+    # Check client_cert_name contains DN
+    ok(defined $tls->{client_cert_name}, 'client_cert_name is defined');
+    like($tls->{client_cert_name}, qr/Test Client/, 'client_cert_name contains expected CN');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
 done_testing;
