@@ -254,6 +254,60 @@ sub format_date ($self) {
         $gmt[2], $gmt[1], $gmt[0]);
 }
 
+=head2 parse_chunked_body
+
+    my ($data, $bytes_consumed, $complete) = $proto->parse_chunked_body($buffer);
+
+Parses chunked Transfer-Encoding body from the buffer. Returns:
+- $data: decoded body data (may be empty string)
+- $bytes_consumed: number of bytes consumed from buffer
+- $complete: 1 if final chunk (0-length) was seen, 0 otherwise
+
+Returns (undef, 0, 0) if more data is needed.
+
+=cut
+
+sub parse_chunked_body ($self, $buffer_ref) {
+    my $buffer = ref $buffer_ref ? $$buffer_ref : $buffer_ref;
+    my $data = '';
+    my $total_consumed = 0;
+    my $complete = 0;
+
+    while (1) {
+        # Find chunk size line
+        my $crlf = index($buffer, "\r\n", $total_consumed);
+        last if $crlf < 0;
+
+        # Parse chunk size (hex)
+        my $size_line = substr($buffer, $total_consumed, $crlf - $total_consumed);
+        $size_line =~ s/;.*//;  # Remove chunk extensions
+        my $chunk_size = hex($size_line);
+
+        # Check if we have the full chunk + trailing CRLF
+        my $chunk_start = $crlf + 2;
+        my $chunk_end = $chunk_start + $chunk_size + 2;  # +2 for trailing CRLF
+
+        if (length($buffer) < $chunk_end) {
+            last;  # Need more data
+        }
+
+        # Extract chunk data
+        if ($chunk_size > 0) {
+            $data .= substr($buffer, $chunk_start, $chunk_size);
+        }
+
+        $total_consumed = $chunk_end;
+
+        # Check for final chunk
+        if ($chunk_size == 0) {
+            $complete = 1;
+            last;
+        }
+    }
+
+    return ($data, $total_consumed, $complete);
+}
+
 1;
 
 __END__

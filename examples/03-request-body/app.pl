@@ -31,4 +31,4 @@ async sub app ($scope, $receive, $send) {
     await $send->({ type => 'http.response.body', body => $message, more => 0 });
 }
 
-return \&app unless caller;
+\&app;
