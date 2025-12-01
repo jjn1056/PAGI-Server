@@ -186,4 +186,235 @@ subtest 'GET request still returns body' => sub {
     $loop->remove($http);
 };
 
+# Test 5: Header names are lowercased in scope
+subtest 'Header names are lowercased in scope' => sub {
+    my $captured_scope;
+
+    my $header_test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        $captured_scope = $scope;
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => 'OK',
+            more => 0,
+        });
+    };
+
+    my $server = PAGI::Server->new(
+        app   => $header_test_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+
+    my $response = $http->GET(
+        "http://127.0.0.1:$port/",
+        headers => {
+            'X-Custom-Header' => 'test-value',
+            'Accept-Language' => 'en-US',
+        },
+    )->get;
+
+    is($response->code, 200, 'Response status is 200 OK');
+
+    # Check that header names are lowercased
+    my %header_names = map { $_->[0] => 1 } @{$captured_scope->{headers}};
+    ok($header_names{'x-custom-header'}, 'x-custom-header is lowercased');
+    ok($header_names{'accept-language'}, 'accept-language is lowercased');
+
+    # Verify no uppercase header names
+    my @uppercase = grep { /[A-Z]/ } keys %header_names;
+    is(scalar @uppercase, 0, 'No uppercase header names in scope');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
+# Test 6: URL-encoded paths are decoded correctly
+subtest 'URL-encoded paths are decoded correctly' => sub {
+    my $captured_scope;
+
+    my $path_test_app = async sub ($scope, $receive, $send) {
+        # Handle lifespan scope
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        $captured_scope = $scope;
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => "path=$scope->{path}\nraw_path=$scope->{raw_path}",
+            more => 0,
+        });
+    };
+
+    my $server = PAGI::Server->new(
+        app   => $path_test_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+
+    # Request with URL-encoded path
+    my $response = $http->GET("http://127.0.0.1:$port/path%20with%20spaces")->get;
+
+    is($response->code, 200, 'Response status is 200 OK');
+
+    # Check decoded path
+    is($captured_scope->{path}, '/path with spaces', 'scope.path contains decoded path');
+    is($captured_scope->{raw_path}, '/path%20with%20spaces', 'scope.raw_path contains original encoded path');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
+# Test 7: Server.pm API methods work correctly
+subtest 'Server.pm API methods work correctly' => sub {
+    my $server = PAGI::Server->new(
+        app   => $app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+    );
+
+    # Test before listen
+    ok(!$server->is_running, 'is_running() returns false before listen()');
+
+    $loop->add($server);
+
+    # Test listen returns Future
+    my $listen_future = $server->listen;
+    ok($listen_future->isa('Future'), 'listen() returns a Future');
+    $listen_future->get;
+
+    # Test after listen
+    ok($server->is_running, 'is_running() returns true after listen()');
+    ok($server->port > 0, 'port() returns valid port number');
+
+    # Test shutdown returns Future
+    my $shutdown_future = $server->shutdown;
+    ok($shutdown_future->isa('Future'), 'shutdown() returns a Future');
+    $shutdown_future->get;
+
+    # Test after shutdown
+    ok(!$server->is_running, 'is_running() returns false after shutdown()');
+
+    $loop->remove($server);
+};
+
+# Test 8: Protocol::HTTP1 parse_request works
+subtest 'Protocol::HTTP1 parse_request parses HTTP requests' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    my $proto = PAGI::Server::Protocol::HTTP1->new;
+
+    # Test valid request
+    my $request_str = "GET /test/path?query=value HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+    my ($request, $consumed) = $proto->parse_request(\$request_str);
+
+    ok(defined $request, 'parse_request returns request for valid HTTP');
+    is($request->{method}, 'GET', 'method is GET');
+    is($request->{path}, '/test/path', 'path is correct');
+    is($request->{query_string}, 'query=value', 'query_string is correct');
+    is($request->{http_version}, '1.1', 'http_version is 1.1');
+    ok($consumed > 0, 'bytes_consumed is positive');
+
+    # Test incomplete request
+    my $incomplete = "GET / HTTP/1.1\r\n";
+    my ($req2, $cons2) = $proto->parse_request(\$incomplete);
+    ok(!defined $req2, 'parse_request returns undef for incomplete request');
+    is($cons2, 0, 'bytes_consumed is 0 for incomplete request');
+};
+
+# Test 9: Protocol::HTTP1 serialize methods work
+subtest 'Protocol::HTTP1 serialize methods generate valid HTTP' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    my $proto = PAGI::Server::Protocol::HTTP1->new;
+
+    # Test serialize_response_start
+    my $response = $proto->serialize_response_start(
+        200,
+        [['content-type', 'text/plain'], ['x-custom', 'value']],
+        0  # not chunked
+    );
+
+    like($response, qr/^HTTP\/1\.1 200 OK\r\n/, 'Response starts with status line');
+    like($response, qr/content-type: text\/plain\r\n/, 'Content-Type header present');
+    like($response, qr/x-custom: value\r\n/, 'Custom header present');
+    like($response, qr/\r\n\r\n$/, 'Response ends with blank line');
+
+    # Test chunked response
+    my $chunked_response = $proto->serialize_response_start(200, [], 1);
+    like($chunked_response, qr/Transfer-Encoding: chunked\r\n/, 'Chunked encoding header added');
+
+    # Test serialize_response_body
+    my $body = $proto->serialize_response_body("Hello", 0, 1);  # chunked
+    like($body, qr/^5\r\nHello\r\n/, 'Chunked body has correct format');
+
+    # Test format_date
+    my $date = $proto->format_date;
+    like($date, qr/\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT/, 'Date format is RFC 7231 compliant');
+};
+
 done_testing;
