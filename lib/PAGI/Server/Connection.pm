@@ -59,6 +59,10 @@ sub new ($class, %args) {
         # Event queue for $receive
         receive_queue   => [],
         receive_pending => undef,
+        # Track all pending receive Futures to cancel on close
+        receive_futures => [],
+        # Track request handling Future to prevent "lost future" warning
+        request_future  => undef,
     }, $class;
 
     return $self;
@@ -110,9 +114,13 @@ sub _try_handle_request ($self) {
     # Remove consumed bytes from buffer
     substr($self->{buffer}, 0, $consumed) = '';
 
-    # Handle the request
+    # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
-    $self->_handle_request($request);
+    $self->{request_future} = $self->_handle_request($request);
+
+    # Retain the future to prevent warning if connection is destroyed
+    # while request is still being processed
+    $self->{request_future}->retain;
 }
 
 async sub _handle_request ($self, $request) {
@@ -189,42 +197,112 @@ sub _create_receive ($self, $request) {
 
     weaken(my $weak_self = $self);
 
-    return async sub {
-        return { type => 'http.disconnect' } unless $weak_self;
-        return { type => 'http.disconnect' } if $weak_self->{closed};
+    # Return a wrapper that tracks the Future from the async receive
+    return sub {
+        return Future->done({ type => 'http.disconnect' }) unless $weak_self;
+        return Future->done({ type => 'http.disconnect' }) if $weak_self->{closed};
 
-        # Check queue first - events from disconnect handler
-        if (@{$weak_self->{receive_queue}}) {
-            return shift @{$weak_self->{receive_queue}};
-        }
+        # The actual async implementation
+        my $future = (async sub {
+            return { type => 'http.disconnect' } unless $weak_self;
+            return { type => 'http.disconnect' } if $weak_self->{closed};
 
-        # If body is already complete, wait for disconnect
-        if ($body_complete) {
-            if (!$weak_self->{receive_pending}) {
-                $weak_self->{receive_pending} = Future->new;
+            # Check queue first - events from disconnect handler
+            if (@{$weak_self->{receive_queue}}) {
+                return shift @{$weak_self->{receive_queue}};
             }
 
-            if ($weak_self->{closed}) {
-                my $f = $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
+            # If body is already complete, wait for disconnect
+            if ($body_complete) {
+                if (!$weak_self->{receive_pending}) {
+                    $weak_self->{receive_pending} = Future->new;
+                }
+
+                if ($weak_self->{closed}) {
+                    $weak_self->{receive_pending} = undef;
+                    return { type => 'http.disconnect' };
+                }
+
+                my $result = await $weak_self->{receive_pending};
+                # receive_pending may be completed with a value (disconnect event)
+                # or just done() as a signal
+                return $result if ref $result eq 'HASH';
+                # If no value, check queue
+                if (@{$weak_self->{receive_queue}}) {
+                    return shift @{$weak_self->{receive_queue}};
+                }
                 return { type => 'http.disconnect' };
             }
 
-            return await $weak_self->{receive_pending};
-        }
+            # For requests without body, return empty body immediately
+            if (!$has_body) {
+                $body_complete = 1;
+                return {
+                    type => 'http.request',
+                    body => '',
+                    more => 0,
+                };
+            }
 
-        # For requests without body, return empty body immediately
-        if (!$has_body) {
-            $body_complete = 1;
-            return {
-                type => 'http.request',
-                body => '',
-                more => 0,
-            };
-        }
+            # Handle chunked Transfer-Encoding
+            if ($is_chunked) {
+                # Wait for data if buffer is empty
+                while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
+                    if (!$weak_self->{receive_pending}) {
+                        $weak_self->{receive_pending} = Future->new;
+                    }
+                    await $weak_self->{receive_pending};
+                    $weak_self->{receive_pending} = undef;
 
-        # Handle chunked Transfer-Encoding
-        if ($is_chunked) {
+                    # Check queue after waiting
+                    if (@{$weak_self->{receive_queue}}) {
+                        return shift @{$weak_self->{receive_queue}};
+                    }
+                }
+
+                # Try to parse chunked data
+                my ($data, $consumed, $complete) = $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
+
+                if ($consumed > 0) {
+                    substr($weak_self->{buffer}, 0, $consumed) = '';
+
+                    if ($complete) {
+                        $body_complete = 1;
+                    }
+
+                    return {
+                        type => 'http.request',
+                        body => $data // '',
+                        more => $complete ? 0 : 1,
+                    };
+                }
+
+                # Need more data - wait for it
+                if (!$weak_self->{receive_pending}) {
+                    $weak_self->{receive_pending} = Future->new;
+                }
+                await $weak_self->{receive_pending};
+                $weak_self->{receive_pending} = undef;
+
+                # Recursive call to re-process - but we can't use __SUB__ in nested async
+                # Just return disconnect if closed
+                return { type => 'http.disconnect' } if $weak_self->{closed};
+                # This shouldn't happen often - caller should retry
+                return { type => 'http.request', body => '', more => 1 };
+            }
+
+            # Handle Content-Length based body reading
+            my $remaining = $content_length - $bytes_read;
+
+            if ($remaining <= 0) {
+                $body_complete = 1;
+                return {
+                    type => 'http.request',
+                    body => '',
+                    more => 0,
+                };
+            }
+
             # Wait for data if buffer is empty
             while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
                 if (!$weak_self->{receive_pending}) {
@@ -239,84 +317,39 @@ sub _create_receive ($self, $request) {
                 }
             }
 
-            # Try to parse chunked data
-            my ($data, $consumed, $complete) = $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
-
-            if ($consumed > 0) {
-                substr($weak_self->{buffer}, 0, $consumed) = '';
-
-                if ($complete) {
-                    $body_complete = 1;
-                }
-
-                return {
-                    type => 'http.request',
-                    body => $data // '',
-                    more => $complete ? 0 : 1,
-                };
+            # Return disconnect if closed while waiting
+            if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
+                return { type => 'http.disconnect' };
             }
 
-            # Need more data - wait for it
-            if (!$weak_self->{receive_pending}) {
-                $weak_self->{receive_pending} = Future->new;
+            # Read up to chunk_size or remaining bytes, whichever is smaller
+            my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
+            $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
+
+            my $body = substr($weak_self->{buffer}, 0, $to_read, '');
+            $bytes_read += length($body);
+
+            # Check if we've read all the body
+            my $more = ($bytes_read < $content_length) ? 1 : 0;
+
+            if (!$more) {
+                $body_complete = 1;
             }
-            await $weak_self->{receive_pending};
-            $weak_self->{receive_pending} = undef;
 
-            # Recursive call to re-process
-            return await __SUB__->();
-        }
-
-        # Handle Content-Length based body reading
-        my $remaining = $content_length - $bytes_read;
-
-        if ($remaining <= 0) {
-            $body_complete = 1;
             return {
                 type => 'http.request',
-                body => '',
-                more => 0,
+                body => $body,
+                more => $more,
             };
-        }
+        })->();
 
-        # Wait for data if buffer is empty
-        while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-            if (!$weak_self->{receive_pending}) {
-                $weak_self->{receive_pending} = Future->new;
-            }
-            await $weak_self->{receive_pending};
-            $weak_self->{receive_pending} = undef;
+        # Track this Future so we can cancel it on close
+        push @{$weak_self->{receive_futures}}, $future;
 
-            # Check queue after waiting
-            if (@{$weak_self->{receive_queue}}) {
-                return shift @{$weak_self->{receive_queue}};
-            }
-        }
+        # Clean up completed futures from the list
+        @{$weak_self->{receive_futures}} = grep { !$_->is_ready } @{$weak_self->{receive_futures}};
 
-        # Return disconnect if closed while waiting
-        if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
-            return { type => 'http.disconnect' };
-        }
-
-        # Read up to chunk_size or remaining bytes, whichever is smaller
-        my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
-        $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
-
-        my $body = substr($weak_self->{buffer}, 0, $to_read, '');
-        $bytes_read += length($body);
-
-        # Check if we've read all the body
-        my $more = ($bytes_read < $content_length) ? 1 : 0;
-
-        if (!$more) {
-            $body_complete = 1;
-        }
-
-        return {
-            type => 'http.request',
-            body => $body,
-            more => $more,
-        };
+        return $future;
     };
 }
 
@@ -451,6 +484,16 @@ sub _close ($self) {
 
     # Complete any pending receive with disconnect
     $self->_handle_disconnect;
+
+    # Cancel any tracked receive Futures that are still pending
+    for my $future (@{$self->{receive_futures}}) {
+        if (!$future->is_ready) {
+            # Complete with disconnect event instead of cancelling
+            # This allows the async sub to complete cleanly
+            $future->done({ type => 'http.disconnect' });
+        }
+    }
+    $self->{receive_futures} = [];
 
     if ($self->{stream}) {
         $self->{stream}->close_when_empty;
