@@ -114,11 +114,23 @@ sub parse_request ($self, $buffer_ref) {
     my $header_end = index($buffer, "\r\n\r\n");
     return (undef, 0) if $header_end < 0;
 
+    # Check max header size
+    if ($header_end > $self->{max_header_size}) {
+        return ({ error => 431, message => 'Request Header Fields Too Large' }, $header_end + 4);
+    }
+
     # Parse using HTTP::Parser::XS
     my %env;
     my $ret = parse_http_request($buffer, \%env);
 
-    # Return undef if incomplete (-2) or error (-1)
+    # Return error for malformed request (-1)
+    if ($ret == -1) {
+        # Find end of malformed request line/headers
+        my $consumed = $header_end + 4;
+        return ({ error => 400, message => 'Bad Request' }, $consumed);
+    }
+
+    # Return undef if incomplete (-2)
     return (undef, 0) if $ret < 0;
 
     # Extract method and path
@@ -137,6 +149,7 @@ sub parse_request ($self, $buffer_ref) {
     my @headers;
     my $content_length;
     my $chunked = 0;
+    my $expect_continue = 0;
     my @cookie_values;
 
     for my $key (keys %env) {
@@ -154,6 +167,11 @@ sub parse_request ($self, $buffer_ref) {
             # Check for Transfer-Encoding: chunked
             if ($header_name eq 'transfer-encoding' && $value =~ /chunked/i) {
                 $chunked = 1;
+            }
+
+            # Check for Expect: 100-continue
+            if ($header_name eq 'expect' && lc($value) eq '100-continue') {
+                $expect_continue = 1;
             }
 
             push @headers, [$header_name, $value];
@@ -181,22 +199,23 @@ sub parse_request ($self, $buffer_ref) {
     }
 
     my $request = {
-        method         => $method,
-        path           => $path,
-        raw_path       => $raw_path,
-        query_string   => $query_string,
-        http_version   => $http_version,
-        headers        => \@headers,
-        content_length => $content_length,
-        chunked        => $chunked,
+        method          => $method,
+        path            => $path,
+        raw_path        => $raw_path,
+        query_string    => $query_string,
+        http_version    => $http_version,
+        headers         => \@headers,
+        content_length  => $content_length,
+        chunked         => $chunked,
+        expect_continue => $expect_continue,
     };
 
     return ($request, $ret);
 }
 
-sub serialize_response_start ($self, $status, $headers, $chunked = 0) {
+sub serialize_response_start ($self, $status, $headers, $chunked = 0, $http_version = '1.1') {
     my $phrase = $STATUS_PHRASES{$status} // 'Unknown';
-    my $response = "HTTP/1.1 $status $phrase\r\n";
+    my $response = "HTTP/$http_version $status $phrase\r\n";
 
     # Add headers
     for my $header (@$headers) {
@@ -204,8 +223,8 @@ sub serialize_response_start ($self, $status, $headers, $chunked = 0) {
         $response .= "$name: $value\r\n";
     }
 
-    # Add Transfer-Encoding if chunked
-    if ($chunked) {
+    # Add Transfer-Encoding if chunked (HTTP/1.1 only)
+    if ($chunked && $http_version eq '1.1') {
         $response .= "Transfer-Encoding: chunked\r\n";
     }
 
@@ -233,6 +252,10 @@ sub serialize_response_body ($self, $chunk, $more, $chunked = 0) {
 
 sub serialize_chunk_end ($self) {
     return "0\r\n\r\n";
+}
+
+sub serialize_continue ($self) {
+    return "HTTP/1.1 100 Continue\r\n\r\n";
 }
 
 sub serialize_trailers ($self, $headers) {

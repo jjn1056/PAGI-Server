@@ -7,6 +7,7 @@ use Net::Async::HTTP;
 use Future::AsyncAwait;
 use FindBin;
 use IO::Socket::INET;
+use IO::Select;
 
 use PAGI::Server;
 
@@ -415,6 +416,106 @@ subtest 'Protocol::HTTP1 serialize methods generate valid HTTP' => sub {
     # Test format_date
     my $date = $proto->format_date;
     like($date, qr/\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT/, 'Date format is RFC 7231 compliant');
+};
+
+# Test 10: Malformed request returns 400 Bad Request (via Protocol::HTTP1 unit test)
+subtest 'Malformed request parsing returns error' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    my $proto = PAGI::Server::Protocol::HTTP1->new;
+
+    # Test malformed request line
+    my $malformed = "INVALID REQUEST LINE\r\n\r\n";
+    my ($request, $consumed) = $proto->parse_request(\$malformed);
+
+    ok(defined $request, 'parse_request returns result for malformed request');
+    is($request->{error}, 400, 'Error code is 400 Bad Request');
+};
+
+# Test 11: HTTP/1.0 response serialization works without chunked encoding
+subtest 'HTTP/1.0 response does not use chunked encoding' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    my $proto = PAGI::Server::Protocol::HTTP1->new;
+
+    # Serialize HTTP/1.0 response (chunked=0, http_version='1.0')
+    my $response = $proto->serialize_response_start(200, [['content-type', 'text/plain']], 0, '1.0');
+
+    like($response, qr/^HTTP\/1\.0 200 OK/, 'HTTP/1.0 response uses HTTP/1.0 version');
+    unlike($response, qr/Transfer-Encoding: chunked/i, 'HTTP/1.0 response does not use chunked encoding');
+
+    # Verify that even with chunked=1, HTTP/1.0 doesn't add chunked encoding
+    my $response2 = $proto->serialize_response_start(200, [], 1, '1.0');
+    unlike($response2, qr/Transfer-Encoding: chunked/i, 'HTTP/1.0 ignores chunked flag');
+};
+
+# Test 12: Keep-alive can be tested via Net::Async::HTTP (which uses persistent connections)
+subtest 'Keep-alive works with Net::Async::HTTP' => sub {
+    my $server = PAGI::Server->new(
+        app   => $app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(
+        # Net::Async::HTTP uses persistent connections by default
+        max_connections_per_host => 1,
+    );
+    $loop->add($http);
+
+    # First request
+    my $response1 = $http->GET("http://127.0.0.1:$port/")->get;
+    is($response1->code, 200, 'First response status is 200 OK');
+
+    # Second request (should reuse connection)
+    my $response2 = $http->GET("http://127.0.0.1:$port/")->get;
+    is($response2->code, 200, 'Second response status is 200 OK');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
+# Test 13: Expect: 100-continue parsing is detected
+subtest 'Expect: 100-continue parsing detected' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    my $proto = PAGI::Server::Protocol::HTTP1->new;
+
+    # Request with Expect: 100-continue
+    my $request_str = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n";
+    my ($request, $consumed) = $proto->parse_request(\$request_str);
+
+    ok(defined $request, 'Request parsed successfully');
+    ok(!$request->{error}, 'No parse error');
+    is($request->{expect_continue}, 1, 'expect_continue flag is set');
+
+    # Verify 100 Continue serialization
+    my $continue = $proto->serialize_continue;
+    like($continue, qr/^HTTP\/1\.1 100 Continue\r\n\r\n$/, '100 Continue response format is correct');
+};
+
+# Test 14: Max header size returns 431
+subtest 'Max header size exceeded returns 431' => sub {
+    use PAGI::Server::Protocol::HTTP1;
+
+    # Create protocol with small max_header_size
+    my $proto = PAGI::Server::Protocol::HTTP1->new(max_header_size => 100);
+
+    # Create a request with large headers
+    my $large_header = "X-Large-Header: " . ("x" x 200);
+    my $request_str = "GET / HTTP/1.1\r\nHost: localhost\r\n$large_header\r\n\r\n";
+
+    my ($request, $consumed) = $proto->parse_request(\$request_str);
+
+    ok(defined $request, 'parse_request returns result for oversized headers');
+    is($request->{error}, 431, 'Error code is 431 Request Header Fields Too Large');
 };
 
 done_testing;

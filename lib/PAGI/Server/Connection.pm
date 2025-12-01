@@ -138,6 +138,13 @@ sub _try_handle_request ($self) {
     # Remove consumed bytes from buffer
     substr($self->{buffer}, 0, $consumed) = '';
 
+    # Handle parse errors (malformed request, header too large)
+    if ($request->{error}) {
+        $self->_send_error_response($request->{error}, $request->{message});
+        $self->_close;
+        return;
+    }
+
     # Check if this is a WebSocket upgrade request
     my $is_websocket = $self->_is_websocket_upgrade($request);
 
@@ -216,8 +223,50 @@ async sub _handle_request ($self, $request) {
         warn "PAGI application error: $error\n";
     }
 
-    # Close connection after response (no keep-alive for now)
-    $self->_close;
+    # Determine if we should keep the connection alive
+    my $keep_alive = $self->_should_keep_alive($request);
+
+    if ($keep_alive) {
+        # Reset for next request
+        $self->{handling_request} = 0;
+        $self->{response_started} = 0;
+        $self->{request_future} = undef;
+
+        # Check if there's more data in the buffer (pipelining)
+        if (length($self->{buffer}) > 0) {
+            $self->_try_handle_request;
+        }
+    } else {
+        $self->_close;
+    }
+}
+
+sub _should_keep_alive ($self, $request) {
+    my $http_version = $request->{http_version} // '1.1';
+
+    # Check for Connection header
+    my $connection_header;
+    for my $header (@{$request->{headers}}) {
+        if ($header->[0] eq 'connection') {
+            $connection_header = lc($header->[1]);
+            last;
+        }
+    }
+
+    # HTTP/1.1: keep-alive by default unless Connection: close
+    if ($http_version eq '1.1') {
+        return 0 if $connection_header && $connection_header =~ /close/;
+        return 1;
+    }
+
+    # HTTP/1.0: close by default unless Connection: keep-alive
+    if ($http_version eq '1.0') {
+        return 1 if $connection_header && $connection_header =~ /keep-alive/;
+        return 0;
+    }
+
+    # Unknown version: close connection
+    return 0;
 }
 
 sub _create_scope ($self, $request) {
@@ -266,6 +315,8 @@ sub _create_scope ($self, $request) {
 sub _create_receive ($self, $request) {
     my $content_length = $request->{content_length};
     my $is_chunked = $request->{chunked} // 0;
+    my $expect_continue = $request->{expect_continue} // 0;
+    my $continue_sent = 0;
     my $body_complete = 0;
     my $bytes_read = 0;
     my $chunk_size = 65536;  # 64KB chunks for large bodies
@@ -320,6 +371,12 @@ sub _create_receive ($self, $request) {
                     body => '',
                     more => 0,
                 };
+            }
+
+            # Send 100 Continue if client expects it (before reading body)
+            if ($expect_continue && !$continue_sent) {
+                $continue_sent = 1;
+                $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
             }
 
             # Handle chunked Transfer-Encoding
@@ -437,6 +494,8 @@ sub _create_send ($self, $request) {
     my $expects_trailers = 0;
     my $body_complete = 0;
     my $is_head_request = ($request->{method} // '') eq 'HEAD';
+    my $http_version = $request->{http_version} // '1.1';
+    my $is_http10 = ($http_version eq '1.0');
 
     weaken(my $weak_self = $self);
 
@@ -469,10 +528,19 @@ sub _create_send ($self, $request) {
             push @final_headers, ['date', $weak_self->{protocol}->format_date];
 
             # For HEAD requests, don't use chunked encoding (no body will be sent)
-            $chunked = $is_head_request ? 0 : !$has_content_length;
+            # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
+            if ($is_head_request || $is_http10) {
+                $chunked = 0;
+                # For HTTP/1.0 streaming without Content-Length, add Connection: close
+                if ($is_http10 && !$has_content_length) {
+                    push @final_headers, ['connection', 'close'];
+                }
+            } else {
+                $chunked = !$has_content_length;
+            }
 
             my $response = $weak_self->{protocol}->serialize_response_start(
-                $status, \@final_headers, $chunked
+                $status, \@final_headers, $chunked, $http_version
             );
 
             $weak_self->{stream}->write($response);
