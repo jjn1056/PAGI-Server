@@ -436,6 +436,7 @@ sub _create_send ($self, $request) {
     my $response_started = 0;
     my $expects_trailers = 0;
     my $body_complete = 0;
+    my $is_head_request = ($request->{method} // '') eq 'HEAD';
 
     weaken(my $weak_self = $self);
 
@@ -467,7 +468,8 @@ sub _create_send ($self, $request) {
             my @final_headers = @$headers;
             push @final_headers, ['date', $weak_self->{protocol}->format_date];
 
-            $chunked = !$has_content_length;
+            # For HEAD requests, don't use chunked encoding (no body will be sent)
+            $chunked = $is_head_request ? 0 : !$has_content_length;
 
             my $response = $weak_self->{protocol}->serialize_response_start(
                 $status, \@final_headers, $chunked
@@ -478,6 +480,15 @@ sub _create_send ($self, $request) {
         elsif ($type eq 'http.response.body') {
             return unless $response_started;
             return if $body_complete;
+
+            # For HEAD requests, suppress the body but track completion
+            if ($is_head_request) {
+                my $more = $event->{more} // 0;
+                if (!$more) {
+                    $body_complete = 1;
+                }
+                return;  # Don't send any body for HEAD
+            }
 
             my $body = $event->{body} // '';
             my $more = $event->{more} // 0;
