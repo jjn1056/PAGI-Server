@@ -614,6 +614,11 @@ async sub _handle_sse_request ($self, $request) {
         warn "PAGI application error (SSE): $error\n";
     }
 
+    # Send chunked terminator if SSE was started (uses chunked encoding)
+    if ($self->{sse_started} && !$self->{closed}) {
+        $self->{stream}->write("0\r\n\r\n");
+    }
+
     # Close connection after SSE stream ends
     $self->_close;
 }

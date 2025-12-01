@@ -271,7 +271,70 @@ subtest 'SSE disconnect detection' => sub {
     $server->shutdown->get;
 };
 
-# Test 5: SSE id and retry fields
+# Test 5: SSE chunked encoding is properly terminated
+subtest 'SSE chunked encoding properly terminated' => sub {
+    my $test_app = async sub ($scope, $receive, $send) {
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+
+        await $send->({ type => 'sse.send', event => 'test', data => 'hello' });
+        # App returns normally - server should send chunked terminator
+    };
+
+    my $server = create_server($test_app);
+    my $port = $server->port;
+
+    use IO::Socket::INET;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 2 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Accept: text/event-stream\r\n";
+        print $sock "\r\n";
+
+        # Read until connection closes (server should close after sending terminator)
+        $sock->blocking(0);
+        my $response = '';
+        my $deadline = time + 5;
+        my $connection_closed = 0;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) {
+                $response .= $buf;
+            }
+            elsif (defined $n && $n == 0) {
+                # EOF - connection closed cleanly
+                $connection_closed = 1;
+                last;
+            }
+            $loop->loop_once(0.1);
+        }
+        close $sock;
+
+        # Verify chunked terminator is present (0\r\n\r\n)
+        # The response uses chunked encoding, so final chunk should be "0\r\n\r\n"
+        like($response, qr/0\r\n\r\n$/, 'Response ends with chunked terminator (0\\r\\n\\r\\n)');
+        ok($connection_closed, 'Connection closed cleanly after chunked terminator');
+    }
+
+    $server->shutdown->get;
+};
+
+# Test 6: SSE id and retry fields
 subtest 'SSE id and retry fields' => sub {
     my $test_app = async sub ($scope, $receive, $send) {
         die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
