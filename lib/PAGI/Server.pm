@@ -6,9 +6,12 @@ use parent 'IO::Async::Notifier';
 use IO::Async::Listener;
 use IO::Async::Stream;
 use IO::Async::SSL;
+use IO::Async::Loop;
+use IO::Socket::INET;
 use Future;
 use Future::AsyncAwait;
 use Scalar::Util qw(weaken);
+use POSIX ':sys_wait_h';
 
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
@@ -127,6 +130,7 @@ sub _init ($self, $params) {
     $self->{timeout}         = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size} = delete $params->{max_header_size} // 8192;  # Max header size in bytes
     $self->{max_body_size}   = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
+    $self->{workers}         = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -136,6 +140,8 @@ sub _init ($self, $params) {
         max_header_size => $self->{max_header_size},
     );
     $self->{state}       = {};  # Shared state from lifespan
+    $self->{worker_pids} = {};  # Track worker PIDs in multi-worker mode
+    $self->{is_worker}   = 0;   # True if this is a worker process
 
     $self->SUPER::_init($params);
 }
@@ -174,6 +180,9 @@ sub configure ($self, %params) {
     if (exists $params{max_body_size}) {
         $self->{max_body_size} = delete $params{max_body_size};
     }
+    if (exists $params{workers}) {
+        $self->{workers} = delete $params{workers};
+    }
 
     $self->SUPER::configure(%params);
 }
@@ -181,6 +190,16 @@ sub configure ($self, %params) {
 async sub listen ($self) {
     return if $self->{running};
 
+    # Multi-worker mode uses a completely different code path
+    if ($self->{workers} && $self->{workers} > 0) {
+        return $self->_listen_multiworker;
+    }
+
+    return await $self->_listen_singleworker;
+}
+
+# Single-worker mode - uses IO::Async normally
+async sub _listen_singleworker ($self) {
     weaken(my $weak_self = $self);
 
     # Run lifespan startup before accepting connections
@@ -252,6 +271,206 @@ async sub listen ($self) {
     }
 
     return $self;
+}
+
+# Multi-worker mode - forks workers, each with their own event loop
+sub _listen_multiworker ($self) {
+    my $workers = $self->{workers};
+
+    # Create the listening socket BEFORE forking
+    my $listen_socket = IO::Socket::INET->new(
+        LocalAddr => $self->{host},
+        LocalPort => $self->{port},
+        Proto     => 'tcp',
+        Listen    => 128,
+        ReuseAddr => 1,
+        Blocking  => 0,
+    ) or die "Cannot create listening socket: $!";
+
+    $self->{bound_port} = $listen_socket->sockport;
+    $self->{running} = 1;
+
+    unless ($self->{quiet}) {
+        my $log = $self->{access_log};
+        my $scheme = $self->{ssl} ? 'https' : 'http';
+        print $log "PAGI Server (multi-worker) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers\n";
+    }
+
+    # Set up signal handlers in parent
+    $self->_setup_parent_signals;
+
+    # Fork the workers
+    for my $i (1 .. $workers) {
+        $self->_spawn_worker($listen_socket, $i);
+    }
+
+    # Store the socket for potential cleanup
+    $self->{listen_socket} = $listen_socket;
+
+    # Parent process enters monitoring loop
+    $self->_parent_monitor_loop($listen_socket);
+
+    return $self;
+}
+
+sub _spawn_worker ($self, $listen_socket, $worker_num) {
+    my $pid = fork();
+    die "Fork failed: $!" unless defined $pid;
+
+    if ($pid == 0) {
+        # Child process - become a worker
+        $self->_run_as_worker($listen_socket, $worker_num);
+        exit(0);  # Should not reach here
+    }
+
+    # Parent - track the worker
+    $self->{worker_pids}{$pid} = {
+        worker_num => $worker_num,
+        started    => time(),
+    };
+
+    return $pid;
+}
+
+sub _run_as_worker ($self, $listen_socket, $worker_num) {
+    # Reset signal handlers to default in worker
+    $SIG{CHLD} = 'DEFAULT';
+    $SIG{TERM} = 'DEFAULT';
+    $SIG{INT}  = 'DEFAULT';
+
+    # Create a fresh event loop for this worker
+    my $loop = IO::Async::Loop->new;
+
+    # Create a fresh server instance for this worker (single-worker mode)
+    my $worker_server = PAGI::Server->new(
+        app             => $self->{app},
+        host            => $self->{host},
+        port            => $self->{port},
+        ssl             => $self->{ssl},
+        extensions      => $self->{extensions},
+        on_error        => $self->{on_error},
+        access_log      => $self->{access_log},
+        quiet           => 1,  # Workers should be quiet
+        timeout         => $self->{timeout},
+        max_header_size => $self->{max_header_size},
+        max_body_size   => $self->{max_body_size},
+        workers         => 0,  # Single-worker mode in worker process
+    );
+    $worker_server->{is_worker} = 1;
+    $worker_server->{bound_port} = $listen_socket->sockport;
+
+    $loop->add($worker_server);
+
+    # Set up graceful shutdown on SIGTERM
+    my $shutdown_triggered = 0;
+    $SIG{TERM} = sub {
+        return if $shutdown_triggered;
+        $shutdown_triggered = 1;
+        $worker_server->shutdown->on_done(sub {
+            $loop->stop;
+        })->retain;
+    };
+
+    # Run lifespan startup using a proper async wrapper
+    my $startup_done = 0;
+    my $startup_error;
+
+    (async sub {
+        eval {
+            my $startup_result = await $worker_server->_run_lifespan_startup;
+            if (!$startup_result->{success}) {
+                $startup_error = $startup_result->{message} // 'Lifespan startup failed';
+            }
+        };
+        if ($@) {
+            $startup_error = $@;
+        }
+        $startup_done = 1;
+        $loop->stop if $startup_error;  # Stop loop on error
+    })->()->retain;
+
+    # Run the loop briefly to let async startup complete
+    $loop->loop_once while !$startup_done;
+
+    if ($startup_error) {
+        warn "Worker $worker_num ($$): startup failed: $startup_error\n" unless $self->{quiet};
+        exit(1);
+    }
+
+    # Set up listener using the inherited socket
+    weaken(my $weak_server = $worker_server);
+
+    my $listener = IO::Async::Listener->new(
+        handle => $listen_socket,
+        on_stream => sub ($listener, $stream) {
+            return unless $weak_server;
+            $weak_server->_on_connection($stream);
+        },
+    );
+
+    $worker_server->add_child($listener);
+    $worker_server->{listener} = $listener;
+    $worker_server->{running} = 1;
+
+    # Run the event loop
+    $loop->run;
+
+    exit(0);
+}
+
+sub _setup_parent_signals ($self) {
+    # Handle child exits
+    $SIG{CHLD} = sub {
+        # Reap all finished children
+        while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
+            if (exists $self->{worker_pids}{$pid}) {
+                my $info = delete $self->{worker_pids}{$pid};
+                my $worker_num = $info->{worker_num};
+
+                # If we're still running, restart the worker
+                if ($self->{running} && !$self->{shutting_down}) {
+                    $self->_spawn_worker($self->{listen_socket}, $worker_num);
+                }
+            }
+        }
+    };
+
+    # Handle graceful shutdown
+    $SIG{TERM} = sub {
+        $self->{shutting_down} = 1;
+        $self->{running} = 0;
+
+        # Signal all workers to shutdown
+        for my $pid (keys %{$self->{worker_pids}}) {
+            kill 'TERM', $pid;
+        }
+    };
+
+    $SIG{INT} = $SIG{TERM};
+}
+
+sub _parent_monitor_loop ($self, $listen_socket) {
+    # Parent just waits for signals and manages workers
+    while ($self->{running} || keys %{$self->{worker_pids}}) {
+        # Wait for a child to exit or signal
+        my $pid = waitpid(-1, 0);
+
+        if ($pid > 0 && exists $self->{worker_pids}{$pid}) {
+            my $info = delete $self->{worker_pids}{$pid};
+            my $worker_num = $info->{worker_num};
+
+            # Restart worker if still running
+            if ($self->{running} && !$self->{shutting_down}) {
+                $self->_spawn_worker($listen_socket, $worker_num);
+            }
+        }
+
+        # If shutting down and all workers gone, exit loop
+        last if $self->{shutting_down} && !keys %{$self->{worker_pids}};
+    }
+
+    # Close listening socket
+    close($listen_socket);
 }
 
 sub _on_connection ($self, $stream) {
