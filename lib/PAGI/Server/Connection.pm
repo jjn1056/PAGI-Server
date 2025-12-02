@@ -94,6 +94,8 @@ sub new ($class, %args) {
     return $self;
 }
 
+use Socket qw(IPPROTO_TCP TCP_NODELAY);
+
 sub start ($self) {
     my $stream = $self->{stream};
     weaken(my $weak_self = $self);
@@ -101,9 +103,8 @@ sub start ($self) {
     # Enable TCP_NODELAY to reduce latency for small responses
     my $handle = $stream->write_handle // $stream->read_handle;
     if ($handle && $handle->can('setsockopt')) {
-        require Socket;
         eval {
-            $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+            $handle->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);
         };
         # Ignore errors - not all sockets support this
     }

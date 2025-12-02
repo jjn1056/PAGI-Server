@@ -57,6 +57,11 @@ Bind port (default: 5000)
 
 Number of worker processes (default: 1)
 
+=item --listener_backlog -b
+
+Listener queue size. No default, if left blank then the
+server sets a default that is rational for itself.
+
 =item --loop, -l BACKEND
 
 Event loop backend (Poll, EV, Epoll, UV). Default is auto-detect.

@@ -139,18 +139,19 @@ Returns true if the server is accepting connections.
 =cut
 
 sub _init ($self, $params) {
-    $self->{app}             = delete $params->{app} or die "app is required";
-    $self->{host}            = delete $params->{host} // '127.0.0.1';
-    $self->{port}            = delete $params->{port} // 5000;
-    $self->{ssl}             = delete $params->{ssl};
-    $self->{extensions}      = delete $params->{extensions} // {};
-    $self->{on_error}        = delete $params->{on_error} // sub { warn @_ };
-    $self->{access_log}      = delete $params->{access_log} // \*STDERR;
-    $self->{quiet}           = delete $params->{quiet} // 0;
-    $self->{timeout}         = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
-    $self->{max_header_size} = delete $params->{max_header_size} // 8192;  # Max header size in bytes
-    $self->{max_body_size}   = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
-    $self->{workers}         = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
+    $self->{app}              = delete $params->{app} or die "app is required";
+    $self->{host}             = delete $params->{host} // '127.0.0.1';
+    $self->{port}             = delete $params->{port} // 5000;
+    $self->{ssl}              = delete $params->{ssl};
+    $self->{extensions}       = delete $params->{extensions} // {};
+    $self->{on_error}         = delete $params->{on_error} // sub { warn @_ };
+    $self->{access_log}       = delete $params->{access_log} // \*STDERR;
+    $self->{quiet}            = delete $params->{quiet} // 0;
+    $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
+    $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
+    $self->{max_body_size}    = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
+    $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
+    $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -162,6 +163,7 @@ sub _init ($self, $params) {
     $self->{state}       = {};  # Shared state from lifespan
     $self->{worker_pids} = {};  # Track worker PIDs in multi-worker mode
     $self->{is_worker}   = 0;   # True if this is a worker process
+
 
     $self->SUPER::_init($params);
 }
@@ -202,6 +204,9 @@ sub configure ($self, %params) {
     }
     if (exists $params{workers}) {
         $self->{workers} = delete $params{workers};
+    }
+    if (exists $params{listener_backlog}) {
+        $self->{listener_backlog} = delete $params{listener_backlog};
     }
 
     $self->SUPER::configure(%params);
@@ -244,6 +249,7 @@ async sub _listen_singleworker ($self) {
 
     # Build listener options
     my %listen_opts = (
+        queuesize => $self->{listener_backlog},
         addr => {
             family   => 'inet',
             socktype => 'stream',
@@ -316,7 +322,7 @@ sub _listen_multiworker ($self) {
         LocalAddr => $self->{host},
         LocalPort => $self->{port},
         Proto     => 'tcp',
-        Listen    => 128,
+        Listen    => $self->{listener_backlog},
         ReuseAddr => 1,
         Blocking  => 0,
     ) or die "Cannot create listening socket: $!";
