@@ -11,7 +11,6 @@ use IO::Socket::INET;
 use Future;
 use Future::AsyncAwait;
 use Scalar::Util qw(weaken);
-use POSIX ':sys_wait_h';
 
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
@@ -85,6 +84,27 @@ Error callback receiving ($error)
 =item access_log => $filehandle
 
 Access log filehandle. Default: STDERR
+
+=item workers => $count
+
+Number of worker processes for multi-worker mode. Default: 0 (single process mode).
+
+When set to a value greater than 0, the server uses a pre-fork model:
+
+=over 4
+
+=item * A listening socket is created before forking
+
+=item * Worker processes are spawned using C<< $loop->fork() >> which properly
+handles IO::Async's C<$ONE_TRUE_LOOP> singleton
+
+=item * Each worker gets a fresh event loop and runs lifespan startup independently
+
+=item * Workers that exit are automatically respawned via C<< $loop->watch_process() >>
+
+=item * SIGTERM/SIGINT triggers graceful shutdown of all workers
+
+=back
 
 =back
 
@@ -304,19 +324,18 @@ sub _listen_multiworker ($self) {
     $self->{bound_port} = $listen_socket->sockport;
     $self->{running} = 1;
 
-    # Capture the loop class so workers use the same type
-    $self->{loop_class} = ref($self->loop);
-
     unless ($self->{quiet}) {
         my $log = $self->{access_log};
         my $scheme = $self->{ssl} ? 'https' : 'http';
-        my $loop_class = $self->{loop_class};
+        my $loop_class = ref($self->loop);
         $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
         print $log "PAGI Server (multi-worker) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class)\n";
     }
 
-    # Set up signal handlers in parent
-    $self->_setup_parent_signals;
+    # Set up signal handlers using IO::Async's watch_signal (replaces _setup_parent_signals)
+    my $loop = $self->loop;
+    $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
+    $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
 
     # Fork the workers
     for my $i (1 .. $workers) {
@@ -326,21 +345,49 @@ sub _listen_multiworker ($self) {
     # Store the socket for potential cleanup
     $self->{listen_socket} = $listen_socket;
 
-    # Parent process enters monitoring loop
-    $self->_parent_monitor_loop($listen_socket);
+    # Parent runs event loop (handles signals and process exits via watches)
+    $loop->run;
+
+    # Cleanup after loop exits
+    close($listen_socket);
 
     return $self;
 }
 
-sub _spawn_worker ($self, $listen_socket, $worker_num) {
-    my $pid = fork();
-    die "Fork failed: $!" unless defined $pid;
+# Initiate graceful shutdown in multi-worker mode
+sub _initiate_multiworker_shutdown ($self) {
+    return if $self->{shutting_down};
+    $self->{shutting_down} = 1;
+    $self->{running} = 0;
 
-    if ($pid == 0) {
-        # Child process - become a worker
-        $self->_run_as_worker($listen_socket, $worker_num);
-        exit(0);  # Should not reach here
+    # Signal all workers to shutdown
+    for my $pid (keys %{$self->{worker_pids}}) {
+        kill 'TERM', $pid;
     }
+
+    # If no workers, stop the loop immediately
+    if (!keys %{$self->{worker_pids}}) {
+        $self->loop->stop;
+    }
+    # Otherwise, watch_process callbacks will stop the loop when all workers exit
+}
+
+sub _spawn_worker ($self, $listen_socket, $worker_num) {
+    my $loop = $self->loop;
+    weaken(my $weak_self = $self);
+
+    # Use $loop->fork() instead of POSIX fork() to properly:
+    # 1. Clear $ONE_TRUE_LOOP in child (so child gets fresh loop)
+    # 2. Reset signal handlers in child
+    # 3. Call post_fork() for loop backends that need it (epoll, kqueue)
+    my $pid = $loop->fork(
+        code => sub {
+            $self->_run_as_worker($listen_socket, $worker_num);
+            return 0;  # Exit code (may not be reached if worker calls exit())
+        },
+    );
+
+    die "Fork failed" unless defined $pid;
 
     # Parent - track the worker
     $self->{worker_pids}{$pid} = {
@@ -348,18 +395,32 @@ sub _spawn_worker ($self, $listen_socket, $worker_num) {
         started    => time(),
     };
 
+    # Use watch_process to handle worker exit (replaces manual SIGCHLD handling)
+    $loop->watch_process($pid => sub {
+        my ($exit_pid, $exitcode) = @_;
+        return unless $weak_self;
+
+        # Remove from tracking
+        delete $weak_self->{worker_pids}{$exit_pid};
+
+        # Respawn if still running and not shutting down
+        if ($weak_self->{running} && !$weak_self->{shutting_down}) {
+            $weak_self->_spawn_worker($listen_socket, $worker_num);
+        }
+
+        # Check if all workers have exited (for shutdown)
+        if ($weak_self->{shutting_down} && !keys %{$weak_self->{worker_pids}}) {
+            $loop->stop;
+        }
+    });
+
     return $pid;
 }
 
 sub _run_as_worker ($self, $listen_socket, $worker_num) {
-    # Reset signal handlers to default in worker
-    $SIG{CHLD} = 'DEFAULT';
-    $SIG{TERM} = 'DEFAULT';
-    $SIG{INT}  = 'DEFAULT';
-
-    # Create a fresh event loop for this worker, using the same loop class as parent
-    my $loop_class = $self->{loop_class} || 'IO::Async::Loop';
-    my $loop = $loop_class->new;
+    # Note: Signal handlers already reset by $loop->fork() (keep_signals defaults to false)
+    # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
+    my $loop = IO::Async::Loop->new;
 
     # Create a fresh server instance for this worker (single-worker mode)
     my $worker_server = PAGI::Server->new(
@@ -436,113 +497,6 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
     # Run the event loop
     $loop->run;
 
-    exit(0);
-}
-
-sub _setup_parent_signals ($self) {
-    # Handle child exits
-    $SIG{CHLD} = sub {
-        # Reap all finished children
-        while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
-            if (exists $self->{worker_pids}{$pid}) {
-                my $info = delete $self->{worker_pids}{$pid};
-                my $worker_num = $info->{worker_num};
-
-                # If we're still running, restart the worker
-                if ($self->{running} && !$self->{shutting_down}) {
-                    $self->_spawn_worker($self->{listen_socket}, $worker_num);
-                }
-            }
-        }
-    };
-
-    # Handle graceful shutdown
-    $SIG{TERM} = sub {
-        $self->{shutting_down} = 1;
-        $self->{running} = 0;
-
-        # Signal all workers to shutdown
-        for my $pid (keys %{$self->{worker_pids}}) {
-            kill 'TERM', $pid;
-        }
-    };
-
-    $SIG{INT} = $SIG{TERM};
-}
-
-sub _parent_monitor_loop ($self, $listen_socket) {
-    # Parent just waits for signals and manages workers
-    # Use self-pipe trick for reliable signal handling across all platforms
-
-    # Create a self-pipe for signal notification
-    pipe(my $sig_read, my $sig_write) or die "pipe() failed: $!";
-
-    # Set the write end to non-blocking so signal handler never blocks
-    require Fcntl;
-    my $flags = fcntl($sig_write, Fcntl::F_GETFL(), 0) or die "fcntl F_GETFL: $!";
-    fcntl($sig_write, Fcntl::F_SETFL(), $flags | Fcntl::O_NONBLOCK()) or die "fcntl F_SETFL: $!";
-
-    my $shutdown_handler = sub {
-        $self->{shutting_down} = 1;
-        $self->{running} = 0;
-        # Signal all workers to shutdown
-        for my $pid (keys %{$self->{worker_pids}}) {
-            kill 'TERM', $pid;
-        }
-        # Write to self-pipe to wake up select() - ignore errors (pipe may be full)
-        syswrite($sig_write, "X", 1);
-    };
-
-    # Install signal handlers
-    local $SIG{INT}  = $shutdown_handler;
-    local $SIG{TERM} = $shutdown_handler;
-    local $SIG{CHLD} = sub {
-        # Just write to wake up select() - we'll reap in the main loop
-        syswrite($sig_write, "C", 1);
-    };
-
-    while (1) {
-        # Check if we should exit
-        last if $self->{shutting_down} && !keys %{$self->{worker_pids}};
-        last if !$self->{running} && !keys %{$self->{worker_pids}};
-
-        # Non-blocking check for exited children
-        while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
-            if (exists $self->{worker_pids}{$pid}) {
-                my $info = delete $self->{worker_pids}{$pid};
-                my $worker_num = $info->{worker_num};
-
-                # Restart worker if still running and not shutting down
-                if ($self->{running} && !$self->{shutting_down}) {
-                    $self->_spawn_worker($listen_socket, $worker_num);
-                }
-            }
-        }
-
-        # Check again after reaping
-        last if $self->{shutting_down} && !keys %{$self->{worker_pids}};
-
-        # Wait on self-pipe with timeout - wakes on signal or timeout
-        my $rin = '';
-        vec($rin, fileno($sig_read), 1) = 1;
-        my $nfound = select($rin, undef, undef, 0.5);
-
-        # Drain the self-pipe if there's data
-        if ($nfound > 0) {
-            my $buf;
-            while (sysread($sig_read, $buf, 256)) { }
-        }
-    }
-
-    # Close self-pipe
-    close($sig_read);
-    close($sig_write);
-
-    # Close listening socket
-    close($listen_socket);
-
-    # In multi-worker mode, the parent should exit after shutdown
-    # (otherwise control returns to the caller who would try to run the event loop)
     exit(0);
 }
 

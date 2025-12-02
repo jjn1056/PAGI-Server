@@ -108,19 +108,23 @@ subtest 'Single worker mode continues to work' => sub {
 };
 
 # Note: Multi-worker functional tests require complex process management
-# and have been verified manually:
+# and have been verified manually.
 #
-# Manual verification (2024-12-01):
+# The implementation in lib/PAGI/Server.pm uses IO::Async idiomatically:
+# - Uses $loop->fork() which properly clears $ONE_TRUE_LOOP and resets signals
+# - Uses $loop->watch_process() for automatic worker restart on exit
+# - Uses $loop->watch_signal() for graceful shutdown (SIGTERM/SIGINT)
+# - Parent runs $loop->run() instead of manual select() loop
+# - Per-worker lifespan startup/shutdown in each forked process
+#
+# Loop isolation is tested in t/12-fork-loop-isolation.t which verifies:
+# - Child process gets a fresh loop instance (not parent's cached loop)
+# - $ONE_TRUE_LOOP is properly cleared in child
+#
+# Manual verification:
 # 1. ./bin/pagi-server --app examples/01-hello-http/app.pl --port 9777 --workers 2
-#    Output: "PAGI Server (multi-worker) listening on http://127.0.0.1:9777/ with 2 workers"
 # 2. curl http://127.0.0.1:9777/ - Response received successfully
-# 3. Worker processes spawn correctly with different PIDs
-# 4. Graceful shutdown (SIGTERM) terminates all workers
-#
-# The implementation in lib/PAGI/Server.pm includes:
-# - Pre-fork worker model (socket shared before fork)
-# - SIGCHLD handler for automatic worker restart
-# - SIGTERM handler for graceful shutdown
-# - Per-worker lifespan startup/shutdown
+# 3. kill -9 <worker_pid> - Worker is automatically respawned
+# 4. kill -TERM <parent_pid> - Graceful shutdown of all workers
 
 done_testing;
