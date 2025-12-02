@@ -218,7 +218,7 @@ subtest 'Client disconnect stops streaming app' => sub {
     my $slow_streaming_app = async sub ($scope, $receive, $send) {
         die "Unsupported: $scope->{type}" if $scope->{type} ne 'http';
 
-        my $loop = $scope->{pagi}{loop};
+        my $loop = IO::Async::Loop->new;
 
         # Drain request body
         while (1) {
