@@ -91,6 +91,13 @@ Number of worker processes for multi-worker mode. Default: 0 (single process mod
 
 When set to a value greater than 0, the server uses a pre-fork model:
 
+=item listener_backlog => $number
+
+Value for the listener queue size. Default: 2048
+
+When in multi worker mode, the queue size for those workers inherits
+from this value.
+
 =over 4
 
 =item * A listening socket is created before forking
