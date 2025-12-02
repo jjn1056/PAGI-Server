@@ -6,4 +6,29 @@ Shows how to:
 - Emit `http.response.trailers` when `trailers => 1` was advertised.
 - Watch for `{ type => 'http.disconnect' }` while streaming and stop if the client drops.
 
-Spec references: `docs/specs/www.mkdn` (HTTP events, trailers, disconnect) and `docs/specs/main.mkdn` (cancellation semantics).
+## Quick Start
+
+**1. Start the server:**
+
+```bash
+pagi-server --app examples/02-streaming-response/app.pl --port 5000
+```
+
+**2. Demo with curl:**
+
+```bash
+# Watch chunks stream in (one per second)
+curl -N http://localhost:5000/
+# => Chunk 1 of 5
+# => Chunk 2 of 5
+# => ...
+
+# Test disconnect handling - press Ctrl+C during streaming
+curl -N http://localhost:5000/
+# (press Ctrl+C to see server handle disconnect)
+```
+
+## Spec References
+
+- HTTP events, trailers, disconnect – `docs/specs/www.mkdn`
+- Cancellation semantics – `docs/specs/main.mkdn`

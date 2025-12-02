@@ -109,6 +109,7 @@ subtest 'Child process gets fresh loop (not parent cached)' => sub {
         # Child: run the server
         eval {
             $server->listen;
+            $loop->run;  # Run the event loop (listen no longer blocks for multi-worker)
         };
         exit(0);
     }

@@ -3,7 +3,9 @@ use warnings;
 use Future::AsyncAwait;
 use experimental 'signatures';
 
-async sub app ($scope, $receive, $send) {
+# Return anonymous coderef directly (avoids "Subroutine redefined" warnings
+# when file is loaded multiple times via do)
+my $app = async sub ($scope, $receive, $send) {
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
     await $send->({
@@ -18,6 +20,6 @@ async sub app ($scope, $receive, $send) {
         body  => "Hello from PAGI at $timestamp",  # bytes; encode explicitly if needed
         more  => 0,
     });
-}
+};
 
-\&app;  # Return coderef when loaded via do
+$app;  # Return coderef when loaded via do

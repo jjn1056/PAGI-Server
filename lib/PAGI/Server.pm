@@ -342,15 +342,11 @@ sub _listen_multiworker ($self) {
         $self->_spawn_worker($listen_socket, $i);
     }
 
-    # Store the socket for potential cleanup
+    # Store the socket for cleanup during shutdown
     $self->{listen_socket} = $listen_socket;
 
-    # Parent runs event loop (handles signals and process exits via watches)
-    $loop->run;
-
-    # Cleanup after loop exits
-    close($listen_socket);
-
+    # Return immediately - caller (Runner) will call $loop->run()
+    # This is consistent with single-worker mode behavior
     return $self;
 }
 
@@ -359,6 +355,12 @@ sub _initiate_multiworker_shutdown ($self) {
     return if $self->{shutting_down};
     $self->{shutting_down} = 1;
     $self->{running} = 0;
+
+    # Close the listen socket to stop accepting new connections
+    if ($self->{listen_socket}) {
+        close($self->{listen_socket});
+        delete $self->{listen_socket};
+    }
 
     # Signal all workers to shutdown
     for my $pid (keys %{$self->{worker_pids}}) {
