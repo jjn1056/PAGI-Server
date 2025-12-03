@@ -62,6 +62,11 @@ Number of worker processes (default: 1)
 Listener queue size. No default, if left blank then the
 server sets a default that is rational for itself.
 
+=item --timeout
+
+Seconds before we timeout the request. If left blank will
+default to whatever is default for the server.
+
 =item --loop, -l BACKEND
 
 Event loop backend (Poll, EV, Epoll, UV). Default is auto-detect.

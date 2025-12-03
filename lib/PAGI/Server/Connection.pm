@@ -786,6 +786,12 @@ sub _close ($self) {
     return if $self->{closed};
     $self->{closed} = 1;
 
+    # Remove from server's connection list
+    if ($self->{server}) {
+        @{$self->{server}{connections}} = 
+            grep { $_ != $self } @{$self->{server}{connections}};
+    }
+
     # Stop idle timer
     $self->_stop_idle_timer;
 

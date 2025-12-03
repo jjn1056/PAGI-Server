@@ -710,6 +710,96 @@ sub is_running ($self) {
 
 __END__
 
+=head1 PERFORMANCE
+
+=head1 PERFORMANCE
+
+PAGI::Server is designed as a reference implementation prioritizing spec
+compliance and code clarity, yet delivers competitive performance suitable
+for production workloads.
+
+=head2 Benchmark Results
+
+Tested on a 2.4 GHz 8-Core Intel Core i9 Mac with 16 workers, using
+L<hey|https://github.com/rakyll/hey> with 500 concurrent connections
+over 30 seconds against a minimal "Hello World" application:
+
+    Requests/sec:    13,270
+    Total requests:  398,458
+    Latency p50:     36ms
+    Latency p99:     71ms
+    Errors:          0
+
+=head2 Comparison
+
+    Server                  Req/sec     p99 Latency   Notes
+    ---------------------------------------------------------------
+    PAGI (16 workers)       ~13,000     71ms          Async, zero errors
+    Starman (16 workers)    ~10,500     2.8ms*        Sync prefork
+    Uvicorn (Python)        ~10-15k     varies        ASGI reference
+    Hypercorn (Python)      ~8-12k      varies        ASGI
+
+    * Starman shows lower latency at low concurrency but experiences
+      request timeouts under high concurrent load (500+ connections)
+      due to its synchronous prefork model.
+
+PAGI's async architecture handles high concurrency gracefully without
+queueing or timeouts, making it well-suited for WebSocket, SSE, and
+bursty traffic patterns that would overwhelm traditional prefork servers.
+
+=head2 Worker Tuning
+
+For optimal performance, set C<workers> equal to your CPU core count:
+
+    # Recommended production configuration
+    my $server = PAGI::Server->new(
+        app     => $app,
+        workers => 16,  # Set to number of CPU cores
+    );
+
+Guidelines:
+
+=over 4
+
+=item * B<CPU-bound workloads>: workers = CPU cores
+
+=item * B<I/O-bound workloads>: workers = 2 × CPU cores
+
+=item * B<Development>: workers = 0 (single process)
+
+=back
+
+Exceeding 2× CPU cores typically degrades performance due to context
+switching overhead.
+
+=head2 System Tuning
+
+For high-concurrency production deployments, ensure adequate system limits:
+
+    # File descriptors (run before starting server)
+    ulimit -n 65536
+
+    # Listen backlog (Linux)
+    sudo sysctl -w net.core.somaxconn=2048
+
+    # Listen backlog (macOS)
+    sudo sysctl -w kern.ipc.somaxconn=2048
+
+PAGI::Server defaults to a listen backlog of 2048, matching Uvicorn's
+default. This can be adjusted via the C<listen_backlog> option.
+
+=head2 Event Loop Selection
+
+PAGI::Server works with any L<IO::Async> compatible event loop. If
+you are on Linux, its recommended to install L<IO::Async::Loop::EPoll>
+because that is the best choice for Linux and if installed will be automatically
+used.
+
+For other systems I recommend testing the various backend loop options
+and find what works best.   Your notes and updates appreciated.
+
+=cut
+
 =head1 SEE ALSO
 
 L<PAGI::Server::Connection>, L<PAGI::Server::Protocol::HTTP1>
