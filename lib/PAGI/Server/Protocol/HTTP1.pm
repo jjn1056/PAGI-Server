@@ -4,6 +4,7 @@ use warnings;
 use experimental 'signatures';
 use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
+use Encode qw(decode);
 
 our $VERSION = '0.001';
 
@@ -147,7 +148,7 @@ sub parse_request ($self, $buffer_ref) {
     $query_string //= '';
 
     # Decode path (URL-decode)
-    my $path = uri_unescape($raw_path);
+    my $path = decode('UTF-8', uri_unescape($raw_path), Encode::FB_DEFAULT);
 
     # Build headers array with lowercase names
     my @headers;

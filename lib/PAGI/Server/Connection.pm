@@ -1468,10 +1468,16 @@ sub _process_websocket_frames ($self) {
     # Protocol::WebSocket::Frame->next() decodes as UTF-8, which corrupts binary data
     while (defined(my $bytes = $frame->next_bytes)) {
         my $opcode = $frame->opcode;
-
+        
         if ($opcode == 1) {
             # Text frame - decode as UTF-8
-            my $text = Encode::decode('UTF-8', $bytes);
+            my $text = eval { Encode::decode('UTF-8', $bytes, Encode::FB_CROAK) };
+            unless (defined $text) {
+                # Invalid UTF-8 - close with 1007 per RFC 6455
+                $self->_send_close_frame(1007, 'Invalid UTF-8');
+                $self->_close;
+                return;
+            }
             push @{$self->{receive_queue}}, {
                 type => 'websocket.receive',
                 text => $text,
