@@ -159,6 +159,7 @@ sub _init ($self, $params) {
     $self->{max_body_size}    = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
     $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
     $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size
+    $self->{shutdown_timeout} = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -214,6 +215,9 @@ sub configure ($self, %params) {
     }
     if (exists $params{listener_backlog}) {
         $self->{listener_backlog} = delete $params{listener_backlog};
+    }
+    if (exists $params{shutdown_timeout}) {
+        $self->{shutdown_timeout} = delete $params{shutdown_timeout};
     }
 
     $self->SUPER::configure(%params);
@@ -687,12 +691,16 @@ async sub _run_lifespan_shutdown ($self) {
 async sub shutdown ($self) {
     return unless $self->{running};
     $self->{running} = 0;
+    $self->{shutting_down} = 1;
 
     # Stop accepting new connections
     if ($self->{listener}) {
         $self->remove_child($self->{listener});
         $self->{listener} = undef;
     }
+
+    # Wait for active connections to drain (graceful shutdown)
+    await $self->_drain_connections;
 
     # Run lifespan shutdown
     my $shutdown_result = await $self->_run_lifespan_shutdown;
@@ -704,6 +712,36 @@ async sub shutdown ($self) {
     }
 
     return $self;
+}
+
+# Wait for active connections to complete, with timeout
+async sub _drain_connections ($self) {
+    my $timeout = $self->{shutdown_timeout} // 30;
+    my $start = time();
+    my $loop = $self->loop;
+
+    # Poll until connections are drained or timeout
+    while (@{$self->{connections}} > 0) {
+        my $elapsed = time() - $start;
+        if ($elapsed >= $timeout) {
+            # Timeout reached - force close remaining connections
+            my $remaining = scalar @{$self->{connections}};
+            warn "Shutdown timeout: force-closing $remaining active connections\n"
+                unless $self->{quiet};
+
+            # Force close all remaining connections
+            for my $conn (@{$self->{connections}}) {
+                $conn->_close if $conn && $conn->can('_close');
+            }
+            last;
+        }
+
+        # Give the event loop time to process responses
+        # Use a short delay to avoid busy-waiting
+        await $loop->delay_future(after => 0.1);
+    }
+
+    return;
 }
 
 sub port ($self) {
