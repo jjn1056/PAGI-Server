@@ -109,6 +109,36 @@ Value for the listener queue size. Default: 2048
 When in multi worker mode, the queue size for those workers inherits
 from this value.
 
+=item reuseport => $bool
+
+Enable SO_REUSEPORT mode for multi-worker servers. Default: 0 (disabled).
+
+When enabled, each worker process creates its own listening socket with
+SO_REUSEPORT, allowing the kernel to load-balance incoming connections
+across workers. This can reduce accept() contention and improve p99
+latency under high concurrency.
+
+B<Traditional mode (reuseport=0):> Parent creates one socket before forking,
+all workers inherit and share that socket. Workers compete on a single
+accept queue (potential thundering herd).
+
+B<Reuseport mode (reuseport=1):> Each worker creates its own socket with
+SO_REUSEPORT. The kernel distributes connections across sockets, each
+worker has its own accept queue (reduced contention).
+
+B<Platform notes:>
+
+=over 4
+
+=item * B<Linux 3.9+>: Full kernel-level load balancing. Recommended for high
+concurrency workloads.
+
+=item * B<macOS/BSD>: SO_REUSEPORT allows multiple binds but does NOT provide
+kernel load balancing. May actually decrease performance compared to shared
+socket mode. Use with caution - benchmark before deploying.
+
+=back
+
 =over 4
 
 =item * A listening socket is created before forking
@@ -171,6 +201,7 @@ sub _init ($self, $params) {
     $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
     $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size
     $self->{shutdown_timeout} = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
+    $self->{reuseport}        = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -336,25 +367,46 @@ async sub _listen_singleworker ($self) {
 # Multi-worker mode - forks workers, each with their own event loop
 sub _listen_multiworker ($self) {
     my $workers = $self->{workers};
+    my $reuseport = $self->{reuseport};
 
-    # Create the listening socket BEFORE forking
-    my $listen_socket = IO::Socket::INET->new(
-        LocalAddr => $self->{host},
-        LocalPort => $self->{port},
-        Proto     => 'tcp',
-        Listen    => $self->{listener_backlog},
-        ReuseAddr => 1,
-        Blocking  => 0,
-    ) or die "Cannot create listening socket: $!";
+    my $listen_socket;
 
-    $self->{bound_port} = $listen_socket->sockport;
+    if ($reuseport) {
+        # SO_REUSEPORT mode: each worker creates its own socket
+        # Parent just needs to know the port for display purposes
+        # We do a quick bind to validate port availability and get actual port if 0
+        my $probe_socket = IO::Socket::INET->new(
+            LocalAddr => $self->{host},
+            LocalPort => $self->{port},
+            Proto     => 'tcp',
+            Listen    => 1,
+            ReuseAddr => 1,
+            ReusePort => 1,
+        ) or die "Cannot bind to $self->{host}:$self->{port}: $!";
+        $self->{bound_port} = $probe_socket->sockport;
+        close($probe_socket);  # Workers will create their own sockets
+    }
+    else {
+        # Traditional mode: parent creates socket, workers inherit it
+        $listen_socket = IO::Socket::INET->new(
+            LocalAddr => $self->{host},
+            LocalPort => $self->{port},
+            Proto     => 'tcp',
+            Listen    => $self->{listener_backlog},
+            ReuseAddr => 1,
+            Blocking  => 0,
+        ) or die "Cannot create listening socket: $!";
+        $self->{bound_port} = $listen_socket->sockport;
+    }
+
     $self->{running} = 1;
 
     unless ($self->{quiet}) {
         my $scheme = $self->{ssl} ? 'https' : 'http';
         my $loop_class = ref($self->loop);
         $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
-        warn "PAGI Server (multi-worker) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class)\n";
+        my $mode = $reuseport ? 'reuseport' : 'shared-socket';
+        warn "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class)\n";
     }
 
     # Set up signal handlers using IO::Async's watch_signal (replaces _setup_parent_signals)
@@ -367,8 +419,8 @@ sub _listen_multiworker ($self) {
         $self->_spawn_worker($listen_socket, $i);
     }
 
-    # Store the socket for cleanup during shutdown
-    $self->{listen_socket} = $listen_socket;
+    # Store the socket for cleanup during shutdown (only in traditional mode)
+    $self->{listen_socket} = $listen_socket if $listen_socket;
 
     # Return immediately - caller (Runner) will call $loop->run()
     # This is consistent with single-worker mode behavior
@@ -455,6 +507,20 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
     # Note: Signal handlers already reset by $loop->fork() (keep_signals defaults to false)
     # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
     my $loop = IO::Async::Loop->new;
+
+    # In reuseport mode, each worker creates its own listening socket
+    my $reuseport = $self->{reuseport};
+    if ($reuseport && !$listen_socket) {
+        $listen_socket = IO::Socket::INET->new(
+            LocalAddr => $self->{host},
+            LocalPort => $self->{bound_port},  # Use the port determined by parent
+            Proto     => 'tcp',
+            Listen    => $self->{listener_backlog},
+            ReuseAddr => 1,
+            ReusePort => 1,
+            Blocking  => 0,
+        ) or die "Worker $worker_num: Cannot create listening socket: $!";
+    }
 
     # Create a fresh server instance for this worker (single-worker mode)
     my $worker_server = PAGI::Server->new(
