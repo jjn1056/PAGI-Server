@@ -959,7 +959,10 @@ sub _extract_tls_info ($self) {
                     $tls_info->{cipher_suite} = $id & 0xFFFF if defined $id;
                 }
             };
-            # Ignore errors - cipher_suite will remain undef
+            if ($@) {
+                warn "TLS cipher suite extraction error: $@\n";
+                $tls_info->{cipher_extraction_error} = $@;
+            }
         }
     }
 
@@ -971,6 +974,10 @@ sub _extract_tls_info ($self) {
             $tls_info->{server_cert} = Net::SSLeay::PEM_get_string_X509($cert);
         }
     };
+    if ($@) {
+        warn "TLS server certificate extraction error: $@\n";
+        $tls_info->{server_cert_error} = $@;
+    }
 
     # Get client certificate if provided
     eval {
@@ -1011,6 +1018,10 @@ sub _extract_tls_info ($self) {
             }
         }
     };
+    if ($@) {
+        warn "TLS client certificate extraction error: $@\n";
+        $tls_info->{client_cert_extraction_error} = $@;
+    }
 
     $self->{tls_info} = $tls_info;
 }
