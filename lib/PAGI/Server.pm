@@ -765,36 +765,69 @@ __END__
 
 =head1 PERFORMANCE
 
-=head1 PERFORMANCE
-
 PAGI::Server is designed as a reference implementation prioritizing spec
 compliance and code clarity, yet delivers competitive performance suitable
 for production workloads.
 
 =head2 Benchmark Results
 
-Tested on a 2.4 GHz 8-Core Intel Core i9 Mac with 16 workers, using
-L<hey|https://github.com/rakyll/hey> with 500 concurrent connections
-over 30 seconds against a minimal "Hello World" application:
+Tested on a 2.4 GHz 8-Core Intel Core i9 Mac with 8 workers, using
+L<hey|https://github.com/rakyll/hey> against a PAGI::Simple hello world
+application:
 
-    Requests/sec:    13,270
-    Total requests:  398,458
-    Latency p50:     36ms
-    Latency p99:     71ms
+B<Peak Performance (100 concurrent, 10 seconds):>
+
+    Endpoint        Req/sec     p50      p99      Response
+    ----------------------------------------------------------------
+    / (text)        12,455      7.7ms    13.2ms   13 bytes
+    /html           10,932      8.4ms    19.3ms   143 bytes
+    /json           9,806       8.8ms    28.2ms   50 bytes
+    /greet/:name    10,722      8.9ms    15.4ms   17 bytes (path params)
+
+B<Concurrency Scaling:>
+
+    Concurrent    Req/sec     p50       p99
+    -----------------------------------------
+    10            9,757       0.9ms     2.1ms
+    100           12,100      7.8ms     14.1ms
+    500           11,299      43.3ms    63.7ms
+
+B<Sustained Load (30 seconds, 200 concurrent):>
+
+    Requests/sec:    9,934
+    Total requests:  298,171
+    Latency p99:     39.5ms
     Errors:          0
 
 =head2 Comparison
 
     Server                  Req/sec     p99 Latency   Notes
     ---------------------------------------------------------------
-    PAGI (16 workers)       ~13,000     71ms          Async, zero errors
-    Starman (16 workers)    ~10,500     2.8ms*        Sync prefork
-    Uvicorn (Python)        ~10-15k     varies        ASGI reference
-    Hypercorn (Python)      ~8-12k      varies        ASGI
+    PAGI (8 workers)        10-12k      13-40ms       Async, zero errors
+    Uvicorn (Python)        10-15k      varies        ASGI reference
+    Hypercorn (Python)      8-12k       varies        ASGI
+    Starman (Perl)          8-10k       2-3ms*        Sync prefork
 
     * Starman shows lower latency at low concurrency but experiences
       request timeouts under high concurrent load (500+ connections)
       due to its synchronous prefork model.
+
+=head2 Key Findings
+
+=over 4
+
+=item * B<Keep-alive is essential> - Without it, throughput drops 6x and
+port exhaustion errors occur under load.
+
+=item * B<Zero errors under sustained load> - 298k requests over 30 seconds
+with no failures when using keep-alive connections.
+
+=item * B<Consistent tail latency> - p99 is typically only 2x p50, indicating
+predictable performance without major outliers.
+
+=item * B<JSON overhead> - JSON serialization adds ~20% overhead vs plain text.
+
+=back
 
 PAGI's async architecture handles high concurrency gracefully without
 queueing or timeouts, making it well-suited for WebSocket, SSE, and
