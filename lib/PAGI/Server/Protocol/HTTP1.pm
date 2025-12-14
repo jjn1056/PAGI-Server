@@ -344,6 +344,13 @@ sub parse_chunked_body ($self, $buffer_ref) {
         # Parse chunk size (hex)
         my $size_line = substr($buffer, $total_consumed, $crlf - $total_consumed);
         $size_line =~ s/;.*//;  # Remove chunk extensions
+        $size_line =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+        # Validate chunk size is valid hex (RFC 7230 Section 4.1)
+        if ($size_line eq '' || $size_line !~ /^[0-9a-fA-F]+$/) {
+            return ({ error => 400, message => 'Invalid chunk size' }, 0, 0);
+        }
+
         my $chunk_size = hex($size_line);
 
         # Check if we have the full chunk + trailing CRLF

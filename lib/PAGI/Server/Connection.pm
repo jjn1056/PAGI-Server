@@ -499,6 +499,13 @@ sub _create_receive ($self, $request) {
                 # Try to parse chunked data
                 my ($data, $consumed, $complete) = $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
 
+                # Check for parse error (invalid chunk size)
+                if (ref($data) eq 'HASH' && $data->{error}) {
+                    $weak_self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
+                    $weak_self->_close;
+                    return { type => 'http.disconnect' };
+                }
+
                 if ($consumed > 0) {
                     substr($weak_self->{buffer}, 0, $consumed) = '';
 
