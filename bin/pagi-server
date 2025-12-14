@@ -100,6 +100,20 @@ reducing accept() contention and improving p99 latency under high concurrency.
 B<macOS/BSD>: SO_REUSEPORT allows binding but does NOT provide kernel load
 balancing. May actually decrease performance - benchmark before using.
 
+=item --max-receive-queue NUM
+
+Maximum number of messages in the WebSocket receive queue before the
+connection is closed with code 1008 (Policy Violation). This is a DoS
+protection mechanism to prevent memory exhaustion from slow consumers.
+
+B<Default:> 1000 messages
+
+B<Unit:> Message count, not bytes. Each WebSocket frame counts as one message.
+
+B<Tuning:> Lower to 100-500 for slow message processing. Raise to 5000-10000
+for trusted high-throughput clients. Memory risk per connection is approximately
+max_receive_queue × average_message_size.
+
 =item --quiet, -q
 
 Suppress startup banner

@@ -95,8 +95,9 @@ sub new ($class, %args) {
         state         => $args{state} // {},
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
-        max_body_size => $args{max_body_size},  # undef = unlimited
-        access_log    => $args{access_log},     # Filehandle for access logging
+        max_body_size     => $args{max_body_size},  # undef = unlimited
+        access_log        => $args{access_log},     # Filehandle for access logging
+        max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -1548,6 +1549,12 @@ sub _process_websocket_frames ($self) {
                 $self->_close;
                 return;
             }
+            # Check queue limit before adding (DoS protection)
+            if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
+                $self->_send_close_frame(1008, 'Message queue overflow');  # Policy Violation
+                $self->_close;
+                return;
+            }
             push @{$self->{receive_queue}}, {
                 type => 'websocket.receive',
                 text => $text,
@@ -1555,6 +1562,12 @@ sub _process_websocket_frames ($self) {
         }
         elsif ($opcode == 2) {
             # Binary frame - keep as raw bytes
+            # Check queue limit before adding (DoS protection)
+            if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
+                $self->_send_close_frame(1008, 'Message queue overflow');  # Policy Violation
+                $self->_close;
+                return;
+            }
             push @{$self->{receive_queue}}, {
                 type  => 'websocket.receive',
                 bytes => $bytes,

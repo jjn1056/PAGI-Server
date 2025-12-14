@@ -139,6 +139,44 @@ socket mode. Use with caution - benchmark before deploying.
 
 =back
 
+=item max_receive_queue => $count
+
+Maximum number of messages that can be queued in the WebSocket receive queue
+before the connection is closed. This is a DoS protection mechanism.
+
+B<Unit:> Message count (not bytes). Each WebSocket text or binary frame counts
+as one message regardless of size.
+
+B<Default:> 1000 messages
+
+B<When exceeded:> The server sends a WebSocket close frame with code 1008
+(Policy Violation) and reason "Message queue overflow", then closes the
+connection.
+
+B<Tuning guidelines:>
+
+=over 4
+
+=item * B<Memory impact:> Each queued message holds the full message payload.
+With default of 1000 messages and average 1KB messages, worst case is ~1MB
+per slow connection.
+
+=item * B<Workers:> Total memory risk = workers × max_connections × max_receive_queue × avg_message_size.
+For 4 workers, 100 connections each, 1000 queue, 1KB average = 400MB worst case.
+
+=item * B<Fast consumers:> If your app processes messages quickly, the queue
+rarely grows. Default of 1000 is generous for most applications.
+
+=item * B<Slow consumers:> If your app does expensive processing per message,
+consider lowering to 100-500 to limit memory exposure.
+
+=item * B<High throughput:> If you have trusted clients sending rapid bursts,
+you may increase to 5000-10000, but monitor memory usage.
+
+=back
+
+B<CLI:> C<--max-receive-queue 500>
+
 =over 4
 
 =item * A listening socket is created before forking
@@ -200,8 +238,9 @@ sub _init ($self, $params) {
     $self->{max_body_size}    = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
     $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
     $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size
-    $self->{shutdown_timeout} = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
-    $self->{reuseport}        = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
+    $self->{shutdown_timeout}  = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
+    $self->{reuseport}         = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
+    $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -261,6 +300,9 @@ sub configure ($self, %params) {
     if (exists $params{shutdown_timeout}) {
         $self->{shutdown_timeout} = delete $params{shutdown_timeout};
     }
+    if (exists $params{max_receive_queue}) {
+        $self->{max_receive_queue} = delete $params{max_receive_queue};
+    }
 
     $self->SUPER::configure(%params);
 }
@@ -317,9 +359,17 @@ async sub _listen_singleworker ($self) {
         $listen_opts{SSL_cert_file} = $ssl->{cert_file} if $ssl->{cert_file};
         $listen_opts{SSL_key_file} = $ssl->{key_file} if $ssl->{key_file};
 
+        # TLS hardening: minimum version TLS 1.2 (configurable)
+        $listen_opts{SSL_version} = $ssl->{min_version} // 'TLSv1_2';
+
+        # TLS hardening: secure cipher suites (configurable)
+        $listen_opts{SSL_cipher_list} = $ssl->{cipher_list} //
+            'ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA';
+
         # Client certificate verification
         if ($ssl->{verify_client}) {
-            $listen_opts{SSL_verify_mode} = 0x01;  # SSL_VERIFY_PEER
+            # SSL_VERIFY_PEER (0x01) | SSL_VERIFY_FAIL_IF_NO_PEER_CERT (0x02)
+            $listen_opts{SSL_verify_mode} = 0x03;
             $listen_opts{SSL_ca_file} = $ssl->{ca_file} if $ssl->{ca_file};
         } else {
             $listen_opts{SSL_verify_mode} = 0x00;  # SSL_VERIFY_NONE
@@ -604,16 +654,17 @@ sub _on_connection ($self, $stream) {
     weaken(my $weak_self = $self);
 
     my $conn = PAGI::Server::Connection->new(
-        stream        => $stream,
-        app           => $self->{app},
-        protocol      => $self->{protocol},
-        server        => $self,
-        extensions    => $self->{extensions},
-        state         => $self->{state},
-        tls_enabled   => $self->{tls_enabled} // 0,
-        timeout       => $self->{timeout},
-        max_body_size => $self->{max_body_size},
-        access_log    => $self->{access_log},
+        stream            => $stream,
+        app               => $self->{app},
+        protocol          => $self->{protocol},
+        server            => $self,
+        extensions        => $self->{extensions},
+        state             => $self->{state},
+        tls_enabled       => $self->{tls_enabled} // 0,
+        timeout           => $self->{timeout},
+        max_body_size     => $self->{max_body_size},
+        access_log        => $self->{access_log},
+        max_receive_queue => $self->{max_receive_queue},
     );
 
     # Track the connection (O(1) hash insert)

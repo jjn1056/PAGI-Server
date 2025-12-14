@@ -342,7 +342,234 @@ subtest 'CLI launcher supports --ssl-cert and --ssl-key for HTTPS' => sub {
     waitpid($pid, 0);
 };
 
-# Test 7: Client certificates are captured when provided
+# Test 7: TLS 1.2 minimum version is enforced
+subtest 'TLS 1.2 minimum version is enforced by default' => sub {
+    my $captured_scope;
+
+    my $tls_version_app = async sub ($scope, $receive, $send) {
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        $captured_scope = $scope;
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => 'OK',
+            more => 0,
+        });
+    };
+
+    my $server = PAGI::Server->new(
+        app   => $tls_version_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+        ssl   => {
+            cert_file => $server_cert,
+            key_file  => $server_key,
+        },
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(
+        SSL_verify_mode => 0,
+    );
+    $loop->add($http);
+
+    my $response = $http->GET("https://127.0.0.1:$port/")->get;
+
+    ok(exists $captured_scope->{extensions}{tls}, 'scope.extensions.tls exists');
+
+    my $tls = $captured_scope->{extensions}{tls};
+
+    # TLS 1.2 = 0x0303, TLS 1.3 = 0x0304
+    ok($tls->{tls_version} >= 0x0303, 'TLS version is at least TLS 1.2 (0x0303)');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
+# Test 8: Custom TLS min_version and cipher_list are configurable
+subtest 'Custom TLS min_version and cipher_list are configurable' => sub {
+    my $captured_scope;
+
+    my $custom_tls_app = async sub ($scope, $receive, $send) {
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        $captured_scope = $scope;
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => 'OK',
+            more => 0,
+        });
+    };
+
+    # Server with custom TLS settings
+    my $server = PAGI::Server->new(
+        app   => $custom_tls_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+        ssl   => {
+            cert_file   => $server_cert,
+            key_file    => $server_key,
+            min_version => 'TLSv1_2',  # Explicit min version
+            cipher_list => 'ECDHE+AESGCM:DHE+AESGCM',  # Custom cipher list
+        },
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(
+        SSL_verify_mode => 0,
+    );
+    $loop->add($http);
+
+    my $response = $http->GET("https://127.0.0.1:$port/")->get;
+
+    is($response->code, 200, 'HTTPS response with custom TLS settings is 200 OK');
+
+    my $tls = $captured_scope->{extensions}{tls};
+    ok($tls->{tls_version} >= 0x0303, 'TLS version meets minimum requirement');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+};
+
+# Test 9: verify_client requires client certificate (connection fails without one)
+subtest 'verify_client requires client certificate' => sub {
+    my $strict_app = async sub ($scope, $receive, $send) {
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+
+        await $send->({
+            type => 'http.response.body',
+            body => 'OK',
+            more => 0,
+        });
+    };
+
+    # Server requiring client certificate
+    my $server = PAGI::Server->new(
+        app   => $strict_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+        ssl   => {
+            cert_file     => $server_cert,
+            key_file      => $server_key,
+            ca_file       => $ca_cert,
+            verify_client => 1,
+        },
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $port = $server->port;
+
+    # Client WITHOUT certificate - should fail
+    my $http_no_cert = Net::Async::HTTP->new(
+        SSL_verify_mode => 0,
+        # No SSL_cert_file or SSL_key_file
+    );
+    $loop->add($http_no_cert);
+
+    my $failed = 0;
+    eval {
+        my $response = $http_no_cert->GET("https://127.0.0.1:$port/")->get;
+    };
+    if ($@) {
+        $failed = 1;
+        like($@, qr/SSL|certificate|handshake|connection/i, 'Connection failed due to missing client certificate');
+    }
+    ok($failed, 'Connection without client certificate was rejected');
+
+    $loop->remove($http_no_cert);
+
+    # Client WITH certificate - should succeed
+    my $http_with_cert = Net::Async::HTTP->new(
+        SSL_verify_mode => 0,
+        SSL_cert_file   => $client_cert,
+        SSL_key_file    => $client_key,
+    );
+    $loop->add($http_with_cert);
+
+    my $response = $http_with_cert->GET("https://127.0.0.1:$port/")->get;
+    is($response->code, 200, 'Connection with client certificate succeeds');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http_with_cert);
+};
+
+# Test 10: Client certificates are captured when provided
 subtest 'Client certificates are captured when provided' => sub {
     my $captured_scope;
 
