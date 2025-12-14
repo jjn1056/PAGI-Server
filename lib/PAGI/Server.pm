@@ -418,8 +418,15 @@ sub _spawn_worker ($self, $listen_socket, $worker_num) {
         # Remove from tracking
         delete $weak_self->{worker_pids}{$exit_pid};
 
+        # Check exit code: exit(2) = startup failure, don't respawn
+        my $exit_code = $exitcode >> 8;
+        if ($exit_code == 2) {
+            warn "Worker $worker_num startup failed, not respawning\n"
+                unless $weak_self->{quiet};
+            # Don't respawn - startup failure would just repeat
+        }
         # Respawn if still running and not shutting down
-        if ($weak_self->{running} && !$weak_self->{shutting_down}) {
+        elsif ($weak_self->{running} && !$weak_self->{shutting_down}) {
             $weak_self->_spawn_worker($listen_socket, $worker_num);
         }
 
@@ -491,7 +498,7 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
 
     if ($startup_error) {
         warn "Worker $worker_num ($$): startup failed: $startup_error\n" unless $self->{quiet};
-        exit(1);
+        exit(2);  # Exit code 2 = startup failure (don't respawn)
     }
 
     # Set up listener using the inherited socket
