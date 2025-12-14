@@ -98,6 +98,7 @@ sub new ($class, %args) {
         max_body_size     => $args{max_body_size},  # undef = unlimited
         access_log        => $args{access_log},     # Filehandle for access logging
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
+        max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -176,20 +177,30 @@ sub start ($self) {
                 return 0;
             }
 
-            # If in WebSocket mode, process WebSocket frames
-            if ($weak_self->{websocket_mode}) {
-                $weak_self->_process_websocket_frames;
-                return 0;
-            }
+            # Wrap processing in eval to prevent exceptions from crashing the event loop
+            # This is critical - Protocol::WebSocket::Frame can throw exceptions for
+            # oversized payloads, and other parsing code may throw as well
+            eval {
+                # If in WebSocket mode, process WebSocket frames
+                if ($weak_self->{websocket_mode}) {
+                    $weak_self->_process_websocket_frames;
+                    return;
+                }
 
-            # If we're waiting for body data, notify the receive handler
-            if ($weak_self->{receive_pending} && !$weak_self->{receive_pending}->is_ready) {
-                my $f = $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
-                $f->done;
-            }
+                # If we're waiting for body data, notify the receive handler
+                if ($weak_self->{receive_pending} && !$weak_self->{receive_pending}->is_ready) {
+                    my $f = $weak_self->{receive_pending};
+                    $weak_self->{receive_pending} = undef;
+                    $f->done;
+                }
 
-            $weak_self->_try_handle_request;
+                $weak_self->_try_handle_request;
+            };
+            if (my $error = $@) {
+                # Log the error and close the connection gracefully
+                warn "PAGI connection error: $error";
+                $weak_self->_close;
+            }
             return 0;
         },
         on_closed => sub {
@@ -1458,7 +1469,9 @@ sub _create_websocket_send ($self, $request) {
             # Switch to WebSocket mode
             $weak_self->{websocket_mode} = 1;
             $weak_self->{websocket_accepted} = 1;
-            $weak_self->{websocket_frame} = Protocol::WebSocket::Frame->new;
+            $weak_self->{websocket_frame} = Protocol::WebSocket::Frame->new(
+                max_payload_size => $weak_self->{max_ws_frame_size},
+            );
             $weak_self->{response_status} = 101;  # Track for access logging
 
             # Notify any waiting receive

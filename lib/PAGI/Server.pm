@@ -177,6 +177,38 @@ you may increase to 5000-10000, but monitor memory usage.
 
 B<CLI:> C<--max-receive-queue 500>
 
+=item max_ws_frame_size => $bytes
+
+Maximum size in bytes for a single WebSocket frame payload. When a client
+sends a frame larger than this limit, the connection is closed with a
+protocol error.
+
+B<Unit:> Bytes
+
+B<Default:> 65536 (64KB) - matches Protocol::WebSocket default
+
+B<When exceeded:> The server closes the connection. The error is logged as
+"PAGI connection error: Payload is too big."
+
+B<Tuning guidelines:>
+
+=over 4
+
+=item * B<Small messages:> For chat apps or control messages, default 64KB is plenty.
+
+=item * B<File uploads:> For binary data transfer via WebSocket, increase to 1MB-16MB
+depending on expected file sizes.
+
+=item * B<Memory impact:> Each connection can buffer up to max_ws_frame_size bytes
+during frame parsing. High values increase memory per connection.
+
+=item * B<DoS protection:> Lower values limit memory exhaustion from malicious clients
+sending oversized frames.
+
+=back
+
+B<CLI:> C<--max-ws-frame-size 1048576>
+
 =over 4
 
 =item * A listening socket is created before forking
@@ -241,6 +273,7 @@ sub _init ($self, $params) {
     $self->{shutdown_timeout}  = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
     $self->{reuseport}         = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
+    $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -302,6 +335,9 @@ sub configure ($self, %params) {
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
+    }
+    if (exists $params{max_ws_frame_size}) {
+        $self->{max_ws_frame_size} = delete $params{max_ws_frame_size};
     }
 
     $self->SUPER::configure(%params);
@@ -665,6 +701,7 @@ sub _on_connection ($self, $stream) {
         max_body_size     => $self->{max_body_size},
         access_log        => $self->{access_log},
         max_receive_queue => $self->{max_receive_queue},
+        max_ws_frame_size => $self->{max_ws_frame_size},
     );
 
     # Track the connection (O(1) hash insert)

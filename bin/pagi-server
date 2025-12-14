@@ -114,6 +114,19 @@ B<Tuning:> Lower to 100-500 for slow message processing. Raise to 5000-10000
 for trusted high-throughput clients. Memory risk per connection is approximately
 max_receive_queue × average_message_size.
 
+=item --max-ws-frame-size NUM
+
+Maximum size in bytes for a single WebSocket frame payload. When a client
+sends a frame larger than this limit, the connection is closed.
+
+B<Default:> 65536 bytes (64KB)
+
+B<Unit:> Bytes (not messages). This controls individual frame size.
+
+B<Tuning:> For chat/control messages, default 64KB is sufficient. For file
+uploads via WebSocket, increase to 1-16MB. Memory impact: each connection
+can buffer up to this amount during frame parsing.
+
 =item --quiet, -q
 
 Suppress startup banner
