@@ -550,6 +550,7 @@ async sub _run_lifespan_startup ($self) {
         pagi => {
             version      => '0.1',
             spec_version => '0.1',
+            loop         => $self->loop,  # IO::Async::Loop for worker pools, etc.
         },
         state => $self->{state},  # App can populate this
     };
