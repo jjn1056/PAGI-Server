@@ -21,6 +21,7 @@ use warnings;
 use Test2::V0;
 use experimental 'signatures';
 use Future::AsyncAwait;
+use Time::HiRes qw(time);
 
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
