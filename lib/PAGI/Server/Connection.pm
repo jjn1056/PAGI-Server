@@ -849,6 +849,14 @@ sub _close ($self) {
     # Remove from server's connection list (O(1) hash delete)
     if ($self->{server}) {
         delete $self->{server}{connections}{refaddr($self)};
+
+        # Signal drain complete if this was the last connection during shutdown
+        if ($self->{server}{shutting_down} &&
+            keys %{$self->{server}{connections}} == 0 &&
+            $self->{server}{drain_complete} &&
+            !$self->{server}{drain_complete}->is_ready) {
+            $self->{server}{drain_complete}->done;
+        }
     }
 
     # Stop idle timer

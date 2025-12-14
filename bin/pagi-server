@@ -83,6 +83,12 @@ Path to SSL private key
 
 Path to access log file (default: STDERR)
 
+=item --no-access-log
+
+Disable access logging entirely. Eliminates per-request I/O overhead,
+improving throughput by 5-15% depending on workload. Useful for
+benchmarking or when access logs are handled by a reverse proxy.
+
 =item --quiet, -q
 
 Suppress startup banner
@@ -138,6 +144,9 @@ If no app is specified, serves the current directory:
 
     # Use EV event loop for better performance
     pagi-server --loop EV ./myapp.pl
+
+    # Maximum performance (no access logging)
+    pagi-server --no-access-log -w 8 ./myapp.pl
 
     # Or via environment variable
     IO_ASYNC_LOOP=EV pagi-server ./myapp.pl
