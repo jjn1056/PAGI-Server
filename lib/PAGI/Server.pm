@@ -10,7 +10,7 @@ use IO::Async::Loop;
 use IO::Socket::INET;
 use Future;
 use Future::AsyncAwait;
-use Scalar::Util qw(weaken);
+use Scalar::Util qw(weaken refaddr);
 
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
@@ -164,7 +164,7 @@ sub _init ($self, $params) {
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
     $self->{listener}    = undef;
-    $self->{connections} = [];
+    $self->{connections} = {};  # Hash keyed by refaddr for O(1) add/remove
     $self->{protocol}    = PAGI::Server::Protocol::HTTP1->new(
         max_header_size => $self->{max_header_size},
     );
@@ -542,8 +542,8 @@ sub _on_connection ($self, $stream) {
         access_log    => $self->{access_log},
     );
 
-    # Track the connection
-    push @{$self->{connections}}, $conn;
+    # Track the connection (O(1) hash insert)
+    $self->{connections}{refaddr($conn)} = $conn;
 
     # Configure stream with callbacks BEFORE adding to loop
     $conn->start;
@@ -722,22 +722,22 @@ async sub _drain_connections ($self) {
 
     # First, close all idle connections immediately (not processing a request)
     # Keep-alive connections waiting for next request should be closed
-    my @idle = grep { !$_->{handling_request} } @{$self->{connections}};
+    my @idle = grep { !$_->{handling_request} } values %{$self->{connections}};
     for my $conn (@idle) {
         $conn->_close if $conn && $conn->can('_close');
     }
 
     # Now wait only for connections with active requests
-    while (@{$self->{connections}} > 0) {
+    while (keys %{$self->{connections}} > 0) {
         my $elapsed = time() - $start;
         if ($elapsed >= $timeout) {
             # Timeout reached - force close remaining connections
-            my $remaining = scalar @{$self->{connections}};
+            my $remaining = scalar keys %{$self->{connections}};
             warn "Shutdown timeout: force-closing $remaining active connections\n"
                 unless $self->{quiet};
 
             # Force close all remaining connections
-            for my $conn (@{$self->{connections}}) {
+            for my $conn (values %{$self->{connections}}) {
                 $conn->_close if $conn && $conn->can('_close');
             }
             last;

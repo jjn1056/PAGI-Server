@@ -4,7 +4,7 @@ use warnings;
 use experimental 'signatures';
 use Future;
 use Future::AsyncAwait;
-use Scalar::Util qw(weaken);
+use Scalar::Util qw(weaken refaddr);
 use Protocol::WebSocket::Handshake::Server;
 use Protocol::WebSocket::Frame;
 use Digest::SHA qw(sha1_base64);
@@ -846,10 +846,9 @@ sub _close ($self) {
     return if $self->{closed};
     $self->{closed} = 1;
 
-    # Remove from server's connection list
+    # Remove from server's connection list (O(1) hash delete)
     if ($self->{server}) {
-        @{$self->{server}{connections}} = 
-            grep { $_ != $self } @{$self->{server}{connections}};
+        delete $self->{server}{connections}{refaddr($self)};
     }
 
     # Stop idle timer
