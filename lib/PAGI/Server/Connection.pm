@@ -967,8 +967,9 @@ sub _extract_tls_info ($self) {
     }
 
     # Get server certificate (our certificate)
+    # IO::Socket::SSL uses sock_certificate() for the server's own cert
     eval {
-        my $cert = $handle->get_servercert;
+        my $cert = $handle->sock_certificate;
         if ($cert) {
             require Net::SSLeay;
             $tls_info->{server_cert} = Net::SSLeay::PEM_get_string_X509($cert);
