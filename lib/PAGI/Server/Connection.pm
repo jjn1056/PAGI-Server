@@ -324,9 +324,19 @@ async sub _handle_request ($self, $request) {
     };
 
     if (my $error = $@) {
-        # Handle application error
-        $self->_send_error_response(500, "Internal Server Error");
-        warn "PAGI application error: $error\n";
+        # Handle application error - always close connection after exception
+        # If response already started, we can't send error page (3.17)
+        if ($self->{response_started}) {
+            warn "PAGI application error (after response started): $error\n";
+        } else {
+            $self->_send_error_response(500, "Internal Server Error");
+            warn "PAGI application error: $error\n";
+        }
+        # Write access log before closing
+        $self->_write_access_log;
+        # Always close connection after exception (3.2) - don't try keep-alive
+        $self->_close;
+        return;
     }
 
     # Write access log entry
@@ -874,6 +884,9 @@ sub _send_close_frame ($self, $code, $reason = '') {
 sub _close ($self) {
     return if $self->{closed};
     $self->{closed} = 1;
+
+    # Clean up WebSocket frame parser to free memory immediately
+    delete $self->{websocket_frame};
 
     # Remove from server's connection list (O(1) hash delete)
     if ($self->{server}) {
