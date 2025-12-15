@@ -186,6 +186,9 @@ If no app is specified, serves the current directory:
     # Maximum performance (no access logging)
     pagi-server --no-access-log -w 8 ./myapp.pl
 
+    # Optimal macOS performance (EV + kqueue)
+    LIBEV_FLAGS=8 pagi-server --loop EV --no-access-log ./myapp.pl
+
     # High concurrency with SO_REUSEPORT (reduces accept contention)
     pagi-server --reuseport -w 8 ./myapp.pl
 
@@ -253,6 +256,16 @@ For better performance, especially with many concurrent connections:
     IO_ASYNC_LOOP=Epoll pagi-server ./myapp.pl   # Linux-specific
 
 The C<--loop> option takes precedence over this environment variable.
+
+=item LIBEV_FLAGS
+
+When using the EV backend, this controls which libev backend is used internally.
+By default, EV may choose a suboptimal backend (select instead of kqueue on macOS).
+
+    # Force kqueue on macOS for optimal performance (~6% faster)
+    LIBEV_FLAGS=8 pagi-server --loop EV ./myapp.pl
+
+Values: 1=select, 2=poll, 4=epoll (Linux), 8=kqueue (macOS/BSD)
 
 =back
 
