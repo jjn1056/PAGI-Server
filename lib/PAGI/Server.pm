@@ -679,6 +679,7 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
 
     if ($startup_error) {
         warn "Worker $worker_num ($$): startup failed: $startup_error\n" unless $self->{quiet};
+        close($listen_socket) if $listen_socket;  # Clean up FD before exit
         exit(2);  # Exit code 2 = startup failure (don't respawn)
     }
 
@@ -700,6 +701,8 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
     # Run the event loop
     $loop->run;
 
+    # Clean up listen socket before exit (avoid FD leak)
+    close($listen_socket) if $listen_socket;
     exit(0);
 }
 
