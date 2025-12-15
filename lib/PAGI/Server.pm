@@ -819,6 +819,24 @@ sub _on_connection ($self, $stream) {
     $self->add_child($stream);
 }
 
+# Called when a request completes (for max_requests tracking)
+sub _on_request_complete ($self) {
+    return unless $self->{is_worker};
+    return unless $self->{max_requests} && $self->{max_requests} > 0;
+
+    $self->{_request_count}++;
+
+    if ($self->{_request_count} >= $self->{max_requests}) {
+        return if $self->{_max_requests_shutdown_triggered};  # Prevent duplicate shutdowns
+        $self->{_max_requests_shutdown_triggered} = 1;
+        $self->_log(info => "Worker $$: reached max_requests ($self->{max_requests}), shutting down");
+        # Initiate graceful shutdown (finish current connections, then exit)
+        $self->shutdown->on_done(sub {
+            $self->loop->stop;
+        })->retain;
+    }
+}
+
 # Lifespan Protocol Implementation
 
 async sub _run_lifespan_startup ($self) {
