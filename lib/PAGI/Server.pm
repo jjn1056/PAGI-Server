@@ -261,6 +261,23 @@ sub _init ($self, $params) {
     $self->{host}             = delete $params->{host} // '127.0.0.1';
     $self->{port}             = delete $params->{port} // 5000;
     $self->{ssl}              = delete $params->{ssl};
+
+    # Validate SSL certificate files at startup (fail fast)
+    if (my $ssl = $self->{ssl}) {
+        if (my $cert = $ssl->{cert_file}) {
+            die "SSL certificate file not found: $cert\n" unless -e $cert;
+            die "SSL certificate file not readable: $cert\n" unless -r $cert;
+        }
+        if (my $key = $ssl->{key_file}) {
+            die "SSL key file not found: $key\n" unless -e $key;
+            die "SSL key file not readable: $key\n" unless -r $key;
+        }
+        if (my $ca = $ssl->{ca_file}) {
+            die "SSL CA file not found: $ca\n" unless -e $ca;
+            die "SSL CA file not readable: $ca\n" unless -r $ca;
+        }
+    }
+
     $self->{extensions}       = delete $params->{extensions} // {};
     $self->{on_error}         = delete $params->{on_error} // sub { warn @_ };
     $self->{access_log}       = exists $params->{access_log} ? delete $params->{access_log} : \*STDERR;

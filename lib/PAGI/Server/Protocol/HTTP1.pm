@@ -123,6 +123,7 @@ my %STATUS_PHRASES = (
     404 => 'Not Found',
     405 => 'Method Not Allowed',
     413 => 'Payload Too Large',
+    414 => 'URI Too Long',
     431 => 'Request Header Fields Too Large',
     500 => 'Internal Server Error',
     502 => 'Bad Gateway',
@@ -131,7 +132,8 @@ my %STATUS_PHRASES = (
 
 sub new ($class, %args) {
     my $self = bless {
-        max_header_size => $args{max_header_size} // 8192,
+        max_header_size       => $args{max_header_size} // 8192,
+        max_request_line_size => $args{max_request_line_size} // 8192,  # 8KB per RFC 7230
     }, $class;
     return $self;
 }
@@ -143,6 +145,12 @@ sub parse_request ($self, $buffer_ref) {
     # Check for complete headers (look for \r\n\r\n)
     my $header_end = index($buffer, "\r\n\r\n");
     return (undef, 0) if $header_end < 0;
+
+    # Check request line length (first line before \r\n)
+    my $first_line_end = index($buffer, "\r\n");
+    if ($first_line_end > $self->{max_request_line_size}) {
+        return ({ error => 414, message => 'URI Too Long' }, $header_end + 4);
+    }
 
     # Check max header size
     if ($header_end > $self->{max_header_size}) {
@@ -247,6 +255,20 @@ sub parse_request ($self, $buffer_ref) {
 sub serialize_response_start ($self, $status, $headers, $chunked = 0, $http_version = '1.1') {
     my $phrase = $STATUS_PHRASES{$status} // 'Unknown';
     my $response = "HTTP/$http_version $status $phrase\r\n";
+
+    # Check if app provided a Server header
+    my $has_server = 0;
+    for my $header (@$headers) {
+        if (lc($header->[0]) eq 'server') {
+            $has_server = 1;
+            last;
+        }
+    }
+
+    # Add default Server header if not provided
+    unless ($has_server) {
+        $response .= "Server: PAGI/$VERSION\r\n";
+    }
 
     # Add headers (with CRLF injection validation)
     for my $header (@$headers) {
