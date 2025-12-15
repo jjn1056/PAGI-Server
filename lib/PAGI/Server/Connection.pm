@@ -1594,7 +1594,34 @@ sub _process_websocket_frames ($self) {
     # Protocol::WebSocket::Frame->next() decodes as UTF-8, which corrupts binary data
     while (defined(my $bytes = $frame->next_bytes)) {
         my $opcode = $frame->opcode;
-        
+
+        # RFC 6455 Section 5.2: RSV1-3 MUST be 0 unless extension defines meaning
+        # PAGI doesn't support compression extensions, so RSV must always be 0
+        my $rsv = $frame->rsv;
+        if ($rsv && ref($rsv) eq 'ARRAY') {
+            if (grep { $_ } @$rsv) {
+                $self->_send_close_frame(1002, 'RSV bits must be 0');
+                $self->_close;
+                return;
+            }
+        }
+
+        # RFC 6455 Section 5.2: Opcodes 3-7 and 11-15 (0xB-0xF) are reserved
+        # Must fail connection with 1002 Protocol Error
+        if (($opcode >= 3 && $opcode <= 7) || ($opcode >= 11 && $opcode <= 15)) {
+            $self->_send_close_frame(1002, 'Reserved opcode');
+            $self->_close;
+            return;
+        }
+
+        # RFC 6455 Section 5.5: Control frames (close/ping/pong) MUST have
+        # payload length <= 125 bytes
+        if (($opcode == 8 || $opcode == 9 || $opcode == 10) && length($bytes) > 125) {
+            $self->_send_close_frame(1002, 'Control frame too large');
+            $self->_close;
+            return;
+        }
+
         if ($opcode == 1) {
             # Text frame - decode as UTF-8
             my $text = eval { Encode::decode('UTF-8', $bytes, Encode::FB_CROAK) };
@@ -1633,9 +1660,46 @@ sub _process_websocket_frames ($self) {
             $self->{close_received} = 1;
             my ($code, $reason) = (1005, '');
 
+            # RFC 6455 Section 5.5.1: Close frame payload is 0 or >=2 bytes
+            # 1 byte is invalid
+            if (length($bytes) == 1) {
+                $self->_send_close_frame(1002, 'Invalid close frame');
+                $self->_close;
+                return;
+            }
+
             if (length($bytes) >= 2) {
                 $code = unpack('n', substr($bytes, 0, 2));
                 $reason = substr($bytes, 2) // '';
+
+                # RFC 6455 Section 7.4.1: Validate close code
+                # Valid codes: 1000-1003, 1007-1011, 3000-4999
+                # Invalid: 0-999, 1004-1006, 1012-2999, 5000+
+                my $valid_code = 0;
+                if ($code == 1000 || $code == 1001 || $code == 1002 || $code == 1003) {
+                    $valid_code = 1;
+                }
+                elsif ($code >= 1007 && $code <= 1011) {
+                    $valid_code = 1;
+                }
+                elsif ($code >= 3000 && $code <= 4999) {
+                    $valid_code = 1;
+                }
+                unless ($valid_code) {
+                    $self->_send_close_frame(1002, 'Invalid close code');
+                    $self->_close;
+                    return;
+                }
+
+                # RFC 6455: Close reason must be valid UTF-8
+                if (length($reason) > 0) {
+                    my $decoded = eval { Encode::decode('UTF-8', $reason, Encode::FB_CROAK) };
+                    unless (defined $decoded) {
+                        $self->_send_close_frame(1007, 'Invalid UTF-8 in close reason');
+                        $self->_close;
+                        return;
+                    }
+                }
             }
 
             # If we haven't sent close yet, send it now
