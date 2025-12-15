@@ -284,6 +284,7 @@ sub _init ($self, $params) {
     $self->{quiet}            = delete $params->{quiet} // 0;
     $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
+    $self->{max_header_count} = delete $params->{max_header_count} // 100;  # Max number of headers
     $self->{max_body_size}    = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
     $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
     $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size
@@ -297,7 +298,8 @@ sub _init ($self, $params) {
     $self->{listener}    = undef;
     $self->{connections} = {};  # Hash keyed by refaddr for O(1) add/remove
     $self->{protocol}    = PAGI::Server::Protocol::HTTP1->new(
-        max_header_size => $self->{max_header_size},
+        max_header_size  => $self->{max_header_size},
+        max_header_count => $self->{max_header_count},
     );
     $self->{state}       = {};  # Shared state from lifespan
     $self->{worker_pids} = {};  # Track worker PIDs in multi-worker mode
@@ -337,6 +339,9 @@ sub configure ($self, %params) {
     }
     if (exists $params{max_header_size}) {
         $self->{max_header_size} = delete $params{max_header_size};
+    }
+    if (exists $params{max_header_count}) {
+        $self->{max_header_count} = delete $params{max_header_count};
     }
     if (exists $params{max_body_size}) {
         $self->{max_body_size} = delete $params{max_body_size};
@@ -636,9 +641,10 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
         access_log      => $self->{access_log},
         quiet           => 1,  # Workers should be quiet
         timeout         => $self->{timeout},
-        max_header_size => $self->{max_header_size},
-        max_body_size   => $self->{max_body_size},
-        workers         => 0,  # Single-worker mode in worker process
+        max_header_size  => $self->{max_header_size},
+        max_header_count => $self->{max_header_count},
+        max_body_size    => $self->{max_body_size},
+        workers          => 0,  # Single-worker mode in worker process
     );
     $worker_server->{is_worker} = 1;
     $worker_server->{bound_port} = $listen_socket->sockport;
@@ -1072,6 +1078,58 @@ For other systems I recommend testing the various backend loop options
 and find what works best.   Your notes and updates appreciated.
 
 =cut
+
+=head1 RECOMMENDED MIDDLEWARE
+
+For production deployments, consider enabling these middleware components:
+
+=head2 SecurityHeaders
+
+Adds important security headers to all responses. Addresses common security
+scanner findings (e.g., nikto, OWASP ZAP).
+
+    use PAGI::Middleware::Builder;
+
+    my $app = builder {
+        enable 'SecurityHeaders',
+            x_frame_options           => 'DENY',           # Clickjacking protection
+            x_content_type_options    => 'nosniff',        # MIME sniffing protection
+            content_security_policy   => "default-src 'self'",  # XSS protection
+            strict_transport_security => 'max-age=31536000';    # HSTS (HTTPS only)
+        $my_app;
+    };
+
+Default headers (enabled automatically):
+
+=over 4
+
+=item * X-Frame-Options: SAMEORIGIN
+
+=item * X-Content-Type-Options: nosniff
+
+=item * X-XSS-Protection: 1; mode=block
+
+=item * Referrer-Policy: strict-origin-when-cross-origin
+
+=back
+
+See L<PAGI::Middleware::SecurityHeaders> for full documentation.
+
+=head2 Other Recommended Middleware
+
+=over 4
+
+=item * L<PAGI::Middleware::ContentLength> - Ensures Content-Length header
+
+=item * L<PAGI::Middleware::AccessLog> - Request logging (if not using server's built-in)
+
+=item * L<PAGI::Middleware::RateLimit> - Protection against abuse
+
+=item * L<PAGI::Middleware::CORS> - Cross-origin resource sharing
+
+=item * L<PAGI::Middleware::GZip> - Response compression
+
+=back
 
 =head1 SEE ALSO
 

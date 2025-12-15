@@ -1121,7 +1121,120 @@ subtest 'Access logging writes request/response info' => sub {
     $loop->remove($server);
 };
 
-# Test 25: Content-Length validation (actual body matches declared length)
+# Test 25: HTTP/1.1 requires Host header (RFC 7230 Section 5.4)
+subtest 'HTTP/1.1 without Host header returns 400 Bad Request' => sub {
+    (async sub {
+        my $server = PAGI::Server->new(
+            app   => $app,
+            host  => '127.0.0.1',
+            port  => 0,
+            quiet => 1,
+        );
+
+        $loop->add($server);
+        await $server->listen;
+
+        my $port = $server->port;
+
+        # Create raw socket to send request without Host header
+        my $socket = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1',
+            PeerPort => $port,
+            Proto    => 'tcp',
+            Blocking => 0,
+        ) or die "Cannot connect: $!";
+
+        my $response = '';
+        my $done = $loop->new_future;
+
+        my $stream = IO::Async::Stream->new(
+            handle => $socket,
+            on_read => sub ($s, $buffref, $eof) {
+                $response .= $$buffref;
+                $$buffref = '';
+                if ($eof || $response =~ /\r\n\r\n/) {
+                    $done->done unless $done->is_ready;
+                }
+                return 0;
+            },
+            on_closed => sub {
+                $done->done unless $done->is_ready;
+            },
+        );
+
+        $loop->add($stream);
+
+        # Send HTTP/1.1 request WITHOUT Host header (RFC 7230 violation)
+        $stream->write("GET / HTTP/1.1\r\n\r\n");
+
+        my $timeout = $loop->delay_future(after => 3)->then(sub { $done->done });
+        await Future->wait_any($done, $timeout);
+
+        like($response, qr/HTTP\/1\.1 400/, 'HTTP/1.1 request without Host returns 400 Bad Request');
+
+        $loop->remove($stream);
+        await $server->shutdown;
+        $loop->remove($server);
+    })->()->get;
+};
+
+# Test 26: HTTP/1.0 without Host is allowed
+subtest 'HTTP/1.0 without Host header is allowed' => sub {
+    (async sub {
+        my $server = PAGI::Server->new(
+            app   => $app,
+            host  => '127.0.0.1',
+            port  => 0,
+            quiet => 1,
+        );
+
+        $loop->add($server);
+        await $server->listen;
+
+        my $port = $server->port;
+
+        my $socket = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1',
+            PeerPort => $port,
+            Proto    => 'tcp',
+            Blocking => 0,
+        ) or die "Cannot connect: $!";
+
+        my $response = '';
+        my $done = $loop->new_future;
+
+        my $stream = IO::Async::Stream->new(
+            handle => $socket,
+            on_read => sub ($s, $buffref, $eof) {
+                $response .= $$buffref;
+                $$buffref = '';
+                if ($eof || $response =~ /\r\n\r\n/) {
+                    $done->done unless $done->is_ready;
+                }
+                return 0;
+            },
+            on_closed => sub {
+                $done->done unless $done->is_ready;
+            },
+        );
+
+        $loop->add($stream);
+
+        # Send HTTP/1.0 request WITHOUT Host header (allowed per RFC)
+        $stream->write("GET / HTTP/1.0\r\n\r\n");
+
+        my $timeout = $loop->delay_future(after => 3)->then(sub { $done->done });
+        await Future->wait_any($done, $timeout);
+
+        like($response, qr/HTTP\/1\.0 200/, 'HTTP/1.0 request without Host returns 200 OK');
+
+        $loop->remove($stream);
+        await $server->shutdown;
+        $loop->remove($server);
+    })->()->get;
+};
+
+# Test 27: Content-Length validation (actual body matches declared length)
 subtest 'Content-Length validation' => sub {
     (async sub {
         # App that echoes back request body size
@@ -1195,6 +1308,53 @@ subtest 'Content-Length validation' => sub {
         like($response->decoded_content, qr/Received 13 bytes/, 'Server received correct body size');
 
         $loop->remove($http);
+        await $server->shutdown;
+        $loop->remove($server);
+    })->()->get;
+};
+
+# Test: Too many headers returns 431
+subtest 'Too many headers returns 431' => sub {
+    (async sub {
+        # Create server with low header count limit
+        my $server = PAGI::Server->new(
+            app              => $app,
+            host             => '127.0.0.1',
+            port             => 0,
+            quiet            => 1,
+            max_header_count => 5,  # Very low limit for testing
+        );
+
+        $loop->add($server);
+        await $server->listen;
+
+        my $port = $server->port;
+
+        # Send request with many headers using raw socket
+        my $socket = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1',
+            PeerPort => $port,
+            Proto    => 'tcp',
+            Timeout  => 5,
+        ) or die "Cannot connect: $!";
+
+        # Build request with 10 headers (exceeds limit of 5)
+        my $request = "GET / HTTP/1.1\r\nHost: localhost\r\n";
+        for my $i (1..10) {
+            $request .= "X-Custom-Header-$i: value$i\r\n";
+        }
+        $request .= "\r\n";
+
+        $socket->print($request);
+        $socket->shutdown(1);  # Done writing
+
+        # Read response
+        local $/;
+        my $response = <$socket>;
+        $socket->close;
+
+        like($response, qr{HTTP/1\.1 431}, 'Response is 431 Request Header Fields Too Large');
+
         await $server->shutdown;
         $loop->remove($server);
     })->()->get;

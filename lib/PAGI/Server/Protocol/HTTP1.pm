@@ -134,6 +134,7 @@ sub new ($class, %args) {
     my $self = bless {
         max_header_size       => $args{max_header_size} // 8192,
         max_request_line_size => $args{max_request_line_size} // 8192,  # 8KB per RFC 7230
+        max_header_count      => $args{max_header_count} // 100,  # Max number of headers
     }, $class;
     return $self;
 }
@@ -222,6 +223,11 @@ sub parse_request ($self, $buffer_ref) {
         push @headers, ['cookie', join('; ', @cookie_values)];
     }
 
+    # Check header count limit (DoS protection)
+    if (@headers > $self->{max_header_count}) {
+        return ({ error => 431, message => 'Request Header Fields Too Large' }, $header_end + 4);
+    }
+
     # Add content-type and content-length from env
     if (defined $env{CONTENT_TYPE}) {
         push @headers, ['content-type', $env{CONTENT_TYPE}];
@@ -249,6 +255,13 @@ sub parse_request ($self, $buffer_ref) {
     my $http_version = '1.1';
     if ($env{SERVER_PROTOCOL} && index($env{SERVER_PROTOCOL}, 'HTTP/') == 0) {
         $http_version = substr($env{SERVER_PROTOCOL}, 5);
+    }
+
+    # RFC 7230 Section 5.4: A client MUST send a Host header field in all
+    # HTTP/1.1 request messages. A server MUST respond with a 400 (Bad Request)
+    # status code to any HTTP/1.1 request message that lacks a Host header field.
+    if ($http_version eq '1.1' && !defined $env{HTTP_HOST}) {
+        return ({ error => 400, message => 'Bad Request' }, $header_end + 4);
     }
 
     my $request = {
