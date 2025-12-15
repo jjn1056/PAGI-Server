@@ -96,6 +96,31 @@ externally (e.g., by a reverse proxy).
         access_log => undef,
     );
 
+=item log_level => $level
+
+Controls the verbosity of server log messages. Default: 'info'
+
+Valid levels (from least to most verbose):
+
+=over 4
+
+=item * B<error> - Only errors (application errors, fatal conditions)
+
+=item * B<warn> - Warnings and errors (connection issues, timeouts)
+
+=item * B<info> - Informational messages and above (startup, shutdown, worker spawning)
+
+=item * B<debug> - Everything (verbose diagnostics, frame-level details)
+
+=back
+
+    my $server = PAGI::Server->new(
+        app       => $app,
+        log_level => 'debug',  # Very verbose
+    );
+
+B<CLI:> C<--log-level debug>
+
 =item workers => $count
 
 Number of worker processes for multi-worker mode. Default: 0 (single process mode).
@@ -282,6 +307,12 @@ sub _init ($self, $params) {
     $self->{on_error}         = delete $params->{on_error} // sub { warn @_ };
     $self->{access_log}       = exists $params->{access_log} ? delete $params->{access_log} : \*STDERR;
     $self->{quiet}            = delete $params->{quiet} // 0;
+    $self->{log_level}        = delete $params->{log_level} // 'info';
+    # Validate log level
+    my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
+    die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
+        unless $valid_levels{$self->{log_level}};
+    $self->{_log_level_num}   = $valid_levels{$self->{log_level}};
     $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
     $self->{max_header_count} = delete $params->{max_header_count} // 100;  # Max number of headers
@@ -334,6 +365,14 @@ sub configure ($self, %params) {
     if (exists $params{quiet}) {
         $self->{quiet} = delete $params{quiet};
     }
+    if (exists $params{log_level}) {
+        my $level = delete $params{log_level};
+        my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
+        die "Invalid log_level '$level' - must be one of: debug, info, warn, error\n"
+            unless $valid_levels{$level};
+        $self->{log_level} = $level;
+        $self->{_log_level_num} = $valid_levels{$level};
+    }
     if (exists $params{timeout}) {
         $self->{timeout} = delete $params{timeout};
     }
@@ -365,6 +404,16 @@ sub configure ($self, %params) {
     $self->SUPER::configure(%params);
 }
 
+# Log levels: debug=1, info=2, warn=3, error=4
+my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4);
+
+sub _log ($self, $level, $msg) {
+    my $level_num = $_LOG_LEVELS{$level} // 2;
+    return if $level_num < $self->{_log_level_num};
+    return if $self->{quiet} && $level ne 'error';
+    warn "$msg\n";
+}
+
 async sub listen ($self) {
     return if $self->{running};
 
@@ -385,7 +434,7 @@ async sub _listen_singleworker ($self) {
 
     if (!$startup_result->{success}) {
         my $message = $startup_result->{message} // 'Lifespan startup failed';
-        warn "PAGI Server startup failed: $message\n" unless $self->{quiet};
+        $self->_log(error => "PAGI Server startup failed: $message");
         die "Lifespan startup failed: $message\n";
     }
 
@@ -462,12 +511,10 @@ async sub _listen_singleworker ($self) {
     $self->loop->watch_signal(TERM => $shutdown_handler);
     $self->loop->watch_signal(INT => $shutdown_handler);
 
-    unless ($self->{quiet}) {
-        my $scheme = $self->{tls_enabled} ? 'https' : 'http';
-        my $loop_class = ref($self->loop);
-        $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
-        warn "PAGI Server listening on $scheme://$self->{host}:$self->{bound_port}/ (loop: $loop_class)\n";
-    }
+    my $scheme = $self->{tls_enabled} ? 'https' : 'http';
+    my $loop_class = ref($self->loop);
+    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
+    $self->_log(info => "PAGI Server listening on $scheme://$self->{host}:$self->{bound_port}/ (loop: $loop_class)");
 
     return $self;
 }
@@ -509,13 +556,11 @@ sub _listen_multiworker ($self) {
 
     $self->{running} = 1;
 
-    unless ($self->{quiet}) {
-        my $scheme = $self->{ssl} ? 'https' : 'http';
-        my $loop_class = ref($self->loop);
-        $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
-        my $mode = $reuseport ? 'reuseport' : 'shared-socket';
-        warn "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class)\n";
-    }
+    my $scheme = $self->{ssl} ? 'https' : 'http';
+    my $loop_class = ref($self->loop);
+    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
+    my $mode = $reuseport ? 'reuseport' : 'shared-socket';
+    $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class)");
 
     # Set up signal handlers using IO::Async's watch_signal (replaces _setup_parent_signals)
     my $loop = $self->loop;
@@ -593,8 +638,7 @@ sub _spawn_worker ($self, $listen_socket, $worker_num) {
         # Check exit code: exit(2) = startup failure, don't respawn
         my $exit_code = $exitcode >> 8;
         if ($exit_code == 2) {
-            warn "Worker $worker_num startup failed, not respawning\n"
-                unless $weak_self->{quiet};
+            $weak_self->_log(warn => "Worker $worker_num startup failed, not respawning");
             # Don't respawn - startup failure would just repeat
         }
         # Respawn if still running and not shutting down
@@ -684,7 +728,7 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
     $loop->loop_once while !$startup_done;
 
     if ($startup_error) {
-        warn "Worker $worker_num ($$): startup failed: $startup_error\n" unless $self->{quiet};
+        $self->_log(error => "Worker $worker_num ($$): startup failed: $startup_error");
         close($listen_socket) if $listen_socket;  # Clean up FD before exit
         exit(2);  # Exit code 2 = startup failure (don't respawn)
     }
@@ -830,7 +874,7 @@ async sub _run_lifespan_startup ($self) {
                 }
                 else {
                     # Some other error - could be a real startup failure
-                    warn "PAGI lifespan handler error: $error\n";
+                    $self->_log(error => "PAGI lifespan handler error: $error");
                     $startup_complete->done({ success => 0, message => "Exception: $error" });
                 }
             }
@@ -895,7 +939,7 @@ async sub shutdown ($self) {
 
     if (!$shutdown_result->{success}) {
         my $message = $shutdown_result->{message} // 'Lifespan shutdown failed';
-        warn "PAGI Server shutdown warning: $message\n" unless $self->{quiet};
+        $self->_log(warn => "PAGI Server shutdown warning: $message");
     }
 
     return $self;
@@ -932,8 +976,7 @@ async sub _drain_connections ($self) {
     # If timeout won (connections still remain), force close them
     if (keys %{$self->{connections}} > 0) {
         my $remaining = scalar keys %{$self->{connections}};
-        warn "Shutdown timeout: force-closing $remaining active connections\n"
-            unless $self->{quiet};
+        $self->_log(warn => "Shutdown timeout: force-closing $remaining active connections");
 
         for my $conn (values %{$self->{connections}}) {
             $conn->_close if $conn && $conn->can('_close');
