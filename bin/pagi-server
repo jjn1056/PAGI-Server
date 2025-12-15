@@ -57,6 +57,28 @@ Bind port (default: 5000)
 
 Number of worker processes (default: 1)
 
+=item --max-requests NUM
+
+Maximum number of requests a worker process will handle before restarting.
+After serving this many requests, the worker gracefully shuts down and the
+parent spawns a replacement.
+
+B<Default:> 0 (disabled - workers run indefinitely)
+
+B<When to use:> Long-running deployments where gradual memory growth is a
+concern, or applications with known memory leaks.
+
+B<Note:> Only applies in multi-worker mode (C<--workers> > 1). In single-worker
+mode, this setting is ignored.
+
+=item --log-level LEVEL
+
+Set the logging verbosity level. Messages below this level are suppressed.
+
+B<Levels:> debug, info, warn, error
+
+B<Default:> info
+
 =item --listener_backlog -b
 
 Listener queue size. No default, if left blank then the
@@ -191,6 +213,12 @@ If no app is specified, serves the current directory:
 
     # High concurrency with SO_REUSEPORT (reduces accept contention)
     pagi-server --reuseport -w 8 ./myapp.pl
+
+    # Workers restart after 10k requests (prevents memory growth)
+    pagi-server -w 4 --max-requests 10000 ./myapp.pl
+
+    # Enable debug logging
+    pagi-server --log-level debug ./myapp.pl
 
     # Or via environment variable
     IO_ASYNC_LOOP=EV pagi-server ./myapp.pl
