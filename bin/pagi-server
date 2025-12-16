@@ -9,6 +9,8 @@ PAGI::Runner->new->run(@ARGV);
 
 __END__
 
+=encoding UTF-8
+
 =head1 NAME
 
 pagi-server - PAGI Reference Server CLI
@@ -39,6 +41,13 @@ It can load apps from files or from installed C<PAGI::App::*> modules.
 =head1 OPTIONS
 
 =over 4
+
+=item --lib, -I PATH
+
+Add PATH to C<@INC> before loading the app. Can be specified multiple
+times to add multiple paths, similar to C<perl -I>.
+
+    pagi-server -I ./lib -I ./vendor/lib ./app.pl
 
 =item --app, -a FILE
 
@@ -201,6 +210,9 @@ If no app is specified, serves the current directory:
 
     # Run with multiple workers
     pagi-server -w 4 ./myapp.pl
+
+    # Add library paths (like perl -I)
+    pagi-server -I ./lib -I ./local/lib ./myapp.pl
 
     # Use EV event loop for better performance
     pagi-server --loop EV ./myapp.pl
