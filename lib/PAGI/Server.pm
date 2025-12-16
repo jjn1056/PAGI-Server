@@ -952,7 +952,7 @@ async sub _run_lifespan_shutdown ($self) {
     return { success => 1 } unless $self->{lifespan_supported};
     return { success => 1 } unless $self->{lifespan_send_queue};
 
-    $self->{shutdown_pending} = Future->new;
+    $self->{shutdown_pending} = $self->loop->new_future;
 
     # Queue the shutdown event
     my $send_queue = $self->{lifespan_send_queue};
@@ -967,10 +967,18 @@ async sub _run_lifespan_shutdown ($self) {
         $f->done(shift @$send_queue);
     }
 
-    # Wait for shutdown complete
-    my $result = await $self->{shutdown_pending};
+    # Wait for shutdown complete (with timeout to prevent hanging)
+    my $timeout = $self->{shutdown_timeout} // 30;
+    my $timeout_f = $self->loop->delay_future(after => $timeout);
 
-    return $result;
+    my $result = await Future->wait_any($self->{shutdown_pending}, $timeout_f);
+
+    # If timeout won, return failure
+    if ($timeout_f->is_ready && !$self->{shutdown_pending}->is_ready) {
+        return { success => 0, message => "Lifespan shutdown timed out after ${timeout}s" };
+    }
+
+    return $result // { success => 1 };
 }
 
 async sub shutdown ($self) {
@@ -1008,6 +1016,13 @@ async sub _drain_connections ($self) {
     # Keep-alive connections waiting for next request should be closed
     my @idle = grep { !$_->{handling_request} } values %{$self->{connections}};
     for my $conn (@idle) {
+        $conn->_close if $conn && $conn->can('_close');
+    }
+
+    # Also close long-lived connections (SSE, WebSocket) immediately
+    # These never become "idle" so would wait for full timeout otherwise
+    my @longlived = grep { $_->{sse_mode} || $_->{websocket_mode} } values %{$self->{connections}};
+    for my $conn (@longlived) {
         $conn->_close if $conn && $conn->can('_close');
     }
 
