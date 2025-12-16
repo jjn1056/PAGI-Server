@@ -24,10 +24,11 @@ sub create_server {
     $test_app //= $app;
 
     my $server = PAGI::Server->new(
-        app   => $test_app,
-        host  => '127.0.0.1',
-        port  => 0,  # Random port
-        quiet => 1,
+        app              => $test_app,
+        host             => '127.0.0.1',
+        port             => 0,  # Random port
+        quiet            => 1,
+        shutdown_timeout => 1,  # Fast shutdown for tests
     );
 
     $loop->add($server);
