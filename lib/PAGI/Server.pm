@@ -601,6 +601,12 @@ sub _listen_multiworker ($self) {
     # HUP = graceful restart (replace all workers)
     $loop->watch_signal(HUP => sub { $self->_graceful_restart });
 
+    # TTIN = increase workers by 1
+    $loop->watch_signal(TTIN => sub { $self->_increase_workers });
+
+    # TTOU = decrease workers by 1
+    $loop->watch_signal(TTOU => sub { $self->_decrease_workers });
+
     # Fork the workers
     for my $i (1 .. $workers) {
         $self->_spawn_worker($listen_socket, $i);
@@ -651,6 +657,34 @@ sub _graceful_restart ($self) {
     }
 }
 
+# Increase worker pool by 1
+sub _increase_workers ($self) {
+    return if $self->{shutting_down};
+
+    my $current = scalar keys %{$self->{worker_pids}};
+    my $new_worker_num = $current + 1;
+
+    $self->_log(info => "Received TTIN, spawning worker $new_worker_num (total: $new_worker_num)");
+    $self->_spawn_worker($self->{listen_socket}, $new_worker_num);
+}
+
+# Decrease worker pool by 1
+sub _decrease_workers ($self) {
+    return if $self->{shutting_down};
+
+    my @pids = keys %{$self->{worker_pids}};
+    return unless @pids > 1;  # Keep at least 1 worker
+
+    my $victim_pid = $pids[-1];  # Kill most recent
+    my $remaining = scalar(@pids) - 1;
+
+    $self->_log(info => "Received TTOU, killing worker (remaining: $remaining)");
+
+    # Mark as "don't respawn" by setting a flag before killing
+    $self->{_dont_respawn}{$victim_pid} = 1;
+    kill 'TERM', $victim_pid;
+}
+
 sub _spawn_worker ($self, $listen_socket, $worker_num) {
     my $loop = $self->loop;
     weaken(my $weak_self = $self);
@@ -690,7 +724,10 @@ sub _spawn_worker ($self, $listen_socket, $worker_num) {
         }
         # Respawn if still running and not shutting down
         elsif ($weak_self->{running} && !$weak_self->{shutting_down}) {
-            $weak_self->_spawn_worker($listen_socket, $worker_num);
+            # Don't respawn if this was a TTOU reduction
+            unless (delete $weak_self->{_dont_respawn}{$exit_pid}) {
+                $weak_self->_spawn_worker($listen_socket, $worker_num);
+            }
         }
 
         # Check if all workers have exited (for shutdown)
