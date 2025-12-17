@@ -16,7 +16,7 @@ use Future;
 # Set up lib paths before loading app modules
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
-use lib "$FindBin::Bin/../../examples/view-todo/lib";
+use lib "$FindBin::Bin/../../examples/simple-32-todo/lib";
 
 # =============================================================================
 # Helper Functions - Same pattern as core tests
@@ -257,11 +257,11 @@ subtest 'Create PAGI::Simple app with service discovery' => sub {
     $pagi_app = PAGI::Simple->new(
         name      => 'Todo App',
         # namespace derived from name: 'TodoApp'
-        home      => "$FindBin::Bin/../../examples/view-todo",
-        lib       => "$FindBin::Bin/../../examples/view-todo/lib",
+        home      => "$FindBin::Bin/../../examples/simple-32-todo",
+        lib       => "$FindBin::Bin/../../examples/simple-32-todo/lib",
         share     => 'htmx',
         views     => {
-            directory => "$FindBin::Bin/../../examples/view-todo/templates",
+            directory => "$FindBin::Bin/../../examples/simple-32-todo/templates",
             roles     => ['PAGI::Simple::View::Role::Valiant'],
             preamble  => 'use experimental "signatures";',
         },
