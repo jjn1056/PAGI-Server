@@ -120,6 +120,11 @@ sub new ($class, %args) {
         # SSE state
         sse_mode          => 0,
         sse_started       => 0,
+        # Cached connection info (populated in start(), used by _create_scope)
+        client_host       => '127.0.0.1',
+        client_port       => 0,
+        server_host       => '127.0.0.1',
+        server_port       => 5000,
     }, $class;
 
     # Extract TLS info if this is a TLS connection
@@ -143,6 +148,17 @@ sub start ($self) {
             $handle->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);
         };
         # Ignore errors - not all sockets support this
+    }
+
+    # Cache connection info once (avoids per-request socket method calls)
+    if ($handle && $handle->can('peerhost')) {
+        eval {
+            $self->{client_host} = $handle->peerhost // '127.0.0.1';
+            $self->{client_port} = $handle->peerport // 0;
+            $self->{server_host} = $handle->sockhost // '127.0.0.1';
+            $self->{server_port} = $handle->sockport // 5000;
+        };
+        # Ignore errors - keep defaults if extraction fails
     }
 
     # Set up idle timeout timer
@@ -397,20 +413,6 @@ sub _should_keep_alive ($self, $request) {
 }
 
 sub _create_scope ($self, $request) {
-    my $stream = $self->{stream};
-    my $handle = $stream->read_handle;
-
-    # Get client and server addresses
-    my ($client_host, $client_port) = ('127.0.0.1', 0);
-    my ($server_host, $server_port) = ('127.0.0.1', 5000);
-
-    if ($handle && $handle->can('peerhost')) {
-        $client_host = $handle->peerhost // '127.0.0.1';
-        $client_port = $handle->peerport // 0;
-        $server_host = $handle->sockhost // '127.0.0.1';
-        $server_port = $handle->sockport // 5000;
-    }
-
     # Get the event loop from the server for async operations
     my $loop = $self->{server} ? $self->{server}->loop : undef;
 
@@ -430,8 +432,8 @@ sub _create_scope ($self, $request) {
         query_string => $request->{query_string},
         root_path    => '',
         headers      => $request->{headers},
-        client       => [$client_host, $client_port],
-        server       => [$server_host, $server_port],
+        client       => [$self->{client_host}, $self->{client_port}],
+        server       => [$self->{server_host}, $self->{server_port}],
         # Optimized: avoid hash copy when state is empty (common case)
         state        => %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
@@ -1121,20 +1123,6 @@ async sub _handle_sse_request ($self, $request) {
 }
 
 sub _create_sse_scope ($self, $request) {
-    my $stream = $self->{stream};
-    my $handle = $stream->read_handle;
-
-    # Get client and server addresses
-    my ($client_host, $client_port) = ('127.0.0.1', 0);
-    my ($server_host, $server_port) = ('127.0.0.1', 5000);
-
-    if ($handle && $handle->can('peerhost')) {
-        $client_host = $handle->peerhost // '127.0.0.1';
-        $client_port = $handle->peerport // 0;
-        $server_host = $handle->sockhost // '127.0.0.1';
-        $server_port = $handle->sockport // 5000;
-    }
-
     # Get the event loop from the server for async operations
     my $loop = $self->{server} ? $self->{server}->loop : undef;
 
@@ -1154,8 +1142,8 @@ sub _create_sse_scope ($self, $request) {
         query_string => $request->{query_string},
         root_path    => '',
         headers      => $request->{headers},
-        client       => [$client_host, $client_port],
-        server       => [$server_host, $server_port],
+        client       => [$self->{client_host}, $self->{client_port}],
+        server       => [$self->{server_host}, $self->{server_port}],
         # Optimized: avoid hash copy when state is empty (common case)
         state        => %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
@@ -1339,20 +1327,6 @@ async sub _handle_websocket_request ($self, $request) {
 }
 
 sub _create_websocket_scope ($self, $request) {
-    my $stream = $self->{stream};
-    my $handle = $stream->read_handle;
-
-    # Get client and server addresses
-    my ($client_host, $client_port) = ('127.0.0.1', 0);
-    my ($server_host, $server_port) = ('127.0.0.1', 5000);
-
-    if ($handle && $handle->can('peerhost')) {
-        $client_host = $handle->peerhost // '127.0.0.1';
-        $client_port = $handle->peerport // 0;
-        $server_host = $handle->sockhost // '127.0.0.1';
-        $server_port = $handle->sockport // 5000;
-    }
-
     # Extract WebSocket key and subprotocols from headers
     my $ws_key;
     my @subprotocols;
@@ -1389,8 +1363,8 @@ sub _create_websocket_scope ($self, $request) {
         query_string => $request->{query_string},
         root_path    => '',
         headers      => $request->{headers},
-        client       => [$client_host, $client_port],
-        server       => [$server_host, $server_port],
+        client       => [$self->{client_host}, $self->{client_port}],
+        server       => [$self->{server_host}, $self->{server_port}],
         subprotocols => \@subprotocols,
         # Optimized: avoid hash copy when state is empty (common case)
         state        => %{$self->{state}} ? { %{$self->{state}} } : {},

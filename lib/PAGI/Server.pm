@@ -725,6 +725,7 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
         workers          => 0,  # Single-worker mode in worker process
     );
     $worker_server->{is_worker} = 1;
+    $worker_server->{worker_num} = $worker_num;  # Store for lifespan scope
     $worker_server->{_request_count} = 0;  # Track requests handled
     $worker_server->{bound_port} = $listen_socket->sockport;
 
@@ -847,6 +848,8 @@ async sub _run_lifespan_startup ($self) {
             version      => '0.1',
             spec_version => '0.1',
             loop         => $self->loop,  # IO::Async::Loop for worker pools, etc.
+            is_worker    => $self->{is_worker} // 0,
+            worker_num   => $self->{worker_num},  # undef for single-worker, 1-N for multi-worker
         },
         state => $self->{state},  # App can populate this
     };
