@@ -42,4 +42,13 @@ subtest 'connection_count tracks active connections' => sub {
     is($server->connection_count, 0, 'back to 0 after all removed');
 };
 
+subtest 'max_connections option is accepted' => sub {
+    my $server = bless {
+        connections => {},
+        max_connections => 100,
+    }, 'PAGI::Server';
+
+    is($server->{max_connections}, 100, 'max_connections stored');
+};
+
 done_testing;

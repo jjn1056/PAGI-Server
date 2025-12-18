@@ -358,6 +358,7 @@ sub _init ($self, $params) {
     $self->{reuseport}         = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
+    $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -437,6 +438,9 @@ sub configure ($self, %params) {
     }
     if (exists $params{max_ws_frame_size}) {
         $self->{max_ws_frame_size} = delete $params{max_ws_frame_size};
+    }
+    if (exists $params{max_connections}) {
+        $self->{max_connections} = delete $params{max_connections};
     }
 
     $self->SUPER::configure(%params);
