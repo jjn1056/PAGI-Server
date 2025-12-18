@@ -235,6 +235,30 @@ sending oversized frames.
 
 B<CLI:> C<--max-ws-frame-size 1048576>
 
+=item max_connections => $count
+
+Maximum number of concurrent connections before returning HTTP 503.
+Default: 0 (auto-detect from ulimit - 50).
+
+When at capacity, new connections receive a 503 Service Unavailable
+response with a Retry-After header. This prevents file descriptor
+exhaustion crashes under heavy load.
+
+The auto-detected limit uses: C<ulimit -n> minus 50 for headroom
+(file operations, logging, database connections, etc.).
+
+B<Example:>
+
+    my $server = PAGI::Server->new(
+        app             => $app,
+        max_connections => 200,  # Explicit limit
+    );
+
+B<CLI:> C<--max-connections 200>
+
+B<Monitoring:> Use C<< $server->connection_count >> and
+C<< $server->effective_max_connections >> to monitor usage.
+
 =over 4
 
 =item * A listening socket is created before forking
@@ -313,6 +337,14 @@ Returns true if the server is accepting connections.
     my $count = $server->connection_count;
 
 Returns the current number of active connections.
+
+=head2 effective_max_connections
+
+    my $max = $server->effective_max_connections;
+
+Returns the effective maximum connections limit. If C<max_connections>
+was set explicitly, returns that value. Otherwise returns the
+auto-detected limit (ulimit - 50).
 
 =cut
 

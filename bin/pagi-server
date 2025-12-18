@@ -80,6 +80,31 @@ concern, or applications with known memory leaks.
 B<Note:> Only applies in multi-worker mode (C<--workers> > 1). In single-worker
 mode, this setting is ignored.
 
+=item --max-connections NUM
+
+Maximum number of concurrent connections per worker before returning
+HTTP 503 Service Unavailable. This prevents "Too many open files" crashes.
+
+B<Default:> 0 (auto-detect from ulimit - 50)
+
+B<Behavior:> When at capacity, new connections receive a 503 response with
+a C<Retry-After: 5> header. The TCP backlog queues additional connections.
+
+B<When to adjust:>
+
+=over 4
+
+=item * Getting 503s under load? Increase ulimit or set higher limit
+
+=item * Want predictable capacity? Set explicit limit matching your ulimit
+
+=item * Memory constrained? Lower the limit to reduce concurrent request memory
+
+=back
+
+B<Note:> In multi-worker mode, this limit applies per-worker. With
+C<--workers 4 --max-connections 100>, total capacity is 400 connections.
+
 =item --log-level LEVEL
 
 Set the logging verbosity level. Messages below this level are suppressed.
@@ -283,6 +308,9 @@ If no app is specified, serves the current directory:
 
     # Workers restart after 10k requests (prevents memory growth)
     pagi-server -w 4 --max-requests 10000 ./myapp.pl
+
+    # Limit max connections (prevents FD exhaustion)
+    pagi-server --max-connections 200 ./myapp.pl
 
     # Enable debug logging
     pagi-server --log-level debug ./myapp.pl
