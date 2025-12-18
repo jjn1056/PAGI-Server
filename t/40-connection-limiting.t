@@ -190,4 +190,67 @@ subtest 'EMFILE error pauses accepting temporarily' => sub {
     pass('server has accept error handlers');
 };
 
+subtest 'logs warning when approaching max_connections' => sub {
+    my $loop = IO::Async::Loop->new;
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, @_ };
+
+    my $server = PAGI::Server->new(
+        app => async sub ($scope, $receive, $send) {
+            # Handle lifespan
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
+            # For HTTP requests, respond normally
+            await $send->({ type => 'http.response.start', status => 200, headers => [] });
+            await $send->({ type => 'http.response.body', body => 'OK', more => 0 });
+        },
+        host => '127.0.0.1',
+        port => 0,
+        quiet => 0,  # Enable logging
+        log_level => 'warn',
+        max_connections => 2,
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    # Open connections to reach capacity
+    my $sock1 = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp');
+    print $sock1 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    $loop->loop_once(0.05);
+
+    my $sock2 = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp');
+    print $sock2 "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    $loop->loop_once(0.05);
+
+    # Third connection should be rejected with warning
+    my $sock3 = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp');
+    if ($sock3) {
+        print $sock3 "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        $loop->loop_once(0.1);
+        close($sock3);
+    }
+
+    # Check for capacity warning
+    my $capacity_warning = grep { /at capacity|rejected/i } @warnings;
+    ok($capacity_warning, 'logged warning about capacity');
+
+    close($sock1);
+    close($sock2);
+    $server->shutdown->get;
+};
+
 done_testing;

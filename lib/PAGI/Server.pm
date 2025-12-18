@@ -994,6 +994,14 @@ sub _pause_accepting ($self, $duration) {
     $self->{_accept_pause_timer} = $timer_id;
 }
 
+sub _log_connection_stats ($self) {
+    my $current = $self->connection_count;
+    my $max = $self->effective_max_connections;
+    my $pct = int(($current / $max) * 100);
+
+    $self->_log(info => "Connections: $current/$max ($pct%)");
+}
+
 # Called when a request completes (for max_requests tracking)
 sub _on_request_complete ($self) {
     return unless $self->{is_worker};
