@@ -307,6 +307,12 @@ Returns the bound port number. Useful when port => 0 is used.
 
 Returns true if the server is accepting connections.
 
+=head2 connection_count
+
+    my $count = $server->connection_count;
+
+Returns the current number of active connections.
+
 =cut
 
 sub _init ($self, $params) {
@@ -1115,6 +1121,10 @@ sub port ($self) {
 
 sub is_running ($self) {
     return $self->{running} ? 1 : 0;
+}
+
+sub connection_count ($self) {
+    return scalar keys %{$self->{connections}};
 }
 
 1;
