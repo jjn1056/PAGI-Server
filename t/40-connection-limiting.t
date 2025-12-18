@@ -4,6 +4,10 @@ use warnings;
 use experimental 'signatures';
 use Test2::V0;
 use Scalar::Util qw(refaddr);
+use IO::Async::Loop;
+use IO::Socket::INET;
+use Future;
+use Future::AsyncAwait;
 
 use PAGI::Server;
 
@@ -70,6 +74,96 @@ subtest 'explicit max_connections overrides auto-detect' => sub {
     }, 'PAGI::Server';
 
     is($server->effective_max_connections, 200, 'uses explicit value');
+};
+
+subtest 'returns 503 when at max_connections' => sub {
+    my $loop = IO::Async::Loop->new;
+
+    my $server = PAGI::Server->new(
+        app => async sub ($scope, $receive, $send) {
+            # Handle lifespan
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
+            # For HTTP requests, respond normally
+            await $send->({ type => 'http.response.start', status => 200, headers => [] });
+            await $send->({ type => 'http.response.body', body => 'OK', more => 0 });
+        },
+        host => '127.0.0.1',
+        port => 0,
+        quiet => 1,
+        max_connections => 1,  # Only allow 1 connection
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    # Open first connection (don't send request yet - just connect)
+    my $sock1 = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+    ) or die "Cannot connect to first: $!";
+
+    # Let server accept first connection
+    $loop->loop_once(0.05);
+    is($server->connection_count, 1, 'first connection active');
+
+    # Try second connection - should get 503 immediately
+    my $sock2 = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 1,
+    );
+
+    if ($sock2) {
+        # Let server process the new connection
+        $loop->loop_once(0.05);
+
+        # Now send the request
+        print $sock2 "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+        # Give it time to send the 503 response
+        $loop->loop_once(0.1);
+
+        my $response = '';
+        $sock2->blocking(0);
+        while (my $line = <$sock2>) {
+            $response .= $line;
+        }
+
+        close($sock2);
+
+        # Debug output
+        if ($response) {
+            like($response, qr/503/, 'second connection gets 503 Service Unavailable');
+            like($response, qr/Retry-After:/, 'response includes Retry-After header');
+        } else {
+            fail('second connection got empty response');
+        }
+    } else {
+        # Connection refused is also acceptable (backpressure)
+        pass('second connection refused (backpressure working)');
+    }
+
+    # Clean up first connection
+    close($sock1);
+    $loop->loop_once(0.05);
+
+    $server->shutdown->get;
 };
 
 done_testing;

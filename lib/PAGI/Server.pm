@@ -860,6 +860,14 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
 sub _on_connection ($self, $stream) {
     weaken(my $weak_self = $self);
 
+    # Check if we're at capacity
+    my $max = $self->effective_max_connections;
+    if ($self->connection_count >= $max) {
+        # Over capacity - send 503 and close
+        $self->_send_503_and_close($stream);
+        return;
+    }
+
     my $conn = PAGI::Server::Connection->new(
         stream            => $stream,
         app               => $self->{app},
@@ -883,6 +891,33 @@ sub _on_connection ($self, $stream) {
 
     # Add stream to the loop so it can read/write
     $self->add_child($stream);
+}
+
+sub _send_503_and_close ($self, $stream) {
+    my $body = "503 Service Unavailable - Server at capacity\r\n";
+    my $response = join("\r\n",
+        "HTTP/1.1 503 Service Unavailable",
+        "Content-Type: text/plain",
+        "Content-Length: " . length($body),
+        "Connection: close",
+        "Retry-After: 5",
+        "",
+        $body
+    );
+
+    # Configure stream with minimal on_read handler (required by IO::Async)
+    $stream->configure(
+        on_read => sub { 0 },  # Ignore any incoming data
+    );
+
+    # Add stream to loop so it can write
+    $self->add_child($stream);
+
+    # Write response and close
+    $stream->write($response);
+    $stream->close_when_empty;
+
+    $self->_log(warn => "Connection rejected: at capacity (" . $self->connection_count . "/" . $self->effective_max_connections . ")");
 }
 
 # Called when a request completes (for max_requests tracking)
