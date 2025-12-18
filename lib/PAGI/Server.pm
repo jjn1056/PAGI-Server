@@ -537,6 +537,20 @@ async sub _listen_singleworker ($self) {
 
     await $listen_future;
 
+    # Configure accept error handler after listen() to avoid SSL extension conflicts
+    # Note: SSL extensions may wrap the listener, so try to configure but ignore if it fails
+    eval {
+        $listener->configure(
+            on_accept_error => sub ($listener, $error) {
+                return unless $weak_self;
+                $weak_self->_on_accept_error($error);
+            },
+        );
+    };
+    if ($@) {
+        $self->_log(debug => "Could not configure on_accept_error (likely SSL listener): $@");
+    }
+
     # Store the actual bound port from the listener's read handle
     my $socket = $listener->read_handle;
     $self->{bound_port} = $socket->sockport if $socket && $socket->can('sockport');
@@ -847,6 +861,18 @@ sub _run_as_worker ($self, $listen_socket, $worker_num) {
 
     $worker_server->add_child($listener);
     $worker_server->{listener} = $listener;
+
+    # Configure accept error handler - try but ignore if it fails (SSL listeners may not support it)
+    eval {
+        $listener->configure(
+            on_accept_error => sub ($listener, $error) {
+                return unless $weak_server;
+                $weak_server->_on_accept_error($error);
+            },
+        );
+    };
+    # Silently ignore configuration errors in workers
+
     $worker_server->{running} = 1;
 
     # Run the event loop
@@ -918,6 +944,54 @@ sub _send_503_and_close ($self, $stream) {
     $stream->close_when_empty;
 
     $self->_log(warn => "Connection rejected: at capacity (" . $self->connection_count . "/" . $self->effective_max_connections . ")");
+}
+
+sub _on_accept_error ($self, $error) {
+    # EMFILE = "Too many open files" - we're out of file descriptors
+    # ENFILE = System-wide FD limit reached
+    if ($error =~ /Too many open files|EMFILE|ENFILE/i) {
+        # Only log the first EMFILE in a burst (when we're not already paused)
+        unless ($self->{_accept_paused}) {
+            $self->_log(warn => "Accept error (FD exhaustion): $error - pausing accept for 100ms");
+        }
+
+        # Pause accepting for a short time to let connections drain
+        $self->_pause_accepting(0.1);
+    }
+    else {
+        # Log other accept errors but don't crash
+        $self->_log(error => "Accept error: $error");
+    }
+}
+
+sub _pause_accepting ($self, $duration) {
+    return if $self->{_accept_paused};
+    $self->{_accept_paused} = 1;
+
+    # Cancel any existing timer before creating new one
+    if ($self->{_accept_pause_timer}) {
+        $self->loop->unwatch_time($self->{_accept_pause_timer});
+        delete $self->{_accept_pause_timer};
+    }
+
+    # Temporarily disable the listener
+    if ($self->{listener} && $self->{listener}->read_handle) {
+        $self->{listener}->want_readready(0);
+    }
+
+    # Re-enable after duration
+    my $timer_id = $self->loop->watch_time(after => $duration, code => sub {
+        return unless $self->{running};
+        $self->{_accept_paused} = 0;
+        delete $self->{_accept_pause_timer};
+        if ($self->{listener} && $self->{listener}->read_handle) {
+            $self->{listener}->want_readready(1);
+        }
+        $self->_log(debug => "Accept resumed after FD exhaustion pause");
+    });
+
+    # Store the timer ID for cleanup
+    $self->{_accept_pause_timer} = $timer_id;
 }
 
 # Called when a request completes (for max_requests tracking)
@@ -1087,6 +1161,13 @@ async sub shutdown ($self) {
     return unless $self->{running};
     $self->{running} = 0;
     $self->{shutting_down} = 1;
+
+    # Cancel accept pause timer if active
+    if ($self->{_accept_pause_timer}) {
+        $self->loop->unwatch_time($self->{_accept_pause_timer});
+        delete $self->{_accept_pause_timer};
+        $self->{_accept_paused} = 0;
+    }
 
     # Stop accepting new connections
     if ($self->{listener}) {

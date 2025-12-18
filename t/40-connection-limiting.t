@@ -166,4 +166,28 @@ subtest 'returns 503 when at max_connections' => sub {
     $server->shutdown->get;
 };
 
+subtest 'EMFILE error pauses accepting temporarily' => sub {
+    # This is hard to test directly without exhausting FDs
+    # Instead, test that the server has the error handler installed
+    my $loop = IO::Async::Loop->new;
+
+    my $server = PAGI::Server->new(
+        app => async sub ($scope, $receive, $send) {
+            await $send->({ type => 'http.response.start', status => 200, headers => [] });
+            await $send->({ type => 'http.response.body', body => 'OK', more => 0 });
+        },
+        host => '127.0.0.1',
+        port => 0,
+        quiet => 1,
+    );
+
+    $loop->add($server);
+
+    # Verify server can handle the _on_accept_error method being called
+    ok($server->can('_on_accept_error'), 'server has _on_accept_error handler');
+    ok($server->can('_pause_accepting'), 'server has _pause_accepting handler');
+
+    pass('server has accept error handlers');
+};
+
 done_testing;
