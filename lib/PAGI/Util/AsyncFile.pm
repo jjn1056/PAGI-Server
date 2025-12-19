@@ -157,6 +157,12 @@ async sub read_file ($class, $loop, $path) {
         # Process chunk
     }, chunk_size => 65536);
 
+    # For Range requests (partial file):
+    await PAGI::Util::AsyncFile->read_file_chunked($loop, $path, $callback,
+        offset => 1000,      # Start at byte 1000
+        length => 5000,      # Read 5000 bytes total
+    );
+
 Read a file in chunks, calling a callback for each chunk. This is suitable
 for streaming large files without loading the entire file into memory.
 
@@ -176,13 +182,16 @@ Parameters:
 
 =item * C<chunk_size> - Size of each chunk in bytes (default: 65536)
 
-=back
+=item * C<offset> - Byte offset to start reading from (default: 0)
+
+=item * C<length> - Maximum bytes to read; omit to read to EOF
 
 =back
 
-Returns a Future that resolves when the entire file has been read and all
-callbacks have completed. The callback should return/await properly if it
-needs to do async operations.
+=back
+
+Returns a Future that resolves to the number of bytes read when complete.
+The callback should return/await properly if it needs to do async operations.
 
 =cut
 
@@ -191,14 +200,33 @@ async sub read_file_chunked ($class, $loop, $path, $callback, %opts) {
     die "Cannot read file: $path" unless -r $path;
 
     my $chunk_size = $opts{chunk_size} // 65536;
-    my $file_size = -s $path;
-    my $offset = 0;
+    my $start_offset = $opts{offset} // 0;
+    my $max_length = $opts{length};  # undef means read to EOF
 
+    my $file_size = -s $path;
     my $function = $class->_get_function($loop);
 
-    while ($offset < $file_size) {
+    my $offset = $start_offset;
+    my $bytes_sent = 0;
+
+    # Calculate end position
+    my $end_pos = defined $max_length
+        ? $start_offset + $max_length
+        : $file_size;
+    $end_pos = $file_size if $end_pos > $file_size;
+
+    while ($offset < $end_pos) {
+        my $to_read = $chunk_size;
+
+        # Don't read past the end position
+        if ($offset + $to_read > $end_pos) {
+            $to_read = $end_pos - $offset;
+        }
+
+        last if $to_read <= 0;
+
         my ($chunk, $bytes_read) = await $function->call(
-            args => ['read_chunk', $path, $offset, $chunk_size]
+            args => ['read_chunk', $path, $offset, $to_read]
         );
 
         last unless $bytes_read;
@@ -210,9 +238,10 @@ async sub read_file_chunked ($class, $loop, $path, $callback, %opts) {
         }
 
         $offset += $bytes_read;
+        $bytes_sent += $bytes_read;
     }
 
-    return $offset;  # Return total bytes read
+    return $bytes_sent;  # Return total bytes read
 }
 
 =head2 write_file

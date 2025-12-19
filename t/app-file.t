@@ -9,6 +9,7 @@ use Net::Async::HTTP;
 use Future::AsyncAwait;
 use FindBin;
 use Digest::MD5 'md5_hex';
+use File::Temp;
 
 use lib "$FindBin::Bin/../lib";
 use PAGI::Server;
@@ -289,6 +290,250 @@ subtest 'POST returns 405 Method Not Allowed' => sub {
     my $response = $http->POST("http://127.0.0.1:$port/test.txt", '', content_type => 'text/plain')->get;
 
     is($response->code, 405, 'POST returns 405');
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Security Tests - Based on Plack::App::File security patterns
+# =============================================================================
+
+subtest 'Security: null byte injection blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # Try null byte injection (attempting to bypass extension checks)
+    # Note: We need to send this raw because HTTP clients may reject null bytes
+    # This tests that even if a null byte reaches the server, it's blocked
+    my $response = $http->GET("http://127.0.0.1:$port/test.txt%00.jpg")->get;
+
+    # Should be blocked - either 400 Bad Request or 403 Forbidden or 404
+    ok($response->code >= 400, "Null byte in path blocked (status: " . $response->code . ")");
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: double-dot traversal blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # Various double-dot traversal attempts
+    my @traversal_paths = (
+        '/../../../etc/passwd',
+        '/subdir/../../../etc/passwd',
+        '/subdir/../../etc/passwd',
+        '/%2e%2e/%2e%2e/etc/passwd',  # URL-encoded dots
+    );
+
+    for my $path (@traversal_paths) {
+        my $response = $http->GET("http://127.0.0.1:$port$path")->get;
+        ok($response->code >= 400, "Traversal blocked for $path (status: " . $response->code . ")");
+        unlike($response->content // '', qr/root:/, "Did not expose /etc/passwd for $path");
+    }
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: triple-dot and beyond blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # Triple dots and more should be blocked
+    my @paths = (
+        '/test/.../foo',
+        '/..../etc/passwd',
+        '/foo/...../bar',
+    );
+
+    for my $path (@paths) {
+        my $response = $http->GET("http://127.0.0.1:$port$path")->get;
+        ok($response->code >= 400, "Multi-dot component blocked for $path (status: " . $response->code . ")");
+    }
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: backslash traversal blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # Backslash traversal (Windows-style, but should be blocked on all platforms)
+    my @paths = (
+        '/..\\..\\etc\\passwd',
+        '/foo\\..\\..\\etc\\passwd',
+        '/subdir\\..\\..\\..\\etc\\passwd',
+    );
+
+    for my $path (@paths) {
+        my $response = $http->GET("http://127.0.0.1:$port$path")->get;
+        ok($response->code >= 400, "Backslash traversal blocked for $path (status: " . $response->code . ")");
+    }
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: hidden files (dotfiles) blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # Hidden file access should be blocked
+    my @paths = (
+        '/.htaccess',
+        '/.env',
+        '/.git/config',
+        '/subdir/.hidden',
+    );
+
+    for my $path (@paths) {
+        my $response = $http->GET("http://127.0.0.1:$port$path")->get;
+        ok($response->code >= 400, "Hidden file blocked for $path (status: " . $response->code . ")");
+    }
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: symlink escape prevented' => sub {
+    # This test creates a symlink outside the root and verifies it's blocked
+    # Skip if we can't create symlinks (Windows without admin, etc.)
+    my $test_dir = File::Temp::tempdir(CLEANUP => 1);
+    my $root_dir = "$test_dir/root";
+    my $outside_dir = "$test_dir/outside";
+
+    mkdir $root_dir or die "Cannot create root dir: $!";
+    mkdir $outside_dir or die "Cannot create outside dir: $!";
+
+    # Create a file outside the root
+    open my $fh, '>', "$outside_dir/secret.txt" or die;
+    print $fh "SECRET DATA";
+    close $fh;
+
+    # Create a symlink from inside root to outside
+    my $symlink_created = eval { symlink("$outside_dir/secret.txt", "$root_dir/escape") };
+
+    skip_all("Cannot create symlinks on this system") unless $symlink_created;
+
+    my $server = create_server(root => $root_dir);
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    my $response = $http->GET("http://127.0.0.1:$port/escape")->get;
+
+    # Should either 403 (blocked) or 404 (symlink not followed)
+    ok($response->code >= 400, "Symlink escape blocked (status: " . $response->code . ")");
+    unlike($response->content // '', qr/SECRET DATA/, "Did not expose file outside root");
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest 'Security: URL-encoded traversal blocked' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    # URL-encoded traversal attempts
+    my @paths = (
+        '/%2e%2e/%2e%2e/%2e%2e/etc/passwd',        # ..
+        '/%252e%252e/%252e%252e/etc/passwd',      # double-encoded
+        '/..%252f..%252f..%252fetc/passwd',       # mixed
+    );
+
+    for my $path (@paths) {
+        my $response = $http->GET("http://127.0.0.1:$port$path")->get;
+        ok($response->code >= 400, "URL-encoded traversal blocked for $path (status: " . $response->code . ")");
+    }
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Test: Large file streaming (verifies file response integration)
+# =============================================================================
+subtest 'Large file streaming' => sub {
+    # Create a temp directory with a large file
+    my $test_dir = File::Temp::tempdir(CLEANUP => 1);
+    my $large_content = "X" x (256 * 1024);  # 256KB file
+    open my $fh, '>', "$test_dir/large.bin" or die;
+    print $fh $large_content;
+    close $fh;
+
+    my $server = create_server(root => $test_dir);
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+
+    my $response = $http->GET("http://127.0.0.1:$port/large.bin")->get;
+
+    is($response->code, 200, 'GET /large.bin returns 200');
+    is(length($response->content), length($large_content), 'Large file length matches');
+    is($response->content, $large_content, 'Large file content matches');
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Test: Large file Range request streaming
+# =============================================================================
+subtest 'Large file Range request' => sub {
+    my $test_dir = File::Temp::tempdir(CLEANUP => 1);
+    my $large_content = "X" x (256 * 1024);  # 256KB file
+    open my $fh, '>', "$test_dir/large.bin" or die;
+    print $fh $large_content;
+    close $fh;
+
+    my $server = create_server(root => $test_dir);
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+
+    # Request bytes 1000-2000
+    my $response = $http->GET(
+        "http://127.0.0.1:$port/large.bin",
+        headers => ['Range' => 'bytes=1000-2000'],
+    )->get;
+
+    is($response->code, 206, 'Range request returns 206');
+    is(length($response->content), 1001, 'Partial content length correct');
+    is($response->content, substr($large_content, 1000, 1001), 'Partial content matches');
+    like($response->header('Content-Range'), qr/bytes 1000-2000\/\d+/, 'Has Content-Range header');
 
     $loop->remove($http);
     $server->shutdown->get;

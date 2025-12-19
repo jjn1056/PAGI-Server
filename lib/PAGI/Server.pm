@@ -274,6 +274,36 @@ handles IO::Async's C<$ONE_TRUE_LOOP> singleton
 
 =back
 
+=item disable_sendfile => $bool
+
+Disable the sendfile() syscall for file responses. Default: 0 (use sendfile if available).
+
+When C<Sys::Sendfile> is installed and this option is not set, the server uses
+the sendfile() syscall for zero-copy file transfers. This is faster and uses
+less memory than reading files through userspace.
+
+Set this to 1 to force the server to use the worker pool fallback for file I/O,
+which reads files in chunks through IO::Async::Function workers.
+
+B<Reasons to disable sendfile:>
+
+=over 4
+
+=item * Testing worker pool behavior
+
+=item * Working around buggy OS sendfile implementations
+
+=item * Debugging file transfer issues
+
+=item * Using file systems that don't support sendfile (some network mounts)
+
+=back
+
+B<CLI:> C<--disable-sendfile>
+
+B<Startup banner:> Shows sendfile status: C<on>, C<off (Sys::Sendfile not installed)>,
+C<disabled>, or C<n/a (disabled)>.
+
 =item max_requests => $count
 
 Maximum number of requests a worker process will handle before restarting.
@@ -346,6 +376,42 @@ Returns the effective maximum connections limit. If C<max_connections>
 was set explicitly, returns that value. Otherwise returns the
 auto-detected limit (ulimit - 50).
 
+=head1 FILE RESPONSE STREAMING
+
+PAGI::Server supports efficient file streaming via the C<file> and C<fh>
+keys in C<http.response.body> events:
+
+    # Stream entire file
+    await $send->({
+        type => 'http.response.body',
+        file => '/path/to/file.mp4',
+        more => 0,
+    });
+
+    # Stream partial file (for Range requests)
+    await $send->({
+        type => 'http.response.body',
+        file => '/path/to/file.mp4',
+        offset => 1000,
+        length => 5000,
+        more => 0,
+    });
+
+    # Stream from filehandle
+    open my $fh, '<:raw', $file;
+    await $send->({
+        type => 'http.response.body',
+        fh => $fh,
+        length => $size,
+        more => 0,
+    });
+    close $fh;
+
+The server streams files in 64KB chunks to avoid memory bloat. When
+C<Sys::Sendfile> is available and conditions permit (non-TLS, non-chunked),
+the server uses C<sendfile()> for zero-copy I/O. Otherwise, a worker pool
+handles file I/O asynchronously to avoid blocking the event loop.
+
 =cut
 
 sub _init ($self, $params) {
@@ -392,6 +458,7 @@ sub _init ($self, $params) {
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
+    $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -475,6 +542,9 @@ sub configure ($self, %params) {
     if (exists $params{max_connections}) {
         $self->{max_connections} = delete $params{max_connections};
     }
+    if (exists $params{disable_sendfile}) {
+        $self->{disable_sendfile} = delete $params{disable_sendfile};
+    }
 
     $self->SUPER::configure(%params);
 }
@@ -487,6 +557,15 @@ sub _log ($self, $level, $msg) {
     return if $level_num < $self->{_log_level_num};
     return if $self->{quiet} && $level ne 'error';
     warn "$msg\n";
+}
+
+# Returns a human-readable sendfile status string for the startup banner
+sub _sendfile_status_string ($self) {
+    my $available = PAGI::Server::Connection->has_sendfile;
+    if ($self->{disable_sendfile}) {
+        return $available ? 'disabled' : 'n/a (disabled)';
+    }
+    return $available ? 'on' : 'off (Sys::Sendfile not installed)';
 }
 
 async sub listen ($self) {
@@ -604,7 +683,8 @@ async sub _listen_singleworker ($self) {
     my $loop_class = ref($self->loop);
     $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
     my $max_conn = $self->effective_max_connections;
-    $self->_log(info => "PAGI Server listening on $scheme://$self->{host}:$self->{bound_port}/ (loop: $loop_class, max_conn: $max_conn)");
+    my $sendfile_status = $self->_sendfile_status_string;
+    $self->_log(info => "PAGI Server listening on $scheme://$self->{host}:$self->{bound_port}/ (loop: $loop_class, max_conn: $max_conn, sendfile: $sendfile_status)");
 
     return $self;
 }
@@ -651,7 +731,8 @@ sub _listen_multiworker ($self) {
     $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
     my $mode = $reuseport ? 'reuseport' : 'shared-socket';
     my $max_conn = $self->effective_max_connections;
-    $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class, max_conn: $max_conn/worker)");
+    my $sendfile_status = $self->_sendfile_status_string;
+    $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, sendfile: $sendfile_status)");
 
     # Set up signal handlers using IO::Async's watch_signal (replaces _setup_parent_signals)
     my $loop = $self->loop;
@@ -939,6 +1020,7 @@ sub _on_connection ($self, $stream) {
         access_log        => $self->{access_log},
         max_receive_queue => $self->{max_receive_queue},
         max_ws_frame_size => $self->{max_ws_frame_size},
+        disable_sendfile  => $self->{disable_sendfile},
     );
 
     # Track the connection (O(1) hash insert)

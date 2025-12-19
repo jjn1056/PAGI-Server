@@ -14,10 +14,10 @@ my $app = async sub ($scope, $receive, $send) {
         headers => [ [ 'content-type', 'text/plain' ] ],
     });
 
-    my $timestamp = scalar localtime;
+  #my $timestamp = scalar localtime;
     await $send->({
         type  => 'http.response.body',
-        body  => "Hello from PAGI at $timestamp",  # bytes; encode explicitly if needed
+        body  => "Hello from PAGI",  # bytes; encode explicitly if needed
         more  => 0,
     });
 };
