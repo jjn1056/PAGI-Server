@@ -14,6 +14,8 @@ use Time::HiRes qw(gettimeofday tv_interval);
 
 our $VERSION = '0.001';
 
+use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
+
 # =============================================================================
 # Header Validation (CRLF Injection Prevention)
 # =============================================================================
@@ -724,29 +726,42 @@ sub _create_send ($self, $request) {
                 return;  # Don't send any body for HEAD
             }
 
-            my $body = $event->{body} // '';
+            # Determine body source: body, file, or fh (mutually exclusive)
+            my $body = $event->{body};
+            my $file = $event->{file};
+            my $fh = $event->{fh};
+            my $offset = $event->{offset} // 0;
+            my $length = $event->{length};
             my $more = $event->{more} // 0;
 
-            if ($chunked) {
-                # For chunked encoding, send the chunk
-                if (length $body) {
-                    my $len = sprintf("%x", length($body));
-                    $weak_self->{stream}->write("$len\r\n$body\r\n");
-                }
-
-                # If no more body data coming
-                if (!$more) {
-                    $body_complete = 1;
-                    # If trailers are expected, don't send final chunk terminator yet
-                    # The trailers event will send it
-                    if (!$expects_trailers) {
-                        $weak_self->{stream}->write("0\r\n\r\n");
-                    }
-                }
+            if (defined $file) {
+                # File path response - stream from file
+                $weak_self->_send_file_response($file, $offset, $length, $chunked);
+            }
+            elsif (defined $fh) {
+                # Filehandle response - stream from handle
+                $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
             }
             else {
-                # Non-chunked: just send the body
-                $weak_self->{stream}->write($body) if length $body;
+                # Traditional body response
+                $body //= '';
+                if ($chunked) {
+                    if (length $body) {
+                        my $len = sprintf("%x", length($body));
+                        $weak_self->{stream}->write("$len\r\n$body\r\n");
+                    }
+                }
+                else {
+                    $weak_self->{stream}->write($body) if length $body;
+                }
+            }
+
+            # Handle completion
+            if (!$more) {
+                $body_complete = 1;
+                if ($chunked && !$expects_trailers && !defined $file && !defined $fh) {
+                    $weak_self->{stream}->write("0\r\n\r\n");
+                }
             }
         }
         elsif ($type eq 'http.response.trailers') {
@@ -1715,6 +1730,54 @@ sub _process_websocket_frames ($self) {
         my $f = $self->{receive_pending};
         $self->{receive_pending} = undef;
         $f->done;
+    }
+}
+
+sub _send_file_response ($self, $file, $offset, $length, $chunked) {
+    open my $fh, '<:raw', $file or die "Cannot open file: $!";
+
+    $self->_send_fh_response($fh, $offset, $length, $chunked);
+    close $fh;
+}
+
+sub _send_fh_response ($self, $fh, $offset, $length, $chunked) {
+    # Seek to offset if specified
+    if ($offset && $offset > 0) {
+        seek($fh, $offset, 0) or die "Cannot seek: $!";
+    }
+
+    # Calculate how much to read
+    my $remaining = $length;  # undef means read to EOF
+
+    # Stream in chunks
+    while (1) {
+        my $to_read = FILE_CHUNK_SIZE;
+        if (defined $remaining) {
+            $to_read = $remaining if $remaining < $to_read;
+            last if $to_read <= 0;
+        }
+
+        my $bytes_read = read($fh, my $chunk, $to_read);
+
+        last if !defined $bytes_read;  # Error
+        last if $bytes_read == 0;      # EOF
+
+        if ($chunked) {
+            my $len = sprintf("%x", length($chunk));
+            $self->{stream}->write("$len\r\n$chunk\r\n");
+        }
+        else {
+            $self->{stream}->write($chunk);
+        }
+
+        if (defined $remaining) {
+            $remaining -= $bytes_read;
+        }
+    }
+
+    # Send final chunk if chunked encoding
+    if ($chunked) {
+        $self->{stream}->write("0\r\n\r\n");
     }
 }
 

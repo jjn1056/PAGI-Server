@@ -4,11 +4,14 @@ use warnings;
 use experimental 'signatures';
 use Test2::V0;
 use IO::Async::Loop;
-use IO::Socket::INET;
+use Net::Async::HTTP;
 use File::Temp qw(tempfile tempdir);
 use Future::AsyncAwait;
 
 use PAGI::Server;
+
+# Create shared event loop
+my $loop = IO::Async::Loop->new;
 
 # Create test files
 my $tempdir = tempdir(CLEANUP => 1);
@@ -25,10 +28,22 @@ print $fh $binary_content;
 close $fh;
 
 subtest 'file response sends full file' => sub {
-    my $loop = IO::Async::Loop->new;
-
     my $server = PAGI::Server->new(
         app => async sub ($scope, $receive, $send) {
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
             await $send->({
                 type => 'http.response.start',
                 status => 200,
@@ -52,36 +67,40 @@ subtest 'file response sends full file' => sub {
     $server->listen->get;
     my $port = $server->port;
 
-    my $sock = IO::Socket::INET->new(
-        PeerAddr => '127.0.0.1',
-        PeerPort => $port,
-        Proto => 'tcp',
-    ) or die "Cannot connect: $!";
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
 
-    print $sock "GET /test.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    $loop->loop_once(0.1);
+    my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
 
-    my $response = '';
-    while (my $line = <$sock>) {
-        $response .= $line;
-    }
-    close $sock;
-
-    like($response, qr/HTTP\/1\.1 200/, 'got 200 response');
-    like($response, qr/\Q$test_content\E/, 'file content received');
+    is($response->code, 200, 'got 200 response');
+    is($response->content, $test_content, 'file content matches');
 
     $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
 };
 
 subtest 'file response with offset and length (range)' => sub {
-    my $loop = IO::Async::Loop->new;
-
     my $offset = 100;
     my $length = 500;
     my $expected = substr($test_content, $offset, $length);
 
     my $server = PAGI::Server->new(
         app => async sub ($scope, $receive, $send) {
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
             await $send->({
                 type => 'http.response.start',
                 status => 206,
@@ -129,10 +148,22 @@ subtest 'file response with offset and length (range)' => sub {
 };
 
 subtest 'fh response sends from filehandle' => sub {
-    my $loop = IO::Async::Loop->new;
-
     my $server = PAGI::Server->new(
         app => async sub ($scope, $receive, $send) {
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
             open my $fh, '<:raw', $test_file or die "Cannot open: $!";
 
             await $send->({
@@ -183,10 +214,22 @@ subtest 'fh response sends from filehandle' => sub {
 };
 
 subtest 'binary file response preserves bytes' => sub {
-    my $loop = IO::Async::Loop->new;
-
     my $server = PAGI::Server->new(
         app => async sub ($scope, $receive, $send) {
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
             await $send->({
                 type => 'http.response.start',
                 status => 200,
@@ -231,11 +274,24 @@ subtest 'binary file response preserves bytes' => sub {
 };
 
 subtest 'file not found returns error' => sub {
-    my $loop = IO::Async::Loop->new;
     my $error_logged = 0;
 
     my $server = PAGI::Server->new(
         app => async sub ($scope, $receive, $send) {
+            if ($scope->{type} eq 'lifespan') {
+                while (1) {
+                    my $event = await $receive->();
+                    if ($event->{type} eq 'lifespan.startup') {
+                        await $send->({ type => 'lifespan.startup.complete' });
+                    }
+                    elsif ($event->{type} eq 'lifespan.shutdown') {
+                        await $send->({ type => 'lifespan.shutdown.complete' });
+                        last;
+                    }
+                }
+                return;
+            }
+
             await $send->({
                 type => 'http.response.start',
                 status => 200,
