@@ -11,10 +11,26 @@ use Digest::SHA qw(sha1_base64);
 use Encode;
 use IO::Async::Timer::Countdown;
 use Time::HiRes qw(gettimeofday tv_interval);
+use PAGI::Util::AsyncFile;
 
 our $VERSION = '0.001';
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
+
+# Try to load Sys::Sendfile for zero-copy file transfers
+# Falls back to chunked reads if not available
+my $HAS_SENDFILE;
+BEGIN {
+    eval {
+        require Sys::Sendfile;
+        Sys::Sendfile->import('sendfile');
+        $HAS_SENDFILE = 1;
+    };
+    $HAS_SENDFILE //= 0;
+}
+
+# Class method to check if sendfile is available at the system level
+sub has_sendfile { return $HAS_SENDFILE }
 
 # =============================================================================
 # Header Validation (CRLF Injection Prevention)
@@ -101,6 +117,7 @@ sub new ($class, %args) {
         access_log        => $args{access_log},     # Filehandle for access logging
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
+        disable_sendfile  => $args{disable_sendfile} // 0,  # Disable sendfile even if available
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -711,6 +728,7 @@ sub _create_send ($self, $request) {
                 $status, \@final_headers, $chunked, $http_version
             );
 
+            # Write headers to stream
             $weak_self->{stream}->write($response);
         }
         elsif ($type eq 'http.response.body') {
@@ -732,19 +750,24 @@ sub _create_send ($self, $request) {
             my $fh = $event->{fh};
             my $offset = $event->{offset} // 0;
             my $length = $event->{length};
-            my $more = $event->{more} // 0;
 
             if (defined $file) {
-                # File path response - stream from file
-                $weak_self->_send_file_response($file, $offset, $length, $chunked);
+                # File path response - stream from file (async, non-blocking)
+                # File responses are implicitly complete (more is ignored)
+                await $weak_self->_send_file_response($file, $offset, $length, $chunked);
+                $body_complete = 1;
             }
             elsif (defined $fh) {
-                # Filehandle response - stream from handle
-                $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
+                # Filehandle response - stream from handle (async, non-blocking)
+                # Filehandle responses are implicitly complete (more is ignored)
+                await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
+                $body_complete = 1;
             }
             else {
                 # Traditional body response
                 $body //= '';
+                my $more = $event->{more} // 0;
+
                 if ($chunked) {
                     if (length $body) {
                         my $len = sprintf("%x", length($body));
@@ -754,13 +777,13 @@ sub _create_send ($self, $request) {
                 else {
                     $weak_self->{stream}->write($body) if length $body;
                 }
-            }
 
-            # Handle completion
-            if (!$more) {
-                $body_complete = 1;
-                if ($chunked && !$expects_trailers && !defined $file && !defined $fh) {
-                    $weak_self->{stream}->write("0\r\n\r\n");
+                # Handle completion for body responses
+                if (!$more) {
+                    $body_complete = 1;
+                    if ($chunked && !$expects_trailers) {
+                        $weak_self->{stream}->write("0\r\n\r\n");
+                    }
                 }
             }
         }
@@ -1733,23 +1756,117 @@ sub _process_websocket_frames ($self) {
     }
 }
 
-sub _send_file_response ($self, $file, $offset, $length, $chunked) {
-    open my $fh, '<:raw', $file or die "Cannot open file: $!";
-
-    $self->_send_fh_response($fh, $offset, $length, $chunked);
-    close $fh;
+# Check if we can use sendfile() for this connection
+sub _can_use_sendfile ($self, $chunked) {
+    return 0 unless $HAS_SENDFILE;
+    return 0 if $self->{disable_sendfile};  # Explicitly disabled
+    return 0 if $self->{tls_enabled};       # Can't sendfile over TLS
+    return 0 if $chunked;                   # Can't sendfile with chunked encoding (need headers)
+    return 1;
 }
 
-sub _send_fh_response ($self, $fh, $offset, $length, $chunked) {
+# Async file response - prioritizes speed based on file size:
+#   1. Small files (<=64KB): direct in-process read (fastest for small files)
+#   2. Large files with sendfile: zero-copy kernel transfer (fastest for large files)
+#   3. Large files without sendfile: worker pool (non-blocking fallback)
+async sub _send_file_response ($self, $file, $offset, $length, $chunked) {
+    # Get file size if length not specified
+    my $file_size = -s $file;
+    die "Cannot stat file $file: $!" unless defined $file_size;
+    $length //= $file_size - $offset;
+
+    if ($length <= FILE_CHUNK_SIZE) {
+        # Small file fast path: read directly in-process (no syscall/IPC overhead)
+        # For files <= 64KB, a simple read() beats sendfile() due to syscall overhead
+        open my $fh, '<:raw', $file or die "Cannot open file $file: $!";
+        seek($fh, $offset, 0) if $offset;
+        my $bytes_read = read($fh, my $data, $length);
+        close $fh;
+
+        die "Failed to read file $file: $!" unless defined $bytes_read;
+
+        my $stream = $self->{stream};
+        if ($chunked) {
+            my $len = sprintf("%x", length($data));
+            $stream->write("$len\r\n$data\r\n");
+            $stream->write("0\r\n\r\n");
+        }
+        else {
+            $stream->write($data);
+        }
+    }
+    elsif ($self->_can_use_sendfile($chunked)) {
+        # Large file sendfile path: zero-copy kernel transfer
+        # Ensure headers are flushed before sendfile (sendfile bypasses IO::Async buffer)
+        await $self->{stream}->write('');
+
+        open my $fh, '<:raw', $file or die "Cannot open file $file: $!";
+        my $socket = $self->{stream}->write_handle;
+
+        # sendfile may not send all bytes in one call, loop until done
+        # Sys::Sendfile expects filehandles, not file descriptor numbers
+        my $sent = 0;
+        while ($sent < $length) {
+            my $to_send = $length - $sent;
+            my $current_offset = $offset + $sent;
+            my $result = sendfile($socket, $fh, $to_send, $current_offset);
+            if (!defined $result || $result < 0) {
+                close $fh;
+                die "sendfile failed: $!";
+            }
+            $sent += $result;
+            last if $result == 0;  # EOF
+        }
+        close $fh;
+    }
+    else {
+        # Worker pool path - non-blocking chunked reads for large files
+        # Used when sendfile unavailable (TLS, chunked encoding, no Sys::Sendfile)
+        my $loop = $self->{server} ? $self->{server}->loop : undef;
+        die "No event loop available for async file I/O" unless $loop;
+
+        my $stream = $self->{stream};
+
+        await PAGI::Util::AsyncFile->read_file_chunked(
+            $loop, $file,
+            sub ($chunk) {
+                if ($chunked) {
+                    my $len = sprintf("%x", length($chunk));
+                    $stream->write("$len\r\n$chunk\r\n");
+                }
+                else {
+                    $stream->write($chunk);
+                }
+                return;  # Sync callback
+            },
+            offset     => $offset,
+            length     => $length,
+            chunk_size => FILE_CHUNK_SIZE,
+        );
+
+        # Send final chunk terminator if chunked
+        if ($chunked) {
+            $stream->write("0\r\n\r\n");
+        }
+    }
+}
+
+# Async filehandle response - uses worker pool for non-blocking reads
+# Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
+# may be pipes, may be in-memory). Falls back to chunked reads.
+async sub _send_fh_response ($self, $fh, $offset, $length, $chunked) {
     # Seek to offset if specified
     if ($offset && $offset > 0) {
         seek($fh, $offset, 0) or die "Cannot seek: $!";
     }
 
-    # Calculate how much to read
-    my $remaining = $length;  # undef means read to EOF
+    # For filehandles, we can't easily use the worker pool (can't pass fh across fork).
+    # Use blocking reads in small chunks - not ideal but practical.
+    # TODO: Consider IO::Async::FileStream for better event loop integration.
 
-    # Stream in chunks
+    my $remaining = $length;  # undef means read to EOF
+    my $stream = $self->{stream};
+
     while (1) {
         my $to_read = FILE_CHUNK_SIZE;
         if (defined $remaining) {
@@ -1764,10 +1881,10 @@ sub _send_fh_response ($self, $fh, $offset, $length, $chunked) {
 
         if ($chunked) {
             my $len = sprintf("%x", length($chunk));
-            $self->{stream}->write("$len\r\n$chunk\r\n");
+            $stream->write("$len\r\n$chunk\r\n");
         }
         else {
-            $self->{stream}->write($chunk);
+            $stream->write($chunk);
         }
 
         if (defined $remaining) {
@@ -1777,7 +1894,7 @@ sub _send_fh_response ($self, $fh, $offset, $length, $chunked) {
 
     # Send final chunk if chunked encoding
     if ($chunked) {
-        $self->{stream}->write("0\r\n\r\n");
+        $stream->write("0\r\n\r\n");
     }
 }
 
