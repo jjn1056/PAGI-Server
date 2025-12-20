@@ -1402,7 +1402,7 @@ for production workloads.
 =head2 Benchmark Results
 
 Tested on a 2.4 GHz 8-Core Intel Core i9 Mac with 8 workers, using
-L<hey|https://github.com/rakyll/hey> against a PAGI::Simple hello world
+L<hey|https://github.com/rakyll/hey> against a PAGI hello world
 application:
 
 B<Peak Performance (100 concurrent, 10 seconds):>

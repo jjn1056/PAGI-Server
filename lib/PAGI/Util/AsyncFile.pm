@@ -376,7 +376,7 @@ state.
 
 =head1 SEE ALSO
 
-L<IO::Async::Function>, L<IO::Async::Loop>, L<PAGI::Simple>
+L<IO::Async::Function>, L<IO::Async::Loop>
 
 =head1 AUTHOR
 
