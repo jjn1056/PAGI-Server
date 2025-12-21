@@ -1,4 +1,5 @@
-use v5.36;
+use strict;
+use warnings;
 use utf8;
 use Future::AsyncAwait;
 use Encode qw(decode_utf8 encode_utf8);
