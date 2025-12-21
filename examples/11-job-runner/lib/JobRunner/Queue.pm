@@ -3,7 +3,6 @@ package JobRunner::Queue;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Exporter 'import';
 use Time::HiRes qw(time);
@@ -42,11 +41,15 @@ use constant {
     STATUS_CANCELLED => 'cancelled',
 };
 
-sub set_event_loop ($loop) {
+sub set_event_loop {
+    my ($loop) = @_;
+
     $event_loop = $loop;
 }
 
-sub get_event_loop () {
+sub get_event_loop {
+    my () = @_;
+
     return $event_loop;
 }
 
@@ -54,7 +57,10 @@ sub get_event_loop () {
 # Job Lifecycle
 #
 
-sub create_job ($type, $params = {}) {
+sub create_job {
+    my ($type, $params) = @_;
+    $params //= {};
+
     my $job_id = ++$job_counter;
 
     my $job = {
@@ -78,15 +84,21 @@ sub create_job ($type, $params = {}) {
     return $job_id;
 }
 
-sub get_job ($job_id) {
+sub get_job {
+    my ($job_id) = @_;
+
     return $jobs{$job_id};
 }
 
-sub get_all_jobs () {
+sub get_all_jobs {
+    my () = @_;
+
     return [ map { _job_summary($_) } values %jobs ];
 }
 
-sub update_job ($job_id, $updates) {
+sub update_job {
+    my ($job_id, $updates) = @_;
+
     my $job = $jobs{$job_id} or return;
 
     for my $key (keys %$updates) {
@@ -96,7 +108,9 @@ sub update_job ($job_id, $updates) {
     return $job;
 }
 
-sub cancel_job ($job_id) {
+sub cancel_job {
+    my ($job_id) = @_;
+
     my $job = $jobs{$job_id} or return 0;
 
     # Can only cancel pending or running jobs
@@ -127,15 +141,21 @@ sub cancel_job ($job_id) {
 # Queue Management
 #
 
-sub get_pending_jobs () {
+sub get_pending_jobs {
+    my () = @_;
+
     return [ @pending_queue ];
 }
 
-sub get_running_jobs () {
+sub get_running_jobs {
+    my () = @_;
+
     return [ keys %running_jobs ];
 }
 
-sub pop_next_job () {
+sub pop_next_job {
+    my () = @_;
+
     return unless @pending_queue;
 
     my $job_id = shift @pending_queue;
@@ -154,7 +174,9 @@ sub pop_next_job () {
     return $job_id;
 }
 
-sub complete_job ($job_id, $result) {
+sub complete_job {
+    my ($job_id, $result) = @_;
+
     my $job = $jobs{$job_id} or return;
 
     delete $running_jobs{$job_id};
@@ -179,7 +201,9 @@ sub complete_job ($job_id, $result) {
     });
 }
 
-sub fail_job ($job_id, $error) {
+sub fail_job {
+    my ($job_id, $error) = @_;
+
     my $job = $jobs{$job_id} or return;
 
     delete $running_jobs{$job_id};
@@ -203,7 +227,9 @@ sub fail_job ($job_id, $error) {
 # Progress Tracking
 #
 
-sub update_progress ($job_id, $percent, $message) {
+sub update_progress {
+    my ($job_id, $percent, $message) = @_;
+
     my $job = $jobs{$job_id} or return;
 
     $job->{progress} = {
@@ -223,7 +249,9 @@ sub update_progress ($job_id, $percent, $message) {
     });
 }
 
-sub get_progress ($job_id) {
+sub get_progress {
+    my ($job_id) = @_;
+
     my $job = $jobs{$job_id} or return;
     return $job->{progress};
 }
@@ -232,15 +260,21 @@ sub get_progress ($job_id) {
 # Queue Subscribers (for WebSocket clients watching the queue)
 #
 
-sub add_queue_subscriber ($id, $send_cb) {
+sub add_queue_subscriber {
+    my ($id, $send_cb) = @_;
+
     $queue_subscribers{$id} = $send_cb;
 }
 
-sub remove_queue_subscriber ($id) {
+sub remove_queue_subscriber {
+    my ($id) = @_;
+
     delete $queue_subscribers{$id};
 }
 
-sub broadcast_queue_event ($event_type, $data) {
+sub broadcast_queue_event {
+    my ($event_type, $data) = @_;
+
     for my $id (keys %queue_subscribers) {
         my $send_cb = $queue_subscribers{$id};
         next unless $send_cb;
@@ -263,12 +297,16 @@ sub broadcast_queue_event ($event_type, $data) {
 # Job Subscribers (for SSE clients watching specific jobs)
 #
 
-sub add_job_subscriber ($job_id, $subscriber_id, $send_cb) {
+sub add_job_subscriber {
+    my ($job_id, $subscriber_id, $send_cb) = @_;
+
     $job_subscribers{$job_id} //= {};
     $job_subscribers{$job_id}{$subscriber_id} = $send_cb;
 }
 
-sub remove_job_subscriber ($job_id, $subscriber_id) {
+sub remove_job_subscriber {
+    my ($job_id, $subscriber_id) = @_;
+
     return unless $job_subscribers{$job_id};
     delete $job_subscribers{$job_id}{$subscriber_id};
 
@@ -276,7 +314,9 @@ sub remove_job_subscriber ($job_id, $subscriber_id) {
     delete $job_subscribers{$job_id} unless keys %{$job_subscribers{$job_id}};
 }
 
-sub broadcast_job_event ($job_id, $event_type, $data) {
+sub broadcast_job_event {
+    my ($job_id, $event_type, $data) = @_;
+
     my $subs = $job_subscribers{$job_id} or return;
 
     for my $id (keys %$subs) {
@@ -297,7 +337,9 @@ sub broadcast_job_event ($job_id, $event_type, $data) {
 # Statistics
 #
 
-sub get_queue_stats () {
+sub get_queue_stats {
+    my () = @_;
+
     my $pending   = scalar @pending_queue;
     my $running   = scalar keys %running_jobs;
     my $completed = 0;
@@ -320,7 +362,9 @@ sub get_queue_stats () {
     };
 }
 
-sub clear_completed_jobs () {
+sub clear_completed_jobs {
+    my () = @_;
+
     my @to_delete;
 
     for my $job_id (keys %jobs) {
@@ -343,7 +387,9 @@ sub clear_completed_jobs () {
 # Helper Functions
 #
 
-sub _job_summary ($job) {
+sub _job_summary {
+    my ($job) = @_;
+
     return {
         id         => $job->{id},
         type       => $job->{type},

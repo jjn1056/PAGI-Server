@@ -3,7 +3,6 @@ package JobRunner::HTTP;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Future::AsyncAwait;
 use JSON::PP;
@@ -35,12 +34,15 @@ my %MIME_TYPES = (
 # Path to public directory
 my $PUBLIC_DIR;
 
-sub set_public_dir ($dir) {
+sub set_public_dir {
+    my ($dir) = @_;
+
     $PUBLIC_DIR = $dir;
 }
 
 sub handler {
-    return async sub ($scope, $receive, $send) {
+    return async sub  {
+        my ($scope, $receive, $send) = @_;
         my $method = $scope->{method};
         my $path = $scope->{path};
 
@@ -84,7 +86,9 @@ sub handler {
 # API Handlers
 #
 
-async sub _handle_api ($method, $path, $scope, $receive) {
+async sub _handle_api {
+    my ($method, $path, $scope, $receive) = @_;
+
     # Parse path
     my @parts = split '/', $path;
     shift @parts;  # Remove empty first element
@@ -140,7 +144,9 @@ async sub _handle_api ($method, $path, $scope, $receive) {
     return _json_response(404, { error => "Not found: $path" });
 }
 
-async sub _create_job ($scope, $receive) {
+async sub _create_job {
+    my ($scope, $receive) = @_;
+
     # Read request body
     my $body = '';
     while (1) {
@@ -186,7 +192,9 @@ async sub _create_job ($scope, $receive) {
     });
 }
 
-sub _get_job ($job_id) {
+sub _get_job {
+    my ($job_id) = @_;
+
     my $job = get_job($job_id);
 
     unless ($job) {
@@ -196,7 +204,9 @@ sub _get_job ($job_id) {
     return _json_response(200, $job);
 }
 
-sub _cancel_job ($job_id) {
+sub _cancel_job {
+    my ($job_id) = @_;
+
     my $job = get_job($job_id);
 
     unless ($job) {
@@ -219,7 +229,9 @@ sub _cancel_job ($job_id) {
 # Static File Handler
 #
 
-async sub _handle_static ($path) {
+async sub _handle_static {
+    my ($path) = @_;
+
     # Default to index.html
     $path = '/index.html' if $path eq '/';
 
@@ -261,7 +273,9 @@ async sub _handle_static ($path) {
 # Response Helpers
 #
 
-sub _json_response ($status, $data) {
+sub _json_response {
+    my ($status, $data) = @_;
+
     return (
         $status,
         [['content-type', 'application/json']],

@@ -3,7 +3,6 @@ package JobRunner::Jobs;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Exporter 'import';
 use Future::AsyncAwait;
@@ -92,7 +91,9 @@ my %JOB_TYPES = (
 # Job Type Registry
 #
 
-sub get_job_types () {
+sub get_job_types {
+    my () = @_;
+
     return [
         map {
             {
@@ -105,7 +106,9 @@ sub get_job_types () {
     ];
 }
 
-sub get_job_type ($name) {
+sub get_job_type {
+    my ($name) = @_;
+
     return $JOB_TYPES{$name};
 }
 
@@ -113,7 +116,9 @@ sub get_job_type ($name) {
 # Parameter Validation
 #
 
-sub validate_job_params ($type_name, $params) {
+sub validate_job_params {
+    my ($type_name, $params) = @_;
+
     my $job_type = $JOB_TYPES{$type_name};
 
     unless ($job_type) {
@@ -175,7 +180,9 @@ sub validate_job_params ($type_name, $params) {
 # Job Execution
 #
 
-sub execute_job ($job, $loop, $progress_cb, $cancel_check) {
+sub execute_job {
+    my ($job, $loop, $progress_cb, $cancel_check) = @_;
+
     my $job_type = $JOB_TYPES{$job->{type}};
 
     unless ($job_type) {
@@ -189,7 +196,9 @@ sub execute_job ($job, $loop, $progress_cb, $cancel_check) {
 # Job Type Implementations
 #
 
-async sub _execute_countdown ($job, $loop, $progress_cb, $cancel_check) {
+async sub _execute_countdown {
+    my ($job, $loop, $progress_cb, $cancel_check) = @_;
+
     my $seconds = $job->{params}{seconds} // 10;
     my $remaining = $seconds;
 
@@ -221,7 +230,9 @@ async sub _execute_countdown ($job, $loop, $progress_cb, $cancel_check) {
     };
 }
 
-async sub _execute_prime ($job, $loop, $progress_cb, $cancel_check) {
+async sub _execute_prime {
+    my ($job, $loop, $progress_cb, $cancel_check) = @_;
+
     my $limit = $job->{params}{limit} // 1000;
     my @primes;
     my $checked = 0;
@@ -266,7 +277,9 @@ async sub _execute_prime ($job, $loop, $progress_cb, $cancel_check) {
     };
 }
 
-async sub _execute_fibonacci ($job, $loop, $progress_cb, $cancel_check) {
+async sub _execute_fibonacci {
+    my ($job, $loop, $progress_cb, $cancel_check) = @_;
+
     my $count = $job->{params}{count} // 20;
     my @fib = (0, 1);
 
@@ -294,7 +307,9 @@ async sub _execute_fibonacci ($job, $loop, $progress_cb, $cancel_check) {
     };
 }
 
-async sub _execute_echo ($job, $loop, $progress_cb, $cancel_check) {
+async sub _execute_echo {
+    my ($job, $loop, $progress_cb, $cancel_check) = @_;
+
     my $message = $job->{params}{message} // 'Hello, World!';
     my $delay = $job->{params}{delay} // 3;
 
@@ -323,7 +338,9 @@ async sub _execute_echo ($job, $loop, $progress_cb, $cancel_check) {
 # Utility Functions
 #
 
-sub _delay ($loop, $seconds) {
+sub _delay {
+    my ($loop, $seconds) = @_;
+
     my $future = $loop->new_future;
 
     my $timer = IO::Async::Timer::Countdown->new(

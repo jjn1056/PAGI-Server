@@ -1,11 +1,11 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use experimental 'signatures';
 
 # Return anonymous coderef directly (avoids "Subroutine redefined" warnings
 # when file is loaded multiple times via do)
-my $app = async sub ($scope, $receive, $send) {
+my $app = async sub  {
+        my ($scope, $receive, $send) = @_;
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
     await $send->({

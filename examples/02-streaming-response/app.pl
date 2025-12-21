@@ -1,13 +1,14 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use experimental 'signatures';
 use IO::Async::Loop;
 
 # Drain the request body - keeps reading http.request events until
 # we get one with more => 0 (end of body) or a non-request event.
 # The await yields control to the event loop - this is NOT blocking.
-async sub drain_request ($receive) {
+async sub drain_request {
+    my ($receive) = @_;
+
     while (1) {
         my $event = await $receive->();
         # Exit if not a request event (e.g., http.disconnect)
@@ -17,7 +18,9 @@ async sub drain_request ($receive) {
     }
 }
 
-async sub app ($scope, $receive, $send) {
+async sub app {
+    my ($scope, $receive, $send) = @_;
+
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
     # Get the event loop for non-blocking delays

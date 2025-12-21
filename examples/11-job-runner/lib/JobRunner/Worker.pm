@@ -3,7 +3,6 @@ package JobRunner::Worker;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Exporter 'import';
 use Future::AsyncAwait;
@@ -33,7 +32,10 @@ my $is_running = 0;
 # Worker Control
 #
 
-sub start_worker ($loop, $max_concurrent = 3) {
+sub start_worker {
+    my ($loop, $max_concurrent) = @_;
+    $max_concurrent //= 3;
+
     return if $is_running;
 
     $event_loop = $loop;
@@ -52,7 +54,9 @@ sub start_worker ($loop, $max_concurrent = 3) {
     return 1;
 }
 
-sub stop_worker () {
+sub stop_worker {
+    my () = @_;
+
     return unless $is_running;
 
     $is_running = 0;
@@ -66,7 +70,9 @@ sub stop_worker () {
     return 1;
 }
 
-sub get_worker_stats () {
+sub get_worker_stats {
+    my () = @_;
+
     return {
         active    => $running_count,
         capacity  => $concurrency,
@@ -75,7 +81,9 @@ sub get_worker_stats () {
     };
 }
 
-sub _broadcast_worker_stats () {
+sub _broadcast_worker_stats {
+    my () = @_;
+
     broadcast_queue_event('worker_stats', get_worker_stats());
 }
 
@@ -101,12 +109,15 @@ sub _check_queue {
     _execute_job_async($job_id);
 }
 
-sub _execute_job_async ($job_id) {
+sub _execute_job_async {
+    my ($job_id) = @_;
+
     my $job = get_job($job_id);
     return unless $job;
 
     # Create progress callback
-    my $progress_cb = sub ($percent, $message) {
+    my $progress_cb = sub  {
+        my ($percent, $message) = @_;
         update_progress($job_id, $percent, $message);
     };
 

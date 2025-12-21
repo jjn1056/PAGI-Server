@@ -1,16 +1,19 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use experimental 'signatures';
 
-async sub watch_sse_disconnect ($receive) {
+async sub watch_sse_disconnect {
+    my ($receive) = @_;
+
     while (1) {
         my $event = await $receive->();
         return $event if $event->{type} eq 'sse.disconnect';
     }
 }
 
-async sub app ($scope, $receive, $send) {
+async sub app {
+    my ($scope, $receive, $send) = @_;
+
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
 
     await $send->({

@@ -26,7 +26,8 @@ use Encode qw(decode_utf8 encode_utf8);
 #
 # =============================================================================
 
-my $app = async sub ($scope, $receive, $send) {
+my $app = async sub  {
+        my ($scope, $receive, $send) = @_;
   
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
     
@@ -126,13 +127,17 @@ HTML
     });
 };
 
-sub _uri_decode ($str) {
+sub _uri_decode {
+    my ($str) = @_;
+
     $str =~ s/\+/ /g;
     $str =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
     return decode_utf8($str);
 }
 
-sub _uri_encode ($str) {
+sub _uri_encode {
+    my ($str) = @_;
+
     my $bytes = encode_utf8($str);
     $bytes =~ s/([^A-Za-z0-9\-._~])/sprintf("%%%02X", ord($1))/eg;
     return $bytes;

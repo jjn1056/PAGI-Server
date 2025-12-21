@@ -1,10 +1,11 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use experimental 'signatures';
 use JSON::PP (); # for pretty output (optional)
 
-async sub drain_body ($receive) {
+async sub drain_body {
+    my ($receive) = @_;
+
     while (1) {
         my $event = await $receive->();
         last if $event->{type} ne 'http.request';
@@ -12,7 +13,9 @@ async sub drain_body ($receive) {
     }
 }
 
-async sub app ($scope, $receive, $send) {
+async sub app {
+    my ($scope, $receive, $send) = @_;
+
     # Handle lifespan scope
     if ($scope->{type} eq 'lifespan') {
         while (1) {

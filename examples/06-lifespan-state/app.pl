@@ -1,9 +1,10 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use experimental 'signatures';
 
-async sub handle_lifespan ($scope, $receive, $send) {
+async sub handle_lifespan {
+    my ($scope, $receive, $send) = @_;
+
     my $state = $scope->{state} //= {};
 
     while (1) {
@@ -19,7 +20,9 @@ async sub handle_lifespan ($scope, $receive, $send) {
     }
 }
 
-async sub handle_http ($scope, $receive, $send) {
+async sub handle_http {
+    my ($scope, $receive, $send) = @_;
+
     my $state = $scope->{state} // {};
     my $greeting = $state->{greeting} // 'Hello';
 
@@ -39,7 +42,9 @@ async sub handle_http ($scope, $receive, $send) {
     await $send->({ type => 'http.response.body', body => "$greeting via shared state", more => 0 });
 }
 
-async sub app ($scope, $receive, $send) {
+async sub app {
+    my ($scope, $receive, $send) = @_;
+
     return await handle_lifespan($scope, $receive, $send) if $scope->{type} eq 'lifespan';
     return await handle_http($scope, $receive, $send)      if $scope->{type} eq 'http';
     die "Unsupported scope type: $scope->{type}";

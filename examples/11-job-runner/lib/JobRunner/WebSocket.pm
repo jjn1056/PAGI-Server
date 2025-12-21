@@ -3,7 +3,6 @@ package JobRunner::WebSocket;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Future::AsyncAwait;
 use JSON::PP;
@@ -21,7 +20,8 @@ use JobRunner::Worker qw(get_worker_stats);
 my $JSON = JSON::PP->new->utf8->canonical->allow_nonref;
 
 sub handler {
-    return async sub ($scope, $receive, $send) {
+    return async sub  {
+        my ($scope, $receive, $send) = @_;
         # Wait for connection event
         my $event = await $receive->();
         return unless $event->{type} eq 'websocket.connect';
@@ -37,7 +37,8 @@ sub handler {
         my $weak_send = $send;
         weaken($weak_send);
 
-        my $queue_event_cb = sub ($event_data) {
+        my $queue_event_cb = sub  {
+        my ($event_data) = @_;
             return unless $connected && $weak_send;
             eval {
                 $weak_send->({
@@ -97,7 +98,9 @@ sub handler {
     };
 }
 
-async sub _handle_message ($text, $send) {
+async sub _handle_message {
+    my ($text, $send) = @_;
+
     my $msg = eval { $JSON->decode($text) };
     return unless $msg && ref $msg eq 'HASH';
 
@@ -126,7 +129,9 @@ async sub _handle_message ($text, $send) {
     }
 }
 
-async sub _handle_create_job ($msg, $send) {
+async sub _handle_create_job {
+    my ($msg, $send) = @_;
+
     my $job_type = $msg->{job_type};
     my $params = $msg->{params} // {};
 
@@ -155,7 +160,9 @@ async sub _handle_create_job ($msg, $send) {
     });
 }
 
-async sub _handle_cancel_job ($msg, $send) {
+async sub _handle_cancel_job {
+    my ($msg, $send) = @_;
+
     my $job_id = $msg->{job_id};
 
     unless ($job_id) {
@@ -184,7 +191,9 @@ async sub _handle_cancel_job ($msg, $send) {
     }
 }
 
-async sub _handle_clear_completed ($send) {
+async sub _handle_clear_completed {
+    my ($send) = @_;
+
     my $count = clear_completed_jobs();
     await _send_json($send, {
         type    => 'jobs_cleared_ack',
@@ -192,7 +201,9 @@ async sub _handle_clear_completed ($send) {
     });
 }
 
-async sub _send_full_state ($send) {
+async sub _send_full_state {
+    my ($send) = @_;
+
     await _send_json($send, {
         type      => 'queue_state',
         jobs      => get_all_jobs(),
@@ -202,14 +213,18 @@ async sub _send_full_state ($send) {
     });
 }
 
-async sub _send_job_types ($send) {
+async sub _send_job_types {
+    my ($send) = @_;
+
     await _send_json($send, {
         type      => 'job_types',
         job_types => get_job_types(),
     });
 }
 
-async sub _send_json ($send, $data) {
+async sub _send_json {
+    my ($send, $data) = @_;
+
     await $send->({
         type => 'websocket.send',
         text => $JSON->encode($data),

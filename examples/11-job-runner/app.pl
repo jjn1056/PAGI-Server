@@ -3,7 +3,6 @@
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Future::AsyncAwait;
 use File::Basename;
@@ -27,7 +26,8 @@ my $sse_handler = JobRunner::SSE::handler();
 my $ws_handler = JobRunner::WebSocket::handler();
 
 # Main application
-my $app = async sub ($scope, $receive, $send) {
+my $app = async sub  {
+        my ($scope, $receive, $send) = @_;
     my $type = $scope->{type};
 
     if ($type eq 'lifespan') {
@@ -47,7 +47,9 @@ my $app = async sub ($scope, $receive, $send) {
     }
 };
 
-async sub _handle_lifespan ($scope, $receive, $send) {
+async sub _handle_lifespan {
+    my ($scope, $receive, $send) = @_;
+
     while (1) {
         my $event = await $receive->();
         my $event_type = $event->{type};

@@ -3,7 +3,6 @@ package JobRunner::SSE;
 use v5.32;
 use strict;
 use warnings;
-use experimental 'signatures';
 
 use Future::AsyncAwait;
 use JSON::PP;
@@ -15,7 +14,8 @@ use JobRunner::Queue qw(
 my $JSON = JSON::PP->new->utf8->canonical->allow_nonref;
 
 sub handler {
-    return async sub ($scope, $receive, $send) {
+    return async sub  {
+        my ($scope, $receive, $send) = @_;
         # Extract job ID from path: /api/jobs/:id/progress
         my $path = $scope->{path};
         my ($job_id) = $path =~ m{/api/jobs/(\d+)/progress};
@@ -72,7 +72,8 @@ sub handler {
 
         # Create a callback for receiving job events
         my $connected = 1;
-        my $event_cb = sub ($event_type, $data) {
+        my $event_cb = sub  {
+        my ($event_type, $data) = @_;
             return unless $connected;
 
             eval {
@@ -130,7 +131,9 @@ sub handler {
     };
 }
 
-async sub _send_job_status ($send, $job) {
+async sub _send_job_status {
+    my ($send, $job) = @_;
+
     await $send->({
         type  => 'sse.send',
         event => 'status',
@@ -144,7 +147,9 @@ async sub _send_job_status ($send, $job) {
     });
 }
 
-async sub _send_final_event ($send, $job) {
+async sub _send_final_event {
+    my ($send, $job) = @_;
+
     my $event_type;
     my $data = { status => $job->{status} };
 
