@@ -1,7 +1,6 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use v5.32;
 use Test2::V0;
 use IO::Async::Loop;
 use Future::AsyncAwait;

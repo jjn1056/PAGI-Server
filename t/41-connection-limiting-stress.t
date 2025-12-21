@@ -1,7 +1,6 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use v5.32;
 use Test2::V0;
 
 # This test requires 'hey' to be installed and is skipped by default
