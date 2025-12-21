@@ -1257,22 +1257,14 @@ async sub _run_lifespan_startup {
         eval {
             await $self->{app}->($scope, $receive, $send);
         };
-        if (my $error = $@) {
-            # Per spec: if the app throws an exception for lifespan scope,
-            # the server should continue without lifespan support
-            $lifespan_supported = 0;
-            if (!$startup_complete->is_ready) {
-                # Check if it's an "unsupported scope type" error
-                if ($error =~ /unsupported.*scope.*type|unsupported.*lifespan/i) {
-                    # App doesn't support lifespan - that's OK, continue without it
-                    $startup_complete->done({ success => 1, lifespan_supported => 0 });
-                }
-                else {
-                    # Some other error - could be a real startup failure
-                    $self->_log(error => "PAGI lifespan handler error: $error");
-                    $startup_complete->done({ success => 0, message => "Exception: $error" });
-                }
-            }
+        # Per spec: if the app throws an exception for lifespan scope,
+        # the server should continue without lifespan support.
+        # This matches Uvicorn/Hypercorn "auto" mode behavior.
+        # Apps that don't support lifespan should: die if $scope->{type} ne 'websocket';
+        $lifespan_supported = 0;
+        if (!$startup_complete->is_ready) {
+            $self->_log(info => "Lifespan not supported, continuing without it");
+            $startup_complete->done({ success => 1, lifespan_supported => 0 });
         }
     })->();
 
