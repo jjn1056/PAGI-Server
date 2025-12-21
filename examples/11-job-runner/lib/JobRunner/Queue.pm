@@ -1,6 +1,5 @@
 package JobRunner::Queue;
 
-use v5.32;
 use strict;
 use warnings;
 
