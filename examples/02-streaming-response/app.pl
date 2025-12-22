@@ -54,8 +54,10 @@ async sub app {
     });
 
     # HTML chunks that browsers will render progressively
+    # Safari requires ~1KB before it starts rendering, so we pad the first chunk
+    my $padding = "<!-- " . (" " x 1024) . " -->\n";
     my @chunks = (
-        "<html><body><pre>\n",
+        "<!DOCTYPE html><html><body><pre>\n$padding",
         "Chunk 1 - " . localtime() . "\n",
         "Chunk 2 - " . localtime() . "\n",
         "Chunk 3 - " . localtime() . "\n",
