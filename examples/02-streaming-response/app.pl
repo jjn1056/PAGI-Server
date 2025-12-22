@@ -1,3 +1,13 @@
+# Streaming Response Example
+#
+# Demonstrates chunked transfer encoding with progressive rendering.
+# Uses text/html so browsers render chunks as they arrive.
+# (text/plain gets buffered by browsers until response completes)
+#
+# Test with:
+#   curl -N http://localhost:5000/   # -N disables curl buffering
+#   Or open in browser to see progressive HTML rendering
+
 use strict;
 use warnings;
 use Future::AsyncAwait;
@@ -30,17 +40,26 @@ async sub app {
     await drain_request($receive);
 
     # Start the response with chunked encoding and trailers
+    # Using text/html so browsers render progressively (text/plain gets buffered)
+    # X-Accel-Buffering: no hints to proxies/browsers to disable buffering
     await $send->({
         type     => 'http.response.start',
         status   => 200,
-        headers  => [ [ 'content-type', 'text/plain' ] ],
+        headers  => [
+            [ 'content-type', 'text/html; charset=utf-8' ],
+            [ 'x-accel-buffering', 'no' ],
+            [ 'cache-control', 'no-cache' ],
+        ],
         trailers => 1,
     });
 
+    # HTML chunks that browsers will render progressively
     my @chunks = (
-        "Chunk 1\n",
-        "Chunk 2\n",
-        "Chunk 3\n",
+        "<html><body><pre>\n",
+        "Chunk 1 - " . localtime() . "\n",
+        "Chunk 2 - " . localtime() . "\n",
+        "Chunk 3 - " . localtime() . "\n",
+        "</pre></body></html>\n",
     );
 
     # Start a task that waits for client disconnect.
