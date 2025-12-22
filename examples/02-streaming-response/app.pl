@@ -1,12 +1,19 @@
 # Streaming Response Example
 #
-# Demonstrates chunked transfer encoding with progressive rendering.
-# Uses text/html so browsers render chunks as they arrive.
-# (text/plain gets buffered by browsers until response completes)
+# Demonstrates chunked transfer encoding with trailers.
+#
+# IMPORTANT: Safari does NOT progressively render chunked HTML responses.
+# This is a known WebKit limitation (bugs.webkit.org/show_bug.cgi?id=252413).
+# Safari buffers the entire response until the connection closes.
+#
+# For progressive rendering in ALL browsers, use:
+#   - SSE (text/event-stream) - see examples/sse-dashboard/
+#   - WebSockets - see examples/websocket-echo-v2/
 #
 # Test with:
-#   curl -N http://localhost:5000/   # -N disables curl buffering
-#   Or open in browser to see progressive HTML rendering
+#   curl -N http://localhost:5000/   # Works - shows chunks progressively
+#   Chrome/Firefox                    # Works - progressive rendering
+#   Safari                            # DOES NOT WORK - waits for completion
 
 use strict;
 use warnings;
@@ -53,11 +60,9 @@ async sub app {
         trailers => 1,
     });
 
-    # HTML chunks that browsers will render progressively
-    # Safari requires ~1KB before it starts rendering, so we pad the first chunk
-    my $padding = "<!-- " . (" " x 1024) . " -->\n";
+    # Chunks sent 1 second apart - use curl -N to see them arrive progressively
     my @chunks = (
-        "<!DOCTYPE html><html><body><pre>\n$padding",
+        "<!DOCTYPE html><html><body><pre>\n",
         "Chunk 1 - " . localtime() . "\n",
         "Chunk 2 - " . localtime() . "\n",
         "Chunk 3 - " . localtime() . "\n",
