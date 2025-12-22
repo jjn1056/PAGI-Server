@@ -1372,6 +1372,19 @@ sub _create_sse_send {
             my $len = sprintf("%x", length($sse_data));
             $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
         }
+        elsif ($type eq 'sse.comment') {
+            # SSE comment - sent as-is without data: prefix
+            # Used for keepalives that shouldn't trigger onmessage
+            return unless $weak_self->{sse_started};
+
+            my $comment = $event->{comment} // '';
+            # Ensure comment starts with : and ends with newlines
+            $comment = ":$comment" unless $comment =~ /^:/;
+            $comment .= "\n\n";
+
+            my $len = sprintf("%x", length($comment));
+            $weak_self->{stream}->write("$len\r\n$comment\r\n");
+        }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush
             # Per spec: servers that don't advertise the extension must reject
