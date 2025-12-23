@@ -268,6 +268,12 @@ sub _stop_idle_timer {
 
     return unless $self->{idle_timer};
     $self->{idle_timer}->stop if $self->{idle_timer}->is_running;
+    # Remove timer completely so _reset_idle_timer won't restart it
+    # This is important for long-lived connections (WebSocket, SSE)
+    if ($self->{server}) {
+        $self->{server}->remove_child($self->{idle_timer});
+    }
+    $self->{idle_timer} = undef;
 }
 
 sub _try_handle_request {
@@ -1649,7 +1655,8 @@ sub _create_websocket_send {
                 return;  # Nothing to send
             }
 
-            $weak_self->{stream}->write($frame->to_bytes);
+            my $bytes = $frame->to_bytes;
+            $weak_self->{stream}->write($bytes);
         }
         elsif ($type eq 'websocket.close') {
             # If not accepted yet, send 403 Forbidden
