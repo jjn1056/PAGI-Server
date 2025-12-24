@@ -7,6 +7,8 @@ use Future::AsyncAwait;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 3: Request Body Handling
 # Tests for examples/03-request-body/app.pl
 

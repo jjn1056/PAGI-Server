@@ -9,6 +9,8 @@ use File::Temp qw(tempfile);
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Test: Fork Loop Isolation
 # This test verifies that child processes in multi-worker mode get
 # a fresh IO::Async::Loop instance, not the parent's cached $ONE_TRUE_LOOP.

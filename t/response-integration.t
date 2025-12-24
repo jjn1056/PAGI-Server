@@ -9,6 +9,8 @@ use JSON::MaybeXS qw(decode_json);
 use URI;
 
 use PAGI::Server;
+
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 use PAGI::Response;
 
 my $loop = IO::Async::Loop->new;

@@ -6,6 +6,8 @@ use Net::Async::HTTP;
 use Future::AsyncAwait;
 
 use PAGI::Server;
+
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 use PAGI::Middleware::Builder;
 
 my $loop = IO::Async::Loop->new;

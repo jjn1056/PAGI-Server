@@ -7,6 +7,8 @@ use Future::AsyncAwait;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 7: Extensions Framework
 # Tests for examples/07-extension-fullflush/app.pl
 

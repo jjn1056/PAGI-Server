@@ -10,6 +10,8 @@ use Future::AsyncAwait;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Test connection_count method directly using internal hash
 # (matching pattern from unit tests in this codebase)
 

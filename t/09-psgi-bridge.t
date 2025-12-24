@@ -7,6 +7,8 @@ use Future::AsyncAwait;
 use FindBin;
 
 use PAGI::Server;
+
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 use PAGI::App::WrapPSGI;
 
 # Step 9: PSGI Compatibility Bridge

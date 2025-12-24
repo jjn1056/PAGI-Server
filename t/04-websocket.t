@@ -9,6 +9,8 @@ use lib "$FindBin::Bin/../lib";
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Load example app
 my $app_path = "$FindBin::Bin/../examples/04-websocket-echo/app.pl";
 my $app = do $app_path;

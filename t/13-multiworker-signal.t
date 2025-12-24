@@ -8,6 +8,8 @@ use POSIX ':sys_wait_h';
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Test: Multi-worker Signal Handling
 # This test verifies that multi-worker servers properly terminate on SIGINT/SIGTERM.
 #

@@ -9,6 +9,8 @@ use Future::AsyncAwait;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Create shared event loop and HTTP client
 my $loop = IO::Async::Loop->new;
 my $http = Net::Async::HTTP->new;

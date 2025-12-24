@@ -9,6 +9,8 @@ use Net::Async::HTTP;
 use lib 'lib';
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Test: Worker restarts after max_requests
 subtest 'worker restarts after max_requests' => sub {
     # This test would verify worker restarts in multi-worker mode

@@ -30,6 +30,8 @@ use lib "$FindBin::Bin/../lib";
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # =============================================================================
 # Test: Count actual respawns with a failing app
 # =============================================================================

@@ -9,6 +9,8 @@ use lib "$FindBin::Bin/../lib";
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 6: Lifespan Protocol
 # Tests for examples/06-lifespan-state/app.pl
 

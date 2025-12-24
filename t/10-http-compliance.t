@@ -11,6 +11,8 @@ use IO::Async::Stream;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 10: HTTP/1.1 Compliance and Edge Cases
 
 my $loop = IO::Async::Loop->new;

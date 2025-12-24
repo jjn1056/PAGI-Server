@@ -9,6 +9,8 @@ use URI;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 1: Basic HTTP Server
 # Tests for examples/01-hello-http/app.pl
 

@@ -7,6 +7,8 @@ use Future::AsyncAwait;
 
 use PAGI::Server;
 
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 2: Streaming Responses and Disconnect Handling
 # Tests for examples/02-streaming-response/app.pl
 
