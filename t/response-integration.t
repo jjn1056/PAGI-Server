@@ -192,10 +192,10 @@ subtest 'empty response' => sub {
     }
 };
 
-subtest 'error response' => sub {
+subtest 'json error response pattern' => sub {
     my $app = async sub ($scope, $receive, $send) {
         my $res = PAGI::Response->new($send);
-        await $res->error(400, 'Bad Request', { field => 'email' });
+        await $res->status(400)->json({ error => 'Bad Request', field => 'email' });
     };
 
     with_server($app, async sub ($http, $port) {
@@ -205,7 +205,6 @@ subtest 'error response' => sub {
         is $response->content_type, 'application/json', 'json content-type';
 
         my $data = decode_json($response->decoded_content);
-        is $data->{status}, 400, 'status in body';
         is $data->{error}, 'Bad Request', 'error message';
         is $data->{field}, 'email', 'extra field';
     })->get;
