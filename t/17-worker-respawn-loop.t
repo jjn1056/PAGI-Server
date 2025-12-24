@@ -3,17 +3,13 @@
 # =============================================================================
 # Test: Worker Respawn Loop Prevention (Issue 2.3)
 #
-# This test exposes issue 2.3 from SERVER_ISSUES.md:
-# Workers that fail during startup are respawned indefinitely, causing
-# resource exhaustion and log spam.
+# Regression test for issue 2.3 from SERVER_ISSUES.md:
+# Workers that fail during startup should NOT be respawned indefinitely,
+# which would cause resource exhaustion and log spam.
 #
-# Expected behavior (after fix):
+# Expected behavior:
 # - Workers that fail startup should NOT be respawned infinitely
 # - Server should limit respawns or stop after repeated startup failures
-#
-# Current behavior (before fix):
-# - All worker exits trigger respawn regardless of exit code
-# - Startup failure causes infinite respawn loop
 # =============================================================================
 
 use strict;
@@ -125,8 +121,7 @@ subtest 'Startup failure should not cause excessive respawns' => sub {
 
     diag("Worker startup attempts in ${test_duration}s: $spawn_count");
 
-    # THIS TEST SHOULD FAIL WITH CURRENT BUGGY CODE
-    # After fix, spawn_count should be <= max_acceptable_spawns
+    # Spawn count should be limited, not infinite
     cmp_ok($spawn_count, '<=', $max_acceptable_spawns,
         "Startup failures should not cause excessive respawns (got $spawn_count, max $max_acceptable_spawns)");
 };
