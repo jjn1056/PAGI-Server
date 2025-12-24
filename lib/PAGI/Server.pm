@@ -65,7 +65,30 @@ The PAGI application coderef with signature: async sub ($scope, $receive, $send)
 
 =item host => $host
 
-Bind address. Default: '127.0.0.1'
+Bind address (IP address or hostname). Default: C<'127.0.0.1'>
+
+The default binds only to the loopback interface, accepting connections only
+from localhost. This is B<intentionally secure by default> - development
+servers won't accidentally be exposed to the network.
+
+B<Common values:>
+
+    '127.0.0.1'      - Localhost only (default, secure for development)
+    '0.0.0.0'        - All IPv4 interfaces (required for remote access)
+    '::'             - All IPv6 interfaces (may also accept IPv4)
+    '192.168.1.100'  - Specific interface only
+
+B<For headless servers or production deployments> where remote clients need
+to connect, bind to all interfaces:
+
+    my $server = PAGI::Server->new(
+        app  => $app,
+        host => '0.0.0.0',
+        port => 8080,
+    );
+
+B<Security note:> When binding to C<0.0.0.0>, ensure appropriate firewall
+rules are in place. For production, consider a reverse proxy (nginx, etc.)
 
 =item port => $port
 

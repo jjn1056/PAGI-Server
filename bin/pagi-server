@@ -55,7 +55,17 @@ backward compatibility; you can also just pass the file as an argument.
 
 =item --host, -h HOST
 
-Bind address (default: 127.0.0.1)
+Bind address (default: 127.0.0.1, localhost only)
+
+The default only accepts connections from localhost, which is B<secure by
+default> for development. For headless servers or production deployments
+where remote clients need to connect:
+
+    # Bind to all IPv4 interfaces
+    pagi-server --host 0.0.0.0 ./app.pl
+
+    # Bind to specific interface
+    pagi-server --host 192.168.1.100 ./app.pl
 
 =item --port, -p PORT
 
@@ -289,6 +299,12 @@ If no app is specified, serves the current directory:
 
     # Run with multiple workers
     pagi-server -w 4 ./myapp.pl
+
+    # Headless server / remote access (bind to all interfaces)
+    pagi-server --host 0.0.0.0 -p 8080 ./myapp.pl
+
+    # Production: all interfaces, workers, daemonized
+    pagi-server --host 0.0.0.0 -p 80 -w 4 -D --pid /var/run/pagi.pid ./myapp.pl
 
     # Add library paths (like perl -I)
     pagi-server -I ./lib -I ./local/lib ./myapp.pl
