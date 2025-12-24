@@ -11,6 +11,21 @@ use File::Spec;
 
 use PAGI::Server;
 
+# Skip entire test if TLS modules not installed
+BEGIN {
+    my $tls_available = eval {
+        require IO::Async::SSL;
+        require IO::Socket::SSL;
+        1;
+    };
+    unless ($tls_available) {
+        require Test2::V0;
+        Test2::V0::plan(skip_all => 'TLS modules not installed (optional)');
+    }
+}
+
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
 # Step 8: TLS Support
 # Tests for examples/08-tls-introspection/app.pl
 
