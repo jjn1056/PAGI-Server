@@ -62,7 +62,7 @@ async sub _handle_lifespan {
                 # Start worker with 3 concurrent jobs
                 start_worker($loop, 3);
 
-                say "[lifespan] Job Runner started (worker concurrency: 3)";
+                warn "[lifespan] Job Runner started (worker concurrency: 3)";
             };
 
             if ($@) {
@@ -78,7 +78,7 @@ async sub _handle_lifespan {
         elsif ($event_type eq 'lifespan.shutdown') {
             eval {
                 stop_worker();
-                say "[lifespan] Job Runner stopped";
+                warn "[lifespan] Job Runner stopped";
             };
 
             await $send->({ type => 'lifespan.shutdown.complete' });
