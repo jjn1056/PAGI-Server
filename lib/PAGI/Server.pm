@@ -4,7 +4,6 @@ use warnings;
 use parent 'IO::Async::Notifier';
 use IO::Async::Listener;
 use IO::Async::Stream;
-use IO::Async::SSL;
 use IO::Async::Loop;
 use IO::Socket::INET;
 use Future;
@@ -600,6 +599,33 @@ sub _sendfile_status_string {
     return $available ? 'on' : 'off (Sys::Sendfile not installed)';
 }
 
+# Check if TLS modules are available
+sub _check_tls_available {
+    my ($self) = @_;
+
+    my $ssl_available = eval {
+        require IO::Async::SSL;
+        require IO::Socket::SSL;
+        1;
+    };
+
+    return 1 if $ssl_available;
+
+    die <<"END_TLS_ERROR";
+TLS support requested but required modules not installed.
+
+To enable HTTPS/TLS support, install:
+
+    cpanm IO::Async::SSL IO::Socket::SSL
+
+Or on Debian/Ubuntu:
+
+    apt-get install libio-socket-ssl-perl
+
+Then restart your application.
+END_TLS_ERROR
+}
+
 async sub listen {
     my ($self) = @_;
 
@@ -652,6 +678,7 @@ async sub _listen_singleworker {
 
     # Add SSL options if configured
     if (my $ssl = $self->{ssl}) {
+        $self->_check_tls_available;
         $listen_opts{extensions} = ['SSL'];
         $listen_opts{SSL_server} = 1;
         $listen_opts{SSL_cert_file} = $ssl->{cert_file} if $ssl->{cert_file};
