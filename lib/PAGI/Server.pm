@@ -151,7 +151,48 @@ Bind port. Default: 5000
 
 =item ssl => \%config
 
-Optional TLS configuration with keys: cert_file, key_file, ca_file, verify_client
+Optional TLS/HTTPS configuration. B<Requires additional modules> - see
+L</ENABLING TLS SUPPORT> below.
+
+Configuration keys:
+
+=over 4
+
+=item cert_file => $path
+
+Path to the SSL certificate file (PEM format).
+
+=item key_file => $path
+
+Path to the SSL private key file (PEM format).
+
+=item ca_file => $path
+
+Optional path to CA certificate for client verification.
+
+=item verify_client => $bool
+
+If true, require and verify client certificates.
+
+=item min_version => $version
+
+Minimum TLS version. Default: C<'TLSv1_2'>. Options: C<'TLSv1_2'>, C<'TLSv1_3'>.
+
+=item cipher_list => $string
+
+OpenSSL cipher list. Default uses modern secure ciphers.
+
+=back
+
+Example:
+
+    my $server = PAGI::Server->new(
+        app => $app,
+        ssl => {
+            cert_file => '/path/to/server.crt',
+            key_file  => '/path/to/server.key',
+        },
+    );
 
 =item disable_tls => $bool
 
@@ -495,6 +536,151 @@ The server streams files in 64KB chunks to avoid memory bloat. When
 C<Sys::Sendfile> is available and conditions permit (non-TLS, non-chunked),
 the server uses C<sendfile()> for zero-copy I/O. Otherwise, a worker pool
 handles file I/O asynchronously to avoid blocking the event loop.
+
+=head1 ENABLING TLS SUPPORT
+
+PAGI::Server supports HTTPS/TLS connections, but requires additional modules
+that are not installed by default. This keeps the base installation minimal
+for users who don't need TLS.
+
+=head2 When You Need TLS
+
+You need TLS if you want to:
+
+=over 4
+
+=item * Serve HTTPS traffic directly from PAGI::Server
+
+=item * Test TLS locally during development
+
+=item * Use client certificate authentication
+
+=back
+
+You B<don't> need TLS if you:
+
+=over 4
+
+=item * Use a reverse proxy (nginx, Apache) that handles TLS termination
+
+=item * Only serve HTTP traffic on localhost for development
+
+=item * Deploy behind a load balancer that provides TLS
+
+=back
+
+B<Production recommendation:> Use a reverse proxy (nginx, HAProxy, etc.) for
+TLS termination. They offer better performance, easier certificate management,
+and battle-tested security. PAGI::Server's TLS support is primarily for
+development and testing.
+
+=head2 Installing TLS Modules
+
+To enable TLS support, install the required modules:
+
+B<Using cpanm:>
+
+    cpanm IO::Async::SSL IO::Socket::SSL
+
+B<Using system packages (Debian/Ubuntu):>
+
+    apt-get install libio-socket-ssl-perl
+
+B<Using system packages (RHEL/CentOS):>
+
+    yum install perl-IO-Socket-SSL
+
+B<Verifying installation:>
+
+    perl -MIO::Async::SSL -MIO::Socket::SSL -e 'print "TLS modules installed\n"'
+
+=head2 Basic TLS Configuration
+
+Once the modules are installed, configure TLS with certificate and key files:
+
+    my $server = PAGI::Server->new(
+        app  => $app,
+        host => '0.0.0.0',
+        port => 5000,
+        ssl  => {
+            cert_file => '/path/to/server.crt',
+            key_file  => '/path/to/server.key',
+        },
+    );
+
+=head2 Generating Self-Signed Certificates (Development)
+
+For local development and testing, you can generate a self-signed certificate:
+
+B<Quick self-signed certificate (1 year validity):>
+
+    openssl req -x509 -newkey rsa:4096 -nodes \
+        -keyout server.key -out server.crt -days 365 \
+        -subj "/CN=localhost"
+
+B<With Subject Alternative Names (recommended):>
+
+    # Create config file
+    cat > ssl.conf <<EOF
+    [req]
+    distinguished_name = req_distinguished_name
+    x509_extensions = v3_req
+    prompt = no
+
+    [req_distinguished_name]
+    CN = localhost
+
+    [v3_req]
+    subjectAltName = @alt_names
+
+    [alt_names]
+    DNS.1 = localhost
+    DNS.2 = *.localhost
+    IP.1 = 127.0.0.1
+    EOF
+
+    # Generate certificate
+    openssl req -x509 -newkey rsa:4096 -nodes \
+        -keyout server.key -out server.crt -days 365 \
+        -config ssl.conf -extensions v3_req
+
+B<Testing your TLS configuration:>
+
+    # Start server
+    pagi-server --app myapp.pl --ssl-cert server.crt --ssl-key server.key
+
+    # Test with curl (ignore self-signed cert warning)
+    curl -k https://localhost:5000/
+
+B<Production certificates:>
+
+For production, use certificates from a trusted CA (Let's Encrypt, etc.):
+
+    # Let's Encrypt with certbot
+    certbot certonly --standalone -d yourdomain.com
+
+    # Then configure PAGI::Server
+    my $server = PAGI::Server->new(
+        app => $app,
+        ssl => {
+            cert_file => '/etc/letsencrypt/live/yourdomain.com/fullchain.pem',
+            key_file  => '/etc/letsencrypt/live/yourdomain.com/privkey.pem',
+        },
+    );
+
+=head2 Advanced TLS Configuration
+
+See the C<ssl> option in L</CONSTRUCTOR> for details on:
+
+=over 4
+
+=item * Client certificate verification (C<verify_client>, C<ca_file>)
+
+=item * TLS version requirements (C<min_version>)
+
+=item * Custom cipher suites (C<cipher_list>)
+
+=back
 
 =cut
 
