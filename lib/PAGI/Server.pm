@@ -394,6 +394,34 @@ B<CLI:> C<--max-connections 200>
 B<Monitoring:> Use C<< $server->connection_count >> and
 C<< $server->effective_max_connections >> to monitor usage.
 
+=item max_body_size => $bytes
+
+Maximum request body size in bytes. Default: 10,000,000 (10MB).
+Set to 0 for unlimited (not recommended for public-facing servers).
+
+Requests with Content-Length exceeding this limit receive HTTP 413
+(Payload Too Large). Chunked requests are also checked as data arrives.
+
+B<Example:>
+
+    my $server = PAGI::Server->new(
+        app           => $app,
+        max_body_size => 50_000_000,  # 50MB for file uploads
+    );
+
+    # Unlimited (use with caution)
+    my $server = PAGI::Server->new(
+        app           => $app,
+        max_body_size => 0,
+    );
+
+B<CLI:> C<--max-body-size 50000000>
+
+B<Security note:> Without a body size limit, attackers can exhaust server
+memory with large requests. The 10MB default balances security with common
+use cases (file uploads, JSON payloads). Increase for specific needs, or
+use 0 only behind a reverse proxy that enforces its own limit.
+
 =over 4
 
 =item * A listening socket is created before forking
@@ -761,7 +789,7 @@ sub _init {
     $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
     $self->{max_header_count} = delete $params->{max_header_count} // 100;  # Max number of headers
-    $self->{max_body_size}    = delete $params->{max_body_size};  # Max body size in bytes (undef = unlimited)
+    $self->{max_body_size}    = delete $params->{max_body_size} // 10_000_000;  # Max body size in bytes (10MB default, 0 = unlimited)
     $self->{workers}          = delete $params->{workers} // 0;   # Number of worker processes (0 = single process)
     $self->{max_requests}     = delete $params->{max_requests} // 0;  # 0 = unlimited
     $self->{listener_backlog} = delete $params->{listener_backlog} // 2048;   # Listener queue size

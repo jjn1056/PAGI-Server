@@ -581,6 +581,78 @@ subtest 'Max body size exceeded returns 413 Payload Too Large' => sub {
     })->()->get;
 };
 
+# Test 15b: max_body_size=0 means unlimited
+subtest 'max_body_size=0 allows unlimited body size' => sub {
+    (async sub {
+        my $server = PAGI::Server->new(
+            app           => $app,
+            host          => '127.0.0.1',
+            port          => 0,
+            quiet         => 1,
+            max_body_size => 0,  # Unlimited
+        );
+
+        $loop->add($server);
+        await $server->listen;
+
+        my $port = $server->port;
+
+        my $socket = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1',
+            PeerPort => $port,
+            Proto    => 'tcp',
+            Blocking => 0,
+        ) or die "Cannot connect: $!";
+
+        my $response = '';
+        my $done = $loop->new_future;
+
+        my $stream = IO::Async::Stream->new(
+            handle => $socket,
+            on_read => sub  {
+        my ($s, $buffref, $eof) = @_;
+                $response .= $$buffref;
+                $$buffref = '';
+                if ($eof || $response =~ /\r\n\r\n/) {
+                    $done->done unless $done->is_ready;
+                }
+                return 0;
+            },
+            on_closed => sub {
+                $done->done unless $done->is_ready;
+            },
+        );
+
+        $loop->add($stream);
+        # Claim to send 10KB - with max_body_size=0, this should be accepted
+        $stream->write("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10000\r\n\r\n");
+
+        my $timeout = $loop->delay_future(after => 3)->then(sub { $done->done });
+        await Future->wait_any($done, $timeout);
+
+        # Should NOT get 413 since max_body_size=0 means unlimited
+        unlike($response, qr/HTTP\/1\.1 413/, 'max_body_size=0 allows large requests (no 413)');
+
+        $loop->remove($stream);
+        await $server->shutdown;
+        $loop->remove($server);
+    })->()->get;
+};
+
+# Test 15c: Default max_body_size is 10MB
+subtest 'Default max_body_size is 10MB' => sub {
+    my $server = PAGI::Server->new(
+        app   => $app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+        # No max_body_size specified - should default to 10MB
+    );
+
+    # Check the internal value is 10MB
+    is($server->{max_body_size}, 10_000_000, 'Default max_body_size is 10MB (10_000_000 bytes)');
+};
+
 # Test 16: Connection timeout option is accepted
 subtest 'Connection timeout configuration is accepted' => sub {
     my $server = PAGI::Server->new(

@@ -119,7 +119,7 @@ sub new {
         state         => $args{state} // {},
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
-        max_body_size     => $args{max_body_size},  # undef = unlimited
+        max_body_size     => $args{max_body_size},  # 0 = unlimited
         access_log        => $args{access_log},     # Filehandle for access logging
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
@@ -297,8 +297,8 @@ sub _try_handle_request {
         return;
     }
 
-    # Check Content-Length against max_body_size limit
-    if (defined $self->{max_body_size} && defined $request->{content_length}) {
+    # Check Content-Length against max_body_size limit (0 = unlimited)
+    if ($self->{max_body_size} && defined $request->{content_length}) {
         if ($request->{content_length} > $self->{max_body_size}) {
             $self->_send_error_response(413, 'Payload Too Large');
             $self->_close;
@@ -594,8 +594,8 @@ sub _create_receive {
                     # Track total bytes read for max_body_size check
                     $bytes_read += length($data // '');
 
-                    # Check max_body_size for chunked requests
-                    if (defined $weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
+                    # Check max_body_size for chunked requests (0 = unlimited)
+                    if ($weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
                         # Body too large - close connection
                         $weak_self->_send_error_response(413, 'Payload Too Large');
                         $weak_self->_close;

@@ -114,6 +114,27 @@ B<When to adjust:>
 B<Note:> In multi-worker mode, this limit applies per-worker. With
 C<--workers 4 --max-connections 100>, total capacity is 400 connections.
 
+=item --max-body-size NUM
+
+Maximum request body size in bytes. Requests exceeding this limit receive
+HTTP 413 (Payload Too Large).
+
+B<Default:> 10,000,000 (10MB)
+
+B<Special value:> 0 means unlimited (not recommended for public servers).
+
+B<When to adjust:>
+
+=over 4
+
+=item * File uploads? Increase to 50-100MB as needed
+
+=item * API with large JSON? Increase to match expected payload sizes
+
+=item * Behind reverse proxy? Can set to 0 if proxy enforces its own limit
+
+=back
+
 =item --log-level LEVEL
 
 Set the logging verbosity level. Messages below this level are suppressed.
