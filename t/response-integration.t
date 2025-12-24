@@ -1,9 +1,5 @@
 use strict;
 use warnings;
-use v5.32;
-use feature 'signatures';
-no warnings 'experimental::signatures';
-
 use Test2::V0;
 use IO::Async::Loop;
 use Net::Async::HTTP;
@@ -18,8 +14,10 @@ use PAGI::Response;
 my $loop = IO::Async::Loop->new;
 
 # Helper to handle lifespan scope
-sub with_lifespan ($handler) {
-    return async sub ($scope, $receive, $send) {
+sub with_lifespan {
+    my ($handler) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
         if ($scope->{type} eq 'lifespan') {
             while (1) {
                 my $event = await $receive->();
@@ -38,7 +36,8 @@ sub with_lifespan ($handler) {
 }
 
 # Helper to run a test with server
-async sub with_server ($app, $callback) {
+async sub with_server {
+    my ($app, $callback) = @_;
     my $server = PAGI::Server->new(
         app   => with_lifespan($app),
         host  => '127.0.0.1',
@@ -61,12 +60,14 @@ async sub with_server ($app, $callback) {
 }
 
 subtest 'text response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->text("Hello World");
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -77,12 +78,14 @@ subtest 'text response' => sub {
 };
 
 subtest 'html response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->html("<h1>Hello</h1>");
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -92,12 +95,14 @@ subtest 'html response' => sub {
 };
 
 subtest 'json response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->json({ message => 'Hello', count => 42 });
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -110,7 +115,8 @@ subtest 'json response' => sub {
 };
 
 subtest 'custom status and headers' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->status(201)
                   ->header('X-Custom' => 'value')
@@ -118,7 +124,8 @@ subtest 'custom status and headers' => sub {
                   ->json({ created => 1 });
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 201, 'status 201 Created';
@@ -128,12 +135,14 @@ subtest 'custom status and headers' => sub {
 };
 
 subtest 'redirect response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->redirect('/new-location');
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         # Disable redirects to capture the 302
         my $response = await $http->do_request(
             method => 'GET',
@@ -147,12 +156,14 @@ subtest 'redirect response' => sub {
 };
 
 subtest 'redirect with custom status' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->redirect('/permanent', 301);
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->do_request(
             method => 'GET',
             uri => URI->new("http://127.0.0.1:$port/"),
@@ -164,7 +175,8 @@ subtest 'redirect with custom status' => sub {
 };
 
 subtest 'empty response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->empty();
     };
@@ -172,7 +184,8 @@ subtest 'empty response' => sub {
     # 204 responses can trigger "Spurious on_read" in Net::Async::HTTP due to
     # keepalive handling quirks. Catch and ignore if assertions pass.
     my $result = eval {
-        with_server($app, async sub ($http, $port) {
+        with_server($app, async sub {
+            my ($http, $port) = @_;
             my $response = await $http->do_request(
                 method => 'GET',
                 uri => URI->new("http://127.0.0.1:$port/"),
@@ -193,12 +206,14 @@ subtest 'empty response' => sub {
 };
 
 subtest 'json error response pattern' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->status(400)->json({ error => 'Bad Request', field => 'email' });
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 400, 'status 400';
@@ -211,13 +226,15 @@ subtest 'json error response pattern' => sub {
 };
 
 subtest 'cookie response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->cookie('session' => 'abc123', path => '/', httponly => 1)
                   ->text('OK');
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -229,17 +246,20 @@ subtest 'cookie response' => sub {
 };
 
 subtest 'streaming response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->content_type('text/plain')
-                  ->stream(async sub ($writer) {
+                  ->stream(async sub {
+                      my ($writer) = @_;
                       await $writer->write("chunk1");
                       await $writer->write("chunk2");
                       await $writer->write("chunk3");
                   });
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -253,12 +273,14 @@ subtest 'send_file response' => sub {
     print $fh "File content for testing";
     close $fh;
 
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->send_file($filename);
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -272,12 +294,14 @@ subtest 'send_file with attachment' => sub {
     print $fh "PDF content";
     close $fh;
 
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->send_file($filename, filename => 'document.pdf');
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -287,12 +311,14 @@ subtest 'send_file with attachment' => sub {
 };
 
 subtest 'UTF-8 text response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->text("Hello, 世界! Привет! 🌍");
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -301,7 +327,8 @@ subtest 'UTF-8 text response' => sub {
 };
 
 subtest 'CORS headers' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->cors(
             origin      => 'https://example.com',
@@ -310,7 +337,8 @@ subtest 'CORS headers' => sub {
         )->json({ data => 'cors test' });
     };
 
-    with_server($app, async sub ($http, $port) {
+    with_server($app, async sub {
+        my ($http, $port) = @_;
         my $response = await $http->GET("http://127.0.0.1:$port/");
 
         is $response->code, 200, 'status 200';
@@ -322,7 +350,8 @@ subtest 'CORS headers' => sub {
 };
 
 subtest 'CORS preflight response' => sub {
-    my $app = async sub ($scope, $receive, $send) {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
         my $res = PAGI::Response->new($send);
         await $res->cors(
             origin    => 'https://example.com',
@@ -335,7 +364,8 @@ subtest 'CORS preflight response' => sub {
 
     # 204 responses can trigger "Spurious on_read" in Net::Async::HTTP
     my $result = eval {
-        with_server($app, async sub ($http, $port) {
+        with_server($app, async sub {
+            my ($http, $port) = @_;
             my $response = await $http->do_request(
                 method => 'OPTIONS',
                 uri => URI->new("http://127.0.0.1:$port/"),
