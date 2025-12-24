@@ -17,7 +17,7 @@ pagi-server --app examples/05-sse-broadcaster/app.pl --port 5000
 
 ```bash
 # Subscribe to SSE stream (events arrive periodically)
-curl -N http://localhost:5000/
+curl -N -v -H "Accept: text/event-stream" http://localhost:5000/   
 # => event: time
 # => data: Current time: 2024-01-15 10:30:00
 # =>
