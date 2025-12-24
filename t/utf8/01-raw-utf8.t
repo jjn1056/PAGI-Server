@@ -148,6 +148,29 @@ subtest 'HTTP path/query/body UTF-8 handling' => sub {
     $loop->remove($http);
 };
 
+subtest 'Invalid UTF-8 path falls back to bytes (Mojolicious-style)' => sub {
+    my $server = create_server();
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+
+    # %FF%FE is invalid UTF-8 (not a valid start byte sequence)
+    my $url = "http://127.0.0.1:$port/invalid/%FF%FE/test";
+
+    $http->GET(URI->new($url))->get;
+
+    # Path should contain the original bytes, not replacement characters
+    # \xFF\xFE are the raw bytes after percent-decoding
+    is($captures{last_http}{path}, "/invalid/\xFF\xFE/test",
+       'invalid UTF-8 falls back to original bytes (not U+FFFD)');
+    is($captures{last_http}{raw_path}, '/invalid/%FF%FE/test',
+       'raw_path preserved percent-encoding');
+
+    $server->shutdown->get;
+    $loop->remove($http);
+};
+
 subtest 'HTTP response encodes UTF-8 body' => sub {
     my $server = create_server();
     my $port = $server->port;

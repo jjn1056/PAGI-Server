@@ -4,8 +4,8 @@ use warnings;
 use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
 use Encode qw(decode);
+use PAGI::Server ();
 
-our $VERSION = '0.001';
 
 # =============================================================================
 # Header Validation (CRLF Injection Prevention)
@@ -188,8 +188,10 @@ sub parse_request {
     $raw_path //= '/';
     $query_string //= '';
 
-    # Decode path (URL-decode)
-    my $path = decode('UTF-8', uri_unescape($raw_path), Encode::FB_DEFAULT);
+    # Decode path (URL-decode, then UTF-8 decode with fallback)
+    # Mojolicious-style: try UTF-8 decode, fall back to original bytes if invalid
+    my $unescaped = uri_unescape($raw_path);
+    my $path = eval { decode('UTF-8', $unescaped, Encode::FB_CROAK) } // $unescaped;
 
     # Build headers array with lowercase names
     my @headers;
@@ -305,7 +307,7 @@ sub serialize_response_start {
 
     # Add default Server header if not provided
     unless ($has_server) {
-        $response .= "Server: PAGI/$VERSION\r\n";
+        $response .= "Server: PAGI::Server/$PAGI::Server::VERSION\r\n";
     }
 
     # Add headers (with CRLF injection validation)

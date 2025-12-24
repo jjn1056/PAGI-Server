@@ -123,7 +123,7 @@ subtest 'Server header added to responses (4.2)' => sub {
         ['content-length', '2'],
     ];
     my $response = $protocol->serialize_response_start(200, $headers);
-    like($response, qr/Server: PAGI\//, "Default Server header added");
+    like($response, qr/Server: PAGI::Server\//, "Default Server header added");
 
     # Response with custom Server header - should NOT add default
     my $headers_with_server = [
@@ -132,7 +132,7 @@ subtest 'Server header added to responses (4.2)' => sub {
     ];
     $response = $protocol->serialize_response_start(200, $headers_with_server);
     like($response, qr/MyCustomServer/, "Custom Server header preserved");
-    unlike($response, qr/Server: PAGI\//, "Default Server header NOT added when custom provided");
+    unlike($response, qr/Server: PAGI::Server\//, "Default Server header NOT added when custom provided");
 };
 
 subtest 'Server header in actual responses' => sub {
@@ -203,7 +203,7 @@ subtest 'Server header in actual responses' => sub {
     }
     close($sock);
 
-    like($response, qr/Server: PAGI\//, "Response includes Server header");
+    like($response, qr/Server: PAGI::Server\//, "Response includes Server header");
 
     $server->shutdown->get;
     eval { $loop->remove($server) };

@@ -12,7 +12,6 @@ use IO::Async::Timer::Countdown;
 use Time::HiRes qw(gettimeofday tv_interval);
 use PAGI::Util::AsyncFile;
 
-our $VERSION = '0.001';
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
 
@@ -125,6 +124,7 @@ sub new {
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         disable_sendfile  => $args{disable_sendfile} // 0,  # Disable sendfile even if available
+        sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (0=always async)
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -1872,7 +1872,7 @@ async sub _send_file_response {
     die "Cannot stat file $file: $!" unless defined $file_size;
     $length //= $file_size - $offset;
 
-    if ($length <= FILE_CHUNK_SIZE) {
+    if ($self->{sync_file_threshold} > 0 && $length <= $self->{sync_file_threshold}) {
         # Small file fast path: read directly in-process (no syscall/IPC overhead)
         # For files <= 64KB, a simple read() beats sendfile() due to syscall overhead
         open my $fh, '<:raw', $file or die "Cannot open file $file: $!";

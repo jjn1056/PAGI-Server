@@ -1,6 +1,9 @@
 package PAGI::Server;
 use strict;
 use warnings;
+
+our $VERSION = '0.001001';
+
 use parent 'IO::Async::Notifier';
 use IO::Async::Listener;
 use IO::Async::Stream;
@@ -14,7 +17,6 @@ use POSIX ();
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
 
-our $VERSION = '0.001';
 
 # Check TLS module availability (cached at load time for banner display)
 our $TLS_AVAILABLE;
@@ -63,6 +65,32 @@ This is NOT a production server - it prioritizes spec compliance and code
 clarity over performance optimization. It serves as the canonical reference
 for how PAGI servers should behave.
 
+=head1 PROTOCOL SUPPORT
+
+B<Currently supported:>
+
+=over 4
+
+=item * HTTP/1.1 (full support including chunked encoding, trailers, keepalive)
+
+=item * WebSocket (RFC 6455)
+
+=item * Server-Sent Events (SSE)
+
+=back
+
+B<Not yet implemented:>
+
+=over 4
+
+=item * HTTP/2 - Planned for a future release
+
+=item * HTTP/3 (QUIC) - Under consideration
+
+=back
+
+For HTTP/2 support today, run PAGI::Server behind a reverse proxy like nginx
+or Caddy that handles HTTP/2 on the frontend and speaks HTTP/1.1 to PAGI.
 
 =head1 WINDOWS SUPPORT
 
@@ -411,6 +439,31 @@ B<CLI:> C<--disable-sendfile>
 B<Startup banner:> Shows sendfile status: C<on>, C<off (Sys::Sendfile not installed)>,
 C<disabled>, or C<n/a (disabled)>.
 
+=item sync_file_threshold => $bytes
+
+Threshold in bytes for synchronous file reads. Files smaller than this value
+are read synchronously in the event loop; larger files use async I/O via
+worker pool or sendfile.
+
+B<Default:> 65536 (64KB)
+
+Set to 0 for fully async file reads. This is recommended for:
+
+=over 4
+
+=item * Network filesystems (NFS, SMB, cloud storage)
+
+=item * High-latency storage (spinning disks under load)
+
+=item * Docker volumes with overlay filesystem
+
+=back
+
+The default (64KB) is optimized for local SSDs where small synchronous reads
+are faster than the overhead of async I/O.
+
+B<CLI:> C<--sync-file-threshold NUM>
+
 =item max_requests => $count
 
 Maximum number of requests a worker process will handle before restarting.
@@ -718,6 +771,7 @@ sub _init {
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
     $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
+    $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -1362,6 +1416,7 @@ sub _on_connection {
         max_receive_queue => $self->{max_receive_queue},
         max_ws_frame_size => $self->{max_ws_frame_size},
         disable_sendfile  => $self->{disable_sendfile},
+        sync_file_threshold => $self->{sync_file_threshold},
     );
 
     # Track the connection (O(1) hash insert)
