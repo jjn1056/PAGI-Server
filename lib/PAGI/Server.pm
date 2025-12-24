@@ -505,9 +505,14 @@ sub _init {
     $self->{host}             = delete $params->{host} // '127.0.0.1';
     $self->{port}             = delete $params->{port} // 5000;
     $self->{ssl}              = delete $params->{ssl};
+    $self->{disable_tls}      = delete $params->{disable_tls} // 0;  # Extract early for validation
 
     # Validate SSL certificate files at startup (fail fast)
+    # Skip validation if TLS is explicitly disabled
     if (my $ssl = $self->{ssl}) {
+        if ($self->{disable_tls}) {
+            die "TLS is disabled via disable_tls option\n";
+        }
         if (my $cert = $ssl->{cert_file}) {
             die "SSL certificate file not found: $cert\n" unless -e $cert;
             die "SSL certificate file not readable: $cert\n" unless -r $cert;
@@ -545,7 +550,6 @@ sub _init {
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
     $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
-    $self->{disable_tls}         = delete $params->{disable_tls} // 0;  # Disable TLS support (for testing)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
