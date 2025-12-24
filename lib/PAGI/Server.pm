@@ -17,6 +17,8 @@ use PAGI::Server::Protocol::HTTP1;
 
 our $VERSION = '0.001';
 
+=encoding utf8
+
 =head1 NAME
 
 PAGI::Server - PAGI Reference Server Implementation

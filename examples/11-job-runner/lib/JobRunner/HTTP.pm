@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Future::AsyncAwait;
-use JSON::PP;
+use JSON::MaybeXS;
 use File::Spec;
 use File::Basename;
 
@@ -15,7 +15,7 @@ use JobRunner::Queue qw(
 use JobRunner::Jobs qw(get_job_types get_job_type validate_job_params);
 use JobRunner::Worker qw(get_worker_stats);
 
-my $JSON = JSON::PP->new->utf8->canonical->allow_nonref;
+my $JSON = JSON::MaybeXS->new->utf8->canonical->allow_nonref;
 
 # MIME types for static files
 my %MIME_TYPES = (
@@ -215,7 +215,7 @@ sub _cancel_job {
     my $success = cancel_job($job_id);
 
     if ($success) {
-        return _json_response(200, { success => JSON::PP::true, job_id => $job_id });
+        return _json_response(200, { success => JSON::MaybeXS::true, job_id => $job_id });
     } else {
         return _json_response(400, {
             error => "Cannot cancel job in status: $job->{status}",

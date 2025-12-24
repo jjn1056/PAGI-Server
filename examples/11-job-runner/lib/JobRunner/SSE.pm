@@ -4,13 +4,13 @@ use strict;
 use warnings;
 
 use Future::AsyncAwait;
-use JSON::PP;
+use JSON::MaybeXS;
 
 use JobRunner::Queue qw(
     get_job add_job_subscriber remove_job_subscriber
 );
 
-my $JSON = JSON::PP->new->utf8->canonical->allow_nonref;
+my $JSON = JSON::MaybeXS->new->utf8->canonical->allow_nonref;
 
 sub handler {
     return async sub  {

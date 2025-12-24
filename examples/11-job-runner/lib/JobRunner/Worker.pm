@@ -2,6 +2,8 @@ package JobRunner::Worker;
 
 use strict;
 use warnings;
+use feature 'signatures';
+no warnings 'experimental::signatures';
 
 use Exporter 'import';
 use Future::AsyncAwait;

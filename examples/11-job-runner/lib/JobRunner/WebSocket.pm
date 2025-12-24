@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Future::AsyncAwait;
-use JSON::PP;
+use JSON::MaybeXS;
 use IO::Async::Loop;
 use IO::Async::Timer::Periodic;
 use Scalar::Util qw(weaken);
@@ -16,7 +16,7 @@ use JobRunner::Queue qw(
 use JobRunner::Jobs qw(get_job_types validate_job_params);
 use JobRunner::Worker qw(get_worker_stats);
 
-my $JSON = JSON::PP->new->utf8->canonical->allow_nonref;
+my $JSON = JSON::MaybeXS->new->utf8->canonical->allow_nonref;
 
 sub handler {
     return async sub  {
@@ -177,7 +177,7 @@ async sub _handle_cancel_job {
         await _send_json($send, {
             type    => 'job_cancelled_ack',
             job_id  => $job_id,
-            success => JSON::PP::true,
+            success => JSON::MaybeXS::true,
         });
     } else {
         my $job = get_job($job_id);

@@ -1,7 +1,7 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
-use JSON::PP (); # for pretty output (optional)
+use JSON::MaybeXS (); # for pretty output (optional)
 
 async sub drain_body {
     my ($receive) = @_;
@@ -37,7 +37,7 @@ async sub app {
     my $tls = $scope->{extensions}{tls};
     my $body;
     if ($tls) {
-        $body = "TLS info:\n" . JSON::PP->new->pretty(1)->encode({
+        $body = "TLS info:\n" . JSON::MaybeXS->new->pretty(1)->encode({
             tls_version  => sprintf('0x%04x', $tls->{tls_version} // 0),
             cipher_suite => defined $tls->{cipher_suite} ? sprintf('0x%04x', $tls->{cipher_suite}) : undef,
             client_cert  => $tls->{client_cert_name},
