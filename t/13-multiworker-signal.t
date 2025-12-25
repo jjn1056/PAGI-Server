@@ -182,9 +182,9 @@ subtest 'No zombie worker processes after shutdown' => sub {
     # - Not installed on some systems (OpenBSD uses fstat, minimal containers lack it)
     # - Permission issues in sandboxed/container environments
     # - Different PATH configurations on CI systems
-    # Skip under automated testing - signal handling is already tested by subtests 1 & 2
-    if ($ENV{AUTOMATED_TESTING} || $ENV{NONINTERACTIVE_TESTING}) {
-        plan skip_all => 'lsof-based test skipped under automated testing';
+    # Only run with RELEASE_TESTING - signal handling is already tested by subtests 1 & 2
+    unless ($ENV{RELEASE_TESTING}) {
+        plan skip_all => 'lsof-based test requires RELEASE_TESTING=1';
         return;
     }
 

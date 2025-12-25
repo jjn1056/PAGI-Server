@@ -39,11 +39,11 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # =============================================================================
 
 subtest 'Active request should complete during shutdown' => sub {
-    # Skip this test under automated testing - it tests unimplemented behavior
+    # Only run with RELEASE_TESTING - this tests unimplemented behavior
     # (graceful shutdown, see issue 2.4) and has timing assumptions that fail
     # on slow/loaded systems like ARM smoke testers
-    if ($ENV{AUTOMATED_TESTING} || $ENV{NONINTERACTIVE_TESTING}) {
-        plan skip_all => 'Graceful shutdown not yet implemented - timing-sensitive test skipped under automated testing';
+    unless ($ENV{RELEASE_TESTING}) {
+        plan skip_all => 'Timing-sensitive test requires RELEASE_TESTING=1';
         return;
     }
 
