@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.001001';
+our $VERSION = '0.001002';
 
 use parent 'IO::Async::Notifier';
 use IO::Async::Listener;
