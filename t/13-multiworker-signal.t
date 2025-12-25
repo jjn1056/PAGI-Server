@@ -178,6 +178,15 @@ subtest 'Multi-worker terminates on SIGTERM' => sub {
 };
 
 subtest 'No zombie worker processes after shutdown' => sub {
+    # This test uses lsof which may not be available on all systems (e.g., OpenBSD uses fstat)
+    # Skip if lsof is not available or we're in automated testing on non-Linux
+    my $has_lsof = `which lsof 2>/dev/null`;
+    chomp($has_lsof);
+    if (!$has_lsof || ($ENV{AUTOMATED_TESTING} && $^O !~ /linux/i)) {
+        plan skip_all => 'lsof not available or unreliable on this platform';
+        return;
+    }
+
     my $port = 5500 + int(rand(100));
 
     # Fork a process to run the server
