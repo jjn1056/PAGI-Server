@@ -492,6 +492,34 @@ are faster than the overhead of async I/O.
 
 B<CLI:> C<--sync-file-threshold NUM>
 
+=item sendfile_timeout => $seconds
+
+Timeout in seconds for sendfile() socket writability. When using sendfile()
+for large file transfers, the socket buffer may fill up, requiring the server
+to wait for the client to drain it. This timeout prevents indefinite waits.
+
+B<Default:> 30 seconds
+
+This timeout protects against:
+
+=over 4
+
+=item * Slow or unresponsive clients that accept connections but read slowly
+
+=item * Network congestion causing socket buffer backpressure
+
+=item * Malicious clients attempting to tie up server resources
+
+=back
+
+B<Example:>
+
+    # Increase timeout for slow network conditions
+    my $server = PAGI::Server->new(
+        app => $app,
+        sendfile_timeout => 60,  # 60 seconds
+    );
+
 =item max_requests => $count
 
 Maximum number of requests a worker process will handle before restarting.
@@ -768,6 +796,30 @@ the worker pool method, which is more portable but slightly slower:
 
 =back
 
+=head2 Troubleshooting Sendfile Issues
+
+B<Error: "sendfile write timeout after N seconds">
+
+This error occurs when the client cannot drain the socket buffer fast enough.
+Common causes and solutions:
+
+=over 4
+
+=item * B<Slow Clients:> Clients on slow networks may need more time. Increase
+the C<sendfile_timeout> parameter or use C<< disable_sendfile => 1 >> to use
+the more portable worker pool fallback.
+
+=item * B<Large Files:> Very large files may need longer timeouts. Consider
+using a dedicated file server (nginx, CDN) for large static assets.
+
+=back
+
+B<FreeBSD-Specific Notes:>
+
+FreeBSD's sendfile() implementation returns C<EAGAIN> with zero bytes sent
+when the socket buffer is completely full. PAGI handles this correctly, but
+constrained environments may hit the timeout more easily.
+
 =head1 ENABLING TLS SUPPORT
 
 PAGI::Server supports HTTPS/TLS connections, but requires additional modules
@@ -968,6 +1020,7 @@ sub _init {
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
     $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
+    $self->{sendfile_timeout}    = delete $params->{sendfile_timeout};  # Timeout for sendfile socket writability (undef = use Connection default)
     $self->{request_timeout}     = delete $params->{request_timeout} // 30;  # Request stall timeout in seconds (0 = disabled)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
@@ -1058,6 +1111,9 @@ sub configure {
     }
     if (exists $params{disable_sendfile}) {
         $self->{disable_sendfile} = delete $params{disable_sendfile};
+    }
+    if (exists $params{sendfile_timeout}) {
+        $self->{sendfile_timeout} = delete $params{sendfile_timeout};
     }
     if (exists $params{request_timeout}) {
         $self->{request_timeout} = delete $params{request_timeout};
@@ -1643,6 +1699,7 @@ sub _on_connection {
         max_ws_frame_size => $self->{max_ws_frame_size},
         disable_sendfile  => $self->{disable_sendfile},
         sync_file_threshold => $self->{sync_file_threshold},
+        (defined $self->{sendfile_timeout} ? (sendfile_timeout => $self->{sendfile_timeout}) : ()),
     );
 
     # Track the connection (O(1) hash insert)

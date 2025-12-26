@@ -14,6 +14,7 @@ use PAGI::Util::AsyncFile;
 
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
+use constant DEFAULT_SENDFILE_TIMEOUT => 30;  # Default timeout for sendfile socket writability (seconds)
 
 # Try to load Sys::Sendfile for zero-copy file transfers
 # Falls back to chunked reads if not available
@@ -105,6 +106,17 @@ connection. It handles:
 
 =back
 
+=head2 Sendfile Timeout Configuration
+
+When using sendfile() for large file transfers, the socket buffer may fill
+up faster than the client can drain it. The C<sendfile_timeout> parameter
+controls how long to wait for the socket to become writable before giving up.
+
+B<Default:> 30 seconds
+
+Configure via the C<sendfile_timeout> parameter in L<PAGI::Server> or
+directly in the Connection constructor.
+
 =cut
 
 sub new {
@@ -128,6 +140,7 @@ sub new {
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         disable_sendfile  => $args{disable_sendfile} // 0,  # Disable sendfile even if available
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (0=always async)
+        sendfile_timeout  => $args{sendfile_timeout} // DEFAULT_SENDFILE_TIMEOUT,  # Timeout for sendfile socket writability (seconds)
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -2039,7 +2052,7 @@ sub _can_use_sendfile {
 # Wait for socket to become writable (non-blocking, with timeout)
 # Used by sendfile loop when socket buffer is full (EAGAIN condition)
 # Returns a Future that resolves when socket is writable or fails on timeout/error
-use constant SENDFILE_WRITE_TIMEOUT => 30;  # seconds
+use constant DEFAULT_SENDFILE_TIMEOUT => 30;  # seconds
 
 sub _wait_for_writable {
     my ($self, $socket) = @_;
@@ -2066,8 +2079,9 @@ sub _wait_for_writable {
     $watching = 1;
 
     # Set up timeout to prevent infinite wait
-    my $timeout_f = $loop->delay_future(after => SENDFILE_WRITE_TIMEOUT)->then(sub {
-        Future->fail('sendfile write timeout after ' . SENDFILE_WRITE_TIMEOUT . ' seconds');
+    my $timeout = $self->{sendfile_timeout};
+    my $timeout_f = $loop->delay_future(after => $timeout)->then(sub {
+        Future->fail("sendfile write timeout after $timeout seconds");
     });
 
     # Race between write ready and timeout

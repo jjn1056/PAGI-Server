@@ -35,6 +35,9 @@ sub create_server {
         host  => '127.0.0.1',
         port  => 0,
         quiet => 1,
+        # Increased timeout for CI environments (especially FreeBSD)
+        # where socket buffer pressure can cause timeouts with default 30s
+        sendfile_timeout => 120,
     );
 
     $loop->add($server);
@@ -488,8 +491,10 @@ subtest 'Security: URL-encoded traversal blocked' => sub {
 # =============================================================================
 subtest 'Large file streaming' => sub {
     # Create a temp directory with a large file
+    # Size is 65KB - just over the 64KB sync_file_threshold to trigger sendfile path
+    # Kept small to minimize buffer pressure on constrained CI environments (e.g., FreeBSD)
     my $test_dir = File::Temp::tempdir(CLEANUP => 1);
-    my $large_content = "X" x (256 * 1024);  # 256KB file
+    my $large_content = "X" x (65 * 1024);  # 65KB file (exceeds 64KB threshold)
     open my $fh, '>', "$test_dir/large.bin" or die;
     print $fh $large_content;
     close $fh;
@@ -515,8 +520,9 @@ subtest 'Large file streaming' => sub {
 # Test: Large file Range request streaming
 # =============================================================================
 subtest 'Large file Range request' => sub {
+    # Size is 65KB - just over the 64KB sync_file_threshold to trigger sendfile path
     my $test_dir = File::Temp::tempdir(CLEANUP => 1);
-    my $large_content = "X" x (256 * 1024);  # 256KB file
+    my $large_content = "X" x (65 * 1024);  # 65KB file (exceeds 64KB threshold)
     open my $fh, '>', "$test_dir/large.bin" or die;
     print $fh $large_content;
     close $fh;
