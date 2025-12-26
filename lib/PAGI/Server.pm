@@ -554,9 +554,26 @@ Maximum time in seconds a request can stall without any I/O activity before
 being terminated. This is a "stall timeout" - the timer resets whenever data
 is read from the client or written to the client.
 
-B<Default:> 30 (seconds)
+B<Default:> 0 (disabled)
 
-Set to 0 to disable request timeout entirely.
+B<Why disabled by default:> Creating per-request timers adds overhead that
+impacts throughput on high-performance workloads. For maximum performance,
+this is disabled by default. Most production deployments run behind a reverse
+proxy (nginx, haproxy) which provides its own timeout protection.
+
+B<When to enable:>
+
+=over 4
+
+=item * Running PAGI directly without a reverse proxy
+
+=item * Small/internal apps where simplicity matters more than max throughput
+
+=item * Untrusted clients that might send data slowly or hang
+
+=item * Defense against application bugs that cause requests to hang indefinitely
+
+=back
 
 B<How it works:>
 
@@ -570,41 +587,23 @@ B<How it works:>
 
 =item * If timer expires (no I/O for N seconds), connection is closed
 
-=item * Timer is stopped for WebSocket/SSE connections (they have their own idle handling)
-
-=back
-
-B<Use cases:>
-
-=over 4
-
-=item * Protect against slow loris attacks (clients that send data very slowly)
-
-=item * Prevent runaway requests that hang indefinitely
-
-=item * Free resources from stalled connections
+=item * Not used for WebSocket/SSE (they have C<ws_idle_timeout>/C<sse_idle_timeout>)
 
 =back
 
 B<Example:>
 
-    # Short timeout for API endpoints
+    # Enable 30 second stall timeout (recommended when not behind proxy)
     my $server = PAGI::Server->new(
         app             => $app,
-        request_timeout => 10,  # 10 second stall timeout
-    );
-
-    # Disable for long-running uploads
-    my $server = PAGI::Server->new(
-        app             => $app,
-        request_timeout => 0,  # Disabled
+        request_timeout => 30,
     );
 
 B<CLI:> C<--request-timeout 30>
 
 B<Note:> This differs from C<timeout> (idle connection timeout). The
 C<timeout> applies between requests on keep-alive connections. The
-C<request_timeout> applies during request processing.
+C<request_timeout> applies during active request processing.
 
 =item ws_idle_timeout => $seconds
 
@@ -1021,7 +1020,7 @@ sub _init {
     $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
     $self->{sendfile_timeout}    = delete $params->{sendfile_timeout};  # Timeout for sendfile socket writability (undef = use Connection default)
-    $self->{request_timeout}     = delete $params->{request_timeout} // 30;  # Request stall timeout in seconds (0 = disabled)
+    $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
 

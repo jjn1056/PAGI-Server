@@ -152,8 +152,8 @@ subtest 'request_timeout=0 disables timeout' => sub {
     is($server->{request_timeout}, 0, 'request_timeout is 0 (disabled)');
 };
 
-# Test: Default request_timeout is 30 seconds
-subtest 'default request_timeout is 30 seconds' => sub {
+# Test: Default request_timeout is 0 (disabled for performance)
+subtest 'default request_timeout is 0 (disabled)' => sub {
     my $server = PAGI::Server->new(
         app => async sub {
             my ($scope, $receive, $send) = @_;
@@ -164,7 +164,7 @@ subtest 'default request_timeout is 30 seconds' => sub {
         quiet => 1,
     );
 
-    is($server->{request_timeout}, 30, 'default request_timeout is 30 seconds');
+    is($server->{request_timeout}, 0, 'default request_timeout is 0 (disabled for performance)');
 };
 
 done_testing;
