@@ -325,9 +325,14 @@ sub _try_handle_request {
         $self->{request_future} = $self->_handle_request($request);
     }
 
-    # Retain the future to prevent warning if connection is destroyed
-    # while request is still being processed
-    $self->{request_future}->retain;
+    # Use adopt_future for proper error tracking instead of retain
+    # This ensures errors are propagated to the server's error handling
+    if ($self->{server}) {
+        $self->{server}->adopt_future($self->{request_future});
+    } else {
+        # Fallback if no server (shouldn't happen in normal use)
+        $self->{request_future}->retain;
+    }
 }
 
 sub _is_websocket_upgrade {
@@ -1208,7 +1213,9 @@ async sub _handle_sse_request {
     }
 
     # Send chunked terminator if SSE was started (uses chunked encoding)
-    if ($self->{sse_started} && !$self->{closed}) {
+    # Check both closed flag and that stream is still writable
+    if ($self->{sse_started} && !$self->{closed} &&
+        $self->{stream} && $self->{stream}->write_handle) {
         $self->{stream}->write("0\r\n\r\n");
     }
 
