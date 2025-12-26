@@ -327,12 +327,7 @@ sub _try_handle_request {
 
     # Use adopt_future for proper error tracking instead of retain
     # This ensures errors are propagated to the server's error handling
-    if ($self->{server}) {
-        $self->{server}->adopt_future($self->{request_future});
-    } else {
-        # Fallback if no server (shouldn't happen in normal use)
-        $self->{request_future}->retain;
-    }
+    $self->{server}->adopt_future($self->{request_future});
 }
 
 sub _is_websocket_upgrade {
