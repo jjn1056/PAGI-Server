@@ -520,6 +520,118 @@ B<CLI:> C<--max-requests 10000>
 Example: With 4 workers and max_requests=10000, total capacity before any
 restart is 40,000 requests. Workers restart individually without downtime.
 
+=item request_timeout => $seconds
+
+Maximum time in seconds a request can stall without any I/O activity before
+being terminated. This is a "stall timeout" - the timer resets whenever data
+is read from the client or written to the client.
+
+B<Default:> 30 (seconds)
+
+Set to 0 to disable request timeout entirely.
+
+B<How it works:>
+
+=over 4
+
+=item * Timer starts when request processing begins
+
+=item * Timer resets on any read activity (receiving request body)
+
+=item * Timer resets on any write activity (sending response)
+
+=item * If timer expires (no I/O for N seconds), connection is closed
+
+=item * Timer is stopped for WebSocket/SSE connections (they have their own idle handling)
+
+=back
+
+B<Use cases:>
+
+=over 4
+
+=item * Protect against slow loris attacks (clients that send data very slowly)
+
+=item * Prevent runaway requests that hang indefinitely
+
+=item * Free resources from stalled connections
+
+=back
+
+B<Example:>
+
+    # Short timeout for API endpoints
+    my $server = PAGI::Server->new(
+        app             => $app,
+        request_timeout => 10,  # 10 second stall timeout
+    );
+
+    # Disable for long-running uploads
+    my $server = PAGI::Server->new(
+        app             => $app,
+        request_timeout => 0,  # Disabled
+    );
+
+B<CLI:> C<--request-timeout 30>
+
+B<Note:> This differs from C<timeout> (idle connection timeout). The
+C<timeout> applies between requests on keep-alive connections. The
+C<request_timeout> applies during request processing.
+
+=item ws_idle_timeout => $seconds
+
+Maximum time in seconds a WebSocket connection can be idle without any
+activity (no messages sent or received) before being closed.
+
+B<Default:> 0 (disabled - WebSocket connections can be idle indefinitely)
+
+When enabled, the timer resets on:
+
+=over 4
+
+=item * Sending any WebSocket frame (accept, send, ping, close)
+
+=item * Receiving any WebSocket frame from client
+
+=back
+
+B<Example:>
+
+    # Close idle WebSocket connections after 5 minutes
+    my $server = PAGI::Server->new(
+        app             => $app,
+        ws_idle_timeout => 300,
+    );
+
+B<CLI:> C<--ws-idle-timeout 300>
+
+B<Note:> For more sophisticated keep-alive behavior with ping/pong, use
+the C<PAGI::Middleware::WebSocket::Heartbeat> middleware instead.
+
+=item sse_idle_timeout => $seconds
+
+Maximum time in seconds an SSE connection can be idle without any events
+being sent before being closed.
+
+B<Default:> 0 (disabled - SSE connections can be idle indefinitely)
+
+The timer resets each time an event is sent to the client (including
+comments and the initial headers).
+
+B<Example:>
+
+    # Close idle SSE connections after 2 minutes
+    my $server = PAGI::Server->new(
+        app              => $app,
+        sse_idle_timeout => 120,
+    );
+
+B<CLI:> C<--sse-idle-timeout 120>
+
+B<Note:> For SSE connections that may be legitimately idle, consider
+using the C<PAGI::Middleware::SSE::Heartbeat> middleware to send
+periodic comment keepalives.
+
 =back
 
 =head1 METHODS
@@ -856,6 +968,9 @@ sub _init {
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
     $self->{disable_sendfile}    = delete $params->{disable_sendfile} // 0;  # Disable sendfile() syscall for file responses
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
+    $self->{request_timeout}     = delete $params->{request_timeout} // 30;  # Request stall timeout in seconds (0 = disabled)
+    $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
+    $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -943,6 +1058,15 @@ sub configure {
     }
     if (exists $params{disable_sendfile}) {
         $self->{disable_sendfile} = delete $params{disable_sendfile};
+    }
+    if (exists $params{request_timeout}) {
+        $self->{request_timeout} = delete $params{request_timeout};
+    }
+    if (exists $params{ws_idle_timeout}) {
+        $self->{ws_idle_timeout} = delete $params{ws_idle_timeout};
+    }
+    if (exists $params{sse_idle_timeout}) {
+        $self->{sse_idle_timeout} = delete $params{sse_idle_timeout};
     }
 
     $self->SUPER::configure(%params);
@@ -1510,6 +1634,9 @@ sub _on_connection {
         state             => $self->{state},
         tls_enabled       => $self->{tls_enabled} // 0,
         timeout           => $self->{timeout},
+        request_timeout   => $self->{request_timeout},
+        ws_idle_timeout   => $self->{ws_idle_timeout},
+        sse_idle_timeout  => $self->{sse_idle_timeout},
         max_body_size     => $self->{max_body_size},
         access_log        => $self->{access_log},
         max_receive_queue => $self->{max_receive_queue},

@@ -119,6 +119,9 @@ sub new {
         state         => $args{state} // {},
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
+        request_timeout => $args{request_timeout} // 30,  # Request stall timeout in seconds (0 = disabled)
+        ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
+        sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
         access_log        => $args{access_log},     # Filehandle for access logging
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
@@ -132,6 +135,9 @@ sub new {
         response_status  => undef,  # Track response status for logging
         request_start    => undef,  # Track request start time for logging
         idle_timer    => undef,  # IO::Async::Timer for idle timeout
+        stall_timer   => undef,  # IO::Async::Timer for request stall timeout
+        ws_idle_timer => undef,  # IO::Async::Timer for WebSocket idle timeout
+        sse_idle_timer => undef, # IO::Async::Timer for SSE idle timeout
         # Event queue for $receive
         receive_queue   => [],
         receive_pending => undef,
@@ -214,6 +220,9 @@ sub start {
             # Reset idle timer on any read activity
             $weak_self->_reset_idle_timer;
 
+            # Reset stall timer on read activity (if handling a request)
+            $weak_self->_reset_stall_timer if $weak_self->{handling_request};
+
             $weak_self->{buffer} .= $$buffref;
             $$buffref = '';
 
@@ -276,6 +285,145 @@ sub _stop_idle_timer {
     $self->{idle_timer} = undef;
 }
 
+# Request stall timeout - closes connection if no I/O activity during request processing
+sub _start_stall_timer {
+    my ($self) = @_;
+
+    return unless $self->{request_timeout} && $self->{request_timeout} > 0;
+    return unless $self->{server};
+    return if $self->{stall_timer};  # Already running
+
+    weaken(my $weak_self = $self);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $self->{request_timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            # Log the timeout
+            if ($weak_self->{server} && $weak_self->{server}->can('_log')) {
+                $weak_self->{server}->_log(warn =>
+                    "Request stall timeout ($weak_self->{request_timeout}s) - closing connection");
+            }
+            $weak_self->_close;
+        },
+    );
+    $self->{stall_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _reset_stall_timer {
+    my ($self) = @_;
+
+    return unless $self->{stall_timer};
+    $self->{stall_timer}->reset;
+    $self->{stall_timer}->start unless $self->{stall_timer}->is_running;
+}
+
+sub _stop_stall_timer {
+    my ($self) = @_;
+
+    return unless $self->{stall_timer};
+    $self->{stall_timer}->stop if $self->{stall_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($self->{stall_timer});
+    }
+    $self->{stall_timer} = undef;
+}
+
+# WebSocket idle timeout - closes connection if no activity
+sub _start_ws_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{ws_idle_timeout} && $self->{ws_idle_timeout} > 0;
+    return unless $self->{server};
+    return if $self->{ws_idle_timer};
+
+    weaken(my $weak_self = $self);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $self->{ws_idle_timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            if ($weak_self->{server} && $weak_self->{server}->can('_log')) {
+                $weak_self->{server}->_log(warn =>
+                    "WebSocket idle timeout ($weak_self->{ws_idle_timeout}s) - closing connection");
+            }
+            $weak_self->_close;
+        },
+    );
+    $self->{ws_idle_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _reset_ws_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{ws_idle_timer};
+    $self->{ws_idle_timer}->reset;
+    $self->{ws_idle_timer}->start unless $self->{ws_idle_timer}->is_running;
+}
+
+sub _stop_ws_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{ws_idle_timer};
+    $self->{ws_idle_timer}->stop if $self->{ws_idle_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($self->{ws_idle_timer});
+    }
+    $self->{ws_idle_timer} = undef;
+}
+
+# SSE idle timeout - closes connection if no activity
+sub _start_sse_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{sse_idle_timeout} && $self->{sse_idle_timeout} > 0;
+    return unless $self->{server};
+    return if $self->{sse_idle_timer};
+
+    weaken(my $weak_self = $self);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $self->{sse_idle_timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            if ($weak_self->{server} && $weak_self->{server}->can('_log')) {
+                $weak_self->{server}->_log(warn =>
+                    "SSE idle timeout ($weak_self->{sse_idle_timeout}s) - closing connection");
+            }
+            $weak_self->_close;
+        },
+    );
+    $self->{sse_idle_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _reset_sse_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{sse_idle_timer};
+    $self->{sse_idle_timer}->reset;
+    $self->{sse_idle_timer}->start unless $self->{sse_idle_timer}->is_running;
+}
+
+sub _stop_sse_idle_timer {
+    my ($self) = @_;
+
+    return unless $self->{sse_idle_timer};
+    $self->{sse_idle_timer}->stop if $self->{sse_idle_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($self->{sse_idle_timer});
+    }
+    $self->{sse_idle_timer} = undef;
+}
+
 sub _try_handle_request {
     my ($self) = @_;
 
@@ -322,6 +470,8 @@ sub _try_handle_request {
     } elsif ($is_sse) {
         $self->{request_future} = $self->_handle_sse_request($request);
     } else {
+        # Start stall timer for HTTP requests (WebSocket/SSE have their own handling)
+        $self->_start_stall_timer;
         $self->{request_future} = $self->_handle_request($request);
     }
 
@@ -409,6 +559,9 @@ async sub _handle_request {
 
     # Notify server that request completed (for max_requests tracking)
     $self->{server}->_on_request_complete if $self->{server};
+
+    # Stop stall timer - request completed successfully
+    $self->_stop_stall_timer;
 
     # Determine if we should keep the connection alive
     my $keep_alive = $self->_should_keep_alive($request);
@@ -718,6 +871,9 @@ sub _create_send {
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed};
 
+        # Reset stall timer on write activity
+        $weak_self->_reset_stall_timer;
+
         my $type = $event->{type} // '';
 
         if ($type eq 'http.response.start') {
@@ -997,6 +1153,13 @@ sub _close {
     # Stop idle timer
     $self->_stop_idle_timer;
 
+    # Stop stall timer
+    $self->_stop_stall_timer;
+
+    # Stop WS/SSE idle timers
+    $self->_stop_ws_idle_timer;
+    $self->_stop_sse_idle_timer;
+
     # Complete any pending receive with disconnect
     $self->_handle_disconnect;
 
@@ -1190,6 +1353,7 @@ async sub _handle_sse_request {
 
     $self->{sse_mode} = 1;
     $self->_stop_idle_timer;  # SSE connections are long-lived
+    $self->_start_sse_idle_timer;  # Start SSE-specific idle timer if configured
 
     my $scope = $self->_create_sse_scope($request);
     my $receive = $self->_create_sse_receive($request);
@@ -1310,6 +1474,9 @@ sub _create_sse_send {
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed};
 
+        # Reset SSE idle timer on send activity
+        $weak_self->_reset_sse_idle_timer;
+
         my $type = $event->{type} // '';
 
         if ($type eq 'sse.start') {
@@ -1425,6 +1592,7 @@ async sub _handle_websocket_request {
     my ($self, $request) = @_;
 
     $self->_stop_idle_timer;  # WebSocket connections are long-lived
+    $self->_start_ws_idle_timer;  # Start WebSocket-specific idle timer if configured
 
     my $scope = $self->_create_websocket_scope($request);
     my $receive = $self->_create_websocket_receive($request);
@@ -1579,6 +1747,9 @@ sub _create_websocket_send {
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed};
 
+        # Reset WebSocket idle timer on send activity
+        $weak_self->_reset_ws_idle_timer;
+
         my $type = $event->{type} // '';
 
         if ($type eq 'websocket.accept') {
@@ -1695,6 +1866,9 @@ sub _process_websocket_frames {
 
     return unless $self->{websocket_mode};
     return if $self->{closed};
+
+    # Reset WebSocket idle timer on receive activity
+    $self->_reset_ws_idle_timer;
 
     my $frame = $self->{websocket_frame};
 
