@@ -1257,13 +1257,15 @@ sub _listen_multiworker {
     my $tls_status = $self->_tls_status_string;
     $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, tls: $tls_status)");
 
-    # Set up signal handlers using IO::Async's watch_signal (replaces _setup_parent_signals)
+    # Set up signal handlers for parent process
     # Note: Windows doesn't support Unix signals, so this is skipped there
     # (Multi-worker mode won't work on Windows anyway due to fork() limitations)
     my $loop = $self->loop;
     unless (WIN32) {
+        # Use watch_signal for async signal handling via sigpipe
         $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
         $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
+
         # HUP = graceful restart (replace all workers)
         $loop->watch_signal(HUP => sub { $self->_graceful_restart });
 
@@ -1366,14 +1368,10 @@ sub _spawn_worker {
     my $loop = $self->loop;
     weaken(my $weak_self = $self);
 
-    # Use $loop->fork() instead of POSIX fork() to properly:
-    # 1. Clear $ONE_TRUE_LOOP in child (so child gets fresh loop)
-    # 2. Reset signal handlers in child
-    # 3. Call post_fork() for loop backends that need it (epoll, kqueue)
     my $pid = $loop->fork(
         code => sub {
             $self->_run_as_worker($listen_socket, $worker_num);
-            return 0;  # Exit code (may not be reached if worker calls exit())
+            return 0;
         },
     );
 
@@ -1419,7 +1417,6 @@ sub _spawn_worker {
 sub _run_as_worker {
     my ($self, $listen_socket, $worker_num) = @_;
 
-    # Note: Signal handlers already reset by $loop->fork() (keep_signals defaults to false)
     # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
     my $loop = IO::Async::Loop->new;
 
@@ -1466,6 +1463,9 @@ sub _run_as_worker {
     # (raw $SIG handlers don't work reliably when the loop is running)
     # Note: Windows doesn't support Unix signals, so this is skipped there
     unless (WIN32) {
+        # Workers ignore SIGINT - parent coordinates shutdown via SIGTERM
+        $loop->watch_signal(INT => sub { }); # Empty handler = ignore
+
         my $shutdown_triggered = 0;
         $loop->watch_signal(TERM => sub {
             return if $shutdown_triggered;
