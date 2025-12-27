@@ -1366,25 +1366,16 @@ sub _spawn_worker {
     my $loop = $self->loop;
     weaken(my $weak_self = $self);
 
-    # Temporarily ignore SIGINT before fork so child inherits it.
-    # This prevents race where SIGINT arrives before child can set up handlers.
-    my $old_int = $SIG{INT};
-    $SIG{INT} = 'IGNORE' unless WIN32;
-
     # Use $loop->fork() instead of POSIX fork() to properly:
     # 1. Clear $ONE_TRUE_LOOP in child (so child gets fresh loop)
     # 2. Reset signal handlers in child
     # 3. Call post_fork() for loop backends that need it (epoll, kqueue)
     my $pid = $loop->fork(
-        keep_signals => 1,  # Preserve SIGINT=IGNORE in child
         code => sub {
             $self->_run_as_worker($listen_socket, $worker_num);
             return 0;  # Exit code (may not be reached if worker calls exit())
         },
     );
-
-    # Restore parent's SIGINT handler after fork
-    $SIG{INT} = $old_int unless WIN32;
 
     die "Fork failed" unless defined $pid;
 
@@ -1427,11 +1418,6 @@ sub _spawn_worker {
 
 sub _run_as_worker {
     my ($self, $listen_socket, $worker_num) = @_;
-
-    # Ignore SIGINT immediately - parent handles Ctrl-C and sends SIGTERM to workers.
-    # Must be set before any other setup to prevent race with terminal SIGINT.
-    # (matches Gunicorn convention where master coordinates shutdown)
-    $SIG{INT} = 'IGNORE' unless WIN32;
 
     # Note: Signal handlers already reset by $loop->fork() (keep_signals defaults to false)
     # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
