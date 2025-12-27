@@ -1257,28 +1257,23 @@ sub _listen_multiworker {
     my $tls_status = $self->_tls_status_string;
     $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, tls: $tls_status)");
 
-    # Set up signal handlers for parent process
-    # Note: Windows doesn't support Unix signals, so this is skipped there
-    # (Multi-worker mode won't work on Windows anyway due to fork() limitations)
     my $loop = $self->loop;
-    unless (WIN32) {
-        # Use watch_signal for async signal handling via sigpipe
-        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
-        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
 
-        # HUP = graceful restart (replace all workers)
-        $loop->watch_signal(HUP => sub { $self->_graceful_restart });
-
-        # TTIN = increase workers by 1
-        $loop->watch_signal(TTIN => sub { $self->_increase_workers });
-
-        # TTOU = decrease workers by 1
-        $loop->watch_signal(TTOU => sub { $self->_decrease_workers });
-    }
-
-    # Fork the workers
+    # Fork the workers FIRST, before setting up signal handlers.
+    # This prevents children from inheriting the parent's sigpipe setup,
+    # which can cause issues with Ctrl-C signal delivery on macOS.
     for my $i (1 .. $workers) {
         $self->_spawn_worker($listen_socket, $i);
+    }
+
+    # Set up signal handlers for parent process AFTER forking
+    # Note: Windows doesn't support Unix signals, so this is skipped there
+    unless (WIN32) {
+        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
+        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
+        $loop->watch_signal(HUP => sub { $self->_graceful_restart });
+        $loop->watch_signal(TTIN => sub { $self->_increase_workers });
+        $loop->watch_signal(TTOU => sub { $self->_decrease_workers });
     }
 
     # Store the socket for cleanup during shutdown (only in traditional mode)
@@ -1368,12 +1363,21 @@ sub _spawn_worker {
     my $loop = $self->loop;
     weaken(my $weak_self = $self);
 
+    # Set IGNORE before fork - child inherits it. IO::Async only resets
+    # CODE refs, so 'IGNORE' (a string) survives. Child must NOT call
+    # watch_signal(INT) or it will overwrite the IGNORE.
+    my $old_sigint = $SIG{INT};
+    $SIG{INT} = 'IGNORE' unless WIN32;
+
     my $pid = $loop->fork(
         code => sub {
             $self->_run_as_worker($listen_socket, $worker_num);
             return 0;
         },
     );
+
+    # Restore parent's SIGINT handler
+    $SIG{INT} = $old_sigint unless WIN32;
 
     die "Fork failed" unless defined $pid;
 
@@ -1418,6 +1422,8 @@ sub _run_as_worker {
     my ($self, $listen_socket, $worker_num) = @_;
 
     # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
+    # Note: $SIG{INT} = 'IGNORE' inherited from parent - do NOT call watch_signal(INT)
+    #       or it will overwrite the IGNORE with a CODE ref!
     my $loop = IO::Async::Loop->new;
 
     # In reuseport mode, each worker creates its own listening socket
@@ -1462,10 +1468,9 @@ sub _run_as_worker {
     # Set up graceful shutdown on SIGTERM using IO::Async's signal watching
     # (raw $SIG handlers don't work reliably when the loop is running)
     # Note: Windows doesn't support Unix signals, so this is skipped there
+    # Note: We do NOT set up watch_signal(INT) here - workers inherit $SIG{INT}='IGNORE'
+    #       from parent, so they ignore SIGINT (including Ctrl-C). Parent sends SIGTERM.
     unless (WIN32) {
-        # Workers ignore SIGINT - parent coordinates shutdown via SIGTERM
-        $loop->watch_signal(INT => sub { }); # Empty handler = ignore
-
         my $shutdown_triggered = 0;
         $loop->watch_signal(TERM => sub {
             return if $shutdown_triggered;
