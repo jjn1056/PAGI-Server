@@ -30,9 +30,8 @@ open $fh, '>:raw', $binary_file or die;
 print $fh $binary_content;
 close $fh;
 
-# Large file for chunked transfer / worker pool testing
-# Size is 65KB - just over the 64KB sync_file_threshold to trigger sendfile path
-# Kept small to minimize buffer pressure on constrained CI environments (e.g., FreeBSD)
+# Large file for async I/O testing
+# Size is 65KB - just over the 64KB sync_file_threshold to trigger async path
 my $large_content = "X" x (65 * 1024);  # 65KB to exceed sync threshold
 my $large_file = "$tempdir/large.bin";
 open $fh, '>:raw', $large_file or die;
@@ -71,9 +70,6 @@ sub with_server {
         host => '127.0.0.1',
         port => 0,
         quiet => 1,
-        # Increased timeout for CI environments (especially FreeBSD)
-        # where socket buffer pressure can cause timeouts with default 30s
-        sendfile_timeout => 120,
     );
     $loop->add($server);
     $server->listen->get;
@@ -88,7 +84,7 @@ sub with_server {
     die $err if $err;
 }
 
-subtest 'file response sends full file (with Content-Length - sendfile path)' => sub {
+subtest 'file response sends full file with Content-Length' => sub {
     with_server(
         async sub  {
         my ($scope, $receive, $send) = @_;
@@ -115,8 +111,8 @@ subtest 'file response sends full file (with Content-Length - sendfile path)' =>
     );
 };
 
-subtest 'file response with chunked encoding (worker pool path)' => sub {
-    # No Content-Length = chunked encoding = can't use sendfile = worker pool
+subtest 'file response with chunked encoding' => sub {
+    # No Content-Length = chunked encoding
     with_server(
         async sub  {
         my ($scope, $receive, $send) = @_;
@@ -447,7 +443,7 @@ subtest 'zero-length file works' => sub {
 # Test: Threshold boundary behavior
 # =============================================================================
 # These tests verify that files at exactly the threshold use sync path,
-# and files just over the threshold use sendfile/async path.
+# and files just over the threshold use async path.
 # Default sync_file_threshold is 64KB (65536 bytes).
 
 subtest 'file at exact threshold uses sync path' => sub {
@@ -484,7 +480,7 @@ subtest 'file at exact threshold uses sync path' => sub {
     );
 };
 
-subtest 'file just over threshold uses sendfile path' => sub {
+subtest 'file just over threshold uses async path' => sub {
     # Create a file 1 byte over threshold
     my $over_threshold_content = "Z" x 65537;  # 64KB + 1 byte
     my $over_threshold_file = "$tempdir/over_threshold.bin";
