@@ -1,4 +1,4 @@
-package PAGI::Util::AsyncFile;
+package PAGI::Server::AsyncFile;
 
 use strict;
 use warnings;
@@ -11,38 +11,43 @@ use Scalar::Util qw(blessed);
 
 =head1 NAME
 
-PAGI::Util::AsyncFile - Non-blocking file I/O for PAGI applications
+PAGI::Server::AsyncFile - Non-blocking file I/O for PAGI::Server internals
 
 =head1 SYNOPSIS
 
-    use PAGI::Util::AsyncFile;
+    use PAGI::Server::AsyncFile;
+    use IO::Async::Loop;
 
-    # Get the loop from PAGI scope
-    my $loop = $scope->{pagi}{loop};
+    # Create or obtain an IO::Async::Loop
+    my $loop = IO::Async::Loop->new;
 
     # Read entire file
-    my $content = await PAGI::Util::AsyncFile->read_file($loop, '/path/to/file');
+    my $content = await PAGI::Server::AsyncFile->read_file($loop, '/path/to/file');
 
     # Read file in chunks (streaming)
-    await PAGI::Util::AsyncFile->read_file_chunked($loop, '/path/to/file', async sub  {
+    await PAGI::Server::AsyncFile->read_file_chunked($loop, '/path/to/file', async sub  {
         my ($chunk) = @_;
         # Process each chunk
-        await $send->({ type => 'http.response.body', body => $chunk, more => 1 });
     }, chunk_size => 65536);
 
     # Write file
-    await PAGI::Util::AsyncFile->write_file($loop, '/path/to/file', $content);
+    await PAGI::Server::AsyncFile->write_file($loop, '/path/to/file', $content);
 
     # Append to file
-    await PAGI::Util::AsyncFile->append_file($loop, '/path/to/file', $log_line);
+    await PAGI::Server::AsyncFile->append_file($loop, '/path/to/file', $log_line);
 
 =head1 DESCRIPTION
 
-This module provides non-blocking file I/O operations for use in PAGI async
-applications. It uses L<IO::Async::Function> to offload blocking file operations
-to worker processes, preventing the main event loop from being blocked during
-disk I/O.
+This module provides non-blocking file I/O operations using L<IO::Async::Function>
+worker processes. It is used internally by L<PAGI::Server> for efficient file
+streaming.
 
+B<Note:> This is a PAGI::Server internal module. PAGI applications are
+loop-agnostic and should use synchronous file I/O (which is simple and fast
+for typical file sizes) or bring their own async file library if needed.
+
+It uses L<IO::Async::Function> to offload blocking file operations to worker
+processes, preventing the main event loop from being blocked during disk I/O.
 Regular file I/O in POSIX is always blocking at the kernel level - even
 C<select()>/C<poll()>/C<epoll()> report regular files as always "ready".
 This module works around this limitation by running file operations in
@@ -128,7 +133,7 @@ sub _worker_operation {
 
 =head2 read_file
 
-    my $content = await PAGI::Util::AsyncFile->read_file($loop, $path);
+    my $content = await PAGI::Server::AsyncFile->read_file($loop, $path);
 
 Read the entire contents of a file asynchronously. Returns a Future that
 resolves to the file contents.
@@ -159,13 +164,13 @@ async sub read_file {
 
 =head2 read_file_chunked
 
-    await PAGI::Util::AsyncFile->read_file_chunked($loop, $path, async sub  {
+    await PAGI::Server::AsyncFile->read_file_chunked($loop, $path, async sub  {
         my ($chunk) = @_;
         # Process chunk
     }, chunk_size => 65536);
 
     # For Range requests (partial file):
-    await PAGI::Util::AsyncFile->read_file_chunked($loop, $path, $callback,
+    await PAGI::Server::AsyncFile->read_file_chunked($loop, $path, $callback,
         offset => 1000,      # Start at byte 1000
         length => 5000,      # Read 5000 bytes total
     );
@@ -255,7 +260,7 @@ async sub read_file_chunked {
 
 =head2 write_file
 
-    await PAGI::Util::AsyncFile->write_file($loop, $path, $content);
+    await PAGI::Server::AsyncFile->write_file($loop, $path, $content);
 
 Write content to a file asynchronously, replacing any existing content.
 
@@ -284,7 +289,7 @@ async sub write_file {
 
 =head2 append_file
 
-    await PAGI::Util::AsyncFile->append_file($loop, $path, $content);
+    await PAGI::Server::AsyncFile->append_file($loop, $path, $content);
 
 Append content to a file asynchronously.
 
@@ -313,7 +318,7 @@ async sub append_file {
 
 =head2 file_size
 
-    my $size = await PAGI::Util::AsyncFile->file_size($loop, $path);
+    my $size = await PAGI::Server::AsyncFile->file_size($loop, $path);
 
 Get the size of a file asynchronously.
 
@@ -328,7 +333,7 @@ async sub file_size {
 
 =head2 file_exists
 
-    my $exists = await PAGI::Util::AsyncFile->file_exists($loop, $path);
+    my $exists = await PAGI::Server::AsyncFile->file_exists($loop, $path);
 
 Check if a file exists asynchronously.
 
@@ -343,7 +348,7 @@ async sub file_exists {
 
 =head2 cleanup
 
-    PAGI::Util::AsyncFile->cleanup($loop);
+    PAGI::Server::AsyncFile->cleanup($loop);
 
 Clean up the worker pool for a given loop. Call this during application
 shutdown to properly terminate worker processes.
@@ -396,7 +401,7 @@ state.
 
 =head1 SEE ALSO
 
-L<IO::Async::Function>, L<IO::Async::Loop>
+L<IO::Async::Function>, L<IO::Async::Loop>, L<PAGI::Server>
 
 =head1 AUTHOR
 

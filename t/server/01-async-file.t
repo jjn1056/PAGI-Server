@@ -6,9 +6,9 @@ use IO::Async::Loop;
 use File::Temp qw(tempfile tempdir);
 use File::Spec;
 
-# Test: PAGI::Util::AsyncFile - Non-blocking file I/O
+# Test: PAGI::Server::AsyncFile - Non-blocking file I/O for PAGI::Server
 
-use PAGI::Util::AsyncFile;
+use PAGI::Server::AsyncFile;
 
 my $loop = IO::Async::Loop->new;
 
@@ -21,7 +21,7 @@ subtest 'read_file - small file' => sub {
     print $fh "Hello, World!";
     close $fh;
 
-    my $content = PAGI::Util::AsyncFile->read_file($loop, $filename)->get;
+    my $content = PAGI::Server::AsyncFile->read_file($loop, $filename)->get;
 
     is($content, "Hello, World!", 'read small file correctly');
 };
@@ -33,7 +33,7 @@ subtest 'read_file - binary content' => sub {
     print $fh $binary;
     close $fh;
 
-    my $content = PAGI::Util::AsyncFile->read_file($loop, $filename)->get;
+    my $content = PAGI::Server::AsyncFile->read_file($loop, $filename)->get;
 
     is(length($content), 256, 'read binary file - correct length');
     is($content, $binary, 'read binary file - correct content');
@@ -45,7 +45,7 @@ subtest 'read_file - large file' => sub {
     print $fh $data;
     close $fh;
 
-    my $content = PAGI::Util::AsyncFile->read_file($loop, $filename)->get;
+    my $content = PAGI::Server::AsyncFile->read_file($loop, $filename)->get;
 
     is(length($content), 1024 * 100, 'read large file - correct length');
 };
@@ -53,7 +53,7 @@ subtest 'read_file - large file' => sub {
 subtest 'read_file - file not found' => sub {
     my $error;
     eval {
-        PAGI::Util::AsyncFile->read_file($loop, '/nonexistent/file.txt')->get;
+        PAGI::Server::AsyncFile->read_file($loop, '/nonexistent/file.txt')->get;
     };
     $error = $@;
 
@@ -64,7 +64,7 @@ subtest 'read_file - empty file' => sub {
     my ($fh, $filename) = tempfile(UNLINK => 1);
     close $fh;  # Create empty file
 
-    my $content = PAGI::Util::AsyncFile->read_file($loop, $filename)->get;
+    my $content = PAGI::Server::AsyncFile->read_file($loop, $filename)->get;
 
     is($content, '', 'read empty file correctly');
 };
@@ -79,7 +79,7 @@ subtest 'read_file_chunked - basic' => sub {
     close $fh;
 
     my @chunks;
-    my $total = PAGI::Util::AsyncFile->read_file_chunked(
+    my $total = PAGI::Server::AsyncFile->read_file_chunked(
         $loop, $filename,
         sub  {
         my ($chunk) = @_; push @chunks, $chunk },
@@ -98,7 +98,7 @@ subtest 'read_file_chunked - async callback' => sub {
 
     my @chunks;
     my $callback_count = 0;
-    PAGI::Util::AsyncFile->read_file_chunked(
+    PAGI::Server::AsyncFile->read_file_chunked(
         $loop, $filename,
         async sub  {
         my ($chunk) = @_;
@@ -120,7 +120,7 @@ subtest 'read_file_chunked - single chunk' => sub {
     close $fh;
 
     my @chunks;
-    PAGI::Util::AsyncFile->read_file_chunked(
+    PAGI::Server::AsyncFile->read_file_chunked(
         $loop, $filename,
         sub  {
         my ($chunk) = @_; push @chunks, $chunk },
@@ -139,7 +139,7 @@ subtest 'write_file - basic' => sub {
     my $dir = tempdir(CLEANUP => 1);
     my $filename = File::Spec->catfile($dir, 'test.txt');
 
-    my $bytes = PAGI::Util::AsyncFile->write_file($loop, $filename, "Hello, World!")->get;
+    my $bytes = PAGI::Server::AsyncFile->write_file($loop, $filename, "Hello, World!")->get;
 
     is($bytes, 13, 'returned correct byte count');
     ok(-f $filename, 'file created');
@@ -156,7 +156,7 @@ subtest 'write_file - overwrite existing' => sub {
     print $fh "original content";
     close $fh;
 
-    PAGI::Util::AsyncFile->write_file($loop, $filename, "new content")->get;
+    PAGI::Server::AsyncFile->write_file($loop, $filename, "new content")->get;
 
     open $fh, '<', $filename;
     my $content = do { local $/; <$fh> };
@@ -170,7 +170,7 @@ subtest 'write_file - binary content' => sub {
     my $filename = File::Spec->catfile($dir, 'binary.bin');
 
     my $binary = join('', map { chr($_) } 0..255);
-    PAGI::Util::AsyncFile->write_file($loop, $filename, $binary)->get;
+    PAGI::Server::AsyncFile->write_file($loop, $filename, $binary)->get;
 
     open my $fh, '<:raw', $filename;
     my $content = do { local $/; <$fh> };
@@ -189,7 +189,7 @@ subtest 'append_file - to existing' => sub {
     print $fh "Line 1\n";
     close $fh;
 
-    PAGI::Util::AsyncFile->append_file($loop, $filename, "Line 2\n")->get;
+    PAGI::Server::AsyncFile->append_file($loop, $filename, "Line 2\n")->get;
 
     open $fh, '<', $filename;
     my $content = do { local $/; <$fh> };
@@ -203,9 +203,9 @@ subtest 'append_file - multiple appends' => sub {
     my $filename = File::Spec->catfile($dir, 'log.txt');
 
     (async sub {
-        await PAGI::Util::AsyncFile->append_file($loop, $filename, "Entry 1\n");
-        await PAGI::Util::AsyncFile->append_file($loop, $filename, "Entry 2\n");
-        await PAGI::Util::AsyncFile->append_file($loop, $filename, "Entry 3\n");
+        await PAGI::Server::AsyncFile->append_file($loop, $filename, "Entry 1\n");
+        await PAGI::Server::AsyncFile->append_file($loop, $filename, "Entry 2\n");
+        await PAGI::Server::AsyncFile->append_file($loop, $filename, "Entry 3\n");
     })->()->get;
 
     open my $fh, '<', $filename;
@@ -224,7 +224,7 @@ subtest 'file_size - basic' => sub {
     print $fh "X" x 1234;
     close $fh;
 
-    my $size = PAGI::Util::AsyncFile->file_size($loop, $filename)->get;
+    my $size = PAGI::Server::AsyncFile->file_size($loop, $filename)->get;
 
     is($size, 1234, 'file size correct');
 };
@@ -237,13 +237,13 @@ subtest 'file_exists - existing file' => sub {
     my ($fh, $filename) = tempfile(UNLINK => 1);
     close $fh;
 
-    my $exists = PAGI::Util::AsyncFile->file_exists($loop, $filename)->get;
+    my $exists = PAGI::Server::AsyncFile->file_exists($loop, $filename)->get;
 
     ok($exists, 'existing file returns true');
 };
 
 subtest 'file_exists - nonexistent file' => sub {
-    my $exists = PAGI::Util::AsyncFile->file_exists($loop, '/nonexistent/file.txt')->get;
+    my $exists = PAGI::Server::AsyncFile->file_exists($loop, '/nonexistent/file.txt')->get;
 
     ok(!$exists, 'nonexistent file returns false');
 };
@@ -268,7 +268,7 @@ subtest 'concurrent reads - non-blocking' => sub {
         # Start all reads concurrently
         my @futures = map {
             my $file = $_;
-            PAGI::Util::AsyncFile->read_file($loop, $file);
+            PAGI::Server::AsyncFile->read_file($loop, $file);
         } @files;
 
         # Wait for all to complete
@@ -297,8 +297,8 @@ subtest 'concurrent read and write' => sub {
     (async sub {
         # Do read and write concurrently
         my @futures = (
-            PAGI::Util::AsyncFile->read_file($loop, $read_file),
-            PAGI::Util::AsyncFile->write_file($loop, $write_file, "write this"),
+            PAGI::Server::AsyncFile->read_file($loop, $read_file),
+            PAGI::Server::AsyncFile->write_file($loop, $write_file, "write this"),
         );
 
         my @results = await Future->wait_all(@futures);
@@ -320,7 +320,7 @@ subtest 'write_file - permission denied' => sub {
 
     my $error;
     eval {
-        PAGI::Util::AsyncFile->write_file($loop, '/etc/shadow.test', 'test')->get;
+        PAGI::Server::AsyncFile->write_file($loop, '/etc/shadow.test', 'test')->get;
     };
     $error = $@;
 
@@ -333,7 +333,7 @@ subtest 'write_file - permission denied' => sub {
 
 subtest 'cleanup' => sub {
     # Just verify it doesn't crash
-    ok(lives { PAGI::Util::AsyncFile->cleanup($loop) }, 'cleanup does not crash');
+    ok(lives { PAGI::Server::AsyncFile->cleanup($loop) }, 'cleanup does not crash');
 };
 
 done_testing;

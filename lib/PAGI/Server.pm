@@ -11,6 +11,8 @@ use IO::Async::Loop;
 use IO::Socket::INET;
 use Future;
 use Future::AsyncAwait;
+use Future::IO::Impl::IOAsync;
+
 use Scalar::Util qw(weaken refaddr);
 use POSIX ();
 
@@ -575,7 +577,7 @@ B<Example:>
 B<CLI:> C<--ws-idle-timeout 300>
 
 B<Note:> For more sophisticated keep-alive behavior with ping/pong, use
-the C<PAGI::Middleware::WebSocket::Heartbeat> middleware instead.
+C<< $ws->keepalive($interval, $timeout) >> for protocol-level ping/pong.
 
 =item sse_idle_timeout => $seconds
 
@@ -597,9 +599,35 @@ B<Example:>
 
 B<CLI:> C<--sse-idle-timeout 120>
 
-B<Note:> For SSE connections that may be legitimately idle, consider
-using the C<PAGI::Middleware::SSE::Heartbeat> middleware to send
-periodic comment keepalives.
+B<Note:> For SSE connections that may be legitimately idle, use
+C<< $sse->keepalive($interval) >> to send periodic comment keepalives.
+
+=item loop_type => $backend
+
+Specifies the IO::Async::Loop subclass to use when calling C<run()>.
+This option is ignored when embedding the server in an existing loop.
+
+B<Default:> Auto-detect (IO::Async chooses the best available backend)
+
+B<Common values:>
+
+    'EPoll'   - Linux epoll (recommended for Linux)
+    'EV'      - libev-based (cross-platform, requires EV module)
+    'Poll'    - POSIX poll() (portable fallback)
+    'Select'  - select() (most portable, least scalable)
+
+B<Example:>
+
+    my $server = PAGI::Server->new(
+        app       => $app,
+        loop_type => 'EPoll',
+    );
+    $server->run;
+
+B<CLI:> C<--loop EPoll> (via pagi-server)
+
+B<Note:> The specified backend module must be installed. For example,
+C<loop_type =E<gt> 'EPoll'> requires L<IO::Async::Loop::EPoll>.
 
 =back
 
@@ -1014,6 +1042,7 @@ sub _init {
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
+    $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -1163,6 +1192,85 @@ Then restart your application.
 END_TLS_ERROR
 }
 
+=head2 run
+
+    $server->run;
+
+Standalone entry point that creates an event loop, starts the server,
+and runs until shutdown. This is the simplest way to run a PAGI server:
+
+    my $server = PAGI::Server->new(
+        app  => $app,
+        port => 8080,
+    );
+    $server->run;
+
+For embedding in an existing IO::Async application, use the traditional
+pattern instead:
+
+    my $loop = IO::Async::Loop->new;
+    $loop->add($server);
+    $server->listen->get;
+    $loop->run;
+
+The C<run()> method handles:
+
+=over 4
+
+=item * Creating the event loop (respecting C<loop_type> if set)
+
+=item * Adding the server to the loop
+
+=item * Starting the listener
+
+=item * Setting up signal handlers for graceful shutdown
+
+=item * Running the event loop until shutdown
+
+=back
+
+=cut
+
+sub run {
+    my ($self) = @_;
+
+    my $loop = $self->_create_loop;
+    $loop->add($self);
+
+    # Start listening with error handling
+    eval { $self->listen->get };
+    if ($@) {
+        my $error = $@;
+        my $port = $self->{port};
+        if ($error =~ /Address already in use/i) {
+            die "Error: Port $port is already in use\n";
+        }
+        elsif ($error =~ /Permission denied/i) {
+            die "Error: Permission denied to bind to port $port\n";
+        }
+        die "Error starting server: $error\n";
+    }
+
+    # Run the event loop (signal handlers were set up by listen())
+    $loop->run;
+}
+
+# Create an event loop, respecting loop_type config
+sub _create_loop {
+    my ($self) = @_;
+
+    if (my $loop_type = $self->{loop_type}) {
+        my $loop_class = "IO::Async::Loop::$loop_type";
+        eval "require $loop_class"
+            or die "Cannot load loop backend '$loop_type': $@\n" .
+                   "Install it with: cpanm $loop_class\n";
+        return $loop_class->new;
+    }
+
+    require IO::Async::Loop;
+    return IO::Async::Loop->new;
+}
+
 async sub listen {
     my ($self) = @_;
 
@@ -1288,6 +1396,14 @@ async sub _listen_singleworker {
         };
         $self->loop->watch_signal(TERM => $shutdown_handler);
         $self->loop->watch_signal(INT => $shutdown_handler);
+
+        # HUP in single-worker mode just warns (graceful restart requires multi-worker)
+        my $weak_self = $self;
+        weaken($weak_self);
+        $self->loop->watch_signal(HUP => sub {
+            $weak_self->_log(warn => "Received HUP signal (graceful restart only works in multi-worker mode)")
+                if $weak_self && !$weak_self->{quiet};
+        });
     }
 
     my $scheme = $self->{tls_enabled} ? 'https' : 'http';
@@ -1812,8 +1928,8 @@ async sub _run_lifespan_startup {
     my $scope = {
         type => 'lifespan',
         pagi => {
-            version      => '0.1',
-            spec_version => '0.1',
+            version      => '0.2',
+            spec_version => '0.2',
             is_worker    => $self->{is_worker} // 0,
             worker_num   => $self->{worker_num},  # undef for single-worker, 1-N for multi-worker
         },

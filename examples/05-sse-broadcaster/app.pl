@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 use Future::AsyncAwait;
+use Future::IO;
 
 async sub watch_sse_disconnect {
     my ($receive) = @_;
@@ -29,10 +30,9 @@ async sub app {
         { event => 'done', data => 'finished' },
     );
 
-    my $loop = IO::Async::Loop->new;
     for my $msg (@events) {
         last if $disconnect->is_ready;
-        await $loop->delay_future(after => 1);
+        await Future::IO->sleep(1);
         await $send->({ type => 'sse.send', %$msg });
     }
 
