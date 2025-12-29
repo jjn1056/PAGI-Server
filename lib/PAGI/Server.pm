@@ -11,9 +11,15 @@ use IO::Async::Loop;
 use IO::Socket::INET;
 use Future;
 use Future::AsyncAwait;
-use Future::IO::Impl::IOAsync;
 
 use Scalar::Util qw(weaken refaddr);
+
+# If Future::IO is available, configure it to use IO::Async
+# This enables Future::IO->sleep() etc. in user apps running under PAGI::Server
+BEGIN {
+    eval { require Future::IO::Impl::IOAsync; 1 };
+    # Silently ignore if not installed - Future::IO is optional
+}
 use POSIX ();
 
 use PAGI::Server::Connection;
