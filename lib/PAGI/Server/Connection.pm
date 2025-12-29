@@ -9,6 +9,7 @@ use Protocol::WebSocket::Frame;
 use Digest::SHA qw(sha1_base64);
 use Encode;
 use IO::Async::Timer::Countdown;
+use IO::Async::Timer::Periodic;
 use Time::HiRes qw(gettimeofday tv_interval);
 use PAGI::Server::AsyncFile;
 
