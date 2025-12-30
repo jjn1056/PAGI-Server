@@ -556,10 +556,12 @@ sub _start_sse_keepalive {
             return if $weak_self->{closed};
             return unless $weak_self->{sse_mode};
 
-            # Send comment line
+            # Send comment line with chunked encoding
             my $text = $weak_self->{sse_keepalive_comment};
             $text = ":$text" unless $text =~ /^:/;
-            $weak_self->{stream}->write("$text\n\n");
+            my $chunk = "$text\n\n";
+            my $len = sprintf("%x", length($chunk));
+            $weak_self->{stream}->write("$len\r\n$chunk\r\n");
         },
     );
 
