@@ -381,14 +381,14 @@ B<CLI:> C<--max-ws-frame-size 1048576>
 =item max_connections => $count
 
 Maximum number of concurrent connections before returning HTTP 503.
-Default: 0 (auto-detect from ulimit - 50).
+Default: 0 (auto-detect based on process file descriptor limit).
 
 When at capacity, new connections receive a 503 Service Unavailable
 response with a Retry-After header. This prevents file descriptor
 exhaustion crashes under heavy load.
 
-The auto-detected limit uses: C<ulimit -n> minus 50 for headroom
-(file operations, logging, database connections, etc.).
+The auto-detected limit uses the process soft limit (from
+C<getrlimit(RLIMIT_NOFILE)>) minus C<fd_headroom> (default 100).
 
 B<Example:>
 
@@ -401,6 +401,39 @@ B<CLI:> C<--max-connections 200>
 
 B<Monitoring:> Use C<< $server->connection_count >> and
 C<< $server->effective_max_connections >> to monitor usage.
+
+=item fd_headroom => $count
+
+B<Power user setting.> Number of file descriptors to reserve for
+non-connection use when auto-detecting C<max_connections>.
+Default: 100.
+
+This headroom accounts for: listen socket, worker IPC pipes, log files,
+static file handles, TLS internals, database connections, DNS lookups,
+and other system resources.
+
+B<When to adjust:>
+
+=over 4
+
+=item * B<Increase> (e.g., 150-200) if your application opens many
+database connections, serves many static files simultaneously, or
+uses middleware that opens additional file handles.
+
+=item * B<Decrease> (e.g., 50-75) if running a minimal setup with no
+database, no static files, and you want to maximize connection capacity.
+
+=back
+
+B<Note:> This setting is ignored if C<max_connections> is set explicitly.
+
+B<Example:>
+
+    # Heavy database usage - reserve more headroom
+    my $server = PAGI::Server->new(
+        app         => $app,
+        fd_headroom => 200,
+    );
 
 =item max_body_size => $bytes
 
@@ -1078,6 +1111,7 @@ sub _init {
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = auto-detect
+    $self->{fd_headroom}         = delete $params->{fd_headroom} // 100;  # FDs reserved for non-connection use
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
@@ -1170,6 +1204,9 @@ sub configure {
     }
     if (exists $params{max_connections}) {
         $self->{max_connections} = delete $params{max_connections};
+    }
+    if (exists $params{fd_headroom}) {
+        $self->{fd_headroom} = delete $params{fd_headroom};
     }
     if (exists $params{request_timeout}) {
         $self->{request_timeout} = delete $params{request_timeout};
@@ -1454,6 +1491,15 @@ async sub _listen_singleworker {
     $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
     my $max_conn = $self->effective_max_connections;
     my $tls_status = $self->_tls_status_string;
+
+    # Warn if access_log is a terminal (slow for benchmarks)
+    if ($self->{access_log} && -t $self->{access_log}) {
+        $self->_log(warn =>
+            "access_log is a terminal; this may impact performance. " .
+            "Consider redirecting to a file or setting access_log => undef for benchmarks."
+        );
+    }
+
     $self->_log(info => "PAGI Server listening on $scheme://$self->{host}:$self->{bound_port}/ (loop: $loop_class, max_conn: $max_conn, tls: $tls_status)");
 
     return $self;
@@ -1504,6 +1550,15 @@ sub _listen_multiworker {
     my $mode = $reuseport ? 'reuseport' : 'shared-socket';
     my $max_conn = $self->effective_max_connections;
     my $tls_status = $self->_tls_status_string;
+
+    # Warn if access_log is a terminal (slow for benchmarks)
+    if ($self->{access_log} && -t $self->{access_log}) {
+        $self->_log(warn =>
+            "access_log is a terminal; this may impact performance. " .
+            "Consider redirecting to a file or setting access_log => undef for benchmarks."
+        );
+    }
+
     $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $scheme://$self->{host}:$self->{bound_port}/ with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, tls: $tls_status)");
 
     my $loop = $self->loop;
@@ -2215,11 +2270,17 @@ sub effective_max_connections {
     # If explicitly set, use that
     return $self->{max_connections} if $self->{max_connections} && $self->{max_connections} > 0;
 
-    # Auto-detect from ulimit
-    my $ulimit = eval { POSIX::sysconf(POSIX::_SC_OPEN_MAX()) } // 1024;
+    # Auto-detect from process soft limit (not system max)
+    # getrlimit returns the actual per-process limit, unlike sysconf which
+    # may return the system-wide maximum on some platforms
+    my $ulimit = eval {
+        my ($soft, $hard) = POSIX::getrlimit(POSIX::RLIMIT_NOFILE());
+        $soft;
+    } // 1024;
 
-    # Reserve 50 FDs for: logging, static files, DB connections, etc.
-    my $headroom = 50;
+    # Reserve FDs for: listen socket, worker IPC pipes, logging,
+    # static files, TLS internals, DB connections, DNS, etc.
+    my $headroom = $self->{fd_headroom} // 100;
 
     # Each connection uses 1 FD (or 2 if proxying)
     my $safe_limit = $ulimit - $headroom;
