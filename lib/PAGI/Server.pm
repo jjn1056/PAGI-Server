@@ -435,6 +435,59 @@ B<Example:>
         fd_headroom => 200,
     );
 
+=item write_high_watermark => $bytes
+
+B<Power user setting.> Maximum bytes to buffer in the socket write queue
+before applying backpressure. When exceeded, C<< $send->() >> calls will
+pause until the buffer drains below C<write_low_watermark>.
+Default: 65536 (64KB).
+
+This prevents unbounded memory growth when the server writes data faster
+than the client can receive it. The default matches Python's asyncio
+transport defaults, providing a good balance between throughput and
+memory efficiency.
+
+B<When to adjust:>
+
+=over 4
+
+=item * B<Increase> (e.g., 256KB-1MB) for high-throughput bulk transfers
+where you want fewer context switches and higher throughput at the cost
+of more per-connection memory.
+
+=item * B<Decrease> (e.g., 16KB-32KB) if supporting many concurrent
+connections where memory efficiency is critical.
+
+=back
+
+B<Example:>
+
+    # High-throughput file server - larger buffers
+    my $server = PAGI::Server->new(
+        app                  => $app,
+        write_high_watermark => 262144,  # 256KB
+        write_low_watermark  => 65536,   # 64KB
+    );
+
+=item write_low_watermark => $bytes
+
+B<Power user setting.> Threshold below which sending resumes after
+backpressure was applied. Must be less than or equal to
+C<write_high_watermark>. Default: 16384 (16KB, which is high/4).
+
+A larger gap between high and low watermarks reduces oscillation
+(frequent pause/resume cycles). A smaller gap provides more responsive
+backpressure but may increase context switching.
+
+B<Example:>
+
+    # Minimize oscillation with wider gap
+    my $server = PAGI::Server->new(
+        app                  => $app,
+        write_high_watermark => 131072,  # 128KB
+        write_low_watermark  => 16384,   # 16KB (8:1 ratio)
+    );
+
 =item max_body_size => $bytes
 
 Maximum request body size in bytes. Default: 10,000,000 (10MB).
@@ -1116,6 +1169,8 @@ sub _init {
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
+    $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
+    $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
     # Dev-mode event validation: explicit flag, or auto-enable in development mode
     $self->{validate_events}     = delete $params->{validate_events}
@@ -1889,6 +1944,8 @@ sub _on_connection {
         max_ws_frame_size => $self->{max_ws_frame_size},
         sync_file_threshold => $self->{sync_file_threshold},
         validate_events   => $self->{validate_events},
+        write_high_watermark => $self->{write_high_watermark},
+        write_low_watermark  => $self->{write_low_watermark},
     );
 
     # Track the connection (O(1) hash insert)

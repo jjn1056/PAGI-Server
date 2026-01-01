@@ -126,8 +126,9 @@ sub new {
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (default 64KB)
         validate_events => $args{validate_events} // 0,  # Dev-mode event validation (0 = disabled)
         # Send-side backpressure (watermarks in bytes)
-        write_high_watermark => $args{write_high_watermark} // 1024 * 1024,  # 1MB - pause sending above this
-        write_low_watermark  => $args{write_low_watermark}  // 256 * 1024,   # 256KB - resume sending below this
+        # Defaults match Python asyncio: 64KB high, 16KB low (high/4)
+        write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this
+        write_low_watermark  => $args{write_low_watermark}  // 16384,   # 16KB - resume sending below this
         _drain_waiters       => [],   # Pending Futures waiting for buffer drain
         _drain_check_active  => 0,    # Flag to prevent redundant on_outgoing_empty setup
         tls_info      => undef,  # Populated on first request if TLS
