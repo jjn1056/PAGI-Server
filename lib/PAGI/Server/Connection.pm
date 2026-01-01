@@ -125,6 +125,11 @@ sub new {
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (default 64KB)
         validate_events => $args{validate_events} // 0,  # Dev-mode event validation (0 = disabled)
+        # Send-side backpressure (watermarks in bytes)
+        write_high_watermark => $args{write_high_watermark} // 1024 * 1024,  # 1MB - pause sending above this
+        write_low_watermark  => $args{write_low_watermark}  // 256 * 1024,   # 256KB - resume sending below this
+        _drain_waiters       => [],   # Pending Futures waiting for buffer drain
+        _drain_check_active  => 0,    # Flag to prevent redundant on_outgoing_empty setup
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -432,6 +437,114 @@ sub _stop_sse_idle_timer {
     }
     $self->{sse_idle_timer} = undef;
 }
+
+# ============================================================================
+# Send-side backpressure support
+# ============================================================================
+#
+# Prevents unbounded memory growth when apps send faster than slow clients
+# can receive. Uses watermark-based flow control:
+# - High watermark (default 1MB): pause sending when buffer exceeds this
+# - Low watermark (default 256KB): resume sending when buffer drops below this
+#
+# The $send->() Future will block (await) when high watermark is exceeded,
+# and resolve when buffer drains below low watermark.
+
+sub _get_write_buffer_size {
+    my ($self) = @_;
+
+    return 0 unless $self->{stream};
+
+    # Access IO::Async::Stream's internal write queue
+    # IO::Async doesn't expose a public API for buffer size, so we access internals
+    my $queue = $self->{stream}{writequeue} // [];
+    my $total = 0;
+
+    for my $writer (@$queue) {
+        my $data = $writer->data;
+        if (defined $data && !ref $data) {
+            $total += length($data);
+        }
+    }
+
+    return $total;
+}
+
+sub _check_drain_waiters {
+    my ($self) = @_;
+
+    return unless @{$self->{_drain_waiters}};
+    return unless $self->{stream};
+
+    my $buffered = $self->_get_write_buffer_size;
+
+    # Resolve all waiters if we've drained below low watermark
+    if ($buffered < $self->{write_low_watermark}) {
+        my @waiters = splice @{$self->{_drain_waiters}};
+        for my $f (@waiters) {
+            $f->done unless $f->is_ready;
+        }
+        # Disable drain checking until next high watermark hit
+        $self->{_drain_check_active} = 0;
+    }
+}
+
+sub _setup_drain_detection {
+    my ($self) = @_;
+
+    # Avoid redundant setup
+    return if $self->{_drain_check_active};
+    $self->{_drain_check_active} = 1;
+
+    weaken(my $weak_self = $self);
+
+    # Primary mechanism: check when write queue empties
+    # This guarantees we notice drain even for fast-draining connections
+    # Store previous handler to chain if needed
+    my $prev_on_empty = $self->{_prev_on_outgoing_empty};
+
+    $self->{stream}->configure(
+        on_outgoing_empty => sub {
+            return unless $weak_self;
+            $weak_self->_check_drain_waiters;
+            # Call previous handler if any
+            $prev_on_empty->(@_) if $prev_on_empty;
+        },
+    );
+}
+
+sub _wait_for_drain {
+    my ($self) = @_;
+
+    # Fast path: already below low watermark
+    my $buffered = $self->_get_write_buffer_size;
+    if ($buffered < $self->{write_low_watermark}) {
+        return Future->done;
+    }
+
+    # Create Future to be resolved when drained
+    my $f = $self->{server}->loop->new_future;
+    push @{$self->{_drain_waiters}}, $f;
+
+    # Ensure drain detection is active
+    $self->_setup_drain_detection;
+
+    return $f;
+}
+
+sub _cancel_drain_waiters {
+    my ($self, $reason) = @_;
+    $reason //= 'connection closed';
+
+    my @waiters = splice @{$self->{_drain_waiters}};
+    for my $f (@waiters) {
+        # Resolve (not fail) - app should check connection state after await
+        $f->done unless $f->is_ready;
+    }
+    $self->{_drain_check_active} = 0;
+}
+
+# ============================================================================
 
 # WebSocket keepalive - sends protocol-level ping frames (RFC 6455)
 sub _start_ws_keepalive {
@@ -1126,6 +1239,17 @@ sub _create_send {
                 return;  # Don't send any body for HEAD
             }
 
+            # --- BACKPRESSURE CHECK ---
+            # Wait for buffer to drain if we're above high watermark
+            # This prevents unbounded memory growth with slow clients
+            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
+                await $weak_self->_wait_for_drain;
+                # Re-check connection state after await
+                return Future->done unless $weak_self;
+                return Future->done if $weak_self->{closed};
+            }
+            # --- END BACKPRESSURE CHECK ---
+
             # Determine body source: body, file, or fh (mutually exclusive)
             my $body = $event->{body};
             my $file = $event->{file};
@@ -1279,6 +1403,9 @@ sub _write_access_log {
 sub _handle_disconnect {
     my ($self, $reason) = @_;
 
+    # Cancel any pending drain waiters (backpressure)
+    $self->_cancel_drain_waiters($reason);
+
     # Auto-detect server shutdown (PAGI spec compliance)
     # If no explicit reason and server is shutting down, use server_shutdown
     if (!$reason && $self->{server} && $self->{server}{shutting_down}) {
@@ -1344,6 +1471,9 @@ sub _close {
 
     return if $self->{closed};
     $self->{closed} = 1;
+
+    # Cancel pending drain waiters early (before other cleanup)
+    $self->_cancel_drain_waiters('connection closing');
 
     # Clean up WebSocket frame parser to free memory immediately
     delete $self->{websocket_frame};
@@ -1797,6 +1927,14 @@ sub _create_sse_send {
         elsif ($type eq 'sse.send') {
             return unless $weak_self->{sse_started};
 
+            # --- BACKPRESSURE CHECK ---
+            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
+                await $weak_self->_wait_for_drain;
+                return Future->done unless $weak_self;
+                return Future->done if $weak_self->{closed};
+            }
+            # --- END BACKPRESSURE CHECK ---
+
             # Format SSE event
             my $sse_data = '';
 
@@ -2108,6 +2246,14 @@ sub _create_websocket_send {
         }
         elsif ($type eq 'websocket.send') {
             return unless $weak_self->{websocket_mode};
+
+            # --- BACKPRESSURE CHECK ---
+            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
+                await $weak_self->_wait_for_drain;
+                return Future->done unless $weak_self;
+                return Future->done if $weak_self->{closed};
+            }
+            # --- END BACKPRESSURE CHECK ---
 
             my $frame;
             if (defined $event->{text}) {
