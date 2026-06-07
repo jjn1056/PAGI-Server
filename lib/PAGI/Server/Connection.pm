@@ -1,6 +1,9 @@
 package PAGI::Server::Connection;
 use strict;
 use warnings;
+
+our $VERSION = '0.002000';
+
 use Future;
 use Future::AsyncAwait;
 use Scalar::Util qw(weaken refaddr);

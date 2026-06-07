@@ -2,6 +2,9 @@ package PAGI::Server::EventValidator;
 
 use strict;
 use warnings;
+
+our $VERSION = '0.002000';
+
 use Carp qw(croak);
 
 # =============================================================================

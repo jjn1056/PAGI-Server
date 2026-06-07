@@ -2,6 +2,9 @@ package PAGI::Server::ConnectionState;
 
 use strict;
 use warnings;
+
+our $VERSION = '0.002000';
+
 use Scalar::Util qw(weaken);
 
 =head1 NAME

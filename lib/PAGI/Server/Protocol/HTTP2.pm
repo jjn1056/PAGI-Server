@@ -2,6 +2,8 @@ package PAGI::Server::Protocol::HTTP2;
 use strict;
 use warnings;
 
+our $VERSION = '0.002000';
+
 =head1 NAME
 
 PAGI::Server::Protocol::HTTP2 - HTTP/2 protocol handler using nghttp2

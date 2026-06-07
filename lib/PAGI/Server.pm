@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.001012';
+our $VERSION = '0.002000';
 
 # Future::XS support - opt-in via PAGI_FUTURE_XS=1 environment variable
 # Must be loaded before Future to take effect, so we check env var in BEGIN
@@ -140,7 +140,7 @@ For HTTP/2, see L</ENABLING HTTP/2 SUPPORT (EXPERIMENTAL)>.
 =head1 UNIX DOMAIN SOCKET SUPPORT (EXPERIMENTAL)
 
 B<This feature is experimental.> The API is subject to change in future
-releases. Please report issues at L<https://github.com/jjn1056/pagi/issues>.
+releases. Please report issues at L<https://github.com/jjn1056/pagi-server/issues>.
 
 Unix domain sockets provide efficient local communication between a reverse
 proxy (nginx, HAProxy, etc.) and PAGI::Server running on the same machine.

@@ -3,6 +3,7 @@ package PAGI::Server::AsyncFile;
 use strict;
 use warnings;
 
+our $VERSION = '0.002000';
 
 use Future;
 use Future::AsyncAwait;
