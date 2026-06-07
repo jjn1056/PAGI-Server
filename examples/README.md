@@ -10,13 +10,13 @@ This directory contains progressively more advanced PAGI examples. Each subdirec
 **Note**: `pagi-server` requires `PAGI::Runner` from the PAGI-Tools
 distribution. Until PAGI-Tools is on CPAN, supply it from a checkout of
 the original PAGI repository, e.g.
-`PERL5LIB=/path/to/PAGI/lib perl -Ilib ./bin/pagi-server examples/01-hello-http/app.pl --port 5000`
+`PERL5LIB=/path/to/PAGI/lib:$PERL5LIB perl -Ilib ./bin/pagi-server examples/01-hello-http/app.pl --port 5000`
 (see CONTRIBUTING.md).
 
 Note: Some advanced examples (job-runner, chat) use `IO::Async` directly for
 timer and subprocess features. These are PAGI::Server-specific patterns.
 
-Examples assume you understand the core PAGI specification (see the `PAGI::Spec` POD from the `PAGI` distribution on CPAN (https://github.com/jjn1056/pagi)) plus the relevant protocol documents.
+Examples assume you understand the core PAGI specification (see the `PAGI::Spec` POD from the `PAGI` distribution on CPAN, https://github.com/jjn1056/pagi) plus the relevant protocol documents.
 
 ## Example List
 1. `01-hello-http` - minimal HTTP response

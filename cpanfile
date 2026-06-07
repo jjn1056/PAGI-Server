@@ -50,7 +50,7 @@ on 'test' => sub {
     # (PAGI::Runner, PAGI::Test::Client, PAGI::App::*, middleware) against
     # this server. Until the PAGI-Tools distribution is on CPAN, supply them
     # from a sibling checkout of the original PAGI repo:
-    #   PERL5LIB=/path/to/PAGI/lib prove -lr t/
+    #   PERL5LIB=/path/to/PAGI/lib:$PERL5LIB prove -lr t/
     # (see the runtime PAGI::Tools note above; the test-phase need is covered by the same dist)
 };
 

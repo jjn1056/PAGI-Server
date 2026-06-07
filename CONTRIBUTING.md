@@ -43,7 +43,7 @@ PAGI::App::*, middleware) against this server. Until the PAGI-Tools
 distribution is on CPAN, supply them from a checkout of the original
 PAGI repository:
 
-    PERL5LIB=/path/to/PAGI/lib prove -lr t/
+    PERL5LIB=/path/to/PAGI/lib:$PERL5LIB prove -lr t/
 
 ## AI-Assisted Contributions
 
