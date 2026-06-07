@@ -36,6 +36,15 @@ prove -l t/                      # Quick test run during development
 RELEASE_TESTING=1 prove -l t/    # Full test suite - run before submitting PR
 ```
 
+### Integration tests (require PAGI-Tools)
+
+Some integration tests exercise toolkit modules (PAGI::Test::Client,
+PAGI::App::*, middleware) against this server. Until the PAGI-Tools
+distribution is on CPAN, supply them from a checkout of the original
+PAGI repository:
+
+    PERL5LIB=/path/to/PAGI/lib prove -lr t/
+
 ## AI-Assisted Contributions
 
 AI tools are welcome in your workflow. However, you're responsible for

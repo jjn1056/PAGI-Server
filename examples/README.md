@@ -7,10 +7,16 @@ This directory contains progressively more advanced PAGI examples. Each subdirec
 - For timers/sleeps: `Future::IO` (loop-agnostic)
 - Run examples with: `pagi-server examples/01-hello-http/app.pl --port 5000`
 
+**Note**: `pagi-server` requires `PAGI::Runner` from the PAGI-Tools
+distribution. Until PAGI-Tools is on CPAN, supply it from a checkout of
+the original PAGI repository, e.g.
+`PERL5LIB=/path/to/PAGI/lib perl -Ilib ./bin/pagi-server examples/01-hello-http/app.pl --port 5000`
+(see CONTRIBUTING.md).
+
 Note: Some advanced examples (job-runner, chat) use `IO::Async` directly for
 timer and subprocess features. These are PAGI::Server-specific patterns.
 
-Examples assume you understand the core spec (`docs/specs/main.mkdn`) plus the relevant protocol documents.
+Examples assume you understand the core PAGI specification (see the `PAGI::Spec` POD from the `PAGI` distribution on CPAN (https://github.com/jjn1056/pagi)) plus the relevant protocol documents.
 
 ## Example List
 1. `01-hello-http` - minimal HTTP response
@@ -21,15 +27,16 @@ Examples assume you understand the core spec (`docs/specs/main.mkdn`) plus the r
 6. `06-lifespan-state` - lifespan protocol with shared state
 7. `07-extension-fullflush` - middleware using the `fullflush` extension
 8. `08-tls-introspection` - prints TLS metadata when present
-9. `09-psgi-bridge` - wraps a PSGI app for PAGI use (via `PAGI::App::WrapPSGI`)
-10. `10-chat-showcase` - WebSocket chat demo with multiple clients
-11. `11-job-runner` - background job processing example
-12. `12-utf8` - UTF-8 handling demonstration
-13. `13-contact-form` - form parsing and file uploads
-14. `14-lifespan-utils` - lifespan hooks via PAGI::Utils
+9. `11-job-runner` - background job processing example
+10. `12-utf8` - UTF-8 handling demonstration
 
-## Built-in Apps
-Additional example apps are bundled in `lib/PAGI/App/`:
-- `app-01-file` - static file serving with PAGI::App::File
+Also included: `backpressure-test` - demonstrates backpressure handling (unnumbered utility example)
+
+(Framework-level examples — routers, endpoints, middleware, chat apps — live with the PAGI-Tools distribution.)
 
 Each example has its own `README.md` explaining how to run it and which spec sections to review.
+
+## worker-pool-prototype.pl
+
+A standalone prototype exploring worker-pool design for the server. It is
+not a runnable PAGI example; it is kept for reference.
