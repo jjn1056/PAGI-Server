@@ -187,6 +187,33 @@ subtest 'load app from module' => sub {
     }
 };
 
+# Test 10b: _load_module success path with a self-contained conforming module.
+# Exercises the loader seam (require -> new/to_app check -> instantiate -> coderef)
+# without depending on any PAGI-Tools app, so it runs on a bare PAGI-Server install.
+subtest '_load_module loads a conforming module' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $pm = File::Spec->catfile($tmpdir, 'MyConformingApp.pm');
+    open my $fh, '>', $pm or die "Cannot write $pm: $!";
+    print $fh <<'MOD';
+package MyConformingApp;
+use Future::AsyncAwait;
+sub new { my ($class, %args) = @_; bless { %args }, $class }
+sub to_app { my $self = shift; return async sub { } }
+1;
+MOD
+    close $fh;
+
+    local @INC = ($tmpdir, @INC);
+    my $runner = PAGI::Server::Runner->new;
+    $runner->{argv} = ['MyConformingApp', 'root=/tmp'];
+
+    my $app = $runner->load_app;
+
+    ok(ref $app eq 'CODE', '_load_module returns a coderef for a conforming module');
+    is($runner->{app_spec}, 'MyConformingApp', 'module app_spec stored');
+    is($runner->{app_args}{root}, '/tmp', 'module app_args parsed');
+};
+
 # Test 11: Default app (requires PAGI-Tools for PAGI::App::Directory)
 subtest 'default app loads Directory' => sub {
     SKIP: {
@@ -436,16 +463,17 @@ subtest '-e inline code' => sub {
 
 # Test 29: -M module loading (requires PAGI-Tools for PAGI::App::File)
 subtest '-M module loading' => sub {
+    my $runner = PAGI::Server::Runner->new;
+    $runner->parse_options('-M', 'PAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
+
+    # Option parsing is pure string handling — no module load required.
+    is(scalar @{$runner->{modules}}, 1, 'one module stored');
+    is($runner->{modules}[0], 'PAGI::App::File', 'correct module');
+
+    # Actually loading the -M module + running the -e code needs the app present.
     SKIP: {
-        skip 'PAGI::App::File not available (install PAGI-Tools)', 3
+        skip 'PAGI::App::File not available (install PAGI-Tools)', 1
             unless eval { require PAGI::App::File; 1 };
-
-        my $runner = PAGI::Server::Runner->new;
-        $runner->parse_options('-M', 'PAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
-
-        is(scalar @{$runner->{modules}}, 1, 'one module stored');
-        is($runner->{modules}[0], 'PAGI::App::File', 'correct module');
-
         my $app = $runner->load_app;
         ok(ref $app eq 'CODE', '-M/-e returns coderef');
     }
@@ -453,16 +481,12 @@ subtest '-M module loading' => sub {
 
 # Test 30: cuddled -M option (requires PAGI-Tools for PAGI::App::File)
 subtest 'cuddled -M option' => sub {
-    SKIP: {
-        skip 'PAGI::App::File not available (install PAGI-Tools)', 2
-            unless eval { require PAGI::App::File; 1 };
+    # Pure option parsing of the cuddled -MFoo form; no module load required.
+    my $runner = PAGI::Server::Runner->new;
+    $runner->parse_options('-MPAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
 
-        my $runner = PAGI::Server::Runner->new;
-        $runner->parse_options('-MPAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
-
-        is(scalar @{$runner->{modules}}, 1, 'cuddled module parsed');
-        is($runner->{modules}[0], 'PAGI::App::File', 'correct cuddled module');
-    }
+    is(scalar @{$runner->{modules}}, 1, 'cuddled module parsed');
+    is($runner->{modules}[0], 'PAGI::App::File', 'correct cuddled module');
 };
 
 # Test 31: -e error handling
