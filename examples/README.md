@@ -7,11 +7,10 @@ This directory contains progressively more advanced PAGI examples. Each subdirec
 - For timers/sleeps: `Future::IO` (loop-agnostic)
 - Run examples with: `pagi-server examples/01-hello-http/app.pl --port 5000`
 
-**Note**: `pagi-server` requires `PAGI::Runner` from the PAGI-Tools
-distribution. Until PAGI-Tools is on CPAN, supply it from a checkout of
-the original PAGI repository, e.g.
-`PERL5LIB=/path/to/PAGI/lib:$PERL5LIB perl -Ilib ./bin/pagi-server examples/01-hello-http/app.pl --port 5000`
-(see CONTRIBUTING.md).
+These are raw PAGI applications and run with `pagi-server` alone — no other
+distribution required. (In development mode the runner auto-enables Lint
+middleware if the PAGI-Tools distribution happens to be installed, and
+silently skips it otherwise.)
 
 Note: Some advanced examples (job-runner, chat) use `IO::Async` directly for
 timer and subprocess features. These are PAGI::Server-specific patterns.

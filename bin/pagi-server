@@ -23,7 +23,7 @@ use strict;
 use warnings;
 
 use Getopt::Long qw(GetOptionsFromArray :config pass_through no_auto_abbrev);
-use PAGI::Runner;
+use PAGI::Server::Runner;
 
 # Parse PAGI::Server-specific options before passing to Runner
 # This keeps Runner server-agnostic
@@ -135,7 +135,7 @@ if (defined $server_opts{workers}) {
 %server_opts = map { $_ => $server_opts{$_} } grep { defined $server_opts{$_} } keys %server_opts;
 
 # Pass server options to Runner
-PAGI::Runner->run(@ARGV, server_options => \%server_opts);
+PAGI::Server::Runner->run(@ARGV, server_options => \%server_opts);
 
 __END__
 
@@ -169,7 +169,7 @@ pagi-server - PAGI application server
 =head1 DESCRIPTION
 
 pagi-server is the command-line interface for running PAGI applications.
-It uses L<PAGI::Runner> for application loading and server orchestration,
+It uses L<PAGI::Server::Runner> for application loading and server orchestration,
 and L<PAGI::Server> as the default server backend.
 
 =head1 ENVIRONMENT MODES
@@ -213,7 +213,7 @@ in, similar to Plack's C<PLACK_ENV>.
 
 =head2 Common Options
 
-These are handled by L<PAGI::Runner> and work with any server backend.
+These are handled by L<PAGI::Server::Runner> and work with any server backend.
 
 =over 4
 
@@ -572,7 +572,7 @@ for details.
 
 =head1 SEE ALSO
 
-L<PAGI::Runner>, L<PAGI::Server>, L<PAGI::Middleware::Lint>, L<Future::IO>
+L<PAGI::Server::Runner>, L<PAGI::Server>, L<PAGI::Middleware::Lint>, L<Future::IO>
 
 =head1 AUTHOR
 

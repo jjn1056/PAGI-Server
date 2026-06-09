@@ -10,6 +10,7 @@ my @core_modules = qw(
     PAGI::Server::EventValidator
     PAGI::Server::AsyncFile
     PAGI::Server::Protocol::HTTP1
+    PAGI::Server::Runner
 );
 
 for my $module (@core_modules) {

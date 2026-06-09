@@ -32,11 +32,6 @@ recommends 'Net::HTTP2::nghttp2', '0.007';
 # Utilities
 requires 'URI::Escape', '5.09';
 
-# Runner (bin/pagi-server delegates app loading and CLI to PAGI::Runner,
-# which ships in the PAGI-Tools distribution; until that first release,
-# supply it from a sibling checkout of the original PAGI repo)
-# requires 'PAGI::Tools';  # REQUIRED before the first CPAN release
-
 # Testing
 on 'test' => sub {
     requires 'Test2::V0', '0.000159';
@@ -47,12 +42,12 @@ on 'test' => sub {
     requires 'Time::HiRes', '1.9764';  # Core module, for timing-sensitive tests
 
     # t/integration/ (including t/integration/runner-server.t) and parts of
-    # t/http2/ exercise toolkit modules (PAGI::Runner, PAGI::Test::Client,
-    # PAGI::App::*, middleware) against this server. Until the PAGI-Tools
-    # distribution is on CPAN, supply them from a sibling checkout of the
-    # original PAGI repo:
+    # t/http2/ exercise toolkit modules (PAGI::Test::Client, PAGI::App::*,
+    # middleware) that live in PAGI-Tools. PAGI-Server has NO runtime dependency
+    # on PAGI-Tools — the runner (PAGI::Server::Runner) ships in this dist.
+    # Until the PAGI-Tools distribution is on CPAN, supply toolkit modules at
+    # test time from a sibling checkout:
     #   PERL5LIB=/path/to/PAGI-Tools/lib:$PERL5LIB prove -lr t/
-    # (see the runtime PAGI::Tools note above; the test-phase need is covered by the same dist)
 };
 
 # Development

@@ -11,7 +11,9 @@
 #   - Subtests 1-6: PAGI-Tools t/runner.t
 #   - Subtest 7:    PAGI-Tools t/25-runner-production.t
 #
-# PAGI::Runner ships in PAGI-Tools. Run with the PAGI-Tools lib in PERL5LIB:
+# PAGI::Server::Runner ships in this distribution. The integration tests
+# exercise toolkit modules (PAGI::App::*, PAGI::Test::Client) that live in
+# PAGI-Tools. Run with PAGI-Tools lib bridged for those modules:
 #   PERL5LIB=/path/to/PAGI-Tools/lib:$PERL5LIB prove -lv t/integration/runner-server.t
 # =============================================================================
 
@@ -29,7 +31,7 @@ use Future::AsyncAwait;
 use File::Temp qw(tempdir tempfile);
 
 use PAGI::Server;
-use PAGI::Runner;
+use PAGI::Server::Runner;
 
 # ---------------------------------------------------------------------------
 # SOURCE: t/runner.t
@@ -39,7 +41,7 @@ use PAGI::Runner;
 #       to the server constructor. The die came from PAGI::Server.
 # ---------------------------------------------------------------------------
 subtest 'load_server dies without app' => sub {
-    my $runner = PAGI::Runner->new;
+    my $runner = PAGI::Server::Runner->new;
 
     like(
         dies { $runner->load_server },
@@ -55,7 +57,7 @@ subtest 'load_server dies without app' => sub {
 subtest 'integration: server responds to requests' => sub {
     my $loop = IO::Async::Loop->new;
 
-    my $runner = PAGI::Runner->new(port => 0, quiet => 1);
+    my $runner = PAGI::Server::Runner->new(port => 0, quiet => 1);
     $runner->{app_spec} = "$FindBin::Bin/../../examples/01-hello-http/app.pl";
     $runner->{default_middleware} = 0;  # Disable Lint for test
     $runner->prepare_app;
@@ -93,7 +95,7 @@ subtest 'integration: module-based app serves files' => sub {
     print $fh "Hello from test file";
     close $fh;
 
-    my $runner = PAGI::Runner->new(port => 0, quiet => 1);
+    my $runner = PAGI::Server::Runner->new(port => 0, quiet => 1);
     $runner->{argv} = ['PAGI::App::File', "root=$tmpdir"];
     $runner->{default_middleware} = 0;  # Disable Lint for test
     $runner->prepare_app;
@@ -125,7 +127,7 @@ subtest 'integration: module-based app serves files' => sub {
 #       covered in Tools by the rewritten 'load_server creates server' subtest.
 # ---------------------------------------------------------------------------
 subtest 'SSL options validation' => sub {
-    my $runner = PAGI::Runner->new(
+    my $runner = PAGI::Server::Runner->new(
         quiet          => 1,
         server_options => {
             ssl => { cert_file => '/nonexistent/cert.pem', key_file => '/nonexistent/key.pem' },
@@ -149,7 +151,7 @@ subtest 'SSL options validation' => sub {
 # ---------------------------------------------------------------------------
 subtest 'load_server with socket option omits host/port (PAGI::Server introspection)' => sub {
     my $socket_path = File::Temp::tmpnam() . '.sock';
-    my $runner = PAGI::Runner->new(
+    my $runner = PAGI::Server::Runner->new(
         quiet          => 1,
         server_options => { socket => $socket_path },
     );
@@ -169,7 +171,7 @@ subtest 'load_server with socket option omits host/port (PAGI::Server introspect
 # ---------------------------------------------------------------------------
 subtest 'load_server with listen option omits host/port (PAGI::Server introspection)' => sub {
     my $socket_path = File::Temp::tmpnam() . '.sock';
-    my $runner = PAGI::Runner->new(
+    my $runner = PAGI::Server::Runner->new(
         quiet          => 1,
         server_options => {
             listen => [
@@ -206,7 +208,7 @@ subtest 'PID file with actual server process' => sub {
 
     if ($server_pid == 0) {
         # Child - start actual server
-        my $runner = PAGI::Runner->new(
+        my $runner = PAGI::Server::Runner->new(
             port     => 0,  # Random port
             quiet    => 1,
             pid_file => $pid_file,
@@ -247,7 +249,7 @@ subtest 'PID file with actual server process' => sub {
     }
 
     # Parent - wait for PID file to be created.
-    # Budget is generous: child must load PAGI::Runner fresh from PERL5LIB.
+    # Budget is generous: child must load PAGI::Server::Runner fresh from lib/.
     my $retries = 60;
     while ($retries-- > 0 && !-f $pid_file) {
         select(undef, undef, undef, 0.1);
