@@ -181,7 +181,10 @@ pagi-server supports environment modes similar to Plack's C<-E> flag:
 =item B<development>
 
 Auto-enables L<PAGI::Middleware::Lint> with strict mode. This catches
-specification violations early and provides helpful error messages.
+specification violations early and provides helpful error messages. Lint lives
+in the C<PAGI-Tools> distribution, so it is applied only when PAGI-Tools is
+installed; otherwise pagi-server prints a reminder to install it and runs
+without it.
 
 This is the B<default when running interactively> (TTY detected).
 
