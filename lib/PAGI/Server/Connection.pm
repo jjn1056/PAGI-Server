@@ -2015,6 +2015,16 @@ async sub _handle_request {
     # Stop stall timer - request completed successfully
     $self->_stop_stall_timer;
 
+    # Request finished cleanly: fire on_complete (not on_disconnect) on the
+    # HTTP connection-state object. Must happen on BOTH the keep-alive and
+    # close paths, and before the keep-alive branch clears the state below.
+    # Once marked complete, the non-keep-alive _handle_disconnect_and_close
+    # call below no-ops the state transition, so on_disconnect never fires for
+    # a completed request.
+    if (my $conn_state = $self->{current_connection_state}) {
+        $conn_state->_mark_complete;
+    }
+
     # Determine if we should keep the connection alive
     my $keep_alive = $self->_should_keep_alive($request);
 
