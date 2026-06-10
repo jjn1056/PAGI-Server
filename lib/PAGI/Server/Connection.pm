@@ -170,6 +170,8 @@ sub new {
         sse_mode          => 0,
         sse_started       => 0,
         sse_disconnect_reason => undef,  # Reason for SSE disconnect (client_closed, write_error, etc.)
+        ws_disconnect_reason  => undef,  # Standard reason token for the app-facing websocket.disconnect event
+        ws_disconnect_code    => undef,  # Wire close code for that event (defaults to 1006, abnormal closure)
         # Keepalive state (protocol-level ping/pong for WebSocket, comments for SSE)
         ws_keepalive_timer  => undef,  # Periodic timer for sending WebSocket pings
         ws_pong_timeout     => undef,  # Timeout timer for pong response
@@ -2596,6 +2598,28 @@ sub _write_access_log {
     }
 }
 
+# Reasons passed to _handle_disconnect only for teardown after a clean finish
+# (the app has already returned). They are completions, not abnormal disconnects,
+# and must not surface as a disconnect reason to the application.
+my %COMPLETION_REASON = map { ($_ => 1) } qw(
+    request_complete
+    stream_complete
+    session_complete
+);
+
+# Build the app-facing websocket.disconnect event for a server-detected close.
+# The code and reason come from the close the server initiated; the defaults are
+# the RFC 6455 "abnormal closure, no status received" pair (1006 / empty), used
+# when the connection dropped with no close handshake (timeout, TCP FIN).
+sub _ws_disconnect_event {
+    my ($self) = @_;
+    return {
+        type   => 'websocket.disconnect',
+        code   => $self->{ws_disconnect_code}   // 1006,
+        reason => $self->{ws_disconnect_reason} // '',
+    };
+}
+
 sub _handle_disconnect {
     my ($self, $reason) = @_;
 
@@ -2616,16 +2640,27 @@ sub _handle_disconnect {
     # Default reason is client_closed (TCP FIN received)
     $reason //= 'client_closed';
 
-    # Mark HTTP connection state as disconnected (PAGI spec 0.3)
-    # Only for HTTP - WebSocket/SSE have their own patterns
+    # A clean completion is not an abnormal disconnect: don't surface its reason.
+    my $is_completion = $COMPLETION_REASON{$reason};
+
+    # Mark HTTP connection state as disconnected (abnormal only).
+    # Only for HTTP - WebSocket/SSE have their own patterns.
     if ($self->{current_connection_state} && !$self->{websocket_mode} && !$self->{sse_mode}) {
-        $self->{current_connection_state}->_mark_disconnected($reason);
+        $self->{current_connection_state}->_mark_disconnected($reason)
+            unless $is_completion;
+    }
+
+    # Record the abnormal reason so the WebSocket disconnect event reports it
+    # (instead of the old empty string). SSE tracks its own reason at the
+    # detection sites via sse_disconnect_reason.
+    if ($self->{websocket_mode} && !$is_completion) {
+        $self->{ws_disconnect_reason} = $reason;
     }
 
     # Determine disconnect event type based on mode
     my $disconnect_event;
     if ($self->{websocket_mode}) {
-        $disconnect_event = { type => 'websocket.disconnect', code => 1006, reason => '' };
+        $disconnect_event = $self->_ws_disconnect_event;
     } elsif ($self->{sse_mode}) {
         $disconnect_event = {
             type   => 'sse.disconnect',
@@ -2657,6 +2692,10 @@ sub _send_close_frame {
 
     return unless $self->{stream};
     return if $self->{close_sent};
+
+    # Remember the wire code so the app-facing websocket.disconnect event reports
+    # the same code the peer received, rather than the 1006 abnormal-close default.
+    $self->{ws_disconnect_code} = $code;
 
     my $frame = Protocol::WebSocket::Frame->new(
         type   => 'close',
@@ -2730,7 +2769,7 @@ sub _close {
     # Determine disconnect event type based on mode
     my $disconnect_event;
     if ($self->{websocket_mode}) {
-        $disconnect_event = { type => 'websocket.disconnect', code => 1006, reason => '' };
+        $disconnect_event = $self->_ws_disconnect_event;
     } elsif ($self->{sse_mode}) {
         $disconnect_event = {
             type   => 'sse.disconnect',
@@ -3643,8 +3682,8 @@ sub _process_websocket_frames {
             }
             # Check queue limit before adding (DoS protection)
             if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
-                $self->_send_close_frame(1008, 'Message queue overflow');  # Policy Violation
-                $self->_handle_disconnect_and_close('policy_violation');
+                $self->_send_close_frame(1008, 'Message queue overflow');
+                $self->_handle_disconnect_and_close('queue_overflow');
                 return;
             }
             push @{$self->{receive_queue}}, {
@@ -3656,8 +3695,8 @@ sub _process_websocket_frames {
             # Binary frame - keep as raw bytes
             # Check queue limit before adding (DoS protection)
             if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
-                $self->_send_close_frame(1008, 'Message queue overflow');  # Policy Violation
-                $self->_handle_disconnect_and_close('policy_violation');
+                $self->_send_close_frame(1008, 'Message queue overflow');
+                $self->_handle_disconnect_and_close('queue_overflow');
                 return;
             }
             push @{$self->{receive_queue}}, {

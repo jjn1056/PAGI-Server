@@ -3,7 +3,7 @@
 # =============================================================================
 # Test: Disconnect reasons implementation (PAGI spec compliance)
 #
-# Per www.mkdn: Servers must use standard disconnect reason strings
+# Per PAGI::Spec::Www: Servers must use standard disconnect reason strings
 # =============================================================================
 
 use strict;
@@ -61,6 +61,24 @@ subtest 'server implements disconnect reason code paths' => sub {
         $source,
         qr/'body_too_large'/,
         'body_too_large reason is used'
+    );
+
+    like(
+        $source,
+        qr/'keepalive_timeout'/,
+        'keepalive_timeout reason is used'
+    );
+
+    like(
+        $source,
+        qr/'queue_overflow'/,
+        'queue_overflow reason is used (renamed from policy_violation)'
+    );
+
+    unlike(
+        $source,
+        qr/'policy_violation'/,
+        'policy_violation is no longer used (renamed to queue_overflow)'
     );
 };
 
