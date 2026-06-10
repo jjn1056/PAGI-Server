@@ -228,6 +228,93 @@ subtest 'disconnect without calling disconnect_future' => sub {
 };
 
 # =============================================================================
+# Test: Completion is distinct from disconnect (on_complete / _mark_complete)
+# =============================================================================
+
+subtest 'mark_complete fires on_complete, not on_disconnect' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+
+    my @complete;
+    my $disconnected = 0;
+    $conn->on_complete(sub { push @complete, [@_] });
+    $conn->on_disconnect(sub { $disconnected = 1 });
+
+    is(scalar @complete, 0, 'on_complete not fired while in-flight');
+
+    $conn->_mark_complete;
+
+    is(scalar @complete, 1, 'on_complete fired exactly once');
+    ok(!$disconnected, 'on_disconnect NOT fired on clean completion');
+    ok(!$conn->is_connected, 'no longer connected after completion');
+    is($conn->disconnect_reason, undef, 'disconnect_reason stays undef on completion');
+};
+
+subtest 'disconnect_future does not resolve on completion' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+    my $future = $conn->disconnect_future;
+
+    $conn->_mark_complete;
+
+    ok(!$future->is_ready, 'disconnect_future remains pending after clean completion');
+};
+
+subtest 'on_complete after already completed fires immediately' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+    $conn->_mark_complete;
+
+    my $called = 0;
+    $conn->on_complete(sub { $called = 1 });
+
+    ok($called, 'late on_complete callback invoked immediately');
+};
+
+subtest 'completion and disconnect are mutually exclusive terminal states' => sub {
+    # complete first, then a stray disconnect is a no-op
+    my $c1 = PAGI::Server::ConnectionState->new();
+    my $disc = 0;
+    $c1->on_disconnect(sub { $disc = 1 });
+    $c1->_mark_complete;
+    $c1->_mark_disconnected('client_closed');   # must be ignored
+    ok(!$disc, 'on_disconnect not fired after completion');
+    is($c1->disconnect_reason, undef, 'no reason after completion + stray disconnect');
+
+    # disconnect first, then a stray completion is a no-op
+    my $c2 = PAGI::Server::ConnectionState->new();
+    my $comp = 0;
+    $c2->on_complete(sub { $comp = 1 });
+    $c2->_mark_disconnected('write_error');
+    $c2->_mark_complete;                          # must be ignored
+    ok(!$comp, 'on_complete not fired after abnormal disconnect');
+    is($c2->disconnect_reason, 'write_error', 'disconnect reason preserved');
+};
+
+subtest 'on_disconnect after completion does not fire' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+    $conn->_mark_complete;
+
+    my $called = 0;
+    $conn->on_disconnect(sub { $called = 1 });
+
+    ok(!$called, 'on_disconnect registered after clean completion never fires');
+};
+
+subtest 'on_complete callback errors do not break others' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+    my $cb2_called = 0;
+
+    $conn->on_complete(sub { die "error in cb1" });
+    $conn->on_complete(sub { $cb2_called = 1 });
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, @_ };
+
+    $conn->_mark_complete;
+
+    ok($cb2_called, 'cb2 still called despite cb1 error');
+    like($warnings[0], qr/callback error/, 'warning emitted');
+};
+
+# =============================================================================
 # Test: Server implements disconnect reason code paths (source inspection)
 # =============================================================================
 

@@ -23,13 +23,18 @@ PAGI::Server::ConnectionState - Connection state tracking for HTTP requests
     # Get disconnect reason (undef while connected)
     my $reason = $conn->disconnect_reason;
 
-    # Register cleanup callback
+    # Register a callback for an abnormal end (client gone, timeout, error)
     $conn->on_disconnect(sub {
         my ($reason) = @_;
-        cleanup_resources();
+        rollback();
     });
 
-    # Await disconnect (if Future provided)
+    # ...and its counterpart for a clean finish. Exactly one of the two fires.
+    $conn->on_complete(sub {
+        commit();
+    });
+
+    # Await abnormal disconnect (if Future provided)
     if (my $future = $conn->disconnect_future) {
         my $reason = await $future;
     }
@@ -47,8 +52,8 @@ The C<disconnect_future()> method lazily creates a Future only when called,
 avoiding allocation overhead for simple request/response handlers that don't
 need async disconnect detection.
 
-See the "Connection State" section in L<docs/specs/www.mkdn> for the
-full specification.
+See the "Connection State" section in L<PAGI::Spec::Www> for the full
+specification.
 
 =head1 METHODS
 
@@ -75,11 +80,18 @@ sub new {
         _connected => \$connected,
         _reason    => \$reason,
 
+        # Distinguishes the two terminal states once _connected is false:
+        # an abnormal disconnect (false) vs. a clean completion (true).
+        _completed => 0,
+
         # Lazy Future (only created if disconnect_future() called)
         _future => undef,
 
         # Callbacks registered via on_disconnect()
         _callbacks => [],
+
+        # Callbacks registered via on_complete()
+        _complete_callbacks => [],
     }, $class;
 
     # Weaken to avoid circular reference: Connection -> ConnectionState -> Connection
@@ -108,17 +120,20 @@ sub is_connected {
 
     my $reason = $conn->disconnect_reason;  # String or undef
 
-Returns the disconnect reason string, or C<undef> if still connected.
+Returns the disconnect reason string, or C<undef> if still connected B<or if the
+request completed normally> -- every reason below describes an abnormal end.
 
 Standard reason strings:
 
 =over 4
 
-=item * C<client_closed> - Client initiated clean close (TCP FIN)
+=item * C<client_closed> - Client initiated clean close (TCP FIN) mid-request
 
 =item * C<client_timeout> - Client stopped responding (read timeout)
 
-=item * C<idle_timeout> - Connection idle too long between requests
+=item * C<idle_timeout> - Connection idle too long before the request arrived
+
+=item * C<keepalive_timeout> - Keep-alive connection idled out between requests
 
 =item * C<write_timeout> - Response write timed out
 
@@ -130,9 +145,15 @@ Standard reason strings:
 
 =item * C<server_shutdown> - Server shutting down gracefully
 
+=item * C<server_error> - Unhandled server-side error aborted the request
+
 =item * C<body_too_large> - Request body exceeded limit
 
+=item * C<queue_overflow> - A bounded server queue overflowed; connection dropped
+
 =back
+
+See L<PAGI::Spec::Www/"Standard Disconnect Reasons"> for the authoritative list.
 
 =cut
 
@@ -215,14 +236,63 @@ being invoked
 sub on_disconnect {
     my ($self, $cb) = @_;
 
-    # If already disconnected, invoke immediately
-    unless (${$self->{_connected}}) {
-        eval { $cb->(${$self->{_reason}}) };
-        warn "on_disconnect callback error: $@" if $@;
+    # Still in flight: register for later.
+    if (${$self->{_connected}}) {
+        push @{$self->{_callbacks}}, $cb;
         return;
     }
 
-    push @{$self->{_callbacks}}, $cb;
+    # Terminal: only fire if the request ended abnormally, not on clean
+    # completion (on_disconnect means "something went wrong").
+    return if $self->{_completed};
+
+    eval { $cb->(${$self->{_reason}}) };
+    warn "on_disconnect callback error: $@" if $@;
+}
+
+=head2 on_complete
+
+    $conn->on_complete(sub {
+        # request finished cleanly
+    });
+
+Registers a callback invoked B<only when the request completes successfully>
+(the response was fully delivered without the client disconnecting). It is the
+counterpart to L</on_disconnect>: exactly one of the two fires for a given
+request.
+
+=over 4
+
+=item * May be called multiple times to register multiple callbacks
+
+=item * Callbacks are invoked in registration order, with no arguments
+
+=item * If registered after the request already completed, the callback is
+invoked immediately
+
+=item * If the request ended in an abnormal disconnect, the callback never fires
+
+=item * One callback's failure does not prevent other callbacks from being
+invoked
+
+=back
+
+=cut
+
+sub on_complete {
+    my ($self, $cb) = @_;
+
+    # Still in flight: register for later.
+    if (${$self->{_connected}}) {
+        push @{$self->{_complete_callbacks}}, $cb;
+        return;
+    }
+
+    # Terminal: only fire on clean completion, not on abnormal disconnect.
+    return unless $self->{_completed};
+
+    eval { $cb->() };
+    warn "on_complete callback error: $@" if $@;
 }
 
 =head2 _mark_disconnected
@@ -271,8 +341,50 @@ sub _mark_disconnected {
         warn "on_disconnect callback error: $@" if $@;
     }
 
-    # 4. Clear callbacks to release references
-    $self->{_callbacks} = [];
+    # 4. Clear callbacks to release references. The request ended abnormally,
+    #    so on_complete callbacks never run.
+    $self->{_callbacks}          = [];
+    $self->{_complete_callbacks} = [];
+}
+
+=head2 _mark_complete
+
+    $conn->_mark_complete;
+
+B<Internal method> - Called by the server when the request completes
+successfully (the response was fully delivered). Applications should not call
+this method directly.
+
+Transitions to the C<completed> terminal state and invokes C<on_complete>
+callbacks in registration order. Unlike L</_mark_disconnected>, it leaves
+C<disconnect_reason()> as C<undef> and does B<not> resolve C<disconnect_future()>
+or fire C<on_disconnect> callbacks -- a clean completion is not a disconnect.
+
+Idempotent, and a no-op once the connection has already reached a terminal
+state (so a stray completion after an abnormal disconnect is ignored).
+
+=cut
+
+sub _mark_complete {
+    my ($self) = @_;
+
+    # Already terminal (disconnected or completed) - no-op (idempotent).
+    return unless ${$self->{_connected}};
+
+    # Mark the completed terminal state. Reason stays undef; the disconnect
+    # Future is deliberately left pending (completion is not a disconnect).
+    ${$self->{_connected}} = 0;
+    $self->{_completed}    = 1;
+
+    # Invoke completion callbacks (no reason argument).
+    for my $cb (@{$self->{_complete_callbacks}}) {
+        eval { $cb->() };
+        warn "on_complete callback error: $@" if $@;
+    }
+
+    # Clear both lists to release references.
+    $self->{_complete_callbacks} = [];
+    $self->{_callbacks}          = [];
 }
 
 1;
@@ -314,7 +426,7 @@ to the connection object:
         await $send->({ type => 'http.response.body', body => $result, more => 0 });
     }
 
-=head1 EXAMPLE: Cleanup on Disconnect
+=head1 EXAMPLE: Cleanup on Disconnect vs. Completion
 
     async sub handler {
         my ($scope, $receive, $send) = @_;
@@ -323,21 +435,23 @@ to the connection object:
         my $temp_file = create_temp_file();
         my $lock = acquire_lock();
 
-        # Register cleanup - runs automatically if client disconnects
+        my $cleanup = sub { $temp_file->unlink; $lock->release };
+
+        # Abnormal end: client vanished, or a timeout/error fired mid-request.
         $conn->on_disconnect(sub {
             my ($reason) = @_;
-            $temp_file->unlink;
-            $lock->release;
+            $cleanup->();
             log_info("Client disconnected: $reason");
         });
 
-        # Do work - cleanup happens automatically if client leaves
+        # Clean end: the response was fully delivered.
+        $conn->on_complete(sub {
+            $cleanup->();
+            log_info("Delivered OK");
+        });
+
+        # Exactly one of the two callbacks runs, so cleanup happens once.
         my $result = await process_data($temp_file);
-
-        # Normal cleanup on success
-        $temp_file->unlink;
-        $lock->release;
-
         await send_response($send, $result);
     }
 
