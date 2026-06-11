@@ -1636,6 +1636,14 @@ sub _get_write_buffer_size {
     return $total;
 }
 
+# Notify the current transport-state handle after an application write so its
+# backpressure callbacks (on_high_water/on_drain) can fire on a watermark cross.
+sub _notify_transport_write {
+    my ($self) = @_;
+    my $ts = $self->{current_transport_state};
+    $ts->_check_watermarks if $ts;
+}
+
 sub _check_drain_waiters {
     my ($self) = @_;
 
@@ -2028,6 +2036,7 @@ async sub _handle_request {
         $self->{current_request} = undef;
         $self->{request_future} = undef;
         $self->{current_connection_state} = undef;  # Clear for next request
+        $self->{current_transport_state}  = undef;  # New request gets a fresh handle
 
         # Check if there's more data in the buffer (pipelining)
         if (length($self->{buffer}) > 0) {
@@ -2103,8 +2112,10 @@ sub _create_scope {
         extensions   => $self->_get_extensions_for_scope,
         # Connection state for non-destructive disconnect detection (PAGI spec 0.3)
         'pagi.connection' => $connection_state,
-        # Outbound flow-control introspection (buffered_amount, watermarks)
-        'pagi.transport'  => PAGI::Server::TransportState->new(connection => $self),
+        # Outbound flow-control introspection (buffered_amount, watermarks,
+        # on_high_water/on_drain). Stashed on the connection too, so the send
+        # path can poke _check_watermarks after each write.
+        'pagi.transport'  => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
     };
 
     return $scope;
@@ -2455,6 +2466,7 @@ sub _create_send {
                 else {
                     $weak_self->{stream}->write($body) if length $body;
                 }
+                $weak_self->_notify_transport_write;
 
                 # Handle completion for body responses
                 if (!$more) {
@@ -3014,8 +3026,10 @@ sub _create_sse_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
-        # Outbound flow-control introspection (buffered_amount, watermarks)
-        'pagi.transport' => PAGI::Server::TransportState->new(connection => $self),
+        # Outbound flow-control introspection (buffered_amount, watermarks,
+        # on_high_water/on_drain). Stashed on the connection too, so the send
+        # path can poke _check_watermarks after each write.
+        'pagi.transport' => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
     };
 
     return $scope;
@@ -3252,6 +3266,7 @@ sub _create_sse_send {
             # Send as chunked data
             my $len = sprintf("%x", length($sse_data));
             $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
+            $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'sse.comment') {
             return unless $weak_self->{sse_started};
@@ -3376,8 +3391,10 @@ sub _create_websocket_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
-        # Outbound flow-control introspection (buffered_amount, watermarks)
-        'pagi.transport' => PAGI::Server::TransportState->new(connection => $self),
+        # Outbound flow-control introspection (buffered_amount, watermarks,
+        # on_high_water/on_drain). Stashed on the connection too, so the send
+        # path can poke _check_watermarks after each write.
+        'pagi.transport' => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
     };
 
     return $scope;
@@ -3567,6 +3584,7 @@ sub _create_websocket_send {
 
             my $bytes = $frame->to_bytes;
             $weak_self->{stream}->write($bytes);
+            $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'websocket.close') {
             # If not accepted yet, send 403 Forbidden

@@ -51,6 +51,13 @@ sub new {
 
     my $self = bless {
         _connection => $args{connection},
+
+        # Backpressure callbacks + hysteresis state. _above_high is true once
+        # the buffer has crossed the high mark and not yet drained below the low
+        # mark, so on_high_water is edge-triggered (fires once per cycle).
+        _high_water_callbacks => [],
+        _drain_callbacks      => [],
+        _above_high           => 0,
     }, $class;
 
     # Weaken to avoid a cycle: Connection -> scope -> TransportState -> Connection
@@ -109,6 +116,101 @@ sub low_water_mark {
     my $conn = $self->{_connection};
     return undef unless $conn;
     return $conn->{write_low_watermark};
+}
+
+=head2 on_high_water
+
+    $transport->on_high_water(sub { $source->pause });
+
+Registers a callback invoked when the outbound buffer reaches or exceeds
+L</high_water_mark> (backpressure engaged). Edge-triggered: it fires once when
+the buffer crosses up, and not again until the buffer has drained below the low
+mark and crossed up again. If the buffer is already at or above the mark when
+the callback is registered, it is invoked immediately. Multiple callbacks may be
+registered; they are invoked in registration order with no arguments. Returns
+the handle for chaining.
+
+=cut
+
+sub on_high_water {
+    my ($self, $cb) = @_;
+    push @{$self->{_high_water_callbacks}}, $cb;
+
+    if ($self->{_above_high}) {
+        # Already in the high state: this late registrant fires now.
+        $self->_fire([$cb]);
+    }
+    else {
+        # May already be above the mark but not yet detected (no send since).
+        $self->_check_watermarks;
+    }
+
+    return $self;
+}
+
+=head2 on_drain
+
+    $transport->on_drain(sub { $source->resume });
+
+Registers a callback invoked when the outbound buffer falls back below
+L</low_water_mark> after having reached the high mark (backpressure released).
+It is not invoked merely because the buffer is below the low mark when
+registered -- only on an actual high-then-low transition. Multiple callbacks may
+be registered; they are invoked in registration order with no arguments. Returns
+the handle for chaining.
+
+=cut
+
+sub on_drain {
+    my ($self, $cb) = @_;
+    push @{$self->{_drain_callbacks}}, $cb;
+    return $self;
+}
+
+=head2 _check_watermarks
+
+    $transport->_check_watermarks;
+
+B<Internal method> - Called by the server after an application send. Detects a
+high-water crossing and fires C<on_high_water>, then arms drain detection (via
+the connection's existing C<_wait_for_drain>) so C<on_drain> fires once the
+buffer falls below the low mark. Edge-triggered and idempotent while above.
+
+=cut
+
+sub _check_watermarks {
+    my ($self) = @_;
+
+    return if $self->{_above_high};     # already armed; waiting for drain
+
+    my $conn = $self->{_connection};
+    return unless $conn;
+
+    my $high = $self->high_water_mark;
+    return unless defined $high;
+    return unless $self->buffered_amount >= $high;
+
+    $self->{_above_high} = 1;
+    $self->_fire($self->{_high_water_callbacks});
+
+    # Arm drain detection through the connection's existing mechanism: when the
+    # buffer falls below the low mark, fire on_drain and re-arm the cycle.
+    weaken(my $weak = $self);
+    $conn->_wait_for_drain->on_ready(sub {
+        return unless $weak;
+        $weak->{_above_high} = 0;
+        $weak->_fire($weak->{_drain_callbacks});
+    });
+
+    return;
+}
+
+# Invoke a list of callbacks in order, isolating exceptions.
+sub _fire {
+    my ($self, $cbs) = @_;
+    for my $cb (@$cbs) {
+        eval { $cb->(); 1 } or warn "transport callback error: $@";
+    }
 }
 
 1;
