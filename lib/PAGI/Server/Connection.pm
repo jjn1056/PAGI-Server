@@ -17,6 +17,7 @@ use IO::Async::Timer::Periodic;
 use Time::HiRes qw(gettimeofday tv_interval);
 use PAGI::Server::AsyncFile;
 use PAGI::Server::ConnectionState;
+use PAGI::Server::TransportState;
 
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
@@ -2102,6 +2103,8 @@ sub _create_scope {
         extensions   => $self->_get_extensions_for_scope,
         # Connection state for non-destructive disconnect detection (PAGI spec 0.3)
         'pagi.connection' => $connection_state,
+        # Outbound flow-control introspection (buffered_amount, watermarks)
+        'pagi.transport'  => PAGI::Server::TransportState->new(connection => $self),
     };
 
     return $scope;
@@ -3011,6 +3014,8 @@ sub _create_sse_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
+        # Outbound flow-control introspection (buffered_amount, watermarks)
+        'pagi.transport' => PAGI::Server::TransportState->new(connection => $self),
     };
 
     return $scope;
@@ -3371,6 +3376,8 @@ sub _create_websocket_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
+        # Outbound flow-control introspection (buffered_amount, watermarks)
+        'pagi.transport' => PAGI::Server::TransportState->new(connection => $self),
     };
 
     return $scope;
