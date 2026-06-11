@@ -908,10 +908,6 @@ sub _h2_create_websocket_scope {
         }
     }
 
-    my $connection_state = PAGI::Server::ConnectionState->new(
-        connection => $self,
-    );
-
     return {
         type         => 'websocket',
         pagi         => {
@@ -934,7 +930,6 @@ sub _h2_create_websocket_scope {
         subprotocols => \@subprotocols,
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
-        'pagi.connection' => $connection_state,
     };
 }
 
@@ -1119,10 +1114,6 @@ sub _h2_create_sse_scope {
     my $decoded_path = eval { decode('UTF-8', $unescaped, Encode::FB_CROAK) }
                        // $unescaped;
 
-    my $connection_state = PAGI::Server::ConnectionState->new(
-        connection => $self,
-    );
-
     return {
         type         => 'sse',
         pagi         => {
@@ -1145,7 +1136,6 @@ sub _h2_create_sse_scope {
         server       => [$self->{server_host}, $self->{server_port}],
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
-        'pagi.connection' => $connection_state,
     };
 }
 
