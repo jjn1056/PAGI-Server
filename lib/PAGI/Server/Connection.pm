@@ -1636,6 +1636,20 @@ sub _get_write_buffer_size {
     return $total;
 }
 
+# HTTP/1.1: the transport handle reads the shared TCP write buffer. One
+# connection is one stream here, so the IO::Async write queue is the per-stream
+# backlog. The connection is held weakly so the handle never keeps it alive.
+sub _h1_transport_state {
+    my ($self) = @_;
+    weaken(my $w = $self);
+    return PAGI::Server::TransportState->new(
+        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
+        high      => sub { $w ? $w->{write_high_watermark} : undef },
+        low       => sub { $w ? $w->{write_low_watermark}  : undef },
+        arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
+    );
+}
+
 # Notify the current transport-state handle after an application write so its
 # backpressure callbacks (on_high_water/on_drain) can fire on a watermark cross.
 sub _notify_transport_write {
@@ -2115,7 +2129,7 @@ sub _create_scope {
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.
-        'pagi.transport'  => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
+        'pagi.transport'  => ($self->{current_transport_state} = $self->_h1_transport_state),
     };
 
     return $scope;
@@ -3029,7 +3043,7 @@ sub _create_sse_scope {
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.
-        'pagi.transport' => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
+        'pagi.transport' => ($self->{current_transport_state} = $self->_h1_transport_state),
     };
 
     return $scope;
@@ -3394,7 +3408,7 @@ sub _create_websocket_scope {
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.
-        'pagi.transport' => ($self->{current_transport_state} = PAGI::Server::TransportState->new(connection => $self)),
+        'pagi.transport' => ($self->{current_transport_state} = $self->_h1_transport_state),
     };
 
     return $scope;

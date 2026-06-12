@@ -13,6 +13,15 @@ PAGI::Server::TransportState - Outbound flow-control introspection for a connect
 
 =head1 SYNOPSIS
 
+    # Built by the server from an outbound-buffer source (not by the app):
+    my $transport = PAGI::Server::TransportState->new(
+        measure   => sub { $conn->_get_write_buffer_size },
+        high      => sub { $conn->{write_high_watermark} },
+        low       => sub { $conn->{write_low_watermark} },
+        arm_drain => sub { my $fire = shift; $conn->_wait_for_drain->on_ready($fire) },
+    );
+
+    # Read by the application via the scope:
     my $transport = $scope->{'pagi.transport'};
 
     # Bytes queued for the client but not yet written to the network
@@ -31,18 +40,42 @@ written to the network -- so it can conflate, coalesce, shed load, or disconnect
 a slow client instead of only blocking until the buffer drains. It is the
 server-side analogue of the browser WebSocket API's C<bufferedAmount>.
 
-All reads are live: the object holds a weak reference to the parent connection
-and reports its current state at call time. See the "Transport Flow Control"
-section in L<PAGI::Spec::Www> for the full specification.
+The handle is source-agnostic: it measures the outbound buffer through coderefs
+supplied by the server, never by reaching into a connection itself. That lets
+the same hysteresis logic serve different transports -- under HTTP/1.1 the
+source reads the shared TCP write buffer, while under HTTP/2 it reads a
+per-stream send queue. All reads are live: each call invokes the source and
+reports its current state. See the "Transport Flow Control" section in
+L<PAGI::Spec::Www> for the full specification.
 
 =head1 METHODS
 
 =head2 new
 
-    my $transport = PAGI::Server::TransportState->new(connection => $connection);
+    my $transport = PAGI::Server::TransportState->new(
+        measure   => sub { ... },   # current buffered bytes
+        high      => $bytes,        # high-water mark (value or coderef)
+        low       => $bytes,        # low-water mark  (value or coderef)
+        arm_drain => sub { my $fire = shift; ... },
+    );
 
-Creates a transport-state handle. The C<connection> argument is the parent
-connection, held weakly to avoid a reference cycle.
+Creates a transport-state handle. B<This is built by the server, not the
+application> -- apps receive the finished handle via the C<pagi.transport> scope
+key. The arguments describe the outbound buffer source:
+
+=over 4
+
+=item * C<measure> -- coderef returning the current buffered byte count.
+C<undef>/missing is treated as C<0>.
+
+=item * C<high> / C<low> -- the backpressure band. Each may be a plain value or
+a coderef returning the current mark; C<undef> means unavailable.
+
+=item * C<arm_drain> -- coderef invoked when the buffer crosses the high mark. It
+receives a single C<$fire> callback and must invoke it exactly once when the
+buffer next falls below the low mark, so C<on_drain> fires and the cycle re-arms.
+
+=back
 
 =cut
 
@@ -50,7 +83,10 @@ sub new {
     my ($class, %args) = @_;
 
     my $self = bless {
-        _connection => $args{connection},
+        _measure   => $args{measure},     # coderef -> current buffered bytes
+        _high      => $args{high},        # value or coderef -> high mark (undef ok)
+        _low       => $args{low},         # value or coderef -> low mark  (undef ok)
+        _arm_drain => $args{arm_drain},   # coderef: (fire) -> call fire once when below low
 
         # Backpressure callbacks + hysteresis state. _above_high is true once
         # the buffer has crossed the high mark and not yet drained below the low
@@ -59,9 +95,6 @@ sub new {
         _drain_callbacks      => [],
         _above_high           => 0,
     }, $class;
-
-    # Weaken to avoid a cycle: Connection -> scope -> TransportState -> Connection
-    weaken($self->{_connection}) if $self->{_connection};
 
     return $self;
 }
@@ -79,9 +112,9 @@ non-destructive read.
 
 sub buffered_amount {
     my $self = shift;
-    my $conn = $self->{_connection};
-    return 0 unless $conn;
-    return $conn->_get_write_buffer_size;
+    my $measure = $self->{_measure};
+    return 0 unless $measure;
+    return $measure->() // 0;
 }
 
 =head2 high_water_mark
@@ -97,9 +130,8 @@ ceiling rather than hard-coding a byte count.
 
 sub high_water_mark {
     my $self = shift;
-    my $conn = $self->{_connection};
-    return undef unless $conn;
-    return $conn->{write_high_watermark};
+    my $high = $self->{_high};
+    return ref $high eq 'CODE' ? $high->() : $high;
 }
 
 =head2 low_water_mark
@@ -113,9 +145,8 @@ server releases backpressure (the drain point), or C<undef> if unavailable.
 
 sub low_water_mark {
     my $self = shift;
-    my $conn = $self->{_connection};
-    return undef unless $conn;
-    return $conn->{write_low_watermark};
+    my $low = $self->{_low};
+    return ref $low eq 'CODE' ? $low->() : $low;
 }
 
 =head2 on_high_water
@@ -173,8 +204,8 @@ sub on_drain {
 
 B<Internal method> - Called by the server after an application send. Detects a
 high-water crossing and fires C<on_high_water>, then arms drain detection (via
-the connection's existing C<_wait_for_drain>) so C<on_drain> fires once the
-buffer falls below the low mark. Edge-triggered and idempotent while above.
+the source's C<arm_drain> coderef) so C<on_drain> fires once the buffer falls
+below the low mark. Edge-triggered and idempotent while above.
 
 =cut
 
@@ -183,9 +214,6 @@ sub _check_watermarks {
 
     return if $self->{_above_high};     # already armed; waiting for drain
 
-    my $conn = $self->{_connection};
-    return unless $conn;
-
     my $high = $self->high_water_mark;
     return unless defined $high;
     return unless $self->buffered_amount >= $high;
@@ -193,10 +221,11 @@ sub _check_watermarks {
     $self->{_above_high} = 1;
     $self->_fire($self->{_high_water_callbacks});
 
-    # Arm drain detection through the connection's existing mechanism: when the
-    # buffer falls below the low mark, fire on_drain and re-arm the cycle.
+    # Arm drain detection through the source: when the buffer falls below the
+    # low mark, fire on_drain and re-arm the cycle.
+    my $arm = $self->{_arm_drain} or return;
     weaken(my $weak = $self);
-    $conn->_wait_for_drain->on_ready(sub {
+    $arm->(sub {
         return unless $weak;
         $weak->{_above_high} = 0;
         $weak->_fire($weak->{_drain_callbacks});
