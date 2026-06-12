@@ -548,6 +548,9 @@ sub _h2_on_body {
             # No _h2_write_pending here — we're inside feed(); _h2_process_data
             # flushes after feed() returns
             $self->_h2_resolve_stream_drain_waiters($stream);
+            # Drop (don't fire) the app's on_drain fires: the stream is closing,
+            # not draining, and the transport handle is going away.
+            $stream->{transport_drain_fires} = [];
             delete $self->{h2_streams}{$stream_id};
             return;
         }
@@ -600,6 +603,8 @@ sub _h2_on_close {
     # stream is closing, so it must not hang waiting for a queue that will
     # never drain.
     $self->_h2_resolve_stream_drain_waiters($stream);
+    # Drop (don't fire) the app's on_drain fires: this is a close, not a drain.
+    $stream->{transport_drain_fires} = [];
 
     # Clean up after a delay (let any pending futures resolve)
     weaken(my $weak_self = $self);
@@ -705,6 +710,10 @@ sub _h2_create_scope {
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
         'pagi.connection' => $connection_state,
+        # h2 transport handle measures THIS stream's send queue (per-stream),
+        # stored on the stream state rather than $self->{current_transport_state}
+        # because h2 multiplexes many concurrent streams over one connection.
+        'pagi.transport'  => ($stream_state->{transport_state} = $self->_h2_transport_state($stream_state)),
     };
 }
 
@@ -817,6 +826,20 @@ sub _h2_create_send {
                 });
             }
 
+            # Fire the app's on_drain hysteresis callbacks once this stream's
+            # queue falls below the low watermark. Like the waiters above, this
+            # runs inside nghttp2's extract(), and an on_drain callback may call
+            # $send to resume its source — which would re-enter nghttp2. Splice
+            # the fires out first (so they can't double-fire), then invoke them on
+            # the next loop tick.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
+                my @fires = splice @{$ss->{transport_drain_fires}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->() for @fires;
+                });
+            }
+
             my $eof = (!@$q && $eof_pending) ? 1 : 0;
             return ($chunk, $eof);
         }
@@ -864,6 +887,10 @@ sub _h2_create_send {
                         push @{$ss->{send_queue}}, $body;
                         $ss->{send_queue_bytes} += length $body;
                     }
+                    # Synchronous: we're in the app's send path (not nghttp2's
+                    # extract), so on_high_water can fire here to tell the app to
+                    # pause its source.
+                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -886,6 +913,8 @@ sub _h2_create_send {
                         push @{$ss->{send_queue}}, $body;
                         $ss->{send_queue_bytes} += length $body;
                     }
+                    # Synchronous — app send path, not nghttp2 extract.
+                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 }
@@ -904,6 +933,8 @@ sub _h2_create_send {
                         push @{$ss->{send_queue}}, $body;
                         $ss->{send_queue_bytes} += length $body;
                     }
+                    # Synchronous — app send path, not nghttp2 extract.
+                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 } else {
@@ -1690,6 +1721,26 @@ sub _h1_transport_state {
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
+    );
+}
+
+# HTTP/2: the transport handle reads this stream's send queue, not the shared
+# TCP write buffer — under h2, N streams multiplex one connection, so that
+# buffer is the whole connection's backlog (meaningless per stream). $ss is the
+# per-stream state hashref; it's held directly (it is the stream's own state),
+# while $self is weakened so the handle never keeps the connection alive.
+# arm_drain parks the $fire callback on the stream; the data_callback pull fires
+# it (deferred) when the queue crosses below the low watermark. Kept separate
+# from stream_drain_waiters: those are Futures for blocking backpressure, these
+# are the on_drain hysteresis fires.
+sub _h2_transport_state {
+    my ($self, $ss) = @_;
+    weaken(my $w = $self);
+    return PAGI::Server::TransportState->new(
+        measure   => sub { $ss->{send_queue_bytes} // 0 },
+        high      => sub { $w ? $w->{write_high_watermark} : undef },
+        low       => sub { $w ? $w->{write_low_watermark}  : undef },
+        arm_drain => sub { my $fire = shift; push @{$ss->{transport_drain_fires}}, $fire },
     );
 }
 
@@ -2823,6 +2874,9 @@ sub _close {
             # Release producers blocked on per-stream backpressure so they
             # don't hang on a connection that is going away.
             $self->_h2_resolve_stream_drain_waiters($stream);
+            # Drop (don't fire) the app's on_drain fires: the connection is going
+            # away, not draining.
+            $stream->{transport_drain_fires} = [];
         }
         delete $self->{h2_streams};
     }
