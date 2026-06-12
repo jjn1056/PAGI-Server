@@ -549,8 +549,12 @@ sub _h2_on_body {
             # flushes after feed() returns
             $self->_h2_resolve_stream_drain_waiters($stream);
             # Drop (don't fire) the app's on_drain fires: the stream is closing,
-            # not draining, and the transport handle is going away.
+            # not draining, and the transport handle is going away. Also break
+            # the $stream <-> transport_state cycle (the handle's measure/arm
+            # closures hold $stream strongly), or the stream state leaks for the
+            # life of the process once h2_streams drops its external ref.
             $stream->{transport_drain_fires} = [];
+            delete $stream->{transport_state};
             delete $self->{h2_streams}{$stream_id};
             return;
         }
@@ -604,7 +608,10 @@ sub _h2_on_close {
     # never drain.
     $self->_h2_resolve_stream_drain_waiters($stream);
     # Drop (don't fire) the app's on_drain fires: this is a close, not a drain.
+    # Also break the $stream <-> transport_state cycle so the stream state can be
+    # collected once the deferred delete below drops h2_streams' external ref.
     $stream->{transport_drain_fires} = [];
+    delete $stream->{transport_state};
 
     # Clean up after a delay (let any pending futures resolve)
     weaken(my $weak_self = $self);
@@ -2875,8 +2882,10 @@ sub _close {
             # don't hang on a connection that is going away.
             $self->_h2_resolve_stream_drain_waiters($stream);
             # Drop (don't fire) the app's on_drain fires: the connection is going
-            # away, not draining.
+            # away, not draining. Also break the $stream <-> transport_state cycle
+            # so the stream state is freed when h2_streams is deleted below.
             $stream->{transport_drain_fires} = [];
+            delete $stream->{transport_state};
         }
         delete $self->{h2_streams};
     }
