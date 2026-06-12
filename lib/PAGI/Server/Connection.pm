@@ -1215,6 +1215,10 @@ sub _h2_create_sse_scope {
         server       => [$self->{server_host}, $self->{server_port}],
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
+        # Per-stream outbound flow-control handle. Like the h2 streaming scope,
+        # it measures THIS stream's send queue (h2 multiplexes many streams over
+        # one connection, so the shared TCP buffer is meaningless per stream).
+        'pagi.transport'  => ($stream_state->{transport_state} = $self->_h2_transport_state($stream_state)),
     };
 }
 
@@ -1286,23 +1290,59 @@ sub _h2_create_sse_send {
 
     weaken(my $weak_self = $self);
 
-    # Streaming state for data provider pattern
-    my @data_queue;
+    # Streaming state for the data-provider pull pattern. The send queue lives on
+    # per-stream state ($ss->{send_queue} / $ss->{send_queue_bytes}) so the
+    # pagi.transport handle can measure THIS stream's backlog. $streaming_started
+    # stays closure-local.
     my $streaming_started = 0;
 
+    # Data callback for nghttp2's streaming response. Pulls from the per-stream
+    # queue; SSE responses stay open, so this never signals EOF (returns eof=0),
+    # or undef to defer when the queue is empty.
     my $data_callback = sub {
         my ($cb_stream_id, $max_len) = @_;
 
-        if (@data_queue) {
-            my $chunk = shift @data_queue;
+        my $ss = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        return undef unless $ss;
+        my $q = $ss->{send_queue} ||= [];
+
+        if (@$q) {
+            my $chunk = shift @$q;
+            # Respect max_len — XS truncates without preserving remainder
             if (length($chunk) > $max_len) {
-                unshift @data_queue, substr($chunk, $max_len);
+                unshift @$q, substr($chunk, $max_len);
                 $chunk = substr($chunk, 0, $max_len);
             }
+            $ss->{send_queue_bytes} -= length($chunk);
+
+            # Per-stream backpressure: once this stream's queue falls below the
+            # low watermark, release any producer blocked in
+            # _h2_wait_for_stream_drain. This runs inside nghttp2's extract(), so
+            # resolve on the next loop tick — completing the Future resumes the
+            # awaiting producer synchronously, and it must not re-enter nghttp2.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}}) {
+                my @waiters = splice @{$ss->{stream_drain_waiters}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->done for grep { !$_->is_ready } @waiters;
+                });
+            }
+
+            # Fire the app's on_drain hysteresis callbacks once this stream's
+            # queue falls below the low watermark. Deferred for the same reason:
+            # an on_drain callback may call $send, which would re-enter nghttp2.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
+                my @fires = splice @{$ss->{transport_drain_fires}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->() for @fires;
+                });
+            }
+
             return ($chunk, 0);  # SSE streams never EOF via data_callback
         }
 
-        # Queue empty — defer
+        # Queue empty — defer (NGHTTP2_ERR_DEFERRED in the C layer)
         return undef;
     };
 
@@ -1351,6 +1391,8 @@ sub _h2_create_sse_send {
             push @final_headers, ['cache-control', 'no-cache'];
 
             $streaming_started = 1;
+            $ss->{send_queue}       //= [];
+            $ss->{send_queue_bytes} //= 0;
             $weak_self->{h2_session}->submit_response_streaming(
                 $stream_id,
                 status        => $status,
@@ -1359,13 +1401,17 @@ sub _h2_create_sse_send {
             );
             $weak_self->_h2_write_pending;
 
-            # Set protocol-specific keepalive writer (HTTP/2 DATA frames)
+            # Protocol-specific keepalive writer (HTTP/2 DATA frames). Keepalive
+            # bytes are counted in the per-stream backlog so buffered_amount stays
+            # accurate, but they do not poke the watermark callbacks — a server
+            # heartbeat is not an application send.
             $weak_self->{sse_keepalive_writer} = sub {
                 my ($text) = @_;
                 return unless $weak_self;
                 return if $weak_self->{closed};
-                return unless $weak_self->{h2_streams}{$stream_id};
-                push @data_queue, $text;
+                my $ss = $weak_self->{h2_streams}{$stream_id} or return;
+                push @{$ss->{send_queue} ||= []}, $text;
+                $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $text;
                 $weak_self->{h2_session}->resume_stream($stream_id);
                 $weak_self->_h2_write_pending;
             };
@@ -1376,16 +1422,21 @@ sub _h2_create_sse_send {
         elsif ($type eq 'sse.send') {
             return unless $ss->{response_started};
 
-            # Backpressure check
-            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
-                await $weak_self->_wait_for_drain;
-                return Future->done unless $weak_self;
-                return Future->done if $weak_self->{closed};
+            # Per-stream backpressure: bound on THIS stream's queue, not the
+            # shared TCP buffer (meaningless across multiplexed h2 streams).
+            if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
+                await $weak_self->_h2_wait_for_stream_drain($stream_id);
+                return unless $weak_self;
+                return if $weak_self->{closed};
                 return unless $weak_self->{h2_streams}{$stream_id};
             }
 
             my $sse_data = _format_sse_event($event);
-            push @data_queue, $sse_data;
+            push @{$ss->{send_queue} ||= []}, $sse_data;
+            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $sse_data;
+            # Synchronous — app send path, not nghttp2 extract — so on_high_water
+            # may fire here to tell the app to pause its source.
+            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -1393,7 +1444,9 @@ sub _h2_create_sse_send {
             return unless $ss->{response_started};
 
             my $comment = _format_sse_comment($event);
-            push @data_queue, $comment;
+            push @{$ss->{send_queue} ||= []}, $comment;
+            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $comment;
+            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
