@@ -3053,35 +3053,22 @@ sub _extract_tls_info {
         $tls_info->{tls_version} = $version_map{$version_str};
     }
 
-    # Get cipher suite
-    if (my $cipher = $handle->get_cipher) {
-        # IO::Socket::SSL provides cipher name, we need to map to numeric
-        # For now, get the raw bits if available, or store undef
-        # IO::Socket::SSL doesn't easily expose the numeric cipher ID
-        # We'll try to get it from the SSL object
-        my $ssl = $handle->_get_ssl_object;
-        if ($ssl && $ssl->can('get_cipher_bits')) {
-            # Unfortunately, OpenSSL doesn't expose cipher ID easily via perl bindings
-            # We'll leave cipher_suite as undef for this reference implementation
-            # A production server could use Net::SSLeay::get_current_cipher and
-            # Net::SSLeay::CIPHER_get_id for the actual numeric ID
-            eval {
-                require Net::SSLeay;
-                my $current_cipher = Net::SSLeay::get_current_cipher($ssl);
-                if ($current_cipher) {
-                    my $id = Net::SSLeay::CIPHER_get_id($current_cipher);
-                    # The ID from OpenSSL includes protocol bits in upper bytes
-                    # We want just the cipher suite ID (lower 16 bits usually, but SSL3+ uses different encoding)
-                    # For TLS, the ID is returned as a 32-bit value with protocol in upper bits
-                    # Extract lower 16 bits for the cipher suite
-                    $tls_info->{cipher_suite} = $id & 0xFFFF if defined $id;
-                }
-            };
-            if ($@) {
-                warn "TLS cipher suite extraction error: $@\n";
-                $tls_info->{cipher_extraction_error} = $@;
-            }
-        }
+    # Cipher suite (numeric IANA id). Net::SSLeay/IO::Socket::SSL expose only the
+    # cipher *name*, not the 16-bit id the spec asks for. For TLS 1.3 the OpenSSL
+    # name IS the IANA name and the registry is frozen at five suites, so we map
+    # those exactly. For TLS 1.2 the names are OpenSSL-specific (a large, shifting
+    # set), so we leave cipher_suite undef -- the spec permits undef when the
+    # server cannot determine the value.
+    if (my $cipher_name = $handle->get_cipher) {
+        my %tls13_cipher_suites = (
+            'TLS_AES_128_GCM_SHA256'       => 0x1301,
+            'TLS_AES_256_GCM_SHA384'       => 0x1302,
+            'TLS_CHACHA20_POLY1305_SHA256' => 0x1303,
+            'TLS_AES_128_CCM_SHA256'       => 0x1304,
+            'TLS_AES_128_CCM_8_SHA256'     => 0x1305,
+        );
+        $tls_info->{cipher_suite} = $tls13_cipher_suites{$cipher_name}
+            if exists $tls13_cipher_suites{$cipher_name};
     }
 
     # Get server certificate (our certificate)
@@ -3095,7 +3082,6 @@ sub _extract_tls_info {
     };
     if ($@) {
         warn "TLS server certificate extraction error: $@\n";
-        $tls_info->{server_cert_error} = $@;
     }
 
     # Get client certificate if provided
@@ -3139,7 +3125,6 @@ sub _extract_tls_info {
     };
     if ($@) {
         warn "TLS client certificate extraction error: $@\n";
-        $tls_info->{client_cert_extraction_error} = $@;
     }
 
     $self->{tls_info} = $tls_info;

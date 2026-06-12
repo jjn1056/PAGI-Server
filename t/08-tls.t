@@ -157,6 +157,21 @@ subtest 'TLS connection populates scope.extensions.tls' => sub {
     ok(defined $tls->{tls_version}, 'tls_version is defined');
     ok($tls->{tls_version} >= 0x0301, 'tls_version is at least TLS 1.0');
 
+    # B8: the reference server terminates TLS itself, so the negotiated cipher is
+    # determinable. The spec permits undef only when the server cannot determine
+    # it, so cipher_suite must be a real 16-bit cipher-suite ID here.
+    ok(defined $tls->{cipher_suite}, 'cipher_suite is defined (server terminates TLS)');
+    ok(defined $tls->{cipher_suite} && $tls->{cipher_suite} > 0 && $tls->{cipher_suite} <= 0xFFFF,
+        'cipher_suite is a 16-bit cipher-suite ID');
+
+    # C11: the tls hash must contain exactly the six PAGI::Spec::Tls keys — no
+    # implementation-specific extraction-error diagnostics leak into app scope.
+    is(
+        [ sort keys %$tls ],
+        [ sort qw(server_cert client_cert_chain client_cert_name client_cert_error tls_version cipher_suite) ],
+        'tls hash contains exactly the six PAGI::Spec::Tls keys',
+    );
+
     # Check client_cert_chain is empty (no client cert in this test)
     is(ref $tls->{client_cert_chain}, 'ARRAY', 'client_cert_chain is arrayref');
     is(scalar @{$tls->{client_cert_chain}}, 0, 'client_cert_chain is empty (no client cert)');
@@ -671,6 +686,14 @@ subtest 'Client certificates are captured when provided' => sub {
     ok(defined $tls->{client_cert_name}, 'client_cert_name is defined');
     like($tls->{client_cert_name}, qr/Test Client/, 'client_cert_name contains expected CN');
 
+    # C11: even with a verified client certificate, the tls hash stays at the six
+    # spec keys (no client_cert_extraction_error / cipher_extraction_error).
+    is(
+        [ sort keys %$tls ],
+        [ sort qw(server_cert client_cert_chain client_cert_name client_cert_error tls_version cipher_suite) ],
+        'tls hash contains exactly the six PAGI::Spec::Tls keys (with client cert)',
+    );
+
     $server->shutdown->get;
     $loop->remove($server);
     $loop->remove($http);
@@ -967,6 +990,74 @@ subtest 'Multi-worker TLS connections work' => sub {
     }
 
     $loop->remove($http);
+};
+
+# Test 15: min_version is a FLOOR (TLS 1.3 negotiated), not an exact pin
+subtest 'TLS 1.3 negotiated by default; min_version is a floor not a pin' => sub {
+    my $captured_scope;
+
+    my $tls13_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    last;
+                }
+            }
+            return;
+        }
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+        $captured_scope = $scope;
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'OK', more => 0 });
+    };
+
+    # Default ssl config (no min_version): a TLS 1.3-capable client MUST get TLS
+    # 1.3. A server pinned to 1.2 (the bug) would force 0x0303 here.
+    my $server = PAGI::Server->new(
+        app => $tls13_app, host => '127.0.0.1', port => 0, quiet => 1,
+        ssl => { cert_file => $server_cert, key_file => $server_key },
+    );
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    my $http = Net::Async::HTTP->new(SSL_verify_mode => 0);
+    $loop->add($http);
+    $http->GET("https://127.0.0.1:$port/")->get;
+
+    is($captured_scope->{extensions}{tls}{tls_version}, 0x0304,
+        'default config negotiates TLS 1.3 (0x0304) - min_version is a floor');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+    $loop->remove($http);
+
+    # An explicit min_version => 'TLSv1_3' floor still negotiates 1.3.
+    $captured_scope = undef;
+    my $strict = PAGI::Server->new(
+        app => $tls13_app, host => '127.0.0.1', port => 0, quiet => 1,
+        ssl => { cert_file => $server_cert, key_file => $server_key, min_version => 'TLSv1_3' },
+    );
+    $loop->add($strict);
+    $strict->listen->get;
+    my $strict_port = $strict->port;
+
+    my $http2 = Net::Async::HTTP->new(SSL_verify_mode => 0);
+    $loop->add($http2);
+    $http2->GET("https://127.0.0.1:$strict_port/")->get;
+
+    is($captured_scope->{extensions}{tls}{tls_version}, 0x0304,
+        'min_version => TLSv1_3 negotiates TLS 1.3');
+
+    $strict->shutdown->get;
+    $loop->remove($strict);
+    $loop->remove($http2);
 };
 
 done_testing;

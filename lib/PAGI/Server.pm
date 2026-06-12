@@ -2422,8 +2422,25 @@ sub _build_ssl_config {
     $ssl_params{SSL_server}      = 1;
     $ssl_params{SSL_cert_file}   = $ssl->{cert_file} if $ssl->{cert_file};
     $ssl_params{SSL_key_file}    = $ssl->{key_file}  if $ssl->{key_file};
-    # Trailing colon means "this version or higher" — allows TLS 1.3 negotiation
-    $ssl_params{SSL_version}     = ($ssl->{min_version} // 'TLSv1_2') . ':';
+    # SSL_version as a true floor: negotiate the highest version the client also
+    # supports at or above min_version, so TLS 1.3 is offered. IO::Socket::SSL
+    # pins to an exact version for a bare 'TLSv1_2' (the trailing ':' does NOT
+    # mean "or higher"), so instead start from auto-negotiation ('SSLv23') and
+    # exclude every protocol below the floor. A min_version outside the
+    # documented TLSv1_2/TLSv1_3 set is passed through unchanged.
+    my @tls_order = qw(SSLv2 SSLv3 TLSv1 TLSv1_1 TLSv1_2 TLSv1_3);
+    my $min_version = $ssl->{min_version} // 'TLSv1_2';
+    if (grep { $_ eq $min_version } @tls_order) {
+        my @below_floor;
+        for my $v (@tls_order) {
+            last if $v eq $min_version;
+            push @below_floor, "!$v";
+        }
+        $ssl_params{SSL_version} = join(':', 'SSLv23', @below_floor);
+    }
+    else {
+        $ssl_params{SSL_version} = $min_version;
+    }
     $ssl_params{SSL_cipher_list} = $ssl->{cipher_list}
         // 'ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA';
 
