@@ -547,6 +547,7 @@ sub _h2_on_body {
             );
             # No _h2_write_pending here — we're inside feed(); _h2_process_data
             # flushes after feed() returns
+            $self->_h2_resolve_stream_drain_waiters($stream);
             delete $self->{h2_streams}{$stream_id};
             return;
         }
@@ -594,6 +595,11 @@ sub _h2_on_close {
     }
 
     $self->_h2_wake_pending($stream);
+
+    # Release any producer blocked on this stream's backpressure drain — the
+    # stream is closing, so it must not hang waiting for a queue that will
+    # never drain.
+    $self->_h2_resolve_stream_drain_waiters($stream);
 
     # Clean up after a delay (let any pending futures resolve)
     weaken(my $weak_self = $self);
@@ -796,6 +802,21 @@ sub _h2_create_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+
+            # Per-stream backpressure: once this stream's queue falls below the
+            # low watermark, release any producer blocked in
+            # _h2_wait_for_stream_drain. This callback runs inside nghttp2's
+            # extract(), so resolve on the next loop tick — completing the Future
+            # resumes the awaiting producer synchronously, and it must not call
+            # resume_stream/_h2_write_pending re-entrantly into nghttp2.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}}) {
+                my @waiters = splice @{$ss->{stream_drain_waiters}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->done for grep { !$_->is_ready } @waiters;
+                });
+            }
+
             my $eof = (!@$q && $eof_pending) ? 1 : 0;
             return ($chunk, $eof);
         }
@@ -851,9 +872,12 @@ sub _h2_create_send {
                     );
                     $weak_self->_h2_write_pending;
                 } else {
-                    # Subsequent chunk — backpressure check then push and resume
-                    if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
-                        await $weak_self->_wait_for_drain;
+                    # Subsequent chunk — backpressure check then push and resume.
+                    # Bound on THIS stream's send queue (per-stream), not the
+                    # shared TCP buffer which is meaningless across multiplexed
+                    # streams.
+                    if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
+                        await $weak_self->_h2_wait_for_stream_drain($stream_id);
                         return unless $weak_self;
                         return if $weak_self->{closed};
                         return unless $weak_self->{h2_streams}{$stream_id};
@@ -867,9 +891,10 @@ sub _h2_create_send {
                 }
             } else {
                 if ($streaming_started) {
-                    # Final chunk on an already-streaming response
-                    if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
-                        await $weak_self->_wait_for_drain;
+                    # Final chunk on an already-streaming response. Bound on THIS
+                    # stream's send queue (per-stream), not the shared TCP buffer.
+                    if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
+                        await $weak_self->_h2_wait_for_stream_drain($stream_id);
                         return unless $weak_self;
                         return if $weak_self->{closed};
                         return unless $weak_self->{h2_streams}{$stream_id};
@@ -1748,6 +1773,44 @@ sub _cancel_drain_waiters {
         $f->done unless $f->is_ready;
     }
     $self->{_drain_check_active} = 0;
+}
+
+# HTTP/2 per-stream backpressure: the h2 analogue of _wait_for_drain. Resolves
+# when this stream's send queue falls below the low watermark. Each multiplexed
+# stream is bounded independently, so a quiet TCP buffer can't let one stream's
+# queue grow without limit.
+sub _h2_wait_for_stream_drain {
+    my ($self, $stream_id) = @_;
+
+    my $ss = $self->{h2_streams}{$stream_id} or return Future->done;
+
+    # Fast path: already below low watermark
+    if (($ss->{send_queue_bytes} // 0) < $self->{write_low_watermark}) {
+        return Future->done;
+    }
+
+    # Create Future to be resolved when this stream's queue drains (in the
+    # data_callback pull) or when the stream is torn down.
+    my $f = $self->{server}->loop->new_future;
+    push @{$ss->{stream_drain_waiters} //= []}, $f;
+
+    return $f;
+}
+
+# Release any producer blocked on _h2_wait_for_stream_drain for a stream that
+# is being torn down (close/RST/connection shutdown). Resolve, never fail - the
+# producer rechecks connection/stream state after the await. Some teardown
+# sites run inside nghttp2's feed() (e.g. the oversize-body 413 path); completing
+# a waiter resumes the producer synchronously, so defer to the next loop tick to
+# keep the resumed producer out of a re-entrant nghttp2 call.
+sub _h2_resolve_stream_drain_waiters {
+    my ($self, $ss) = @_;
+    return unless $ss && $ss->{stream_drain_waiters};
+    my @waiters = splice @{$ss->{stream_drain_waiters}};
+    return unless @waiters;
+    $self->{server}->loop->later(sub {
+        $_->done for grep { !$_->is_ready } @waiters;
+    });
 }
 
 # ============================================================================
@@ -2757,6 +2820,9 @@ sub _close {
                     : { type => 'http.disconnect' };
                 $stream->{body_pending}->done($event);
             }
+            # Release producers blocked on per-stream backpressure so they
+            # don't hang on a connection that is going away.
+            $self->_h2_resolve_stream_drain_waiters($stream);
         }
         delete $self->{h2_streams};
     }
