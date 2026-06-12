@@ -772,8 +772,10 @@ sub _h2_create_send {
     my $status;
     my @response_headers;
 
-    # Streaming state for deferred data provider pattern
-    my @data_queue;
+    # Streaming state for deferred data provider pattern.
+    # The send queue lives on per-stream state ($ss->{send_queue} /
+    # $ss->{send_queue_bytes}) so the h2 transport handle can measure it;
+    # $eof_pending / $streaming_started stay closure-local.
     my $eof_pending = 0;
     my $streaming_started = 0;
 
@@ -782,14 +784,19 @@ sub _h2_create_send {
     my $data_callback = sub {
         my ($cb_stream_id, $max_len) = @_;
 
-        if (@data_queue) {
-            my $chunk = shift @data_queue;
+        my $ss = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        return undef unless $ss;
+        my $q = $ss->{send_queue} ||= [];
+
+        if (@$q) {
+            my $chunk = shift @$q;
             # Respect max_len — XS truncates without preserving remainder
             if (length($chunk) > $max_len) {
-                unshift @data_queue, substr($chunk, $max_len);
+                unshift @$q, substr($chunk, $max_len);
                 $chunk = substr($chunk, 0, $max_len);
             }
-            my $eof = (!@data_queue && $eof_pending) ? 1 : 0;
+            $ss->{send_queue_bytes} -= length($chunk);
+            my $eof = (!@$q && $eof_pending) ? 1 : 0;
             return ($chunk, $eof);
         }
 
@@ -830,7 +837,12 @@ sub _h2_create_send {
                 if (!$streaming_started) {
                     # First streaming chunk — submit with data callback
                     $streaming_started = 1;
-                    push @data_queue, $body if length($body);
+                    $ss->{send_queue}       //= [];
+                    $ss->{send_queue_bytes} //= 0;
+                    if (length $body) {
+                        push @{$ss->{send_queue}}, $body;
+                        $ss->{send_queue_bytes} += length $body;
+                    }
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -846,7 +858,10 @@ sub _h2_create_send {
                         return if $weak_self->{closed};
                         return unless $weak_self->{h2_streams}{$stream_id};
                     }
-                    push @data_queue, $body if length($body);
+                    if (length $body) {
+                        push @{$ss->{send_queue}}, $body;
+                        $ss->{send_queue_bytes} += length $body;
+                    }
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 }
@@ -860,7 +875,10 @@ sub _h2_create_send {
                         return unless $weak_self->{h2_streams}{$stream_id};
                     }
                     $eof_pending = 1;
-                    push @data_queue, $body if length($body);
+                    if (length $body) {
+                        push @{$ss->{send_queue}}, $body;
+                        $ss->{send_queue_bytes} += length $body;
+                    }
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 } else {
