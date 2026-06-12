@@ -180,6 +180,35 @@ max_frame_size, max_header_list_size
 
 =back
 
+=head2 Transport Flow Control (pagi.transport)
+
+PAGI exposes outbound flow-control introspection to applications through the
+C<pagi.transport> scope key (see L<PAGI::Spec::Www/"Transport Flow Control">):
+C<buffered_amount>, the high/low watermarks, and the
+C<on_high_water>/C<on_drain> backpressure callbacks. Over HTTP/2 the handle
+measures the B<per-stream> send backlog, so each multiplexed stream is bounded
+independently.
+
+PAGI::Server provides C<pagi.transport> for HTTP/2 C<http> (streaming responses)
+and C<sse> scopes, matching its HTTP/1.1 coverage of C<http>, C<sse>, and
+C<websocket>.
+
+B<Known gap:> WebSocket over HTTP/2 (RFC 8441) does B<not> yet provide
+C<pagi.transport>. The HTTP/2 WebSocket send path hands each frame to nghttp2
+through its push-style C<submit_data> entry point, which keeps no per-stream
+send queue for the handle to measure, and the binding exposes no per-stream
+buffered-byte API. Closing the gap means converting the HTTP/2 WebSocket send
+path to the same pull-based data-provider model that HTTP/2 streaming and SSE
+use. Until then a WebSocket application running over HTTP/2 sees
+C<pagi.transport> as absent: the L<PAGI::WebSocket> helpers degrade quietly
+(C<buffered_amount> reports C<0>, C<is_writable> stays true, and the callbacks
+are no-ops). WebSocket over HTTP/1.1 is unaffected and provides the handle
+normally.
+
+The long-term goal is parity: C<pagi.transport> for every streaming scope type
+over every transport, so an application need not know whether it runs over
+HTTP/1.1 or HTTP/2.
+
 =head2 Enabling HTTP/2
 
     # TLS mode (h2 via ALPN)
