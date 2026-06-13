@@ -3891,8 +3891,8 @@ async sub _run_lifespan_startup {
     my $scope = {
         type => 'lifespan',
         pagi => {
-            version      => '0.2',
-            spec_version => '0.2',
+            version      => '0.3',
+            spec_version => '0.3',
             is_worker    => $self->{is_worker} // 0,
             worker_num   => $self->{worker_num},  # undef for single-worker, 1-N for multi-worker
         },
