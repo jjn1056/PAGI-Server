@@ -876,6 +876,10 @@ sub _h2_create_send {
             @response_headers = map {
                 [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
             } @{$event->{headers} // []};
+            # Server-supplied Date header (HTTP/1.1 parity) — add if the app didn't.
+            unless (grep { lc($_->[0]) eq 'date' } @response_headers) {
+                push @response_headers, ['date', $weak_self->{protocol}->format_date];
+            }
         }
         elsif ($type eq 'http.response.body') {
             my $ss = $weak_self->{h2_streams}{$stream_id} or return;
@@ -1389,6 +1393,11 @@ sub _h2_create_sse_send {
                 push @final_headers, ['content-type', 'text/event-stream'];
             }
             push @final_headers, ['cache-control', 'no-cache'];
+            # Server-supplied Date header (HTTP/1.1 parity) — the h1 SSE path adds
+            # this too; add it unless the app supplied one.
+            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
+                push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            }
 
             $streaming_started = 1;
             $ss->{send_queue}       //= [];
