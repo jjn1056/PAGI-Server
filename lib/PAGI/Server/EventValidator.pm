@@ -108,6 +108,12 @@ sub validate_websocket_send {
     elsif ($type eq 'websocket.keepalive') {
         _validate_websocket_keepalive($event);
     }
+    elsif ($type eq 'websocket.http.response.start') {
+        _validate_ws_denial_start($event);
+    }
+    elsif ($type eq 'websocket.http.response.body') {
+        _validate_ws_denial_body($event);
+    }
 }
 
 sub _validate_websocket_accept {
@@ -150,6 +156,32 @@ sub _validate_websocket_keepalive {
         unless exists $event->{interval};
     croak "websocket.keepalive 'interval' must be a number"
         unless defined $event->{interval} && $event->{interval} =~ /^[\d.]+$/;
+}
+
+sub _validate_ws_denial_start {
+    my ($event) = @_;
+
+    # status is required (Int)
+    croak "websocket.http.response.start requires 'status' field"
+        unless exists $event->{status};
+    croak "websocket.http.response.start 'status' must be an integer"
+        unless defined $event->{status} && $event->{status} =~ /^\d+$/;
+
+    # headers must be ArrayRef if present
+    if (exists $event->{headers} && defined $event->{headers}) {
+        croak "websocket.http.response.start 'headers' must be an array reference"
+            unless ref $event->{headers} eq 'ARRAY';
+    }
+}
+
+sub _validate_ws_denial_body {
+    my ($event) = @_;
+
+    # more must be integer if present
+    if (exists $event->{more} && defined $event->{more}) {
+        croak "websocket.http.response.body 'more' must be an integer"
+            unless $event->{more} =~ /^\d+$/;
+    }
 }
 
 # =============================================================================
@@ -265,7 +297,8 @@ C<http.response.trailers>.
 =head2 validate_websocket_send($event)
 
 Validates WebSocket send events: C<websocket.accept>, C<websocket.send>,
-C<websocket.close>, C<websocket.keepalive>.
+C<websocket.close>, C<websocket.keepalive>, C<websocket.http.response.start>,
+C<websocket.http.response.body>.
 
 =head2 validate_sse_send($event)
 

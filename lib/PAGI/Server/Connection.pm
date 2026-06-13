@@ -3598,7 +3598,7 @@ sub _create_websocket_scope {
         subprotocols => \@subprotocols,
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
-        extensions   => $self->_get_extensions_for_scope,
+        extensions   => { %{$self->_get_extensions_for_scope}, 'websocket.http.response' => {} },
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.
@@ -3793,6 +3793,41 @@ sub _create_websocket_send {
             my $bytes = $frame->to_bytes;
             $weak_self->{stream}->write($bytes);
             $weak_self->_notify_transport_write;
+        }
+        elsif ($type eq 'websocket.http.response.start') {
+            # Custom handshake denial (websocket.http.response extension). Only
+            # valid before accept; buffer the response head until the body
+            # arrives.
+            return if $weak_self->{websocket_accepted};
+            return if $weak_self->{ws_denial_started};
+            $weak_self->{ws_denial_started} = 1;
+            $weak_self->{ws_denial_status}  = $event->{status} // 403;
+            $weak_self->{ws_denial_headers} = [
+                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
+                    @{$event->{headers} // []}
+            ];
+            $weak_self->{ws_denial_body} = '';
+        }
+        elsif ($type eq 'websocket.http.response.body') {
+            return unless $weak_self->{ws_denial_started};
+            return if $weak_self->{response_started};
+            $weak_self->{ws_denial_body} .= $event->{body} // '';
+            return if $event->{more};   # more chunks coming — keep buffering
+
+            my $status  = $weak_self->{ws_denial_status};
+            my $body    = $weak_self->{ws_denial_body};
+            my @headers = (
+                @{$weak_self->{ws_denial_headers}},
+                ['content-length', length $body],
+                ['date', $weak_self->{protocol}->format_date],
+            );
+            my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
+            $response .= $body;
+            $weak_self->{stream}->write($response);
+            $weak_self->{response_started} = 1;
+            $weak_self->{response_status}  = $status;   # access log
+            # Handshake rejected: close like the bare-403 path (no upgrade).
+            $weak_self->_handle_disconnect_and_close('client_closed');
         }
         elsif ($type eq 'websocket.close') {
             # If not accepted yet, send 403 Forbidden
