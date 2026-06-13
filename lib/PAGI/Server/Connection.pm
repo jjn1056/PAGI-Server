@@ -2321,7 +2321,7 @@ sub _should_keep_alive {
 sub _create_scope {
     my ($self, $request) = @_;
 
-    # Create connection state object for disconnect tracking (PAGI spec 0.3)
+    # Create connection state object for disconnect tracking
     # Uses lazy Future creation - Future only allocated if disconnect_future() is called
     my $connection_state = PAGI::Server::ConnectionState->new(
         connection => $self,
@@ -2350,7 +2350,7 @@ sub _create_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => $self->_get_extensions_for_scope,
-        # Connection state for non-destructive disconnect detection (PAGI spec 0.3)
+        # Connection state for non-destructive disconnect detection
         'pagi.connection' => $connection_state,
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
