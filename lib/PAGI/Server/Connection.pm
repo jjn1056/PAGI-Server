@@ -1013,7 +1013,7 @@ sub _h2_create_websocket_scope {
         server       => [$self->{server_host}, $self->{server_port}],
         subprotocols => \@subprotocols,
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
-        extensions   => $self->_get_extensions_for_scope,
+        extensions   => { %{$self->_get_extensions_for_scope}, 'websocket.http.response' => {} },
     };
 }
 
@@ -1148,6 +1148,31 @@ sub _h2_create_websocket_send {
 
             my $bytes = $frame->to_bytes;
             $weak_self->{h2_session}->submit_data($stream_id, $bytes, 0);
+            $weak_self->_h2_write_pending;
+        }
+        elsif ($type eq 'websocket.http.response.start') {
+            return if $ss->{ws_accepted};
+            return if $ss->{ws_denial_started};
+            $ss->{ws_denial_started} = 1;
+            $ss->{ws_denial_status}  = $event->{status} // 403;
+            $ss->{ws_denial_headers} = [
+                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
+                    @{$event->{headers} // []}
+            ];
+            $ss->{ws_denial_body} = '';
+        }
+        elsif ($type eq 'websocket.http.response.body') {
+            return unless $ss->{ws_denial_started};
+            return if $ss->{response_started};
+            $ss->{ws_denial_body} .= $event->{body} // '';
+            return if $event->{more};   # more chunks coming — keep buffering
+
+            $ss->{response_started} = 1;
+            $weak_self->{h2_session}->submit_response($stream_id,
+                status  => $ss->{ws_denial_status},
+                headers => $ss->{ws_denial_headers},
+                body    => $ss->{ws_denial_body},
+            );
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'websocket.close') {
