@@ -853,7 +853,9 @@ If true, require and verify client certificates.
 
 =item min_version => $version
 
-Minimum TLS version. Default: C<'TLSv1_2'>. Options: C<'TLSv1_2'>, C<'TLSv1_3'>.
+Minimum TLS version -- a B<floor>, not a pin: the server negotiates the highest
+version the client also supports at or above this. Default: C<'TLSv1_2'> (so
+TLS 1.3 is used with modern clients). Options: C<'TLSv1_2'>, C<'TLSv1_3'>.
 
 =item cipher_list => $string
 

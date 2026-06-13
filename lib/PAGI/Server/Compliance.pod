@@ -42,6 +42,39 @@ management, and 71% WebSocket RFC 6455 compliance.
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
     +---------------------------+-------+--------+--------+
 
+=head1 PAGI SPECIFICATION SUPPORT
+
+Beyond protocol conformance, PAGI::Server implements the optional capabilities
+defined in L<PAGI::Spec::Www>, across both HTTP/1.1 and HTTP/2:
+
+=over 4
+
+=item * B<Transport flow control> (C<pagi.transport>) -- C<buffered_amount>,
+high/low watermarks, and C<on_high_water>/C<on_drain> backpressure callbacks. On
+HTTP/1.1 for http/websocket/sse; on HTTP/2 for http streaming and sse. B<Not yet>
+on WebSocket-over-HTTP/2 (see L</"Transport Flow Control (pagi.transport)">).
+
+=item * B<Connection state> (C<pagi.connection>) for HTTP scopes --
+C<is_connected>, C<disconnect_reason>, C<on_disconnect> (abnormal only),
+C<on_complete> (success only), and C<disconnect_future>.
+
+=item * B<WebSocket Denial Response> (the C<websocket.http.response> extension)
+-- reject a handshake with a custom HTTP response instead of a bare C<403>, on
+both HTTP/1.1 and HTTP/2.
+
+=item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT).
+
+=item * B<TLS introspection> (the C<tls> extension) -- certificates, negotiated
+version, and cipher suite. The server negotiates TLS 1.3 by default
+(C<min_version> is a floor, not a pin).
+
+=item * B<Server-Sent Events> over all HTTP methods, with keepalive.
+
+=back
+
+In development mode the server validates outbound events against the spec and
+rejects malformed ones.
+
 =head1 HTTP/1.1 COMPLIANCE
 
 PAGI::Server is fully compliant with RFC 7230 (HTTP/1.1 Message Syntax and Routing)
