@@ -1490,8 +1490,12 @@ C<loop_type =E<gt> 'EPoll'> requires L<IO::Async::Loop::EPoll>.
 B<(Experimental - HTTP/2 support may change in future releases.)>
 
 Maximum number of concurrent HTTP/2 streams per connection. Each stream
-represents an in-flight request/response exchange. Limits resource consumption
-and provides protection against rapid-reset attacks.
+represents an in-flight request/response exchange, bounding concurrent
+resource consumption.
+
+B<Note:> this does I<not> defend the HTTP/2 Rapid Reset attack
+(CVE-2023-44487) — reset streams never count against this limit. Rapid Reset is
+defended by the incoming-C<RST_STREAM> rate limit; see C<h2_rst_rate_limit>.
 
 B<Default:> 100
 
@@ -1500,6 +1504,16 @@ is unlimited, but 100 is the industry consensus for a safe maximum.
 
 B<Tuning:> Increase for API gateways handling many small concurrent requests.
 Decrease for memory-constrained environments or when each request is expensive.
+
+=item h2_rst_rate_limit => { burst => 1000, rate => 33 }
+
+B<(Experimental - HTTP/2.)> Token-bucket rate limit on incoming C<RST_STREAM>
+frames, defending the HTTP/2 Rapid Reset attack (CVE-2023-44487). C<burst>
+tokens are available immediately and refill at C<rate> per second; each
+C<RST_STREAM> consumes one. When the bucket empties the server sends GOAWAY and
+closes the connection. B<On by default> at nghttp2's defaults (burst 1000, rate
+33), which only an abusive create-and-reset flood will hit. Raise the values to
+loosen. Requires C<Net::HTTP2::nghttp2> >= 0.008 (nghttp2 >= 1.57).
 
 =item h2_initial_window_size => $bytes
 
@@ -1934,6 +1948,8 @@ C<h2_>. See L</CONSTRUCTOR> for details on:
 
 =item * C<h2_max_concurrent_streams> - Max streams per connection (default: 100)
 
+=item * C<h2_rst_rate_limit> - Incoming C<RST_STREAM> rate limit; HTTP/2 Rapid Reset defense (default burst 1000 / rate 33)
+
 =item * C<h2_initial_window_size> - Flow control window (default: 65535)
 
 =item * C<h2_max_frame_size> - Max frame payload (default: 16384)
@@ -2199,6 +2215,7 @@ sub _init {
     my $h2_enable_push             = delete $params->{h2_enable_push}             // 0;
     my $h2_enable_connect_protocol = delete $params->{h2_enable_connect_protocol} // 1;
     my $h2_max_header_list_size    = delete $params->{h2_max_header_list_size}    // 65536;
+    my $h2_rst_rate_limit = delete $params->{h2_rst_rate_limit} // { burst => 1000, rate => 33 };
 
     $self->{running}     = 0;
     $self->{bound_port}  = undef;
@@ -2222,6 +2239,7 @@ sub _init {
                 enable_push             => $h2_enable_push,
                 enable_connect_protocol => $h2_enable_connect_protocol,
                 max_header_list_size    => $h2_max_header_list_size,
+                h2_rst_rate_limit       => $h2_rst_rate_limit,
             );
             $self->{http2_enabled} = 1;
 

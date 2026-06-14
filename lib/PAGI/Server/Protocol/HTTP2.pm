@@ -40,7 +40,7 @@ use constant H2_PREFACE_LENGTH => 24;
 
 # Check for nghttp2 availability
 our $AVAILABLE;
-use constant MIN_NGHTTP2_VERSION => '0.007';
+use constant MIN_NGHTTP2_VERSION => '0.008';
 BEGIN {
     $AVAILABLE = eval {
         require Net::HTTP2::nghttp2;
@@ -70,12 +70,13 @@ sub detect_preface {
 =head2 new
 
     my $proto = PAGI::Server::Protocol::HTTP2->new(
-        max_concurrent_streams  => 100,    # Default
-        initial_window_size     => 65535,  # Default
-        max_frame_size          => 16384,  # Default
-        enable_push             => 0,      # Default (disabled)
-        enable_connect_protocol => 1,      # Default (enabled, RFC 8441)
-        max_header_list_size    => 65536,  # Default (64KB)
+        max_concurrent_streams  => 100,                      # Default
+        initial_window_size     => 65535,                    # Default
+        max_frame_size          => 16384,                    # Default
+        enable_push             => 0,                        # Default (disabled)
+        enable_connect_protocol => 1,                        # Default (enabled, RFC 8441)
+        max_header_list_size    => 65536,                    # Default (64KB)
+        h2_rst_rate_limit       => { burst => 1000, rate => 33 }, # Default (Rapid Reset defense)
     );
 
 Creates a new HTTP/2 protocol handler with the specified settings.
@@ -92,6 +93,7 @@ sub new {
         enable_push             => $args{enable_push} // 0,
         enable_connect_protocol => $args{enable_connect_protocol} // 1,
         max_header_list_size    => $args{max_header_list_size} // 65536,
+        h2_rst_rate_limit       => $args{h2_rst_rate_limit} // { burst => 1000, rate => 33 },
     }, $class;
 
     return $self;
@@ -128,6 +130,7 @@ sub create_session {
             enable_connect_protocol => $self->{enable_connect_protocol},
             max_header_list_size    => $self->{max_header_list_size},
         },
+        h2_rst_rate_limit => $self->{h2_rst_rate_limit},
     );
 }
 
@@ -149,6 +152,7 @@ sub new {
         on_body     => $args{on_body},
         on_close    => $args{on_close},
         settings    => $args{settings},
+        h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
         nghttp2     => undef,
     }, $class;
@@ -165,6 +169,8 @@ sub _init_nghttp2_session {
 
     my $weak_self = $self;
     weaken($weak_self);
+
+    my $rl = $self->{h2_rst_rate_limit};
 
     $self->{nghttp2} = Net::HTTP2::nghttp2::Session->new_server(
         callbacks => {
@@ -319,6 +325,9 @@ sub _init_nghttp2_session {
                 return 0;
             },
         },
+        (defined $rl
+            ? (stream_reset_burst => $rl->{burst}, stream_reset_rate => $rl->{rate})
+            : ()),
     );
 
     # Send initial SETTINGS

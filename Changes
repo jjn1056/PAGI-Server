@@ -1,6 +1,7 @@
 # Revision history for PAGI-Server
 
 0.002000
+  - feat(h2): h2_rst_rate_limit — explicit, tunable HTTP/2 Rapid Reset defense; corrected the max_concurrent_streams POD claim.
   - PAGI::Server and bin/pagi-server split out of the PAGI distribution
     into their own distribution. Git history preserved from the original
     repository (https://github.com/jjn1056/pagi).
