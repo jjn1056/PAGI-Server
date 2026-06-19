@@ -3921,7 +3921,6 @@ async sub _run_lifespan_startup {
     my @send_queue;
     my $receive_pending;
     my $startup_complete = Future->new;
-    my $lifespan_supported = 1;  # Track if app supports lifespan
 
     # $receive for the app - returns events from the server
     my $receive = sub {
@@ -3979,17 +3978,26 @@ async sub _run_lifespan_startup {
     # Start the lifespan app handler
     # We run it in the background and wait for startup.complete
     my $app_future = (async sub {
-        eval {
+        my $ok = eval {
             await $self->{app}->($scope, $receive, $send);
+            1;
         };
-        # Per spec: if the app throws an exception for lifespan scope,
-        # the server should continue without lifespan support.
-        # This matches Uvicorn/Hypercorn "auto" mode behavior.
-        # Apps that don't support lifespan should: die if $scope->{type} ne 'websocket';
-        $lifespan_supported = 0;
+        return if $ok;
+        my $err = $@;
+
         if (!$startup_complete->is_ready) {
+            # The app threw before signalling startup: treat it as "lifespan
+            # not supported" and continue without it. This matches the
+            # Uvicorn/Hypercorn "auto" mode behavior, where an app that does
+            # not implement lifespan simply dies on the lifespan scope.
             $self->_log(info => "Lifespan not supported, continuing without it");
             $startup_complete->done({ success => 1, lifespan_supported => 0 });
+        }
+        else {
+            # The app's long-lived lifespan task failed AFTER startup completed.
+            # Surface it at error level rather than swallowing it silently, so a
+            # crashed background task is visible to operators.
+            $self->_log(error => "Lifespan app failed after startup: $err");
         }
     })->();
 
