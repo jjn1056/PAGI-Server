@@ -1205,6 +1205,11 @@ handles IO::Async's C<$ONE_TRUE_LOOP> singleton
 
 =item * Workers that exit are automatically respawned via C<< $loop->watch_process() >>
 
+=item * Workers that fail lifespan startup (exit code 2) are B<not> respawned, since
+the failure would just repeat. If B<every> worker fails startup so that no workers
+remain, the master logs an error and exits non-zero, rather than holding the
+listening socket with nothing serving -- so a process supervisor can restart it.
+
 =item * SIGTERM/SIGINT triggers graceful shutdown of all workers
 
 =back
@@ -2544,6 +2549,13 @@ sub run {
 
     # Run the event loop (signal handlers were set up by listen())
     $loop->run;
+
+    # If the loop stopped because every worker failed to start (multi-worker),
+    # exit non-zero so a process supervisor restarts us rather than seeing a
+    # clean exit from a server that never served anything.
+    if ($self->{_workers_failed}) {
+        die "All workers failed to start; no workers remain\n";
+    }
 }
 
 # Create an event loop, respecting loop_type config
@@ -3483,14 +3495,28 @@ sub _spawn_worker {
             }
         }
 
-        # Check if all workers have exited (for shutdown)
-        if ($weak_self->{shutting_down} && !keys %{$weak_self->{worker_pids}}) {
-            # Cancel the shutdown SIGKILL escalation timer
-            if ($weak_self->{_shutdown_kill_timer}) {
-                $loop->unwatch_time($weak_self->{_shutdown_kill_timer});
-                delete $weak_self->{_shutdown_kill_timer};
+        # Check if all workers have exited.
+        if (!keys %{$weak_self->{worker_pids}}) {
+            if ($weak_self->{shutting_down}) {
+                # Normal shutdown: stop once the last worker is gone.
+                if ($weak_self->{_shutdown_kill_timer}) {
+                    $loop->unwatch_time($weak_self->{_shutdown_kill_timer});
+                    delete $weak_self->{_shutdown_kill_timer};
+                }
+                $loop->stop;
             }
-            $loop->stop;
+            else {
+                # Not shutting down, yet no workers remain and none were
+                # respawned -- e.g. every worker failed lifespan startup (exit 2).
+                # The master would otherwise sit holding the listening socket with
+                # zero workers serving and never exit. Like uvicorn (#1115/#1177),
+                # stop and exit non-zero so a supervisor detects the failure and
+                # restarts us.
+                $weak_self->_log(error =>
+                    "All workers have exited and none were respawned; shutting down");
+                $weak_self->{_workers_failed} = 1;
+                $loop->stop;
+            }
         }
     });
 
