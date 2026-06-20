@@ -1110,10 +1110,8 @@ subtest 'HTTP pipelining handles multiple requests' => sub {
     })->()->get;
 };
 
-# Test 23: on_error callback is invoked for server errors
-subtest 'on_error callback is invoked for errors' => sub {
-    my $error_received;
-
+# Test 23: an application exception produces a 500 response
+subtest 'an application exception produces a 500 response' => sub {
     my $error_app = async sub  {
         my ($scope, $receive, $send) = @_;
         if ($scope->{type} eq 'lifespan') {
@@ -1138,9 +1136,6 @@ subtest 'on_error callback is invoked for errors' => sub {
         host     => '127.0.0.1',
         port     => 0,
         quiet    => 1,
-        on_error => sub {
-            $error_received = shift;
-        },
     );
 
     $loop->add($server);
@@ -1159,10 +1154,6 @@ subtest 'on_error callback is invoked for errors' => sub {
     $loop->remove($http);
     $server->shutdown->get;
     $loop->remove($server);
-
-    # The on_error callback behavior is implementation-dependent
-    # For now, we verify the server handled the error gracefully
-    pass('Server handled app error gracefully');
 };
 
 # Test 24: Access logging writes request/response info
