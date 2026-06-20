@@ -944,7 +944,41 @@ B<CLI:> C<--log-level debug>
 
 Number of worker processes for multi-worker mode. Default: 0 (single process mode).
 
-When set to a value greater than 0, the server uses a pre-fork model:
+When set to a value greater than 0, the server uses a pre-fork model: it spawns
+C<$count> independent worker processes, each with its own event loop, and each
+running the C<lifespan> startup/shutdown cycle independently.
+
+B<Workers do not share memory.> Each worker is a separate process. Anything your
+application keeps in memory -- a cache, a counter, a registry, an open database
+handle, a pub/sub hub stored in C<< $scope->{state} >> -- exists once B<per
+worker> and does not propagate to the others. This is inherent to C<fork>, and it
+is exactly how the wider async ecosystem behaves: gunicorn/uvicorn workers, and
+processes on separate hosts, are isolated the same way.
+
+The practical consequences:
+
+=over 4
+
+=item * A B<stateless> application -- or one whose shared state lives in an
+external store such as a database or Redis -- scales across workers with no
+special handling. This is the common case.
+
+=item * An application that relies on B<in-memory shared state> will see it
+diverge: each worker holds its own copy, and a value written by one worker is
+invisible to the rest. Open per-worker resources (database connections and the
+like) in the C<lifespan> startup -- which runs in each worker -- rather than
+before calling C<run()>.
+
+=item * To share B<events> across workers -- one worker publishes, handlers on
+every worker receive -- you need an external broker, not in-memory state. See
+L<PAGI::Middleware::Channels>; its Redis backend is the cross-process layer, the
+same role Django Channels' channel layer plays for ASGI.
+
+=back
+
+The same boundary applies when you scale to multiple B<nodes> (for example
+Kubernetes pods): nothing in process memory crosses it. In-memory state is
+single-process; anything that must be shared has to live outside the process.
 
 =item listener_backlog => $number
 
