@@ -653,18 +653,27 @@ sub _h2_dispatch_stream {
         eval {
             await $weak_self->{app}->($scope, $receive, $send);
         };
-        if (my $error = $@) {
-            warn "PAGI application error (HTTP/2 stream $stream_id): $error\n";
-            if ($weak_self && !$stream_state->{response_started}) {
-                eval {
-                    $weak_self->{h2_session}->submit_response($stream_id,
-                        status  => 500,
-                        headers => [['content-type', 'text/plain']],
-                        body    => "Internal Server Error\n",
-                    );
-                    $weak_self->_h2_write_pending;
-                };
-            }
+        my $error = $@;
+
+        # If the application failed, OR returned without starting a response,
+        # synthesize a 500 (only possible while no response has begun). A clean
+        # return that produced no response is a protocol error, same as a throw.
+        if ($weak_self && !$stream_state->{response_started}) {
+            warn $error
+                ? "PAGI application error (HTTP/2 stream $stream_id): $error\n"
+                : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)\n";
+            eval {
+                $weak_self->{h2_session}->submit_response($stream_id,
+                    status  => 500,
+                    headers => [['content-type', 'text/plain']],
+                    body    => "Internal Server Error\n",
+                );
+                $weak_self->_h2_write_pending;
+            };
+        }
+        elsif ($error) {
+            # Response already started; cannot send a 500. Log only.
+            warn "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n";
         }
 
         # Notify server that request completed (for max_requests tracking)
@@ -2239,6 +2248,24 @@ async sub _handle_request {
         # Notify server that request completed (for max_requests tracking)
         $self->{server}->_on_request_complete if $self->{server};
         # Always close connection after exception (3.2) - don't try keep-alive
+        $self->_handle_disconnect('server_error');
+        $self->_close;
+        return;
+    }
+
+    # The application returned without starting a response. An incomplete
+    # response is a protocol error: if the client is still connected, synthesize
+    # a 500; either way do not keep-alive a connection on which no response was
+    # written (that would hang the client, which is waiting for a response). A
+    # response that was started but not completed is handled by the body-framing
+    # and keep-alive logic below.
+    if (!$self->{response_started}) {
+        unless ($self->{closed}) {
+            warn "PAGI application returned without starting a response\n";
+            $self->_send_error_response(500, "Internal Server Error");
+        }
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
         $self->_handle_disconnect('server_error');
         $self->_close;
         return;
