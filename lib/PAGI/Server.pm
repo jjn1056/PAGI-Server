@@ -3982,23 +3982,25 @@ async sub _run_lifespan_startup {
             await $self->{app}->($scope, $receive, $send);
             1;
         };
-        return if $ok;
-        my $err = $@;
+        my $err = $ok ? undef : $@;
 
         if (!$startup_complete->is_ready) {
-            # The app threw before signalling startup: treat it as "lifespan
-            # not supported" and continue without it. This matches the
-            # Uvicorn/Hypercorn "auto" mode behavior, where an app that does
-            # not implement lifespan simply dies on the lifespan scope.
+            # The app finished -- by returning cleanly OR by throwing -- without
+            # ever signalling startup. It does not implement the lifespan
+            # protocol, so continue without it. This matches the Uvicorn/Hypercorn
+            # "auto" mode behavior; an app may decline either by returning on the
+            # lifespan scope or by dying on it.
             $self->_log(info => "Lifespan not supported, continuing without it");
             $startup_complete->done({ success => 1, lifespan_supported => 0 });
         }
-        else {
+        elsif (defined $err) {
             # The app's long-lived lifespan task failed AFTER startup completed.
             # Surface it at error level rather than swallowing it silently, so a
             # crashed background task is visible to operators.
             $self->_log(error => "Lifespan app failed after startup: $err");
         }
+        # else: the app returned cleanly after startup completed -- the handler
+        # simply exited early; nothing to do.
     })->();
 
     # Keep the app future so we can trigger shutdown later
