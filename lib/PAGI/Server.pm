@@ -882,10 +882,6 @@ TLS configuration parsing without actually enabling TLS. Default: false.
 
 Extensions to advertise (e.g., { fullflush => {} })
 
-=item on_error => \&callback
-
-Error callback receiving ($error)
-
 =item access_log => $filehandle | undef
 
 Access log filehandle. Default: STDERR
@@ -2164,7 +2160,6 @@ sub _init {
     }
 
     $self->{extensions}       = delete $params->{extensions} // {};
-    $self->{on_error}         = delete $params->{on_error} // sub { warn @_ };
     $self->{access_log}       = exists $params->{access_log} ? delete $params->{access_log} : \*STDERR;
     $self->{access_log_format} = delete $params->{access_log_format} // 'clf';
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
@@ -2289,9 +2284,6 @@ sub configure {
     }
     if (exists $params{extensions}) {
         $self->{extensions} = delete $params{extensions};
-    }
-    if (exists $params{on_error}) {
-        $self->{on_error} = delete $params{on_error};
     }
     if (exists $params{access_log}) {
         $self->{access_log} = delete $params{access_log};
@@ -3548,7 +3540,6 @@ sub _run_as_worker {
         ssl             => $self->{ssl},
         http2           => $self->{http2},
         extensions      => $self->{extensions},
-        on_error        => $self->{on_error},
         access_log      => $self->{access_log},
         log_level       => $self->{log_level},
         quiet           => 1,  # Workers should be quiet
