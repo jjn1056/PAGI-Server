@@ -8,7 +8,13 @@ use Future::AsyncAwait;
 use PAGI::Server;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
-use PAGI::Middleware::Builder;
+
+# PAGI::Middleware::Builder and the security-headers middleware live in the
+# sibling PAGI-Tools distribution. Skip when Tools is not installed.
+BEGIN {
+    eval { require PAGI::Middleware::Builder; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Middleware::Builder) not installed');
+}
 
 my $loop = IO::Async::Loop->new;
 

@@ -16,7 +16,12 @@ use warnings;
 use Test2::V0;
 use Future;
 
-require PAGI::Request;
+# PAGI::Request is in the sibling PAGI-Tools distribution; ConnectionState is
+# PAGI-Server's own. Skip when Tools is not installed.
+BEGIN {
+    eval { require PAGI::Request; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Request) not installed');
+}
 require PAGI::Server::ConnectionState;
 
 # =============================================================================

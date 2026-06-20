@@ -9,7 +9,14 @@ use JSON::MaybeXS;
 
 use lib 'lib';
 use PAGI::Server;
-use PAGI::Request;
+
+# PAGI::Request is in the sibling PAGI-Tools distribution. This is a genuine
+# server+Tools integration test; skip when Tools is not installed (the server's
+# own request handling is covered Tools-free in t/10-http-compliance.t etc.).
+BEGIN {
+    eval { require PAGI::Request; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Request) not installed');
+}
 
 # Skip if not running integration tests
 plan skip_all => 'Set INTEGRATION_TEST=1 to run' unless $ENV{INTEGRATION_TEST};

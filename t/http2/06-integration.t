@@ -25,8 +25,14 @@ use PAGI::Server::Connection;
 use PAGI::Server;
 use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
-use PAGI::Test::Client;
 use Net::HTTP2::nghttp2::Session;
+
+# PAGI::Test::Client lives in the sibling PAGI-Tools distribution. Skip when it
+# is not installed (the raw HTTP/2 paths are covered Tools-free in t/http2/*).
+BEGIN {
+    eval { require PAGI::Test::Client; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Test::Client) not installed');
+}
 
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
