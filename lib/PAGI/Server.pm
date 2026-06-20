@@ -1300,6 +1300,16 @@ request processing). The C<timeout> applies between requests; the
 C<request_timeout> applies during a request. For WebSocket and SSE, use
 C<ws_idle_timeout> and C<sse_idle_timeout> respectively.
 
+=item lifespan_startup_timeout => $seconds
+
+Maximum time in seconds to wait for the lifespan application to signal startup
+(by sending C<lifespan.startup.complete> or C<lifespan.startup.failed>). If the
+lifespan handler neither signals startup nor returns within this window, the
+server logs an error and aborts startup rather than blocking forever.
+
+B<Default:> 30. Set to 0 to disable the timeout (the server will wait
+indefinitely for the startup signal).
+
 =item request_timeout => $seconds
 
 Maximum time in seconds a request can stall without any I/O activity before
@@ -2194,6 +2204,7 @@ sub _init {
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
+    $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal (0 = disabled)
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
@@ -2336,6 +2347,9 @@ sub configure {
     }
     if (exists $params{shutdown_timeout}) {
         $self->{shutdown_timeout} = delete $params{shutdown_timeout};
+    }
+    if (exists $params{lifespan_startup_timeout}) {
+        $self->{lifespan_startup_timeout} = delete $params{lifespan_startup_timeout};
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
@@ -4016,8 +4030,25 @@ async sub _run_lifespan_startup {
     # Use adopt_future instead of retain for proper error handling
     $self->adopt_future($app_future);
 
-    # Wait for startup complete (with timeout)
-    my $result = await $startup_complete;
+    # Wait for startup complete, bounded by lifespan_startup_timeout so a hung
+    # lifespan handler (one that neither signals startup nor returns) cannot
+    # block the server forever. 0 disables the bound. without_cancel keeps
+    # $startup_complete pending on timeout, so a late signal cannot croak.
+    my $startup_timeout = $self->{lifespan_startup_timeout} // 30;
+    my $result;
+    if ($startup_timeout > 0) {
+        my $timeout_f = $self->loop->delay_future(after => $startup_timeout)
+            ->then(sub { Future->done(undef) });
+        $result = await Future->wait_any($startup_complete->without_cancel, $timeout_f);
+        if (!defined $result) {
+            my $message = "Lifespan startup timed out after ${startup_timeout}s";
+            $self->_log(error => $message);
+            return { success => 0, message => $message };
+        }
+    }
+    else {
+        $result = await $startup_complete;
+    }
 
     # Track if lifespan is supported
     $self->{lifespan_supported} = $result->{lifespan_supported} // 1;
