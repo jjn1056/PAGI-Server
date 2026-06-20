@@ -3989,8 +3989,16 @@ async sub _run_lifespan_startup {
             # ever signalling startup. It does not implement the lifespan
             # protocol, so continue without it. This matches the Uvicorn/Hypercorn
             # "auto" mode behavior; an app may decline either by returning on the
-            # lifespan scope or by dying on it.
-            $self->_log(info => "Lifespan not supported, continuing without it");
+            # lifespan scope or by dying on it. If it raised, include the message:
+            # raising is the canonical decline idiom, but a genuine startup failure
+            # (e.g. a failed DB connect) is indistinguishable from a decline here,
+            # so surface the text rather than burying it.
+            my $msg = "Lifespan not supported, continuing without it";
+            if (defined $err) {
+                (my $detail = $err) =~ s/\s+\z//;
+                $msg .= " (application raised: $detail)";
+            }
+            $self->_log(info => $msg);
             $startup_complete->done({ success => 1, lifespan_supported => 0 });
         }
         elsif (defined $err) {
