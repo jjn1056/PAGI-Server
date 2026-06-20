@@ -12,8 +12,13 @@ use File::Path qw(make_path);
 use lib 'lib';
 
 use PAGI::Server;
-use PAGI::App::File;
-use PAGI::App::Directory;
+
+# PAGI::App::File / ::Directory are in the sibling PAGI-Tools distribution. Skip
+# when not installed.
+BEGIN {
+    eval { require PAGI::App::File; require PAGI::App::Directory; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::App::File/Directory) not installed');
+}
 
 my $loop = IO::Async::Loop->new;
 

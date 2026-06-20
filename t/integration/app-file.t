@@ -12,7 +12,13 @@ use File::Temp;
 
 use lib "$FindBin::Bin/../../lib";
 use PAGI::Server;
-use PAGI::App::File;
+
+# PAGI::App::File is in the sibling PAGI-Tools distribution. Skip when it is not
+# installed (file-serving over the server is also covered by t/42-file-response.t).
+BEGIN {
+    eval { require PAGI::App::File; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::App::File) not installed');
+}
 
 # =============================================================================
 # Tests for PAGI::App::File - Static file serving

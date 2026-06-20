@@ -11,7 +11,14 @@ use URI;
 use PAGI::Server;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
-use PAGI::Response;
+
+# PAGI::Response is in the sibling PAGI-Tools distribution. Skip when it is not
+# installed; the server's response wire-format is covered Tools-free elsewhere
+# (t/10-http-compliance.t, t/42-file-response.t).
+BEGIN {
+    eval { require PAGI::Response; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Response) not installed');
+}
 
 my $loop = IO::Async::Loop->new;
 

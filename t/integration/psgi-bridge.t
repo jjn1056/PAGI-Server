@@ -8,7 +8,13 @@ use Future::AsyncAwait;
 use PAGI::Server;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
-use PAGI::App::WrapPSGI;
+
+# PAGI::App::WrapPSGI is in the sibling PAGI-Tools distribution. Skip when not
+# installed.
+BEGIN {
+    eval { require PAGI::App::WrapPSGI; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::App::WrapPSGI) not installed');
+}
 
 # Integration tests: PSGI apps bridged via PAGI::App::WrapPSGI on PAGI::Server
 

@@ -5,7 +5,14 @@ use Test2::V0;
 use Future::AsyncAwait;
 
 use lib 'lib';
-use PAGI::Request;
+
+# PAGI::Request lives in the sibling PAGI-Tools distribution, not PAGI-Server.
+# Skip when it is not installed; the server-side behavior these exercise is
+# covered Tools-free elsewhere (t/10-http-compliance.t, t/03-request-body.t).
+BEGIN {
+    eval { require PAGI::Request; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::Request) not installed');
+}
 
 subtest 'is_json predicate' => sub {
     my $json_scope = {

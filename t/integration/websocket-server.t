@@ -9,7 +9,14 @@ use FindBin;
 use lib "$FindBin::Bin/../../lib";
 
 use PAGI::Server;
-use PAGI::WebSocket;
+
+# PAGI::WebSocket is in the sibling PAGI-Tools distribution. This is a genuine
+# server+Tools integration test; skip when Tools is not installed (the raw
+# WebSocket protocol is covered Tools-free in t/04-websocket.t and others).
+BEGIN {
+    eval { require PAGI::WebSocket; 1 }
+        or plan(skip_all => 'PAGI-Tools (PAGI::WebSocket) not installed');
+}
 
 my $loop = IO::Async::Loop->new;
 
