@@ -54,6 +54,10 @@ GetOptionsFromArray(
     'sse-idle-timeout=i'    => \$server_opts{sse_idle_timeout},
     'heartbeat-timeout=i'   => \$server_opts{heartbeat_timeout},
 
+    # Lifespan
+    'lifespan=s'                 => \$server_opts{lifespan_mode},
+    'lifespan-startup-timeout=i' => \$server_opts{lifespan_startup_timeout},
+
     # Limits
     'max-body-size=i'       => \$server_opts{max_body_size},
     'max-header-size=i'     => \$server_opts{max_header_size},
@@ -374,6 +378,18 @@ Connection idle timeout in seconds (default: 60)
 =item B<--shutdown-timeout> NUM
 
 Graceful shutdown timeout in seconds (default: 30)
+
+=item B<--lifespan> auto|on|off
+
+How to treat the lifespan protocol: C<auto> (default; run lifespan if the app
+supports it, otherwise continue without it), C<on> (require it -- a startup
+decline is fatal), or C<off> (skip it entirely). See
+L<PAGI::Server/"lifespan_mode">.
+
+=item B<--lifespan-startup-timeout> NUM
+
+Maximum seconds to wait for the lifespan app to signal startup before aborting
+(default: 30; 0 disables). See L<PAGI::Server/"lifespan_startup_timeout">.
 
 =item B<--log-level> LEVEL
 

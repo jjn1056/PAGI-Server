@@ -1310,6 +1310,29 @@ server logs an error and aborts startup rather than blocking forever.
 B<Default:> 30. Set to 0 to disable the timeout (the server will wait
 indefinitely for the startup signal).
 
+=item lifespan_mode => 'auto' | 'on' | 'off'
+
+Controls how the server treats the lifespan protocol.
+
+=over 4
+
+=item * B<auto> (default) -- run the lifespan handler if the application has one.
+If the application declines lifespan (by raising on the lifespan scope, or by
+returning without signalling startup), the server continues without it. This is
+the interoperable default: an application that does not implement lifespan still
+runs.
+
+=item * B<on> -- require lifespan. A decline at startup is B<fatal>: the server
+logs it and refuses to start. Use this for applications whose startup must
+succeed (for example, one that opens a database pool in lifespan).
+
+=item * B<off> -- skip the lifespan protocol entirely. The application is never
+invoked with a C<lifespan> scope.
+
+=back
+
+An explicit C<lifespan.startup.failed> aborts startup in all modes.
+
 =item request_timeout => $seconds
 
 Maximum time in seconds a request can stall without any I/O activity before
@@ -2205,6 +2228,9 @@ sub _init {
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
     $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal (0 = disabled)
+    $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal) | off (skip lifespan)
+    die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be one of: auto, on, off\n"
+        unless $self->{lifespan_mode} =~ /\A(?:auto|on|off)\z/;
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
@@ -2350,6 +2376,12 @@ sub configure {
     }
     if (exists $params{lifespan_startup_timeout}) {
         $self->{lifespan_startup_timeout} = delete $params{lifespan_startup_timeout};
+    }
+    if (exists $params{lifespan_mode}) {
+        my $mode = delete $params{lifespan_mode};
+        die "Invalid lifespan_mode '$mode' - must be one of: auto, on, off\n"
+            unless $mode =~ /\A(?:auto|on|off)\z/;
+        $self->{lifespan_mode} = $mode;
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
@@ -3919,6 +3951,11 @@ sub _on_request_complete {
 async sub _run_lifespan_startup {
     my ($self) = @_;
 
+    # lifespan_mode 'off': skip the protocol entirely -- never invoke the app
+    # with a lifespan scope.
+    return { success => 1, lifespan_supported => 0 }
+        if ($self->{lifespan_mode} // 'auto') eq 'off';
+
     # Create lifespan scope
     my $scope = {
         type => 'lifespan',
@@ -4000,20 +4037,30 @@ async sub _run_lifespan_startup {
 
         if (!$startup_complete->is_ready) {
             # The app finished -- by returning cleanly OR by throwing -- without
-            # ever signalling startup. It does not implement the lifespan
-            # protocol, so continue without it. This matches the Uvicorn/Hypercorn
-            # "auto" mode behavior; an app may decline either by returning on the
-            # lifespan scope or by dying on it. If it raised, include the message:
-            # raising is the canonical decline idiom, but a genuine startup failure
-            # (e.g. a failed DB connect) is indistinguishable from a decline here,
-            # so surface the text rather than burying it.
-            my $msg = "Lifespan not supported, continuing without it";
-            if (defined $err) {
-                (my $detail = $err) =~ s/\s+\z//;
-                $msg .= " (application raised: $detail)";
+            # ever signalling startup.
+            my $detail;
+            if (defined $err) { ($detail = $err) =~ s/\s+\z//; }
+
+            if (($self->{lifespan_mode} // 'auto') eq 'on') {
+                # 'on' requires lifespan: a decline (a raise, or a clean return
+                # that never signalled startup) is a fatal startup failure rather
+                # than "continue without it".
+                my $why = defined $detail
+                    ? "the application raised: $detail"
+                    : "the application returned without signalling startup";
+                $startup_complete->done({ success => 0,
+                    message => "lifespan_mode is 'on' but $why" });
             }
-            $self->_log(info => $msg);
-            $startup_complete->done({ success => 1, lifespan_supported => 0 });
+            else {
+                # auto: continue without lifespan. This matches Uvicorn/Hypercorn
+                # "auto"; an app may decline by returning on the lifespan scope or
+                # by dying on it. Include the raised message so a genuine startup
+                # failure masquerading as a decline is still visible.
+                my $msg = "Lifespan not supported, continuing without it";
+                $msg .= " (application raised: $detail)" if defined $detail;
+                $self->_log(info => $msg);
+                $startup_complete->done({ success => 1, lifespan_supported => 0 });
+            }
         }
         elsif (defined $err) {
             # The app's long-lived lifespan task failed AFTER startup completed.
