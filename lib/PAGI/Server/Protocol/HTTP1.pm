@@ -196,9 +196,18 @@ sub parse_request {
     $query_string //= '';
 
     # Decode path (URL-decode, then UTF-8 decode with fallback)
-    # Mojolicious-style: try UTF-8 decode, fall back to original bytes if invalid
-    my $unescaped = uri_unescape($raw_path);
-    my $path = eval { decode('UTF-8', $unescaped, Encode::FB_CROAK) } // $unescaped;
+    # Mojolicious-style: try UTF-8 decode, fall back to original bytes if invalid.
+    # Fast path: a path with no percent-escapes and no high bytes is already its
+    # own decoded form (ASCII is its own UTF-8), so skip uri_unescape and the
+    # eval + Encode::decode entirely -- the common case.
+    my $path;
+    if ($raw_path !~ /[%\x80-\xff]/) {
+        $path = $raw_path;
+    }
+    else {
+        my $unescaped = uri_unescape($raw_path);
+        $path = eval { decode('UTF-8', $unescaped, Encode::FB_CROAK) } // $unescaped;
+    }
 
     # Build headers array with lowercase names
     my @headers;
