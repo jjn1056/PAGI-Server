@@ -342,6 +342,16 @@ sub _reset_idle_timer {
     my ($self) = @_;
 
     return unless $self->{idle_timer};
+
+    # Debounce: rescheduling the IO::Async countdown on every read is costly
+    # under keep-alive load -- it re-enqueues a loop timer each time. Reset at
+    # most ~20x/second; this coarsens the idle timeout by at most ~50ms, which is
+    # immaterial for a multi-second idle timeout but cuts the per-request timer
+    # churn dramatically under load.
+    my $now = Time::HiRes::time();
+    return if defined $self->{_idle_reset_at} && ($now - $self->{_idle_reset_at}) < 0.05;
+    $self->{_idle_reset_at} = $now;
+
     $self->{idle_timer}->reset;
     $self->{idle_timer}->start unless $self->{idle_timer}->is_running;
 }
@@ -2238,6 +2248,7 @@ async sub _handle_request {
         # Handle application error - always close connection after exception
         # If response already started, we can't send error page (3.17)
         if ($self->{response_started}) {
+            $self->_flush_pending_headers;   # don't lose a started response's headers
             warn "PAGI application error (after response started): $error\n";
         } else {
             $self->_send_error_response(500, "Internal Server Error");
@@ -2271,6 +2282,10 @@ async sub _handle_request {
         return;
     }
 
+    # Flush any headers buffered by response.start that were never paired with a
+    # body write (a started-but-bodyless response).
+    $self->_flush_pending_headers;
+
     # Write access log entry
     $self->_write_access_log;
 
@@ -2297,6 +2312,7 @@ async sub _handle_request {
         # Reset for next request
         $self->{handling_request} = 0;
         $self->{response_started} = 0;
+        $self->{_resp_pending} = undef;
         $self->{response_status} = undef;
         $self->{_response_size} = 0;
         $self->{request_start} = undef;
@@ -2671,8 +2687,11 @@ sub _create_send {
                 $status, \@final_headers, $chunked, $http_version
             );
 
-            # Write headers to stream
-            $weak_self->{stream}->write($response);
+            # Buffer the headers instead of writing them now; they are flushed
+            # together with the first body write (or at finalization). This
+            # coalesces the common "start + complete body" case into a single
+            # stream write instead of one per headers/chunk/terminator.
+            $weak_self->{_resp_pending} = $response;
         }
         elsif ($type eq 'http.response.body') {
             return unless $response_started;
@@ -2681,6 +2700,8 @@ sub _create_send {
             # For HEAD requests, suppress the body but track completion
             if ($is_head_request) {
                 my $more = $event->{more} // 0;
+                # HEAD has headers but no body, so flush the buffered headers now.
+                $weak_self->_flush_pending_headers;
                 if (!$more) {
                     $body_complete = 1;
                 }
@@ -2708,12 +2729,14 @@ sub _create_send {
             if (defined $file) {
                 # File path response - stream from file (async, non-blocking)
                 # File responses are implicitly complete (more is ignored)
+                $weak_self->_flush_pending_headers;   # headers before the file body
                 await $weak_self->_send_file_response($file, $offset, $length, $chunked);
                 $body_complete = 1;
             }
             elsif (defined $fh) {
                 # Filehandle response - stream from handle (async, non-blocking)
                 # Filehandle responses are implicitly complete (more is ignored)
+                $weak_self->_flush_pending_headers;   # headers before the fh body
                 await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
                 $body_complete = 1;
             }
@@ -2724,23 +2747,33 @@ sub _create_send {
 
                 $weak_self->{_response_size} += length($body);
 
+                # Coalesce any buffered headers, the body (chunk framing if
+                # chunked), and the final terminator into a single stream write.
+                # The common start + complete-body response becomes one write
+                # rather than three.
+                my $out = $weak_self->{_resp_pending};
+                $out = '' unless defined $out;
+                $weak_self->{_resp_pending} = undef;
+
                 if ($chunked) {
                     if (length $body) {
                         my $len = sprintf("%x", length($body));
-                        $weak_self->{stream}->write("$len\r\n$body\r\n");
+                        $out .= "$len\r\n$body\r\n";
+                    }
+                    if (!$more && !$expects_trailers) {
+                        $out .= "0\r\n\r\n";
                     }
                 }
                 else {
-                    $weak_self->{stream}->write($body) if length $body;
+                    $out .= $body;
                 }
+
+                $weak_self->{stream}->write($out) if length $out;
                 $weak_self->_notify_transport_write;
 
                 # Handle completion for body responses
                 if (!$more) {
                     $body_complete = 1;
-                    if ($chunked && !$expects_trailers) {
-                        $weak_self->{stream}->write("0\r\n\r\n");
-                    }
                 }
             }
         }
@@ -2751,8 +2784,10 @@ sub _create_send {
 
             my $trailer_headers = $event->{headers} // [];
 
-            # Send final chunk + trailers
-            my $trailers = "0\r\n";
+            # Send final chunk + trailers (prepend any still-buffered headers).
+            my $trailers = $weak_self->{_resp_pending} // '';
+            $weak_self->{_resp_pending} = undef;
+            $trailers .= "0\r\n";
             for my $header (@$trailer_headers) {
                 my ($name, $value) = @$header;
                 $name  = _validate_header_name($name);
@@ -2792,6 +2827,16 @@ sub _create_send {
 
         return;
     };
+}
+
+# Flush any response headers buffered by http.response.start that were not yet
+# paired with a body write (HEAD/file/fh paths, started-but-incomplete responses).
+sub _flush_pending_headers {
+    my ($self) = @_;
+    my $pending = $self->{_resp_pending};
+    return unless defined $pending && length $pending;
+    $self->{_resp_pending} = undef;
+    $self->{stream}->write($pending);
 }
 
 sub _send_error_response {
