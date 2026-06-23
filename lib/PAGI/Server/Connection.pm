@@ -680,6 +680,9 @@ sub _h2_dispatch_stream {
                 );
                 $weak_self->_h2_write_pending;
             };
+            # The synthesized 500 is this stream's response — mark it started.
+            $stream_state->{connection_state}->_mark_response_started
+                if $stream_state->{connection_state};
         }
         elsif ($error) {
             # Response already started; cannot send a 500. Log only.
@@ -713,6 +716,9 @@ sub _h2_create_scope {
     my $connection_state = PAGI::Server::ConnectionState->new(
         connection => $self,
     );
+    # Store on the stream-state so the send path can mark response_started on
+    # this stream's own connection object (h2 multiplexes many streams).
+    $stream_state->{connection_state} = $connection_state;
 
     return {
         type         => 'http',
@@ -890,6 +896,7 @@ sub _h2_create_send {
             my $ss = $weak_self->{h2_streams}{$stream_id} or return;
             return if $ss->{response_started};
             $ss->{response_started} = 1;
+            $ss->{connection_state}->_mark_response_started if $ss->{connection_state};
 
             $status = $event->{status} // 200;
             @response_headers = map {
@@ -2646,6 +2653,8 @@ sub _create_send {
             return if $response_started;
             $response_started = 1;
             $weak_self->{response_started} = 1;
+            $weak_self->{current_connection_state}->_mark_response_started
+                if $weak_self->{current_connection_state};
             $weak_self->{response_status} = $event->{status} // 200;  # Track for logging
             $expects_trailers = $event->{trailers} // 0;
 
@@ -2857,6 +2866,9 @@ sub _send_error_response {
 
     $self->{stream}->write($response);
     $self->{response_started} = 1;
+    # A server-synthesized response is still "this request's response started".
+    $self->{current_connection_state}->_mark_response_started
+        if $self->{current_connection_state};
     $self->{response_status} = $status;  # Track for logging
 }
 
