@@ -84,6 +84,9 @@ sub new {
         # an abnormal disconnect (false) vs. a clean completion (true).
         _completed => 0,
 
+        # Response progress (HTTP): set when http.response.start is emitted.
+        _response_started => 0,
+
         # Lazy Future (only created if disconnect_future() called)
         _future => undef,
 
@@ -115,6 +118,21 @@ sub is_connected {
     my $self = shift;
     return ${$self->{_connected}} ? 1 : 0;
 }
+
+=head2 response_started
+
+    my $started = $conn->response_started;  # 0 or 1
+
+True once the server has started this request's response (C<http.response.start>
+emitted -- by the application, a framework, a middleware, or a server-synthesized
+error/backstop response). Server-owned; read-only to applications.
+
+=cut
+
+sub response_started { return $_[0]->{_response_started} ? 1 : 0 }
+
+# Server-internal: called from the send path when http.response.start is emitted.
+sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
 =head2 disconnect_reason
 
