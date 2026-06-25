@@ -16,6 +16,11 @@ BEGIN {
         or plan(skip_all => 'PAGI-Tools (PAGI::Middleware::Builder) not installed');
 }
 
+# Import the builder DSL (builder/enable). Reached only when the BEGIN skip
+# above did not fire -- skip_all exits during compilation, so when Tools is
+# absent this use is never compiled and the file still skips cleanly.
+use PAGI::Middleware::Builder;
+
 my $loop = IO::Async::Loop->new;
 
 # Simple test app that returns 200 OK
