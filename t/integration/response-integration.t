@@ -71,8 +71,9 @@ async sub with_server {
 subtest 'text response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->text("Hello World");
+        my $res = PAGI::Response->new($scope);
+        $res->text("Hello World");
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -89,8 +90,9 @@ subtest 'text response' => sub {
 subtest 'html response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->html("<h1>Hello</h1>");
+        my $res = PAGI::Response->new($scope);
+        $res->html("<h1>Hello</h1>");
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -106,8 +108,9 @@ subtest 'html response' => sub {
 subtest 'json response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->json({ message => 'Hello', count => 42 });
+        my $res = PAGI::Response->new($scope);
+        $res->json({ message => 'Hello', count => 42 });
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -126,11 +129,12 @@ subtest 'json response' => sub {
 subtest 'custom status and headers' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->status(201)
-                  ->header('X-Custom' => 'value')
-                  ->header('X-Request-Id' => '12345')
-                  ->json({ created => 1 });
+        my $res = PAGI::Response->new($scope);
+        $res->status(201)
+            ->header('X-Custom' => 'value')
+            ->header('X-Request-Id' => '12345')
+            ->json({ created => 1 });
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -146,8 +150,9 @@ subtest 'custom status and headers' => sub {
 subtest 'redirect response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->redirect('/new-location');
+        my $res = PAGI::Response->new($scope);
+        $res->redirect('/new-location');
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -167,8 +172,9 @@ subtest 'redirect response' => sub {
 subtest 'redirect with custom status' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->redirect('/permanent', 301);
+        my $res = PAGI::Response->new($scope);
+        $res->redirect('/permanent', 301);
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -186,8 +192,9 @@ subtest 'redirect with custom status' => sub {
 subtest 'empty response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->empty();
+        my $res = PAGI::Response->new($scope);
+        $res->empty();
+        await $res->respond($send);
     };
 
     # 204 responses can trigger "Spurious on_read" in Net::Async::HTTP due to
@@ -217,8 +224,9 @@ subtest 'empty response' => sub {
 subtest 'json error response pattern' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->status(400)->json({ error => 'Bad Request', field => 'email' });
+        my $res = PAGI::Response->new($scope);
+        $res->status(400)->json({ error => 'Bad Request', field => 'email' });
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -237,9 +245,10 @@ subtest 'json error response pattern' => sub {
 subtest 'cookie response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->cookie('session' => 'abc123', path => '/', httponly => 1)
-                  ->text('OK');
+        my $res = PAGI::Response->new($scope);
+        $res->cookie('session' => 'abc123', path => '/', httponly => 1)
+            ->text('OK');
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -257,14 +266,15 @@ subtest 'cookie response' => sub {
 subtest 'streaming response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->content_type('text/plain')
-                  ->stream(async sub {
-                      my ($writer) = @_;
-                      await $writer->write("chunk1");
-                      await $writer->write("chunk2");
-                      await $writer->write("chunk3");
-                  });
+        my $res = PAGI::Response->new($scope);
+        $res->content_type('text/plain')
+            ->stream(async sub {
+                my ($writer) = @_;
+                await $writer->write("chunk1");
+                await $writer->write("chunk2");
+                await $writer->write("chunk3");
+            });
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -284,8 +294,9 @@ subtest 'send_file response' => sub {
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->send_file($filename);
+        my $res = PAGI::Response->new($scope);
+        $res->send_file($filename);
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -305,8 +316,9 @@ subtest 'send_file with attachment' => sub {
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->send_file($filename, filename => 'document.pdf');
+        my $res = PAGI::Response->new($scope);
+        $res->send_file($filename, filename => 'document.pdf');
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -322,8 +334,9 @@ subtest 'send_file with attachment' => sub {
 subtest 'UTF-8 text response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->text("Hello, 世界! Привет! 🌍");
+        my $res = PAGI::Response->new($scope);
+        $res->text("Hello, 世界! Привет! 🌍");
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -338,12 +351,13 @@ subtest 'UTF-8 text response' => sub {
 subtest 'CORS headers' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->cors(
+        my $res = PAGI::Response->new($scope);
+        $res->cors(
             origin      => 'https://example.com',
             credentials => 1,
             expose      => [qw(X-Request-Id)],
         )->json({ data => 'cors test' });
+        await $res->respond($send);
     };
 
     with_server($app, async sub {
@@ -361,14 +375,15 @@ subtest 'CORS headers' => sub {
 subtest 'CORS preflight response' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        my $res = PAGI::Response->new($scope, $send);
-        await $res->cors(
+        my $res = PAGI::Response->new($scope);
+        $res->cors(
             origin    => 'https://example.com',
             methods   => [qw(GET POST PUT)],
             headers   => [qw(Content-Type Authorization)],
             max_age   => 3600,
             preflight => 1,
         )->status(204)->empty();
+        await $res->respond($send);
     };
 
     # 204 responses can trigger "Spurious on_read" in Net::Async::HTTP
