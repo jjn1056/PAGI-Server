@@ -19,9 +19,9 @@ pagi-server --app examples/02-streaming-response/app.pl --port 5000
 ```bash
 # Watch chunks stream in (one per second)
 curl -N http://localhost:5000/
-# => Chunk 1 of 5
-# => Chunk 2 of 5
-# => ...
+# => Chunk 1
+# => Chunk 2
+# => Chunk 3
 
 # Test disconnect handling - press Ctrl+C during streaming
 curl -N http://localhost:5000/
@@ -30,5 +30,8 @@ curl -N http://localhost:5000/
 
 ## Spec References
 
-- HTTP events, trailers, disconnect – `docs/specs/www.mkdn`
-- Cancellation semantics – `docs/specs/main.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- HTTP events, trailers, disconnect
+- Cancellation semantics

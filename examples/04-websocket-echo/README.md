@@ -3,8 +3,8 @@
 Handles the WebSocket protocol:
 1. Waits for `websocket.connect`.
 2. Sends `websocket.accept` to complete the handshake.
-3. Echoes incoming frames back via `websocket.send`.
-4. Stops when `websocket.disconnect` arrives or when `websocket.receive` contains neither `text` nor `bytes`.
+3. Echoes incoming frames back via `websocket.send` — text frames are echoed with an `echo: ` prefix, binary frames are echoed unchanged.
+4. Skips any `websocket.receive` frame that carries neither `text` nor `bytes`, and stops the loop only when `websocket.disconnect` arrives.
 
 ## Quick Start
 
@@ -24,9 +24,9 @@ brew install websocat        # macOS
 # Connect and send messages
 websocat ws://localhost:5000/
 # Type: Hello
-# => Hello
+# => echo: Hello
 # Type: PAGI WebSocket!
-# => PAGI WebSocket!
+# => echo: PAGI WebSocket!
 ```
 
 **3. Or use JavaScript in browser console:**
@@ -39,4 +39,7 @@ ws.onopen = () => ws.send('Hello from browser!');
 
 ## Spec References
 
-- WebSocket scope & events – `docs/specs/www.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- WebSocket scope & events

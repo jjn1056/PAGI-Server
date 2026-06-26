@@ -20,9 +20,9 @@ pagi-server --app examples/07-extension-fullflush/app.pl --port 5000
 ```bash
 # Watch real-time streaming with immediate flush
 curl -N http://localhost:5000/
-# => Chunk 1 (flushed immediately)
-# => Chunk 2 (flushed immediately)
-# => ...
+# => Line 1   (flushed immediately)
+# => Line 2   (flushed immediately)
+# => Line 3   (flushed immediately)
 
 # Each chunk appears instantly rather than being buffered
 ```
@@ -31,5 +31,8 @@ curl -N http://localhost:5000/
 
 ## Spec References
 
-- Extensions section – `docs/specs/main.mkdn`
-- Fullflush example – `docs/extensions.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- Extensions section
+- Fullflush extension

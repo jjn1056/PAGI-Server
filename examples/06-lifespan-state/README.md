@@ -20,7 +20,7 @@ You should see startup message in the server logs indicating lifespan initializa
 ```bash
 # Request uses state initialized during lifespan.startup
 curl http://localhost:5000/
-# => Hello from lifespan state!
+# => Hello from lifespan via shared state
 
 # Make multiple requests - all use the same shared state
 curl http://localhost:5000/
@@ -33,5 +33,8 @@ Press Ctrl+C to stop the server and observe the clean shutdown sequence in the l
 
 ## Spec References
 
-- Lifespan events – `docs/specs/lifespan.mkdn`
-- HTTP events – `docs/specs/www.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- Lifespan events
+- HTTP events

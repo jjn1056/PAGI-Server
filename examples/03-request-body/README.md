@@ -32,4 +32,7 @@ echo "File contents here" | curl -X POST http://localhost:5000/ -d @-
 
 ## Spec References
 
-- HTTP request/response events – `docs/specs/www.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- HTTP request/response events

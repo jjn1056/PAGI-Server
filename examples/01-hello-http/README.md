@@ -14,10 +14,13 @@ pagi-server --app examples/01-hello-http/app.pl --port 5000
 
 ```bash
 curl http://localhost:5000/
-# => Hello from PAGI!
+# => Hello from PAGI
 ```
 
 ## Spec References
 
-- Core scope & application contract – `docs/specs/main.mkdn`
-- HTTP response events – `docs/specs/www.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- Core scope & application contract
+- HTTP response events

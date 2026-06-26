@@ -12,27 +12,35 @@ openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -node
 
 # Start with TLS enabled
 pagi-server --app examples/08-tls-introspection/app.pl --port 5000 \
-  --tls-cert cert.pem --tls-key key.pem
+  --ssl-cert cert.pem --ssl-key key.pem
 ```
 
 **2. Demo with curl:**
 
 ```bash
-# HTTPS request - shows TLS info
+# HTTPS request - shows TLS info as JSON (versions/ciphers are raw hex codes)
 curl -k https://localhost:5000/
-# => TLS Connection Info:
-# => Protocol: TLSv1.3
-# => Cipher: TLS_AES_256_GCM_SHA384
-# => ...
+# => TLS info:
+# => {
+# =>    "tls_version" : "0x0304",
+# =>    "cipher_suite" : "0x1302",
+# =>    "client_cert" : null
+# => }
 
 # HTTP request (without TLS) - shows fallback message
 curl http://localhost:5000/
-# => No TLS connection detected
+# => Connection is not using TLS
 ```
 
-**Note:** Use `-k` flag with curl to accept self-signed certificates.
+**Note:** Use `-k` flag with curl to accept self-signed certificates. The
+`tls_version`/`cipher_suite` values are the raw TLS codes (e.g. `0x0304` is
+TLS 1.3, `0x1302` is `TLS_AES_256_GCM_SHA384`); `client_cert` is `null` unless
+the client presents a certificate.
 
 ## Spec References
 
-- TLS extension – `docs/specs/tls.mkdn`
-- HTTP response events – `docs/specs/www.mkdn`
+Covered by the PAGI specification in the upstream PAGI distribution
+(`PAGI::Spec` POD and protocol documents, https://github.com/jjn1056/pagi):
+
+- TLS extension
+- HTTP response events
