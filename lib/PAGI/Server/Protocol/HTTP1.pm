@@ -39,6 +39,8 @@ sub _validate_header_value {
     return $value;
 }
 
+=encoding utf8
+
 =head1 NAME
 
 PAGI::Server::Protocol::HTTP1 - HTTP/1.1 protocol handler
@@ -67,33 +69,73 @@ the same interface.
 
 =head2 new
 
-    my $proto = PAGI::Server::Protocol::HTTP1->new;
+    my $proto = PAGI::Server::Protocol::HTTP1->new(%options);
 
-Creates a new HTTP1 protocol handler.
+Creates a new HTTP1 protocol handler. Accepts the following options, which
+bound resource use while parsing untrusted input:
+
+=over 4
+
+=item * C<max_header_size> - maximum size in bytes of the combined header
+block. Default: 8192 (8KB). Exceeding it yields a 431 error result.
+
+=item * C<max_request_line_size> - maximum size in bytes of the request line.
+Default: 8192 (8KB). Exceeding it yields a 414 error result.
+
+=item * C<max_header_count> - maximum number of header fields. Default: 100.
+Exceeding it yields a 431 error result.
+
+=item * C<max_chunk_size> - maximum size in bytes of a single chunk in a
+chunked request body. Default: 10_485_760 (10MB).
+
+=back
 
 =head2 parse_request
 
     my ($request_info, $bytes_consumed) = $proto->parse_request($buffer);
 
-Parses an HTTP request from the buffer. Returns undef if the request
-is incomplete. On success, returns:
+Parses an HTTP request from the buffer. The first return value is one of three
+things:
+
+=over 4
+
+=item * C<undef> when the request is incomplete (more bytes needed). The
+second value is 0.
+
+=item * an B<error descriptor> when the request is malformed or exceeds a
+limit:
+
+    { error => 400, message => 'Bad Request' }
+
+The C<error> key is the HTTP status code to send (400, 413, 414, 431, or 501);
+C<message> is a short reason. The second return value is the number of bytes
+to discard.
+
+=item * a B<request hash> on success:
 
     $request_info = {
-        method       => 'GET',
-        path         => '/foo',
-        raw_path     => '/foo%20bar',
-        query_string => 'a=1',
-        http_version => '1.1',
-        headers      => [ ['host', 'localhost'], ... ],
-        content_length => 0,  # or undef if not present
-        chunked      => 0,    # 1 if Transfer-Encoding: chunked
+        method          => 'GET',
+        path            => '/foo',
+        raw_path        => '/foo%20bar',
+        query_string    => 'a=1',
+        http_version    => '1.1',
+        headers         => [ ['host', 'localhost'], ... ],
+        content_length  => 0,     # or undef if no Content-Length header
+        chunked         => 0,     # 1 if Transfer-Encoding: chunked
+        expect_continue => 0,     # 1 if the request sent Expect: 100-continue
     };
+
+=back
 
 =head2 serialize_response_start
 
-    my $bytes = $proto->serialize_response_start($status, \@headers, $chunked);
+    my $bytes = $proto->serialize_response_start($status, \@headers, $chunked, $http_version);
 
-Serializes the response line and headers.
+Serializes the status line and headers. C<$chunked> (default 0) adds a
+C<Transfer-Encoding: chunked> header, but only when C<$http_version> (default
+C<'1.1'>) is C<'1.1'> — chunked encoding is not emitted for HTTP/1.0
+responses. A default C<Server> header is added when the application does not
+provide one.
 
 =head2 serialize_response_body
 
@@ -101,11 +143,33 @@ Serializes the response line and headers.
 
 Serializes a body chunk. Uses chunked encoding if $chunked is true.
 
+=head2 serialize_chunk_end
+
+    my $bytes = $proto->serialize_chunk_end;
+
+Returns the terminating zero-length chunk (C<"0\r\n\r\n">) that ends a
+chunked response body.
+
+=head2 serialize_continue
+
+    my $bytes = $proto->serialize_continue;
+
+Returns a C<HTTP/1.1 100 Continue> interim response, sent in reply to a
+request that carried C<Expect: 100-continue>.
+
 =head2 serialize_trailers
 
     my $bytes = $proto->serialize_trailers(\@headers);
 
 Serializes HTTP trailers.
+
+=head2 format_date
+
+    my $date = $proto->format_date;
+
+Returns the current time formatted as an RFC 7231 IMF-fixdate string suitable
+for a C<Date> header (e.g. C<"Sun, 06 Nov 1994 08:49:37 GMT">). The value is
+cached and regenerated at most once per second.
 
 =cut
 
