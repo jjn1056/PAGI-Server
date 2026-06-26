@@ -940,6 +940,15 @@ Valid levels (from least to most verbose):
 
 B<CLI:> C<--log-level debug>
 
+=item quiet => $bool
+
+Suppress all log output except errors. Default: 0. When true, C<_log>
+messages below the C<error> level are dropped regardless of C<log_level>;
+error-level messages are always emitted. Worker processes run quiet
+internally so only the master logs lifecycle events.
+
+B<CLI:> C<-q>, C<--quiet>
+
 =item workers => $count
 
 Number of worker processes for multi-worker mode. Default: 0 (single process mode).
@@ -1248,6 +1257,24 @@ listening socket with nothing serving -- so a process supervisor can restart it.
 
 =back
 
+=item max_header_size => $bytes
+
+Maximum size in bytes of the request line and of the combined header block
+for an HTTP/1.x request. Default: 8192 (8KB). A request line exceeding this
+limit receives HTTP 414 (URI Too Long); a header block exceeding it receives
+HTTP 431 (Request Header Fields Too Large).
+
+B<CLI:> C<--max-header-size 16384>
+
+=item max_header_count => $count
+
+Maximum number of header fields permitted in an HTTP/1.x request. Default:
+100. Requests with more headers receive HTTP 431 (Request Header Fields Too
+Large). This bounds memory and CPU spent parsing maliciously large header
+sets.
+
+B<CLI:> C<--max-header-count 200>
+
 =item sync_file_threshold => $bytes
 
 Threshold in bytes for synchronous file reads. Files smaller than this value
@@ -1485,8 +1512,8 @@ for details and recommendations.
 =item heartbeat_timeout => $seconds
 
 Worker liveness timeout in seconds. Only active in multi-worker mode
-(C<< workers >= 2 >>). Has no effect in single-worker mode — use
-C<timeout> for idle connection management there.
+(C<< workers > 0 >>). Has no effect when running without workers
+(C<< workers == 0 >>) — use C<timeout> for idle connection management there.
 
 Each worker sends a heartbeat to the parent process via a Unix pipe at
 an interval of C<heartbeat_timeout / 5>. The parent checks for missed
@@ -1525,6 +1552,27 @@ B<Example:>
     );
 
 B<CLI:> C<--heartbeat-timeout 20>
+
+=item shutdown_timeout => $seconds
+
+Maximum time in seconds to wait for graceful shutdown to complete.
+Default: 30. On SIGTERM/SIGINT the server stops accepting new connections
+and waits up to this many seconds for in-flight requests to finish before
+forcing remaining connections closed. In multi-worker mode it also bounds
+how long the master waits for a worker to exit after SIGTERM before
+escalating to SIGKILL.
+
+B<CLI:> C<--shutdown-timeout 30>
+
+=item validate_events => $bool
+
+Enable runtime validation of outbound events your application sends (HTTP,
+WebSocket, and SSE), catching malformed event structures with a clear error
+instead of undefined behavior. Default: off, but B<auto-enabled> when the
+environment is development (C<< $ENV{PAGI_ENV} eq 'development' >>, which
+C<pagi-server -E development> sets). Pass an explicit value to override the
+auto-detection. Intended for development; leave off in production to avoid
+the per-event overhead.
 
 =item loop_type => $backend
 
@@ -4575,7 +4623,7 @@ For high-concurrency production deployments, ensure adequate system limits:
     sudo sysctl -w kern.ipc.somaxconn=2048
 
 PAGI::Server defaults to a listen backlog of 2048, matching Uvicorn's
-default. This can be adjusted via the C<listen_backlog> option.
+default. This can be adjusted via the C<listener_backlog> option.
 
 =head2 Event Loop Selection
 
