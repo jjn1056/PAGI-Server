@@ -4,6 +4,8 @@ use warnings;
 
 our $VERSION = '0.002000';
 
+=encoding utf8
+
 =head1 NAME
 
 PAGI::Server::Protocol::HTTP2 - HTTP/2 protocol handler using nghttp2
@@ -51,6 +53,15 @@ BEGIN {
 }
 
 sub available { return $AVAILABLE }
+
+=head2 available
+
+    if (PAGI::Server::Protocol::HTTP2->available) { ... }
+
+Returns true if HTTP/2 support is usable — that is, if Net::HTTP2::nghttp2
+(at least version C<MIN_NGHTTP2_VERSION>) and its Session class loaded and the
+underlying nghttp2 library reports itself available. Returns false otherwise.
+Checked once at module load.
 
 =head2 detect_preface
 
