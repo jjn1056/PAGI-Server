@@ -96,7 +96,7 @@ and RFC 7231 (HTTP/1.1 Semantics and Content).
     | Content-Length: with spaces  |      400 |    400 | PASS   |
     | URI > 8KB                    |      414 |    414 | PASS   |
     | Header > 8KB                 |      431 |    431 | PASS   |
-    | CL+TE conflict               |      200 |    200 | PASS   |
+    | CL+TE conflict               |      400 |    400 | PASS   |
     +------------------------------+----------+--------+--------+
 
 =head2 RFC 7230 Section 5.4 - Host Header
@@ -104,10 +104,12 @@ and RFC 7231 (HTTP/1.1 Semantics and Content).
 HTTP/1.1 requests without a Host header correctly return 400 Bad Request.
 HTTP/1.0 requests without Host are allowed per specification.
 
-=head2 RFC 7230 Section 3.3.3 - Message Body Length
+=head2 RFC 9112 Section 6.3.3 - Message Body Length
 
-Transfer-Encoding takes precedence over Content-Length when both are present,
-providing protection against HTTP request smuggling attacks.
+A request carrying both Transfer-Encoding and Content-Length is rejected with
+400 Bad Request rather than resolved by precedence — the two are treated as
+mutually exclusive. This is the stricter posture permitted by RFC 9112
+Section 6.3.3 and closes the CL/TE desync that enables HTTP request smuggling.
 
 =head1 HTTP/2 COMPLIANCE (EXPERIMENTAL)
 
@@ -300,8 +302,10 @@ PAGI::Server is B<NOT VULNERABLE> to HTTP Request Smuggling attacks.
 
 =head3 CL.TE and TE.CL Attack Vectors
 
-Transfer-Encoding always takes precedence over Content-Length per RFC 7230
-Section 3.3.3. Smuggled data is rejected with 400 Bad Request.
+When a request presents both Transfer-Encoding and Content-Length, the two are
+treated as mutually exclusive per RFC 9112 Section 6.3.3 and the request is
+rejected with 400 Bad Request, so neither header can be used to smuggle data
+past the other.
 
 =head3 Transfer-Encoding Obfuscation
 
@@ -521,7 +525,7 @@ UNIMPLEMENTED, which is the correct behavior.
 
 =item * B<RFC 7230 Section 5.4>: HTTP/1.1 Host header requirement - returns 400
 
-=item * B<RFC 7230 Section 3.3.3>: TE takes precedence over CL (smuggling protection)
+=item * B<RFC 9112 Section 6.3.3>: TE and CL are mutually exclusive - returns 400 (smuggling protection)
 
 =item * Request line size limit (8KB default) - returns 414
 
