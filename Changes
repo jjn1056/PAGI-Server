@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002000
+0.002000 - 2026-06-26
 
   Distribution
   - PAGI::Server and bin/pagi-server split out of the PAGI distribution
