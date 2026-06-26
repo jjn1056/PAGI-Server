@@ -66,6 +66,10 @@ GetOptionsFromArray(
     'max-ws-frame-size=i'   => \$server_opts{max_ws_frame_size},
     'b|listener-backlog=i'  => \$server_opts{listener_backlog},
 
+    # Write backpressure watermarks
+    'write-high-watermark=i' => \$server_opts{write_high_watermark},
+    'write-low-watermark=i'  => \$server_opts{write_low_watermark},
+
     # Misc
     'http2'                 => \$server_opts{http2},
     'log-level=s'           => \$server_opts{log_level},
@@ -406,6 +410,16 @@ Maximum WebSocket receive queue size (default: 1000)
 =item B<--max-ws-frame-size> NUM
 
 Maximum WebSocket frame size in bytes (default: 65536)
+
+=item B<--write-high-watermark> NUM
+
+Pause sending to a connection once its buffered write data exceeds this many
+bytes (default: 65536). See L<PAGI::Server/"write_high_watermark">.
+
+=item B<--write-low-watermark> NUM
+
+Resume sending to a connection once its buffered write data drops below this
+many bytes (default: 16384). See L<PAGI::Server/"write_low_watermark">.
 
 =item B<--request-timeout> NUM
 

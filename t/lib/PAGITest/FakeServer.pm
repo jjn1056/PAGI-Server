@@ -15,8 +15,10 @@ sub new {
 
 sub run {
     my ($self) = @_;
-    my $http2 = $self->{options}{http2};
-    print "FAKESERVER http2=" . (defined $http2 ? $http2 : 'unset') . "\n";
+    for my $opt (qw(http2 write_high_watermark write_low_watermark)) {
+        my $val = $self->{options}{$opt};
+        print "FAKESERVER $opt=" . (defined $val ? $val : 'unset') . "\n";
+    }
     return;
 }
 
