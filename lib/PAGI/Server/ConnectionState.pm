@@ -7,6 +7,8 @@ our $VERSION = '0.002000';
 
 use Scalar::Util qw(weaken);
 
+=encoding utf8
+
 =head1 NAME
 
 PAGI::Server::ConnectionState - Connection state tracking for HTTP requests
@@ -185,7 +187,10 @@ sub disconnect_reason {
     my $future = $conn->disconnect_future;  # Future or undef
     my $reason = await $future;
 
-Returns a Future that resolves when the connection closes.
+Returns a Future that resolves when the connection closes B<abnormally>
+(client disconnect, transport error). On a clean completion the connection
+closes but this Future is deliberately left pending — use C<on_complete> to
+observe normal completion.
 
 The Future is created lazily on first call, avoiding allocation overhead
 for handlers that don't need async disconnect detection.
