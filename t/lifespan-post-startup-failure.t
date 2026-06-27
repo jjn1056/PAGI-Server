@@ -3,10 +3,13 @@ use warnings;
 use Test2::V0;
 use IO::Async::Loop;
 use Future::AsyncAwait;
-use Future::IO;
-use Future::IO::Impl::IOAsync;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
+
+# Future::IO is an optional (recommends) dependency; skip when its IO::Async
+# backend is unavailable, matching t/05-sse.t.
+eval { require Future::IO; require Future::IO::Impl::IOAsync; 1 }
+    or plan skip_all => 'Future::IO::Impl::IOAsync required for this test';
 
 use PAGI::Server;
 

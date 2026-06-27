@@ -1,5 +1,14 @@
 # Revision history for PAGI-Server
 
+0.002001 - 2026-06-26
+
+  Bug Fixes
+  - t/lifespan-post-startup-failure.t now skips when the optional
+    Future::IO::Impl::IOAsync backend is unavailable, instead of dying at
+    compile time. The test use'd Future::IO unconditionally while Future::IO
+    is only a `recommends`, so 0.002000 failed to install on a clean smoker
+    without it. Now guarded the same way as t/05-sse.t.
+
 0.002000 - 2026-06-26
 
   Distribution
