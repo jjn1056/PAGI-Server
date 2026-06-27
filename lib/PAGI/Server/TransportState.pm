@@ -3,7 +3,7 @@ package PAGI::Server::TransportState;
 use strict;
 use warnings;
 
-our $VERSION = '0.002000';
+our $VERSION = '0.002001';
 
 use Scalar::Util qw(weaken);
 
