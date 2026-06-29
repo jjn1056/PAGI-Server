@@ -1397,6 +1397,10 @@ sub _h2_create_sse_send {
             return ($chunk, 0);  # SSE streams never EOF via data_callback
         }
 
+        # Queue empty. If the application closed this stream (sse.close), emit a
+        # final empty DATA frame with END_STREAM to terminate it; otherwise defer.
+        return ('', 1) if $ss->{sse_closing};
+
         # Queue empty — defer (NGHTTP2_ERR_DEFERRED in the C layer)
         return undef;
     };
@@ -1404,15 +1408,24 @@ sub _h2_create_sse_send {
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
-        return if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
         return unless $ss;
 
+        my $type = $event->{type} // '';
+
+        # After an application-initiated sse.close on THIS stream, a second
+        # sse.close is a no-op and any other send raises. Tracked per-stream
+        # ($ss), since HTTP/2 multiplexes many SSE streams over one connection.
+        if ($ss->{sse_close_sent}) {
+            return if $type eq 'sse.close';
+            die "cannot send '$type' after sse.close\n";
+        }
+
+        return if $weak_self->{closed};
+
         # Reset SSE idle timer on send activity
         $weak_self->_reset_sse_idle_timer;
-
-        my $type = $event->{type} // '';
 
         # Dev-mode event validation (PAGI spec compliance)
         if ($weak_self->{validate_events}) {
@@ -1520,6 +1533,17 @@ sub _h2_create_sse_send {
             else {
                 $weak_self->_stop_sse_keepalive;
             }
+        }
+        elsif ($type eq 'sse.close') {
+            # End THIS HTTP/2 stream now: flush remaining queued events, then the
+            # data_callback emits a final END_STREAM frame. `reason` is
+            # server-side only and is never written to the wire.
+            $ss->{sse_close_sent} = 1;
+            $ss->{sse_closing}    = 1;
+            $weak_self->{sse_disconnect_reason} = $event->{reason}
+                if defined $event->{reason};
+            $weak_self->{h2_session}->resume_stream($stream_id);
+            $weak_self->_h2_write_pending;
         }
         else {
             _unrecognized_event_type($type, 'sse');
