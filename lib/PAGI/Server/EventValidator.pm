@@ -204,7 +204,20 @@ sub validate_sse_send {
     elsif ($type eq 'sse.keepalive') {
         _validate_sse_keepalive($event);
     }
+    elsif ($type eq 'sse.close') {
+        _validate_sse_close($event);
+    }
     # http.fullflush has no required fields beyond type
+}
+
+sub _validate_sse_close {
+    my ($event) = @_;
+
+    # reason is optional and server-side only; if present it must be a string
+    if (exists $event->{reason} && defined $event->{reason}) {
+        croak "sse.close 'reason' must be a string"
+            if ref $event->{reason};
+    }
 }
 
 sub _validate_sse_start {

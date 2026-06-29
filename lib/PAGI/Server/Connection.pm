@@ -3304,8 +3304,19 @@ async sub _handle_sse_request {
         warn "PAGI application error (SSE): $error\n";
     }
 
-    # Send chunked terminator if SSE was started (uses chunked encoding)
-    # Check both closed flag and that stream is still writable
+    # End the stream (no-op if an explicit sse.close already finished it).
+    $self->_finish_sse_stream('stream_complete');
+}
+
+# Idempotently end an SSE stream: write the chunked terminator (HTTP/1.1), write
+# the access log, and close the connection. Called both by the on-return path
+# above and by an explicit sse.close event, so it must run exactly once.
+sub _finish_sse_stream {
+    my ($self, $reason) = @_;
+    return if $self->{sse_finished};
+    $self->{sse_finished} = 1;
+
+    # Send chunked terminator if SSE was started and the stream is still writable
     if ($self->{sse_started} && !$self->{closed} &&
         $self->{stream} && $self->{stream}->write_handle) {
         $self->{stream}->write("0\r\n\r\n");
@@ -3315,7 +3326,7 @@ async sub _handle_sse_request {
     $self->_write_access_log;
 
     # Close connection after SSE stream ends
-    $self->_handle_disconnect_and_close('stream_complete');
+    $self->_handle_disconnect_and_close($reason);
 }
 
 sub _create_sse_scope {
@@ -3510,12 +3521,22 @@ sub _create_sse_send {
     return async sub  {
         my ($event) = @_;
         return Future->done unless $weak_self;
+
+        my $type = $event->{type} // '';
+
+        # After an application-initiated sse.close the stream is closed: a second
+        # sse.close is a no-op, but any other send is a programming error and
+        # raises (a failed Future the application's `await $send` will throw).
+        if ($weak_self->{sse_close_sent}) {
+            return Future->done if $type eq 'sse.close';
+            die "cannot send '$type' after sse.close\n";
+        }
+
+        # Transport already gone (client disconnect): sends are a silent no-op.
         return Future->done if $weak_self->{closed};
 
         # Reset SSE idle timer on send activity
         $weak_self->_reset_sse_idle_timer;
-
-        my $type = $event->{type} // '';
 
         # Dev-mode event validation (PAGI spec compliance)
         if ($weak_self->{validate_events}) {
@@ -3604,6 +3625,16 @@ sub _create_sse_send {
             else {
                 $weak_self->_stop_sse_keepalive;
             }
+        }
+        elsif ($type eq 'sse.close') {
+            # Explicit application-initiated end of the SSE stream. End it now,
+            # decoupled from the application returning. `reason` is server-side
+            # metadata only and is never written to the wire. Idempotency for a
+            # repeat sse.close is handled by the sse_close_sent guard above.
+            $weak_self->{sse_close_sent} = 1;
+            $weak_self->{sse_disconnect_reason} = $event->{reason}
+                if defined $event->{reason};
+            $weak_self->_finish_sse_stream($event->{reason} // 'app_closed');
         }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush
