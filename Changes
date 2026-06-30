@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002005
+0.002005 - 2026-06-30
 
   Features
   - sse.http.response.* decline events (PAGI spec). Before sse.start, an
