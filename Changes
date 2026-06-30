@@ -3,6 +3,17 @@
 0.002005
 
   Features
+  - sse.http.response.* decline events (PAGI spec). Before sse.start, an
+    application may decline the stream and return a normal HTTP response
+    (404/401/403/204/redirect/...) by sending sse.http.response.start +
+    sse.http.response.body instead of sse.start. This finally makes an
+    unmatched SSE route return a real HTTP 404 rather than crashing the
+    connection, and gives EventSource the spec's 204 stop-reconnect path.
+    Implemented for both HTTP/1.1 and HTTP/2, reusing the normal HTTP
+    response machinery. First-send-wins: after sse.start a decline raises,
+    and after sse.http.response.start a stream event raises. EventValidator
+    accepts the decline events (status required integer; headers arrayref;
+    more integer).
   - sse.close send-event (PAGI spec). Applications can now end an SSE stream
     explicitly -- immediately and decoupled from returning -- instead of only by
     returning. Implemented for both HTTP/1.1 (chunked terminator) and HTTP/2
