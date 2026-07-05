@@ -25,6 +25,19 @@
     per $send->() call.
   - Transport-state closures are built once per connection and request
     timing runs only when access logging is enabled.
+  - The connection counts its own outbound bytes (a single _stream_write
+    chokepoint plus a shared on_write callback), so buffered_amount and
+    every backpressure check are O(1) reads instead of walking
+    IO::Async::Stream's undocumented internal write queue — removing the
+    dependency on those internals entirely. Large-response throughput
+    gains ~9%; a deliberately tiny high-water mark (every write crossing,
+    permanent backpressure) costs ~2% from lost writer coalescing.
+  - Armed pagi.transport on_drain callbacks now survive the request or
+    stream completing before their deferred delivery runs (previously a
+    fast client could tear the handle down first and the fire was
+    silently dropped — deterministic on Linux under inline flushing).
+  - Connection start() forces the stream handle non-blocking: inline
+    flushing on a blocking handle could stall the event loop.
   - New bench/ benchmark harness (bench/run.sh + bench/apps/bench-app.pl),
     excluded from the CPAN dist.
 
