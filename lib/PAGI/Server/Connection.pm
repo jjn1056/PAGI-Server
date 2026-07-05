@@ -1901,13 +1901,21 @@ sub _get_write_buffer_size {
 # backlog. The connection is held weakly so the handle never keeps it alive.
 sub _h1_transport_state {
     my ($self) = @_;
-    weaken(my $w = $self);
-    return PAGI::Server::TransportState->new(
-        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
-        high      => sub { $w ? $w->{write_high_watermark} : undef },
-        low       => sub { $w ? $w->{write_low_watermark}  : undef },
-        arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
-    );
+
+    # The closures capture only a weak self-reference, so one set serves
+    # every request on this connection; the TransportState object itself
+    # stays per-request (it carries per-request callback lists).
+    my $args = $self->{_h1_transport_args};
+    if (!$args) {
+        weaken(my $w = $self);
+        $args = $self->{_h1_transport_args} = {
+            measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
+            high      => sub { $w ? $w->{write_high_watermark} : undef },
+            low       => sub { $w ? $w->{write_low_watermark}  : undef },
+            arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
+        };
+    }
+    return PAGI::Server::TransportState->new(%$args);
 }
 
 # HTTP/2: the transport handle reads this stream's send queue, not the shared
@@ -2292,7 +2300,8 @@ sub _try_handle_request {
 
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
-    $self->{request_start} = [gettimeofday];
+    # Request timing feeds only the access log's duration field
+    $self->{request_start} = $self->{access_log} ? [gettimeofday] : undef;
     $self->{current_request} = $request;  # Store for access logging
 
     if ($is_websocket) {
