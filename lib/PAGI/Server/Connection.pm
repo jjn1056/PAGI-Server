@@ -142,7 +142,7 @@ sub new {
         write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this
         write_low_watermark  => $args{write_low_watermark}  // 16384,   # 16KB - resume sending below this
         _drain_waiters       => [],   # Pending Futures waiting for buffer drain
-        _drain_check_active  => 0,    # Flag to prevent redundant on_outgoing_empty setup
+        _autoflush_suspended => 0,    # Deferred-write mode; restored by _on_write_queue_empty
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -266,13 +266,20 @@ sub start {
         # Inline write flushing: attempt the syswrite at ->write time,
         # falling back to the deferred want-writeready path on a partial
         # write or EAGAIN. Saves one event-loop cycle per response plus the
-        # per-write watch/unwatch churn. Suspended during write-backpressure
-        # episodes (see _setup_drain_detection) so on_outgoing_empty drain
-        # detection still fires.
+        # per-write watch/unwatch churn. _suspend_autoflush forces the
+        # deferred path whenever the queue must stay observable (watermark
+        # crossings, drain waiters); the on_outgoing_empty handler below is
+        # the single owner that restores inline flushing.
         autoflush => 1,
         # Fewer syscalls per large body in each direction.
         read_len  => 65536,
         write_len => 65536,
+        # Fires only from the deferred write path, which is guaranteed to
+        # run while autoflush is suspended - so suspension always ends here.
+        on_outgoing_empty => sub {
+            return unless $weak_self;
+            $weak_self->_on_write_queue_empty;
+        },
         on_read => sub  {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
@@ -1947,19 +1954,26 @@ sub _notify_transport_write {
 }
 
 # Write application data (HTTP body, WebSocket frame, SSE event) and run the
-# transport-state watermark check. The check must observe the pre-flush
-# quantity: with autoflush a fast client drains the write inline, and a send
-# crossing the high-water mark would otherwise never register. A write that
-# would reach the mark therefore takes the deferred path for the episode's
-# duration; _check_drain_waiters restores inline flushing after the drain.
+# transport-state watermark check when the write reaches the high-water mark.
+# The check must observe the pre-flush quantity: with autoflush a fast client
+# drains the write inline and the crossing would never register, so a
+# crossing write is queued via the deferred path instead. Writes below the
+# mark skip the check entirely - the post-write queue can only be smaller
+# than the pre-write estimate, so the check provably cannot fire.
 sub _write_app_data {
     my ($self, $out) = @_;
 
-    if (defined $out && length $out and my $stream = $self->{stream}) {
+    my $stream = $self->{stream};
+    if ($stream && defined $out && length $out) {
         if ($self->_get_write_buffer_size + length($out) >= $self->{write_high_watermark}) {
-            $stream->configure(autoflush => 0);
+            $self->_suspend_autoflush;
+            $stream->write($out);
+            $self->_notify_transport_write;
         }
-        $stream->write($out);
+        else {
+            $stream->write($out);
+        }
+        return;
     }
     $self->_notify_transport_write;
 }
@@ -1978,40 +1992,34 @@ sub _check_drain_waiters {
         for my $f (@waiters) {
             $f->done unless $f->is_ready;
         }
-        # Disable drain checking until next high watermark hit
-        $self->{_drain_check_active} = 0;
-        # Episode over: restore inline write flushing
-        $self->{stream}->configure(autoflush => 1) if $self->{stream};
     }
 }
 
-sub _setup_drain_detection {
+# Force writes onto the deferred path until the write queue next empties.
+# Two callers need the queue observable in userspace: a write that crosses
+# the high-water mark (the pagi.transport watermark callbacks must see the
+# crossing) and _wait_for_drain (on_outgoing_empty must fire to resolve the
+# waiters). Restoration is owned by _on_write_queue_empty alone.
+sub _suspend_autoflush {
     my ($self) = @_;
 
-    # Avoid redundant setup
-    return if $self->{_drain_check_active};
-    $self->{_drain_check_active} = 1;
+    return if $self->{_autoflush_suspended};
+    return unless $self->{stream};
+    $self->{_autoflush_suspended} = 1;
+    $self->{stream}->configure(autoflush => 0);
+}
 
-    weaken(my $weak_self = $self);
+# The single restore point for inline write flushing, plus drain-waiter
+# resolution. Runs from the stream's on_outgoing_empty, which the deferred
+# write path always reaches while autoflush is suspended.
+sub _on_write_queue_empty {
+    my ($self) = @_;
 
-    # Primary mechanism: check when write queue empties
-    # This guarantees we notice drain even for fast-draining connections
-    # Store previous handler to chain if needed
-    my $prev_on_empty = $self->{_prev_on_outgoing_empty};
-
-    $self->{stream}->configure(
-        # Deferred writes for the duration of the episode: with autoflush a
-        # write issued while waiters exist (e.g. an SSE keepalive ping)
-        # could empty the queue inline, on_outgoing_empty would never fire,
-        # and the drain waiters would hang.
-        autoflush => 0,
-        on_outgoing_empty => sub {
-            return unless $weak_self;
-            $weak_self->_check_drain_waiters;
-            # Call previous handler if any
-            $prev_on_empty->(@_) if $prev_on_empty;
-        },
-    );
+    if ($self->{_autoflush_suspended} && $self->{stream}) {
+        $self->{_autoflush_suspended} = 0;
+        $self->{stream}->configure(autoflush => 1);
+    }
+    $self->_check_drain_waiters if @{$self->{_drain_waiters}};
 }
 
 sub _wait_for_drain {
@@ -2027,8 +2035,8 @@ sub _wait_for_drain {
     my $f = $self->{server}->loop->new_future;
     push @{$self->{_drain_waiters}}, $f;
 
-    # Ensure drain detection is active
-    $self->_setup_drain_detection;
+    # Deferred writes until drained, so on_outgoing_empty is reached
+    $self->_suspend_autoflush;
 
     return $f;
 }
@@ -2042,7 +2050,6 @@ sub _cancel_drain_waiters {
         # Resolve (not fail) - app should check connection state after await
         $f->done unless $f->is_ready;
     }
-    $self->{_drain_check_active} = 0;
 }
 
 # HTTP/2 per-stream backpressure: the h2 analogue of _wait_for_drain. Resolves
