@@ -17,6 +17,14 @@ subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $loop = IO::Async::Loop->new;
     my $socket_path = tmpnam() . '.sock';
 
+    # The parent serves each forked client only while the event loop runs
+    # below (waitpid then blocks the loop), so a slow shared runner needs a
+    # wider window for the child to spawn, connect, and be answered. Honor
+    # PERL_TEST_TIME_OUT_FACTOR (set by slow-box smokers and CI), clamped to
+    # a minimum of 1x like perl core's t/test.pl watchdog.
+    my $factor = $ENV{PERL_TEST_TIME_OUT_FACTOR};
+    $factor = 1 unless defined $factor && $factor =~ /^\d+$/ && $factor >= 1;
+
     my @captured_scopes;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -65,7 +73,7 @@ subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $tcp_resp = '';
     my $tcp_resp_file = "/tmp/pagi_multi_tcp_$$";
     if (my $pid = fork()) {
-        $loop->delay_future(after => 1)->get;
+        $loop->delay_future(after => 1 * $factor)->get;
         waitpid($pid, 0);
         if (-e $tcp_resp_file) {
             open my $fh, '<', $tcp_resp_file;
@@ -98,7 +106,7 @@ subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $unix_resp = '';
     my $unix_resp_file = "/tmp/pagi_multi_unix_$$";
     if (my $pid = fork()) {
-        $loop->delay_future(after => 1)->get;
+        $loop->delay_future(after => 1 * $factor)->get;
         waitpid($pid, 0);
         if (-e $unix_resp_file) {
             open my $fh, '<', $unix_resp_file;
