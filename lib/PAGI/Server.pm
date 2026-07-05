@@ -1452,6 +1452,34 @@ B<Note:> This differs from C<timeout> (idle connection timeout). The
 C<timeout> applies between requests on keep-alive connections. The
 C<request_timeout> applies during active request processing.
 
+=item header_timeout => $seconds
+
+Maximum total time in seconds for a request head (request line plus headers)
+to arrive, measured from its first byte. A head that does not complete in
+time is answered C<408 Request Timeout> and the connection is closed.
+
+B<Default:> 30 (set to 0 to disable)
+
+B<Why on by default:> this is the slowloris defense. The idle and stall
+timers reset on any read activity, so a client trickling one byte per minute
+holds its connection slot forever; a total-elapsed deadline cannot be
+extended by trickling. Legitimate clients send a complete head in well under
+a second, so 30 seconds is generous to real traffic and fatal to squatters.
+
+B<How it works:> the connection records a timestamp when a partial head is
+buffered; a single per-server periodic sweep (roughly every
+C<min(5, header_timeout/4)> seconds, so expiry granularity is coarse)
+answers 408 and closes anything overdue. The request hot path pays one
+timestamp store, no per-request timers. The deadline re-arms for each
+request head on a keep-alive connection and also covers the HTTP/2 cleartext
+preface wait.
+
+B<Note:> This differs from C<timeout> (idle: no bytes at all) and
+C<request_timeout> (stall during active request processing): both reset on
+activity, this one does not.
+
+B<CLI:> C<--header-timeout 30>
+
 =item ws_idle_timeout => $seconds
 
 Maximum time in seconds a WebSocket connection can be idle without any
@@ -2306,6 +2334,7 @@ sub _init {
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = use default (1000)
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
+    $self->{header_timeout}      = delete $params->{header_timeout} // 30;  # Request head completion deadline in seconds (0 = disabled)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
@@ -3864,6 +3893,8 @@ sub _on_connection {
 
     weaken(my $weak_self = $self);
 
+    $self->_start_header_sweeper;
+
     # Check if we're at capacity
     my $max = $self->effective_max_connections;
     if ($self->connection_count >= $max) {
@@ -3891,6 +3922,7 @@ sub _on_connection {
         tls_enabled       => $self->{tls_enabled} // 0,
         timeout           => $self->{timeout},
         request_timeout   => $self->{request_timeout},
+        header_timeout    => $self->{header_timeout},
         ws_idle_timeout   => $self->{ws_idle_timeout},
         sse_idle_timeout  => $self->{sse_idle_timeout},
         max_body_size     => $self->{max_body_size},
@@ -4020,6 +4052,35 @@ sub _pause_accepting {
 }
 
 # Called when a request completes (for max_requests tracking)
+# Lazily start the periodic sweep that enforces header_timeout. One shared
+# timer per server (per worker process): connections only record a
+# timestamp, so the request hot path pays nothing for the deadline.
+sub _start_header_sweeper {
+    my ($self) = @_;
+
+    return unless $self->{header_timeout} && $self->{header_timeout} > 0;
+    return if $self->{_header_sweeper};
+
+    my $interval = int($self->{header_timeout} / 4) || 1;
+    $interval = 5 if $interval > 5;
+
+    weaken(my $weak_self = $self);
+    my $timer = IO::Async::Timer::Periodic->new(
+        interval => $interval,
+        on_tick  => sub {
+            return unless $weak_self;
+            my $cutoff = time - $weak_self->{header_timeout};
+            for my $conn (values %{ $weak_self->{connections} }) {
+                next unless defined $conn->{_head_started_at};
+                $conn->_expire_header_deadline if $conn->{_head_started_at} <= $cutoff;
+            }
+        },
+    );
+    $self->{_header_sweeper} = $timer;
+    $self->add_child($timer);
+    $timer->start;
+}
+
 sub _on_request_complete {
     my ($self) = @_;
 

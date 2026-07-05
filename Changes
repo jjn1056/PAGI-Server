@@ -38,6 +38,17 @@
     silently dropped — deterministic on Linux under inline flushing).
   - Connection start() forces the stream handle non-blocking: inline
     flushing on a blocking handle could stall the event loop.
+
+  Security
+  - New header_timeout option (default ON at 30 seconds; --header-timeout,
+    0 disables): a request head must arrive in full within the deadline,
+    measured from its first byte, or the server answers 408 and closes.
+    Total-elapsed semantics mean slowloris-style byte trickling cannot
+    reset it the way it resets the activity-based idle/stall timers; also
+    covers the h2c preface wait. Enforced by one per-server periodic sweep
+    (the hot path pays a single timestamp store). This is a default-on
+    behavior change for clients that previously sat mid-headers
+    indefinitely.
   - New bench/ benchmark harness (bench/run.sh + bench/apps/bench-app.pl),
     excluded from the CPAN dist.
 

@@ -128,6 +128,8 @@ sub new {
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
         request_timeout => $args{request_timeout} // 0,  # Request stall timeout in seconds (0 = disabled, default for performance)
+        header_timeout  => $args{header_timeout} // 30,  # Head completion deadline in seconds (0 = disabled)
+        _head_started_at => undef,  # Epoch seconds of the first byte of a pending head
         ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
@@ -323,7 +325,11 @@ sub start {
                         $weak_self->{h2c_enabled} = 0;  # Not h2c, stop checking
                     }
                 } else {
-                    # Not enough data yet to determine protocol, wait for more
+                    # Not enough data yet to determine protocol; the head
+                    # deadline covers this wait too (a trickled preface is
+                    # the same squat as a trickled head).
+                    $weak_self->{_head_started_at} //= time
+                        if $weak_self->{header_timeout};
                     return 0;
                 }
             }
@@ -408,6 +414,7 @@ sub _init_h2_session {
     my ($self) = @_;
 
     $self->{is_h2} = 1;
+    $self->{_head_started_at} = undef;   # h2 frame deadlines are the session's job
 
     weaken(my $weak_self = $self);
 
@@ -1745,6 +1752,17 @@ sub _h2_ws_close {
     # No _h2_write_pending — called from inside feed(); flushed by _h2_process_data
 }
 
+# Fired by the server's header sweeper when a pending request head has been
+# incomplete for longer than header_timeout.
+sub _expire_header_deadline {
+    my ($self) = @_;
+
+    return if $self->{closed};
+    $self->_handle_disconnect('client_timeout');
+    $self->_send_error_response(408, 'Request Timeout');
+    $self->_close;
+}
+
 # Request stall timeout - closes connection if no I/O activity during request processing
 sub _start_stall_timer {
     my ($self) = @_;
@@ -2267,7 +2285,18 @@ sub _try_handle_request {
     # Try to parse a request from the buffer
     my ($request, $consumed) = $self->{protocol}->parse_request($self->{buffer});
 
-    return unless $request;
+    if (!$request) {
+        # A partial head is sitting in the buffer: start the completion
+        # deadline. Total elapsed time from the first byte — trickling more
+        # bytes does not extend it (the idle and stall timers reset on
+        # activity, which is exactly the hole slowloris exploits).
+        $self->{_head_started_at} //= time
+            if $self->{header_timeout} && length $self->{buffer};
+        return;
+    }
+
+    # Head phase over (parsed or rejected) — disarm the deadline
+    $self->{_head_started_at} = undef;
 
     # Remove consumed bytes from buffer
     substr($self->{buffer}, 0, $consumed) = '';

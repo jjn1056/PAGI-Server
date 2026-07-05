@@ -199,6 +199,7 @@ my %STATUS_PHRASES = (
     403 => 'Forbidden',
     404 => 'Not Found',
     405 => 'Method Not Allowed',
+    408 => 'Request Timeout',
     413 => 'Payload Too Large',
     414 => 'URI Too Long',
     431 => 'Request Header Fields Too Large',
