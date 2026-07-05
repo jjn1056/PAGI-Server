@@ -263,6 +263,16 @@ sub start {
 
     # Set up read handler
     $stream->configure(
+        # Inline write flushing: attempt the syswrite at ->write time,
+        # falling back to the deferred want-writeready path on a partial
+        # write or EAGAIN. Saves one event-loop cycle per response plus the
+        # per-write watch/unwatch churn. Suspended during write-backpressure
+        # episodes (see _setup_drain_detection) so on_outgoing_empty drain
+        # detection still fires.
+        autoflush => 1,
+        # Fewer syscalls per large body in each direction.
+        read_len  => 65536,
+        write_len => 65536,
         on_read => sub  {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
@@ -1928,6 +1938,24 @@ sub _notify_transport_write {
     $ts->_check_watermarks if $ts;
 }
 
+# Write application data (HTTP body, WebSocket frame, SSE event) and run the
+# transport-state watermark check. The check must observe the pre-flush
+# quantity: with autoflush a fast client drains the write inline, and a send
+# crossing the high-water mark would otherwise never register. A write that
+# would reach the mark therefore takes the deferred path for the episode's
+# duration; _check_drain_waiters restores inline flushing after the drain.
+sub _write_app_data {
+    my ($self, $out) = @_;
+
+    if (defined $out && length $out and my $stream = $self->{stream}) {
+        if ($self->_get_write_buffer_size + length($out) >= $self->{write_high_watermark}) {
+            $stream->configure(autoflush => 0);
+        }
+        $stream->write($out);
+    }
+    $self->_notify_transport_write;
+}
+
 sub _check_drain_waiters {
     my ($self) = @_;
 
@@ -1944,6 +1972,8 @@ sub _check_drain_waiters {
         }
         # Disable drain checking until next high watermark hit
         $self->{_drain_check_active} = 0;
+        # Episode over: restore inline write flushing
+        $self->{stream}->configure(autoflush => 1) if $self->{stream};
     }
 }
 
@@ -1962,6 +1992,11 @@ sub _setup_drain_detection {
     my $prev_on_empty = $self->{_prev_on_outgoing_empty};
 
     $self->{stream}->configure(
+        # Deferred writes for the duration of the episode: with autoflush a
+        # write issued while waiters exist (e.g. an SSE keepalive ping)
+        # could empty the queue inline, on_outgoing_empty would never fire,
+        # and the drain waiters would hang.
+        autoflush => 0,
         on_outgoing_empty => sub {
             return unless $weak_self;
             $weak_self->_check_drain_waiters;
@@ -2833,8 +2868,7 @@ sub _create_send {
                     $out .= $body;
                 }
 
-                $weak_self->{stream}->write($out) if length $out;
-                $weak_self->_notify_transport_write;
+                $weak_self->_write_app_data($out);
 
                 # Handle completion for body responses
                 if (!$more) {
@@ -3665,8 +3699,7 @@ sub _create_sse_send {
 
             # Send as chunked data
             my $len = sprintf("%x", length($sse_data));
-            $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
-            $weak_self->_notify_transport_write;
+            $weak_self->_write_app_data("$len\r\n$sse_data\r\n");
         }
         elsif ($type eq 'sse.comment') {
             return unless $weak_self->{sse_started};
@@ -4028,8 +4061,7 @@ sub _create_websocket_send {
             }
 
             my $bytes = $frame->to_bytes;
-            $weak_self->{stream}->write($bytes);
-            $weak_self->_notify_transport_write;
+            $weak_self->_write_app_data($bytes);
         }
         elsif ($type eq 'websocket.http.response.start') {
             # Custom handshake denial (websocket.http.response extension). Only
