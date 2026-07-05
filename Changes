@@ -39,6 +39,19 @@
   - Connection start() forces the stream handle non-blocking: inline
     flushing on a blocking handle could stall the event loop.
 
+  Performance
+  - Connection storms: cleartext listeners drain up to 64 pending accepts
+    per event-loop iteration (PAGI::Server::Listener) instead of the one
+    per iteration a stock IO::Async::Listener performs — a busy single
+    worker measured ~32 accepts/second, so 500 simultaneous dials produced
+    a first-request latency smear out to ~10 seconds while dropped SYNs
+    retransmitted. Field-measured with hey -c 500 against one worker:
+    slowest request 10.75s -> 0.30s, +3.5% throughput. TLS listeners keep
+    the stock class (the SSL listen extension supplies the acceptor). The
+    remaining storm bound is kernel queue capacity: raise
+    kern.ipc.somaxconn / net.core.somaxconn and use --reuseport so each
+    worker gets its own accept queue.
+
   Security
   - New header_timeout option (default ON at 30 seconds; --header-timeout,
     0 disables): a request head must arrive in full within the deadline,

@@ -34,6 +34,7 @@ END_FUTURE_XS_ERROR
 
 use parent 'IO::Async::Notifier';
 use IO::Async::Listener;
+use PAGI::Server::Listener;
 use IO::Async::Stream;
 use IO::Async::Loop;
 use IO::Async::Timer::Periodic;
@@ -2794,7 +2795,12 @@ async sub _listen_singleworker {
 
             my $spec_ref = $spec;
             weaken(my $weak_inner = $self);
-            my $listener = IO::Async::Listener->new(
+            # Cleartext listeners batch accepts; when TLS is configured the
+            # stock class is kept so behavior matches the pre-batching
+            # server for every TLS setup.
+            my $listener_class = ($inh->{type} eq 'unix' || !$self->{ssl})
+                ? 'PAGI::Server::Listener' : 'IO::Async::Listener';
+            my $listener = $listener_class->new(
                 handle    => $handle,
                 on_stream => sub {
                     my ($l, $stream) = @_;
@@ -2812,7 +2818,15 @@ async sub _listen_singleworker {
         }
 
         my $spec_copy = $spec;  # capture for closure
-        my $listener = IO::Async::Listener->new(
+        # TCP listeners take the SSL listen extension when TLS is configured.
+        # Built here, before the listener-class choice, because the class
+        # must be decided by the same fact (and building it twice would
+        # recreate the shared SSL context).
+        my $ssl_params = $spec->{type} eq 'tcp' ? $self->_build_ssl_config : undef;
+        # Cleartext listeners batch accepts; the SSL listen extension
+        # supplies its own acceptor, which the subclass would bypass.
+        my $listener_class = $ssl_params ? 'IO::Async::Listener' : 'PAGI::Server::Listener';
+        my $listener = $listener_class->new(
             on_stream => sub {
                 my ($listener, $stream) = @_;
                 return unless $weak_self;
@@ -2850,7 +2864,7 @@ async sub _listen_singleworker {
             };
 
             # Add SSL options if configured (TCP only)
-            if (my $ssl_params = $self->_build_ssl_config) {
+            if ($ssl_params) {
                 $listen_opts{extensions} = ['SSL'];
                 %listen_opts = (%listen_opts, %$ssl_params);
 
@@ -3823,7 +3837,9 @@ sub _run_as_worker {
         # Build SSL config for TCP listeners if needed
         my $use_ssl = ($ssl_params && $spec->{type} eq 'tcp');
 
-        my $listener = IO::Async::Listener->new(
+        # Workers upgrade TLS after accept (SSL_upgrade in on_stream), so the
+        # listener itself is always cleartext and can batch accepts.
+        my $listener = PAGI::Server::Listener->new(
             handle => $entry->{socket},
             on_stream => sub {
                 my ($listener, $stream) = @_;
