@@ -2276,10 +2276,11 @@ sub _try_handle_request {
     }
 
     # One pass over the headers for everything dispatch and keep-alive
-    # need: websocket upgrade, SSE accept, and the Connection header
-    # (previously three separate full scans; see _is_websocket_upgrade,
-    # _is_sse_request, and _should_keep_alive for the per-check semantics
-    # this loop mirrors).
+    # need: websocket upgrade (RFC 6455: an Upgrade value of 'websocket',
+    # an upgrade token in a Connection header, and a Sec-WebSocket-Key),
+    # SSE (an Accept header containing text/event-stream - case-sensitive,
+    # and valid for any HTTP method so fetch-event-source-style POST SSE
+    # works), and the first Connection header value for keep-alive.
     my ($has_upgrade, $has_conn_upgrade, $has_ws_key, $accepts_sse, $connection_header);
     for my $header (@{$request->{headers}}) {
         my $name = $header->[0];
@@ -2324,51 +2325,6 @@ sub _try_handle_request {
     # Use adopt_future for proper error tracking instead of retain
     # This ensures errors are propagated to the server's error handling
     $self->{server}->adopt_future($self->{request_future});
-}
-
-sub _is_websocket_upgrade {
-    my ($self, $request) = @_;
-
-    # Check for WebSocket upgrade headers
-    my $has_upgrade = 0;
-    my $has_connection_upgrade = 0;
-    my $has_ws_key = 0;
-
-    for my $header (@{$request->{headers}}) {
-        my ($name, $value) = @$header;
-        if ($name eq 'upgrade' && lc($value) eq 'websocket') {
-            $has_upgrade = 1;
-        }
-        elsif ($name eq 'connection') {
-            # Connection header can have multiple values
-            $has_connection_upgrade = 1 if lc($value) =~ /upgrade/;
-        }
-        elsif ($name eq 'sec-websocket-key') {
-            $has_ws_key = 1;
-        }
-    }
-
-    return $has_upgrade && $has_connection_upgrade && $has_ws_key;
-}
-
-sub _is_sse_request {
-    my ($self, $request) = @_;
-
-    # SSE detection per spec:
-    # - Accept header includes text/event-stream
-    # - Request has not been upgraded to WebSocket (already checked)
-    # Note: SSE works with any HTTP method (GET, POST, etc.) to support
-    # modern patterns like htmx 4 and datastar using fetch-event-source
-
-    for my $header (@{$request->{headers}}) {
-        my ($name, $value) = @$header;
-        if ($name eq 'accept') {
-            # Check if Accept header includes text/event-stream
-            return 1 if $value =~ m{text/event-stream};
-        }
-    }
-
-    return 0;
 }
 
 async sub _handle_request {
@@ -2469,8 +2425,10 @@ async sub _handle_request {
     }
 }
 
-# Keep-alive decision from pre-scanned values; mirrors _should_keep_alive
-# without re-walking the header array.
+# Keep-alive decision from the HTTP version and the first Connection header
+# value (already lowercased): HTTP/1.1 defaults to keep-alive unless the
+# header carries 'close'; HTTP/1.0 defaults to close unless it carries
+# 'keep-alive'; unknown versions close.
 sub _keep_alive_for {
     my ($http_version, $connection_header) = @_;
 
@@ -2488,9 +2446,7 @@ sub _keep_alive_for {
 sub _should_keep_alive {
     my ($self, $request) = @_;
 
-    my $http_version = $request->{http_version} // '1.1';
-
-    # Check for Connection header
+    # Check for Connection header (first one wins)
     my $connection_header;
     for my $header (@{$request->{headers}}) {
         if ($header->[0] eq 'connection') {
@@ -2499,20 +2455,7 @@ sub _should_keep_alive {
         }
     }
 
-    # HTTP/1.1: keep-alive by default unless Connection: close
-    if ($http_version eq '1.1') {
-        return 0 if $connection_header && $connection_header =~ /close/;
-        return 1;
-    }
-
-    # HTTP/1.0: close by default unless Connection: keep-alive
-    if ($http_version eq '1.0') {
-        return 1 if $connection_header && $connection_header =~ /keep-alive/;
-        return 0;
-    }
-
-    # Unknown version: close connection
-    return 0;
+    return _keep_alive_for($request->{http_version} // '1.1', $connection_header);
 }
 
 sub _create_scope {
@@ -2558,11 +2501,11 @@ sub _create_scope {
     return $scope;
 }
 
-# The receive implementation, hoisted to a package-level async sub: each
-# $receive->() call reuses this one compiled body instead of building and
-# tearing down a fresh closure per call. Per-request state lives in the $st
-# hashref built by _create_receive; the connection is held weakly across
-# awaits, exactly as the old closure's captured weak reference was.
+# The receive implementation, a package-level async sub: every $receive->()
+# call on every request shares this one compiled body. Per-request state
+# lives in the $st hashref built by _create_receive; the connection is held
+# weakly across awaits so a pending receive never keeps a dead connection
+# alive.
 async sub _receive_impl {
     my ($self, $st) = @_;
     weaken($self);
@@ -2673,10 +2616,9 @@ async sub _receive_impl {
         await $self->{receive_pending};
         $self->{receive_pending} = undef;
 
-        # Recursive call to re-process - but we can't use __SUB__ in nested async
-        # Just return disconnect if closed
         return { type => 'http.disconnect' } if $self->{closed};
-        # This shouldn't happen often - caller should retry
+        # Signal the caller to retry rather than re-entering the parser
+        # here: an empty chunk flagged more => 1
         return { type => 'http.request', body => '', more => 1 };
     }
 
