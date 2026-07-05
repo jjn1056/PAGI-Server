@@ -1,0 +1,102 @@
+# CI matrix for PAGI-Server.
+#
+# Two axes matter for this dist's CPAN-smoker history:
+#   - perl version: declared floor (5.18) through current (5.40)
+#   - optional deps: "full" installs the cpanfile recommends
+#     (TLS via IO::Async::SSL/IO::Socket::SSL, HTTP/2 via
+#     Net::HTTP2::nghttp2, Future::IO) so those features are exercised;
+#     "bare" installs only the hard requirements so every optional-dep
+#     skip path runs the way it does on a minimal smoker.
+#
+# The arm job uses the distro perl on a slower shared runner with a raised
+# PERL_TEST_TIME_OUT_FACTOR — a canary for the slow-ARM-smoker timeouts
+# that have produced spurious CPAN FAILs before.
+#
+# Windows is intentionally absent: the server integration tests skip_all
+# on MSWin32, so a Windows job would assert almost nothing.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: perl ${{ matrix.perl }} / ${{ matrix.os }} / ${{ matrix.deps }} deps
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Current perl, both dependency profiles
+          - { os: ubuntu-latest, perl: '5.40', deps: full }
+          - { os: ubuntu-latest, perl: '5.40', deps: bare }
+          # Mid-range perls, one profile each
+          - { os: ubuntu-latest, perl: '5.32', deps: full }
+          - { os: ubuntu-latest, perl: '5.26', deps: bare }
+          # Declared minimum (cpanfile: requires perl 5.018)
+          - { os: ubuntu-latest, perl: '5.18', deps: full }
+          - { os: ubuntu-latest, perl: '5.18', deps: bare }
+          # Development platform
+          - { os: macos-latest, perl: '5.40', deps: full }
+    env:
+      # Timing-sensitive tests scale their deadlines by this factor;
+      # shared CI runners deserve the same slack as slow smokers.
+      PERL_TEST_TIME_OUT_FACTOR: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries for the optional XS deps (Linux)
+        if: matrix.deps == 'full' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libnghttp2-dev libssl-dev
+
+      - name: Install system libraries for the optional XS deps (macOS)
+        if: matrix.deps == 'full' && runner.os == 'macOS'
+        run: brew install nghttp2 openssl@3
+
+      - name: Set up perl (required deps only)
+        if: matrix.deps == 'bare'
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          install-modules-with: cpanm
+
+      - name: Set up perl (required plus recommended deps)
+        if: matrix.deps == 'full'
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          install-modules-with: cpanm
+          install-modules-args: --with-recommends
+
+      - name: Run test suite
+        run: prove -lr -j4 t/
+
+  arm-smoker:
+    name: system perl / ubuntu-24.04-arm / slow-smoker canary
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      PERL_TEST_TIME_OUT_FACTOR: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system perl toolchain and optional-dep libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cpanminus build-essential libssl-dev libnghttp2-dev
+
+      - name: Install CPAN dependencies
+        run: |
+          cpanm --local-lib="$HOME/perl5" --notest --with-recommends --installdeps .
+          echo "PERL5LIB=$HOME/perl5/lib/perl5" >> "$GITHUB_ENV"
+
+      - name: Run test suite
+        run: prove -lr -j4 t/
