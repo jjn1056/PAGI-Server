@@ -2260,11 +2260,35 @@ sub _try_handle_request {
         }
     }
 
-    # Check if this is a WebSocket upgrade request
-    my $is_websocket = $self->_is_websocket_upgrade($request);
+    # One pass over the headers for everything dispatch and keep-alive
+    # need: websocket upgrade, SSE accept, and the Connection header
+    # (previously three separate full scans; see _is_websocket_upgrade,
+    # _is_sse_request, and _should_keep_alive for the per-check semantics
+    # this loop mirrors).
+    my ($has_upgrade, $has_conn_upgrade, $has_ws_key, $accepts_sse, $connection_header);
+    for my $header (@{$request->{headers}}) {
+        my $name = $header->[0];
+        if ($name eq 'upgrade') {
+            $has_upgrade = 1 if lc($header->[1]) eq 'websocket';
+        }
+        elsif ($name eq 'connection') {
+            my $lc_value = lc($header->[1]);
+            # First Connection header wins for keep-alive; any of them can
+            # carry the upgrade token.
+            $connection_header //= $lc_value;
+            $has_conn_upgrade = 1 if index($lc_value, 'upgrade') >= 0;
+        }
+        elsif ($name eq 'sec-websocket-key') {
+            $has_ws_key = 1;
+        }
+        elsif ($name eq 'accept') {
+            $accepts_sse = 1 if index($header->[1], 'text/event-stream') >= 0;
+        }
+    }
 
-    # Check if this is an SSE request
-    my $is_sse = !$is_websocket && $self->_is_sse_request($request);
+    my $is_websocket = $has_upgrade && $has_conn_upgrade && $has_ws_key;
+    my $is_sse = !$is_websocket && $accepts_sse;
+    $request->{_keep_alive} = _keep_alive_for($request->{http_version} // '1.1', $connection_header);
 
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
@@ -2404,7 +2428,7 @@ async sub _handle_request {
     }
 
     # Determine if we should keep the connection alive
-    my $keep_alive = $self->_should_keep_alive($request);
+    my $keep_alive = $request->{_keep_alive} // $self->_should_keep_alive($request);
 
     if ($keep_alive) {
         # Reset for next request
@@ -2427,6 +2451,22 @@ async sub _handle_request {
         # Not keeping alive - close connection
         $self->_handle_disconnect_and_close('request_complete');
     }
+}
+
+# Keep-alive decision from pre-scanned values; mirrors _should_keep_alive
+# without re-walking the header array.
+sub _keep_alive_for {
+    my ($http_version, $connection_header) = @_;
+
+    if ($http_version eq '1.1') {
+        return 0 if $connection_header && index($connection_header, 'close') >= 0;
+        return 1;
+    }
+    if ($http_version eq '1.0') {
+        return 1 if $connection_header && index($connection_header, 'keep-alive') >= 0;
+        return 0;
+    }
+    return 0;
 }
 
 sub _should_keep_alive {
