@@ -1,5 +1,33 @@
 # Revision history for PAGI-Server
 
+0.002007
+
+  Performance
+  - HTTP serving is substantially faster (interleaved A/B vs 0.002006 on
+    the same machine, single worker, keep-alive, medians of 3x10s runs:
+    hello-world +26%, 1KB POST echo +32%, 64KB response +46%), with no
+    behavior change and no new dependencies.
+  - Stream writes flush inline at ->write time (IO::Async::Stream
+    autoflush) instead of waiting one event-loop cycle for
+    write-readiness; read/write lengths raised to 64KB. Writes that would
+    cross the write high-water mark still take the deferred path so the
+    pagi.transport watermark callbacks observe the crossing exactly as
+    before; inline flushing resumes when the queue empties
+    (t/52-autoflush-restore.t).
+  - One header scan per request instead of three for websocket / SSE /
+    keep-alive detection; the response serializer emits the Date header
+    directly (no per-response header-array copy) and runs one validation
+    regex per header name on the good path.
+  - The per-request receive and send closures became package-level
+    implementations, and non-suspending send events (response.start,
+    unthrottled body chunks, trailers) dispatch synchronously, returning
+    an immediate Future instead of spinning up an async-sub state machine
+    per $send->() call.
+  - Transport-state closures are built once per connection and request
+    timing runs only when access logging is enabled.
+  - New bench/ benchmark harness (bench/run.sh + bench/apps/bench-app.pl),
+    excluded from the CPAN dist.
+
 0.002006 - 2026-07-04
 
   Bug Fixes
