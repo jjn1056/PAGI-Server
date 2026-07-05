@@ -2801,9 +2801,13 @@ sub _create_send {
                 }
             }
 
-            # Add Date header
-            my @final_headers = @$headers;
-            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            # Date goes through the serializer directly on the common path;
+            # only the HTTP/1.0 branches that append Connection headers
+            # still copy the array (and then carry the date pair themselves,
+            # preserving the original header order).
+            my $date = $weak_self->{protocol}->format_date;
+            my $out_headers = $headers;
+            my $date_arg = $date;
 
             # For HEAD requests, don't use chunked encoding (no body will be sent)
             # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
@@ -2812,11 +2816,13 @@ sub _create_send {
                 if ($is_http10) {
                     if (!$has_content_length) {
                         # No Content-Length means we can't do keep-alive
-                        push @final_headers, ['connection', 'close'];
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'close']];
+                        $date_arg = undef;
                     } elsif ($client_wants_keepalive) {
                         # HTTP/1.0 client requested keep-alive and we can honor it
                         # Must explicitly acknowledge with Connection: keep-alive
-                        push @final_headers, ['connection', 'keep-alive'];
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'keep-alive']];
+                        $date_arg = undef;
                     }
                 }
             } else {
@@ -2824,7 +2830,7 @@ sub _create_send {
             }
 
             my $response = $weak_self->{protocol}->serialize_response_start(
-                $status, \@final_headers, $chunked, $http_version
+                $status, $out_headers, $chunked, $http_version, $date_arg
             );
 
             # Buffer the headers instead of writing them now; they are flushed

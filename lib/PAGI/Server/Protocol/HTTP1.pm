@@ -19,12 +19,14 @@ use PAGI::Server ();
 sub _validate_header_name {
     my ($name) = @_;
 
-    if ($name =~ /[\r\n\0]/) {
-        die "Invalid header name: contains CR, LF, or null byte\n";
-    }
     # RFC 7230: token = 1*tchar
-    # For simplicity, we just reject control characters and delimiters
+    # For simplicity, we just reject control characters and delimiters.
+    # CR/LF/NUL are control characters, so one [[:cntrl:]] match covers the
+    # good path; re-test on failure only to pick the specific message.
     if ($name =~ /[[:cntrl:]]/) {
+        if ($name =~ /[\r\n\0]/) {
+            die "Invalid header name: contains CR, LF, or null byte\n";
+        }
         die "Invalid header name: contains control characters\n";
     }
     return $name;
@@ -129,13 +131,15 @@ to discard.
 
 =head2 serialize_response_start
 
-    my $bytes = $proto->serialize_response_start($status, \@headers, $chunked, $http_version);
+    my $bytes = $proto->serialize_response_start($status, \@headers, $chunked, $http_version, $date);
 
 Serializes the status line and headers. C<$chunked> (default 0) adds a
 C<Transfer-Encoding: chunked> header, but only when C<$http_version> (default
 C<'1.1'>) is C<'1.1'> — chunked encoding is not emitted for HTTP/1.0
 responses. A default C<Server> header is added when the application does not
-provide one.
+provide one. When C<$date> (an IMF-fixdate string, see L</format_date>) is
+defined, a C<date> header is emitted after the application headers; the value
+is server-generated and not subject to header validation.
 
 =head2 serialize_response_body
 
@@ -393,7 +397,7 @@ sub parse_request {
 }
 
 sub serialize_response_start {
-    my ($self, $status, $headers, $chunked, $http_version) = @_;
+    my ($self, $status, $headers, $chunked, $http_version, $date) = @_;
     $chunked //= 0;
     $http_version //= '1.1';
 
@@ -404,10 +408,16 @@ sub serialize_response_start {
     my $has_server = 0;
     for my $header (@$headers) {
         my ($name, $value) = @$header;
-        $has_server = 1 if lc($name) eq 'server';
+        $has_server = 1 if length($name) == 6 && lc($name) eq 'server';
         $name = _validate_header_name($name);
         $value = _validate_header_value($value);
         $response .= "$name: $value\r\n";
+    }
+
+    # Server-generated Date header, emitted directly so callers don't copy
+    # the header array just to append it; the value never needs validation.
+    if (defined $date) {
+        $response .= "date: $date\r\n";
     }
 
     # Add default Server header if app didn't provide one
