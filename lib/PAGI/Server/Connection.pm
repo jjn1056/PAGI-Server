@@ -223,6 +223,14 @@ sub start {
         # Ignore errors - not all sockets support this
     }
 
+    # Inline write flushing (autoflush) requires a non-blocking handle — a
+    # blocking one could stall the event loop mid-write. Sockets accepted by
+    # IO::Async::Listener already are; streams handed in by embedders or
+    # test harnesses may not be.
+    if ($handle && $handle->can('blocking')) {
+        eval { $handle->blocking(0) };
+    }
+
     # Cache connection info once (avoids per-request socket method calls)
     if ($self->{transport_type} eq 'unix') {
         # Unix socket: no peer IP/port, server is identified by path

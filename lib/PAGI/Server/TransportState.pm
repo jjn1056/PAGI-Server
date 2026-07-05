@@ -169,7 +169,7 @@ sub on_high_water {
 
     if ($self->{_above_high}) {
         # Already in the high state: this late registrant fires now.
-        $self->_fire([$cb]);
+        _fire([$cb]);
     }
     else {
         # May already be above the mark but not yet detected (no send since).
@@ -189,6 +189,10 @@ It is not invoked merely because the buffer is below the low mark when
 registered -- only on an actual high-then-low transition. Multiple callbacks may
 be registered; they are invoked in registration order with no arguments. Returns
 the handle for chaining.
+
+Delivery is deferred to the source's drain notification, and the callbacks
+still fire if the request or stream completes (discarding this handle)
+between the high-water crossing and delivery.
 
 =cut
 
@@ -219,16 +223,20 @@ sub _check_watermarks {
     return unless $self->buffered_amount >= $high;
 
     $self->{_above_high} = 1;
-    $self->_fire($self->{_high_water_callbacks});
+    _fire($self->{_high_water_callbacks});
 
     # Arm drain detection through the source: when the buffer falls below the
-    # low mark, fire on_drain and re-arm the cycle.
+    # low mark, fire on_drain and re-arm the cycle. The callback list is
+    # captured strongly: delivery is deferred (next loop tick for h2, drain
+    # future resolution for h1) and a fast client can complete the request
+    # and tear this handle down first — the armed on_drain callbacks must
+    # still fire. Only the hysteresis reset needs the handle itself.
     my $arm = $self->{_arm_drain} or return;
     weaken(my $weak = $self);
+    my $drain_callbacks = $self->{_drain_callbacks};
     $arm->(sub {
-        return unless $weak;
-        $weak->{_above_high} = 0;
-        $weak->_fire($weak->{_drain_callbacks});
+        $weak->{_above_high} = 0 if $weak;
+        _fire($drain_callbacks);
     });
 
     return;
@@ -236,7 +244,7 @@ sub _check_watermarks {
 
 # Invoke a list of callbacks in order, isolating exceptions.
 sub _fire {
-    my ($self, $cbs) = @_;
+    my ($cbs) = @_;
     for my $cb (@$cbs) {
         eval { $cb->(); 1 } or warn "transport callback error: $@";
     }
