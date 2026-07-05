@@ -2760,216 +2760,250 @@ sub _create_receive {
     };
 }
 
-# The send implementation, hoisted to a package-level async sub for the same
-# reason as _receive_impl: one compiled body shared by every request instead
-# of a fresh closure each. Per-request state lives in the $st hashref built
-# by _create_send; the connection is held weakly across awaits, exactly as
-# the old closure's captured weak reference was.
-async sub _send_impl {
+# Send dispatch, shared by every request. The common events (response.start,
+# an unthrottled body chunk, trailers, fullflush) never suspend, so they run
+# in this plain sub and return an immediate Future, avoiding the async-sub
+# state machine on every $send->() call. Paths that genuinely suspend
+# (write backpressure, file/fh streaming) delegate to _send_body_slow. An
+# exception thrown before the first await in an async sub becomes a failed
+# Future; the eval below preserves exactly that contract for the fast paths.
+sub _send_event {
     my ($self, $st, $event) = @_;
     return Future->done unless $self;
     return Future->done if $self->{closed};
-    weaken($self);
 
-    # Reset stall timer on write activity
-    $self->_reset_stall_timer;
+    my $slow = eval {
+        # Reset stall timer on write activity
+        $self->_reset_stall_timer;
 
-    my $type = $event->{type} // '';
+        my $type = $event->{type} // '';
 
-    # Dev-mode event validation (PAGI spec compliance)
-    if ($self->{validate_events}) {
-        require PAGI::Server::EventValidator;
-        PAGI::Server::EventValidator::validate_http_send($event);
-    }
-
-    if ($type eq 'http.response.start') {
-        return if $st->{response_started};
-        $st->{response_started} = 1;
-        $self->{response_started} = 1;
-        $self->{current_connection_state}->_mark_response_started
-            if $self->{current_connection_state};
-        $self->{response_status} = $event->{status} // 200;  # Track for logging
-        $st->{expects_trailers} = $event->{trailers} // 0;
-
-        my $status = $event->{status} // 200;
-        my $headers = $event->{headers} // [];
-
-        # Check if we need chunked encoding (no Content-Length)
-        my $has_content_length = 0;
-        for my $h (@$headers) {
-            if (lc($h->[0]) eq 'content-length') {
-                $has_content_length = 1;
-                last;
-            }
+        # Dev-mode event validation (PAGI spec compliance)
+        if ($self->{validate_events}) {
+            require PAGI::Server::EventValidator;
+            PAGI::Server::EventValidator::validate_http_send($event);
         }
 
-        # Date goes through the serializer directly on the common path;
-        # only the HTTP/1.0 branches that append Connection headers
-        # still copy the array (and then carry the date pair themselves,
-        # preserving the original header order).
-        my $date = $self->{protocol}->format_date;
-        my $out_headers = $headers;
-        my $date_arg = $date;
+        if ($type eq 'http.response.start') {
+            return undef if $st->{response_started};
+            $st->{response_started} = 1;
+            $self->{response_started} = 1;
+            $self->{current_connection_state}->_mark_response_started
+                if $self->{current_connection_state};
+            $self->{response_status} = $event->{status} // 200;  # Track for logging
+            $st->{expects_trailers} = $event->{trailers} // 0;
 
-        # For HEAD requests, don't use chunked encoding (no body will be sent)
-        # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
-        if ($st->{is_head_request} || $st->{is_http10}) {
-            $st->{chunked} = 0;
-            if ($st->{is_http10}) {
-                if (!$has_content_length) {
-                    # No Content-Length means we can't do keep-alive
-                    $out_headers = [@$headers, ['date', $date], ['connection', 'close']];
-                    $date_arg = undef;
-                } elsif ($st->{client_wants_keepalive}) {
-                    # HTTP/1.0 client requested keep-alive and we can honor it
-                    # Must explicitly acknowledge with Connection: keep-alive
-                    $out_headers = [@$headers, ['date', $date], ['connection', 'keep-alive']];
-                    $date_arg = undef;
+            my $status = $event->{status} // 200;
+            my $headers = $event->{headers} // [];
+
+            # Check if we need chunked encoding (no Content-Length)
+            my $has_content_length = 0;
+            for my $h (@$headers) {
+                if (lc($h->[0]) eq 'content-length') {
+                    $has_content_length = 1;
+                    last;
                 }
             }
-        } else {
-            $st->{chunked} = !$has_content_length;
-        }
 
-        my $response = $self->{protocol}->serialize_response_start(
-            $status, $out_headers, $st->{chunked}, $st->{http_version}, $date_arg
-        );
+            # Date goes through the serializer directly on the common path;
+            # only the HTTP/1.0 branches that append Connection headers
+            # still copy the array (and then carry the date pair themselves,
+            # preserving the original header order).
+            my $date = $self->{protocol}->format_date;
+            my $out_headers = $headers;
+            my $date_arg = $date;
 
-        # Buffer the headers instead of writing them now; they are flushed
-        # together with the first body write (or at finalization). This
-        # coalesces the common "start + complete body" case into a single
-        # stream write instead of one per headers/chunk/terminator.
-        $self->{_resp_pending} = $response;
-    }
-    elsif ($type eq 'http.response.body') {
-        return unless $st->{response_started};
-        return if $st->{body_complete};
-
-        # For HEAD requests, suppress the body but track completion
-        if ($st->{is_head_request}) {
-            my $more = $event->{more} // 0;
-            # HEAD has headers but no body, so flush the buffered headers now.
-            $self->_flush_pending_headers;
-            if (!$more) {
-                $st->{body_complete} = 1;
+            # For HEAD requests, don't use chunked encoding (no body will be sent)
+            # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
+            if ($st->{is_head_request} || $st->{is_http10}) {
+                $st->{chunked} = 0;
+                if ($st->{is_http10}) {
+                    if (!$has_content_length) {
+                        # No Content-Length means we can't do keep-alive
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'close']];
+                        $date_arg = undef;
+                    } elsif ($st->{client_wants_keepalive}) {
+                        # HTTP/1.0 client requested keep-alive and we can honor it
+                        # Must explicitly acknowledge with Connection: keep-alive
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'keep-alive']];
+                        $date_arg = undef;
+                    }
+                }
+            } else {
+                $st->{chunked} = !$has_content_length;
             }
-            return;  # Don't send any body for HEAD
+
+            my $response = $self->{protocol}->serialize_response_start(
+                $status, $out_headers, $st->{chunked}, $st->{http_version}, $date_arg
+            );
+
+            # Buffer the headers instead of writing them now; they are flushed
+            # together with the first body write (or at finalization). This
+            # coalesces the common "start + complete body" case into a single
+            # stream write instead of one per headers/chunk/terminator.
+            $self->{_resp_pending} = $response;
         }
+        elsif ($type eq 'http.response.body') {
+            return undef unless $st->{response_started};
+            return undef if $st->{body_complete};
 
-        # --- BACKPRESSURE CHECK ---
-        # Wait for buffer to drain if we're above high watermark
-        # This prevents unbounded memory growth with slow clients
-        if ($self->_get_write_buffer_size >= $self->{write_high_watermark}) {
-            await $self->_wait_for_drain;
-            # Re-check connection state after await
-            return Future->done unless $self;
-            return Future->done if $self->{closed};
+            # For HEAD requests, suppress the body but track completion
+            if ($st->{is_head_request}) {
+                my $more = $event->{more} // 0;
+                # HEAD has headers but no body, so flush the buffered headers now.
+                $self->_flush_pending_headers;
+                if (!$more) {
+                    $st->{body_complete} = 1;
+                }
+                return undef;  # Don't send any body for HEAD
+            }
+
+            # Suspending paths: write backpressure or file/fh streaming
+            if (defined $event->{file} or defined $event->{fh}
+                or $self->_get_write_buffer_size >= $self->{write_high_watermark}) {
+                return $self->_send_body_slow($st, $event);
+            }
+
+            $self->_emit_body_chunk($st, $event->{body}, $event->{more} // 0);
         }
-        # --- END BACKPRESSURE CHECK ---
+        elsif ($type eq 'http.response.trailers') {
+            return undef unless $st->{response_started};
+            return undef unless $st->{expects_trailers};
+            return undef unless $st->{chunked};  # Trailers only work with chunked encoding
 
-        # Determine body source: body, file, or fh (mutually exclusive)
-        my $body = $event->{body};
-        my $file = $event->{file};
-        my $fh = $event->{fh};
-        my $offset = $event->{offset} // 0;
-        my $length = $event->{length};
+            my $trailer_headers = $event->{headers} // [];
 
-        if (defined $file) {
-            # File path response - stream from file (async, non-blocking)
-            # File responses are implicitly complete (more is ignored)
-            $self->_flush_pending_headers;   # headers before the file body
-            await $self->_send_file_response($file, $offset, $length, $st->{chunked});
+            # Send final chunk + trailers (prepend any still-buffered headers).
+            my $trailers = $self->{_resp_pending} // '';
+            $self->{_resp_pending} = undef;
+            $trailers .= "0\r\n";
+            for my $header (@$trailer_headers) {
+                my ($name, $value) = @$header;
+                $name  = _validate_header_name($name);
+                $value = _validate_header_value($value);
+                $trailers .= "$name: $value\r\n";
+            }
+            $trailers .= "\r\n";
+
+            $self->{stream}->write($trailers);
             $st->{body_complete} = 1;
         }
-        elsif (defined $fh) {
-            # Filehandle response - stream from handle (async, non-blocking)
-            # Filehandle responses are implicitly complete (more is ignored)
-            $self->_flush_pending_headers;   # headers before the fh body
-            await $self->_send_fh_response($fh, $offset, $length, $st->{chunked});
-            $st->{body_complete} = 1;
+        elsif ($type eq 'http.fullflush') {
+            # Fullflush extension - force immediate TCP buffer flush
+            # Per spec: servers that don't advertise the extension must reject
+            unless (exists $self->{extensions}{fullflush}) {
+                warn "PAGI: http.fullflush event rejected - extension not enabled\n";
+                die "Extension not enabled: fullflush\n";
+            }
+
+            # Force flush by ensuring TCP_NODELAY and flushing any pending writes
+            my $handle = $self->{stream}->write_handle;
+            if ($handle && $handle->can('setsockopt')) {
+                # Ensure TCP_NODELAY is set to disable Nagle buffering
+                require Socket;
+                $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+            }
+
+            # In IO::Async, writes are queued and sent when the event loop allows.
+            # The above TCP_NODELAY ensures no Nagle buffering delays.
+            # For this reference implementation, we return immediately as the
+            # write buffer will be flushed by the event loop.
         }
         else {
-            # Traditional body response
-            $body //= '';
-            my $more = $event->{more} // 0;
-
-            $self->{_response_size} += length($body);
-
-            # Coalesce any buffered headers, the body (chunk framing if
-            # chunked), and the final terminator into a single stream write.
-            # The common start + complete-body response becomes one write
-            # rather than three.
-            my $out = $self->{_resp_pending};
-            $out = '' unless defined $out;
-            $self->{_resp_pending} = undef;
-
-            if ($st->{chunked}) {
-                if (length $body) {
-                    my $len = sprintf("%x", length($body));
-                    $out .= "$len\r\n$body\r\n";
-                }
-                if (!$more && !$st->{expects_trailers}) {
-                    $out .= "0\r\n\r\n";
-                }
-            }
-            else {
-                $out .= $body;
-            }
-
-            $self->_write_app_data($out);
-
-            # Handle completion for body responses
-            if (!$more) {
-                $st->{body_complete} = 1;
-            }
+            # Per PAGI spec: servers must raise exceptions for unrecognized event types
+            _unrecognized_event_type($type, 'http');
         }
+
+        undef;
+    };
+    if (my $error = $@) {
+        return Future->fail($error);
     }
-    elsif ($type eq 'http.response.trailers') {
-        return unless $st->{response_started};
-        return unless $st->{expects_trailers};
-        return unless $st->{chunked};  # Trailers only work with chunked encoding
 
-        my $trailer_headers = $event->{headers} // [];
+    return ref $slow ? $slow : Future->done;
+}
 
-        # Send final chunk + trailers (prepend any still-buffered headers).
-        my $trailers = $self->{_resp_pending} // '';
-        $self->{_resp_pending} = undef;
-        $trailers .= "0\r\n";
-        for my $header (@$trailer_headers) {
-            my ($name, $value) = @$header;
-            $name  = _validate_header_name($name);
-            $value = _validate_header_value($value);
-            $trailers .= "$name: $value\r\n";
+# Serialize and write one traditional body chunk (coalescing any buffered
+# response headers, chunk framing, and the terminator into a single stream
+# write). Shared by the fast path in _send_event and the post-backpressure
+# path in _send_body_slow.
+sub _emit_body_chunk {
+    my ($self, $st, $body, $more) = @_;
+
+    $body //= '';
+
+    $self->{_response_size} += length($body);
+
+    # Coalesce any buffered headers, the body (chunk framing if
+    # chunked), and the final terminator into a single stream write.
+    # The common start + complete-body response becomes one write
+    # rather than three.
+    my $out = $self->{_resp_pending};
+    $out = '' unless defined $out;
+    $self->{_resp_pending} = undef;
+
+    if ($st->{chunked}) {
+        if (length $body) {
+            my $len = sprintf("%x", length($body));
+            $out .= "$len\r\n$body\r\n";
         }
-        $trailers .= "\r\n";
-
-        $self->{stream}->write($trailers);
-        $st->{body_complete} = 1;
-    }
-    elsif ($type eq 'http.fullflush') {
-        # Fullflush extension - force immediate TCP buffer flush
-        # Per spec: servers that don't advertise the extension must reject
-        unless (exists $self->{extensions}{fullflush}) {
-            warn "PAGI: http.fullflush event rejected - extension not enabled\n";
-            die "Extension not enabled: fullflush\n";
+        if (!$more && !$st->{expects_trailers}) {
+            $out .= "0\r\n\r\n";
         }
-
-        # Force flush by ensuring TCP_NODELAY and flushing any pending writes
-        my $handle = $self->{stream}->write_handle;
-        if ($handle && $handle->can('setsockopt')) {
-            # Ensure TCP_NODELAY is set to disable Nagle buffering
-            require Socket;
-            $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
-        }
-
-        # In IO::Async, writes are queued and sent when the event loop allows.
-        # The above TCP_NODELAY ensures no Nagle buffering delays.
-        # For this reference implementation, we return immediately as the
-        # write buffer will be flushed by the event loop.
     }
     else {
-        # Per PAGI spec: servers must raise exceptions for unrecognized event types
-        _unrecognized_event_type($type, 'http');
+        $out .= $body;
+    }
+
+    $self->_write_app_data($out);
+
+    # Handle completion for body responses
+    if (!$more) {
+        $st->{body_complete} = 1;
+    }
+    return;
+}
+
+# The suspending body paths: wait out write backpressure, then stream from a
+# file path or filehandle, or emit the (now unthrottled) body chunk. The
+# connection is held weakly across awaits.
+async sub _send_body_slow {
+    my ($self, $st, $event) = @_;
+    weaken($self);
+
+    # --- BACKPRESSURE CHECK ---
+    # Wait for buffer to drain if we're above high watermark
+    # This prevents unbounded memory growth with slow clients
+    if ($self->_get_write_buffer_size >= $self->{write_high_watermark}) {
+        await $self->_wait_for_drain;
+        # Re-check connection state after await
+        return Future->done unless $self;
+        return Future->done if $self->{closed};
+    }
+    # --- END BACKPRESSURE CHECK ---
+
+    # Determine body source: body, file, or fh (mutually exclusive)
+    my $file = $event->{file};
+    my $fh = $event->{fh};
+    my $offset = $event->{offset} // 0;
+    my $length = $event->{length};
+
+    if (defined $file) {
+        # File path response - stream from file (async, non-blocking)
+        # File responses are implicitly complete (more is ignored)
+        $self->_flush_pending_headers;   # headers before the file body
+        await $self->_send_file_response($file, $offset, $length, $st->{chunked});
+        $st->{body_complete} = 1;
+    }
+    elsif (defined $fh) {
+        # Filehandle response - stream from handle (async, non-blocking)
+        # Filehandle responses are implicitly complete (more is ignored)
+        $self->_flush_pending_headers;   # headers before the fh body
+        await $self->_send_fh_response($fh, $offset, $length, $st->{chunked});
+        $st->{body_complete} = 1;
+    }
+    else {
+        $self->_emit_body_chunk($st, $event->{body}, $event->{more} // 0);
     }
 
     return;
@@ -3005,7 +3039,7 @@ sub _create_send {
 
     weaken(my $weak_self = $self);
 
-    return sub { _send_impl($weak_self, $st, @_) };
+    return sub { _send_event($weak_self, $st, @_) };
 }
 
 # Flush any response headers buffered by http.response.start that were not yet
