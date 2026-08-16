@@ -284,6 +284,78 @@ subtest 'fh response sends from filehandle' => sub {
     );
 };
 
+subtest 'closed fh fails the send Future' => sub {
+    # Intentionally RED until PAGI::Server implements the existing
+    # PAGI::Spec::Www contract for http.response.body{fh}. A closed or invalid
+    # application-owned handle must fail the Future returned by $send; treating
+    # read() failure as EOF silently turns a resource error into a successful,
+    # empty or truncated response. Keep this as a release-blocking assertion,
+    # not a TODO test, so the server cannot ship while violating the contract.
+    #
+    # The first assertion also pins the asynchronous boundary: $send itself
+    # returns a Future, and validation/resource errors arrive through that
+    # Future rather than as a synchronous exception.
+    my $sync_error = '';
+    my $future_error = '';
+    my $returned_future = 0;
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            open my $closed_fh, '<:raw', $test_file
+                or die "Cannot open: $!";
+            close $closed_fh;
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'application/octet-stream'],
+                ],
+            });
+
+            my $send_future;
+            eval {
+                $send_future = $send->({
+                    type => 'http.response.body',
+                    fh => $closed_fh,
+                    length => 1,
+                });
+                1;
+            } or $sync_error = $@;
+
+            $returned_future = eval { $send_future->isa('Future') } ? 1 : 0
+                if defined $send_future;
+
+            if ($returned_future) {
+                eval { await $send_future; 1 }
+                    or $future_error = $@;
+            }
+
+            # Once the implementation rejects the fh send, finish the response
+            # so the client side of this regression test cannot wait forever.
+            if (!$returned_future || length($sync_error) || length($future_error)) {
+                await $send->({
+                    type => 'http.response.body',
+                    body => '',
+                    more => 0,
+                });
+            }
+        },
+        sub {
+            my ($port, $server) = @_;
+            $http->GET("http://127.0.0.1:$port/closed-fh")->get;
+        },
+    );
+
+    ok(
+        $returned_future && !length($sync_error),
+        '$send returns a Future instead of throwing synchronously',
+    );
+    ok(length($future_error), 'closed fh fails the Future returned by $send');
+};
+
 subtest 'fh response without length reads to EOF' => sub {
     with_server(
         async sub  {
