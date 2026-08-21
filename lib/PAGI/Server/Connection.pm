@@ -4368,9 +4368,13 @@ async sub _send_fh_response {
             last if $to_read <= 0;
         }
 
-        my $bytes_read = read($fh, my $chunk, $to_read);
+        my ($bytes_read, $chunk);
+        {
+            no warnings 'closed';
+            $bytes_read = read($fh, $chunk, $to_read);
+        }
 
-        last if !defined $bytes_read;  # Error
+        die "Failed to read filehandle: $!" unless defined $bytes_read;
         last if $bytes_read == 0;      # EOF
 
         $self->{_response_size} += $bytes_read;
