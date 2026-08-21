@@ -1,5 +1,7 @@
 # PAGI-Server
 
+[![CI](https://github.com/jjn1056/PAGI-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/jjn1056/PAGI-Server/actions/workflows/ci.yml)
+
 Reference [IO::Async](https://metacpan.org/pod/IO::Async) server for the
 **PAGI** specification.
 

@@ -1,5 +1,70 @@
 # Revision history for PAGI-Server
 
+0.002007
+
+  Performance
+  - HTTP serving is substantially faster (interleaved A/B vs 0.002006 on
+    the same machine, single worker, keep-alive, medians of 3x10s runs:
+    hello-world +26%, 1KB POST echo +32%, 64KB response +46%), with no
+    behavior change and no new dependencies.
+  - Stream writes flush inline at ->write time (IO::Async::Stream
+    autoflush) instead of waiting one event-loop cycle for
+    write-readiness; read/write lengths raised to 64KB. Writes that would
+    cross the write high-water mark still take the deferred path so the
+    pagi.transport watermark callbacks observe the crossing exactly as
+    before; inline flushing resumes when the queue empties
+    (t/52-autoflush-restore.t).
+  - One header scan per request instead of three for websocket / SSE /
+    keep-alive detection; the response serializer emits the Date header
+    directly (no per-response header-array copy) and runs one validation
+    regex per header name on the good path.
+  - The per-request receive and send closures became package-level
+    implementations, and non-suspending send events (response.start,
+    unthrottled body chunks, trailers) dispatch synchronously, returning
+    an immediate Future instead of spinning up an async-sub state machine
+    per $send->() call.
+  - Transport-state closures are built once per connection and request
+    timing runs only when access logging is enabled.
+  - The connection counts its own outbound bytes (a single _stream_write
+    chokepoint plus a shared on_write callback), so buffered_amount and
+    every backpressure check are O(1) reads instead of walking
+    IO::Async::Stream's undocumented internal write queue — removing the
+    dependency on those internals entirely. Large-response throughput
+    gains ~9%; a deliberately tiny high-water mark (every write crossing,
+    permanent backpressure) costs ~2% from lost writer coalescing.
+  - Armed pagi.transport on_drain callbacks now survive the request or
+    stream completing before their deferred delivery runs (previously a
+    fast client could tear the handle down first and the fire was
+    silently dropped — deterministic on Linux under inline flushing).
+  - Connection start() forces the stream handle non-blocking: inline
+    flushing on a blocking handle could stall the event loop.
+
+  Performance
+  - Connection storms: cleartext listeners drain up to 64 pending accepts
+    per event-loop iteration (PAGI::Server::Listener) instead of the one
+    per iteration a stock IO::Async::Listener performs — a busy single
+    worker measured ~32 accepts/second, so 500 simultaneous dials produced
+    a first-request latency smear out to ~10 seconds while dropped SYNs
+    retransmitted. Field-measured with hey -c 500 against one worker:
+    slowest request 10.75s -> 0.30s, +3.5% throughput. TLS listeners keep
+    the stock class (the SSL listen extension supplies the acceptor). The
+    remaining storm bound is kernel queue capacity: raise
+    kern.ipc.somaxconn / net.core.somaxconn and use --reuseport so each
+    worker gets its own accept queue.
+
+  Security
+  - New header_timeout option (default ON at 30 seconds; --header-timeout,
+    0 disables): a request head must arrive in full within the deadline,
+    measured from its first byte, or the server answers 408 and closes.
+    Total-elapsed semantics mean slowloris-style byte trickling cannot
+    reset it the way it resets the activity-based idle/stall timers; also
+    covers the h2c preface wait. Enforced by one per-server periodic sweep
+    (the hot path pays a single timestamp store). This is a default-on
+    behavior change for clients that previously sat mid-headers
+    indefinitely.
+  - New bench/ benchmark harness (bench/run.sh + bench/apps/bench-app.pl),
+    excluded from the CPAN dist.
+
 0.002006 - 2026-07-04
 
   Bug Fixes

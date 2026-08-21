@@ -565,6 +565,13 @@ UNIMPLEMENTED, which is the correct behavior.
 
 =item * Connection idle timeout (60 seconds default)
 
+=item * Request-head completion deadline (C<header_timeout>, 30 seconds
+default) - a request head that does not complete in time is answered 408 and
+the connection closed. The deadline is total elapsed time from the head's
+first byte, so slowloris-style byte trickling cannot reset it the way it
+resets activity-based timers. Known boundaries: TLS handshake pacing happens
+below this layer, and HTTP/2 frame pacing is governed by the nghttp2 session.
+
 =item * Graceful shutdown with timeout (30 seconds default)
 
 =item * Listener backlog limit (2048 default)

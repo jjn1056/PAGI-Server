@@ -50,6 +50,7 @@ GetOptionsFromArray(
     'timeout=i'             => \$server_opts{timeout},
     'shutdown-timeout=i'    => \$server_opts{shutdown_timeout},
     'request-timeout=i'     => \$server_opts{request_timeout},
+    'header-timeout=i'      => \$server_opts{header_timeout},
     'ws-idle-timeout=i'     => \$server_opts{ws_idle_timeout},
     'sse-idle-timeout=i'    => \$server_opts{sse_idle_timeout},
     'heartbeat-timeout=i'   => \$server_opts{heartbeat_timeout},
@@ -424,6 +425,15 @@ many bytes (default: 16384). See L<PAGI::Server/"write_low_watermark">.
 =item B<--request-timeout> NUM
 
 Request stall timeout in seconds (default: 0, disabled)
+
+=item B<--header-timeout> NUM
+
+Deadline in seconds for a request head to arrive in full, measured from its
+first byte; on expiry the server answers C<408 Request Timeout> and closes
+(default: 30, 0 disables). Unlike the idle and stall timeouts this is total
+elapsed time, so slowloris-style byte trickling cannot extend it — the
+defense that matters when running without a reverse proxy. See
+L<PAGI::Server/"header_timeout">.
 
 =item B<--ws-idle-timeout> NUM
 

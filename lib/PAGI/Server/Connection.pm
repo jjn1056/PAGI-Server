@@ -128,6 +128,8 @@ sub new {
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
         request_timeout => $args{request_timeout} // 0,  # Request stall timeout in seconds (0 = disabled, default for performance)
+        header_timeout  => $args{header_timeout} // 30,  # Head completion deadline in seconds (0 = disabled)
+        _head_started_at => undef,  # Epoch seconds of the first byte of a pending head
         ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
@@ -142,7 +144,8 @@ sub new {
         write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this
         write_low_watermark  => $args{write_low_watermark}  // 16384,   # 16KB - resume sending below this
         _drain_waiters       => [],   # Pending Futures waiting for buffer drain
-        _drain_check_active  => 0,    # Flag to prevent redundant on_outgoing_empty setup
+        _autoflush_suspended => 0,    # Deferred-write mode; restored by _on_write_queue_empty
+        _outbound_bytes      => 0,    # Bytes written but not yet flushed; see _stream_write
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
         closed        => 0,
@@ -223,6 +226,19 @@ sub start {
         # Ignore errors - not all sockets support this
     }
 
+    # Inline write flushing (autoflush) requires a non-blocking handle — a
+    # blocking one could stall the event loop mid-write. Sockets accepted by
+    # IO::Async::Listener already are; streams handed in by embedders or
+    # test harnesses may not be.
+    if ($handle && $handle->can('blocking')) {
+        eval { $handle->blocking(0) };
+    }
+
+    # Outbound byte accounting: a single shared on_write callback decrements
+    # the counter as syswrites complete (see _stream_write). Built once per
+    # connection so writes don't allocate a closure each.
+    $self->{_on_write_cb} = sub { $weak_self->{_outbound_bytes} -= $_[1] if $weak_self };
+
     # Cache connection info once (avoids per-request socket method calls)
     if ($self->{transport_type} eq 'unix') {
         # Unix socket: no peer IP/port, server is identified by path
@@ -263,6 +279,23 @@ sub start {
 
     # Set up read handler
     $stream->configure(
+        # Inline write flushing: attempt the syswrite at ->write time,
+        # falling back to the deferred want-writeready path on a partial
+        # write or EAGAIN. Saves one event-loop cycle per response plus the
+        # per-write watch/unwatch churn. _suspend_autoflush forces the
+        # deferred path whenever the queue must stay observable (watermark
+        # crossings, drain waiters); the on_outgoing_empty handler below is
+        # the single owner that restores inline flushing.
+        autoflush => 1,
+        # Fewer syscalls per large body in each direction.
+        read_len  => 65536,
+        write_len => 65536,
+        # Fires only from the deferred write path, which is guaranteed to
+        # run while autoflush is suspended - so suspension always ends here.
+        on_outgoing_empty => sub {
+            return unless $weak_self;
+            $weak_self->_on_write_queue_empty;
+        },
         on_read => sub  {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
@@ -292,7 +325,11 @@ sub start {
                         $weak_self->{h2c_enabled} = 0;  # Not h2c, stop checking
                     }
                 } else {
-                    # Not enough data yet to determine protocol, wait for more
+                    # Not enough data yet to determine protocol; the head
+                    # deadline covers this wait too (a trickled preface is
+                    # the same squat as a trickled head).
+                    $weak_self->{_head_started_at} //= time
+                        if $weak_self->{header_timeout};
                     return 0;
                 }
             }
@@ -377,6 +414,7 @@ sub _init_h2_session {
     my ($self) = @_;
 
     $self->{is_h2} = 1;
+    $self->{_head_started_at} = undef;   # h2 frame deadlines are the session's job
 
     weaken(my $weak_self = $self);
 
@@ -426,7 +464,7 @@ sub _h2_write_pending {
     while (1) {
         my $data = $self->{h2_session}->extract;
         last unless defined $data && length($data) > 0;
-        $self->{stream}->write($data);
+        $self->_stream_write($data);
     }
 }
 
@@ -1714,6 +1752,17 @@ sub _h2_ws_close {
     # No _h2_write_pending — called from inside feed(); flushed by _h2_process_data
 }
 
+# Fired by the server's header sweeper when a pending request head has been
+# incomplete for longer than header_timeout.
+sub _expire_header_deadline {
+    my ($self) = @_;
+
+    return if $self->{closed};
+    $self->_handle_disconnect('client_timeout');
+    $self->_send_error_response(408, 'Request Timeout');
+    $self->_close;
+}
+
 # Request stall timeout - closes connection if no I/O activity during request processing
 sub _start_stall_timer {
     my ($self) = @_;
@@ -1866,24 +1915,27 @@ sub _stop_sse_idle_timer {
 # The $send->() Future will block (await) when high watermark is exceeded,
 # and resolve when buffer drains below low watermark.
 
+# The single point where connection bytes enter the stream. Counts outbound
+# bytes and passes the shared on_write callback that counts them back out as
+# syswrites complete, so buffered_amount and every backpressure check read a
+# plain integer instead of walking IO::Async::Stream's internal write queue.
+sub _stream_write {
+    my ($self, $out) = @_;
+
+    my $stream = $self->{stream} or return;
+    $self->{_outbound_bytes} += length($out);
+    $stream->write($out, on_write => $self->{_on_write_cb});
+    return;
+}
+
 sub _get_write_buffer_size {
     my ($self) = @_;
 
-    return 0 unless $self->{stream};
-
-    # Access IO::Async::Stream's internal write queue
-    # IO::Async doesn't expose a public API for buffer size, so we access internals
-    my $queue = $self->{stream}{writequeue} // [];
-    my $total = 0;
-
-    for my $writer (@$queue) {
-        my $data = $writer->data;
-        if (defined $data && !ref $data) {
-            $total += length($data);
-        }
-    }
-
-    return $total;
+    # Maintained by _stream_write (+) and its on_write callback (-); bytes
+    # abandoned with the queue at close are reset in _close. Clamped so a
+    # miscount can only ever report an empty buffer, never a phantom one.
+    my $n = $self->{_outbound_bytes} // 0;
+    return $n > 0 ? $n : 0;
 }
 
 # HTTP/1.1: the transport handle reads the shared TCP write buffer. One
@@ -1891,13 +1943,21 @@ sub _get_write_buffer_size {
 # backlog. The connection is held weakly so the handle never keeps it alive.
 sub _h1_transport_state {
     my ($self) = @_;
-    weaken(my $w = $self);
-    return PAGI::Server::TransportState->new(
-        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
-        high      => sub { $w ? $w->{write_high_watermark} : undef },
-        low       => sub { $w ? $w->{write_low_watermark}  : undef },
-        arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
-    );
+
+    # The closures capture only a weak self-reference, so one set serves
+    # every request on this connection; the TransportState object itself
+    # stays per-request (it carries per-request callback lists).
+    my $args = $self->{_h1_transport_args};
+    if (!$args) {
+        weaken(my $w = $self);
+        $args = $self->{_h1_transport_args} = {
+            measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
+            high      => sub { $w ? $w->{write_high_watermark} : undef },
+            low       => sub { $w ? $w->{write_low_watermark}  : undef },
+            arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
+        };
+    }
+    return PAGI::Server::TransportState->new(%$args);
 }
 
 # HTTP/2: the transport handle reads this stream's send queue, not the shared
@@ -1928,6 +1988,30 @@ sub _notify_transport_write {
     $ts->_check_watermarks if $ts;
 }
 
+# Write application data (HTTP body, WebSocket frame, SSE event) and run the
+# transport-state watermark check when the write reaches the high-water mark.
+# The check must observe the pre-flush quantity: with autoflush a fast client
+# drains the write inline and the crossing would never register, so a
+# crossing write is queued via the deferred path instead. Writes below the
+# mark skip the check entirely - the post-write queue can only be smaller
+# than the pre-write estimate, so the check provably cannot fire.
+sub _write_app_data {
+    my ($self, $out) = @_;
+
+    if ($self->{stream} && defined $out && length $out) {
+        if ($self->_get_write_buffer_size + length($out) >= $self->{write_high_watermark}) {
+            $self->_suspend_autoflush;
+            $self->_stream_write($out);
+            $self->_notify_transport_write;
+        }
+        else {
+            $self->_stream_write($out);
+        }
+        return;
+    }
+    $self->_notify_transport_write;
+}
+
 sub _check_drain_waiters {
     my ($self) = @_;
 
@@ -1942,33 +2026,34 @@ sub _check_drain_waiters {
         for my $f (@waiters) {
             $f->done unless $f->is_ready;
         }
-        # Disable drain checking until next high watermark hit
-        $self->{_drain_check_active} = 0;
     }
 }
 
-sub _setup_drain_detection {
+# Force writes onto the deferred path until the write queue next empties.
+# Two callers need the queue observable in userspace: a write that crosses
+# the high-water mark (the pagi.transport watermark callbacks must see the
+# crossing) and _wait_for_drain (on_outgoing_empty must fire to resolve the
+# waiters). Restoration is owned by _on_write_queue_empty alone.
+sub _suspend_autoflush {
     my ($self) = @_;
 
-    # Avoid redundant setup
-    return if $self->{_drain_check_active};
-    $self->{_drain_check_active} = 1;
+    return if $self->{_autoflush_suspended};
+    return unless $self->{stream};
+    $self->{_autoflush_suspended} = 1;
+    $self->{stream}->configure(autoflush => 0);
+}
 
-    weaken(my $weak_self = $self);
+# The single restore point for inline write flushing, plus drain-waiter
+# resolution. Runs from the stream's on_outgoing_empty, which the deferred
+# write path always reaches while autoflush is suspended.
+sub _on_write_queue_empty {
+    my ($self) = @_;
 
-    # Primary mechanism: check when write queue empties
-    # This guarantees we notice drain even for fast-draining connections
-    # Store previous handler to chain if needed
-    my $prev_on_empty = $self->{_prev_on_outgoing_empty};
-
-    $self->{stream}->configure(
-        on_outgoing_empty => sub {
-            return unless $weak_self;
-            $weak_self->_check_drain_waiters;
-            # Call previous handler if any
-            $prev_on_empty->(@_) if $prev_on_empty;
-        },
-    );
+    if ($self->{_autoflush_suspended} && $self->{stream}) {
+        $self->{_autoflush_suspended} = 0;
+        $self->{stream}->configure(autoflush => 1);
+    }
+    $self->_check_drain_waiters if @{$self->{_drain_waiters}};
 }
 
 sub _wait_for_drain {
@@ -1984,8 +2069,8 @@ sub _wait_for_drain {
     my $f = $self->{server}->loop->new_future;
     push @{$self->{_drain_waiters}}, $f;
 
-    # Ensure drain detection is active
-    $self->_setup_drain_detection;
+    # Deferred writes until drained, so on_outgoing_empty is reached
+    $self->_suspend_autoflush;
 
     return $f;
 }
@@ -1999,7 +2084,6 @@ sub _cancel_drain_waiters {
         # Resolve (not fail) - app should check connection state after await
         $f->done unless $f->is_ready;
     }
-    $self->{_drain_check_active} = 0;
 }
 
 # HTTP/2 per-stream backpressure: the h2 analogue of _wait_for_drain. Resolves
@@ -2069,7 +2153,7 @@ sub _start_ws_keepalive {
                 type   => 'ping',
                 buffer => '',
             );
-            $weak_self->{stream}->write($ping->to_bytes);
+            $weak_self->_stream_write($ping->to_bytes);
 
             # Start pong timeout if configured
             if ($weak_self->{ws_keepalive_timeout} > 0) {
@@ -2201,7 +2285,18 @@ sub _try_handle_request {
     # Try to parse a request from the buffer
     my ($request, $consumed) = $self->{protocol}->parse_request($self->{buffer});
 
-    return unless $request;
+    if (!$request) {
+        # A partial head is sitting in the buffer: start the completion
+        # deadline. Total elapsed time from the first byte — trickling more
+        # bytes does not extend it (the idle and stall timers reset on
+        # activity, which is exactly the hole slowloris exploits).
+        $self->{_head_started_at} //= time
+            if $self->{header_timeout} && length $self->{buffer};
+        return;
+    }
+
+    # Head phase over (parsed or rejected) — disarm the deadline
+    $self->{_head_started_at} = undef;
 
     # Remove consumed bytes from buffer
     substr($self->{buffer}, 0, $consumed) = '';
@@ -2225,15 +2320,41 @@ sub _try_handle_request {
         }
     }
 
-    # Check if this is a WebSocket upgrade request
-    my $is_websocket = $self->_is_websocket_upgrade($request);
+    # One pass over the headers for everything dispatch and keep-alive
+    # need: websocket upgrade (RFC 6455: an Upgrade value of 'websocket',
+    # an upgrade token in a Connection header, and a Sec-WebSocket-Key),
+    # SSE (an Accept header containing text/event-stream - case-sensitive,
+    # and valid for any HTTP method so fetch-event-source-style POST SSE
+    # works), and the first Connection header value for keep-alive.
+    my ($has_upgrade, $has_conn_upgrade, $has_ws_key, $accepts_sse, $connection_header);
+    for my $header (@{$request->{headers}}) {
+        my $name = $header->[0];
+        if ($name eq 'upgrade') {
+            $has_upgrade = 1 if lc($header->[1]) eq 'websocket';
+        }
+        elsif ($name eq 'connection') {
+            my $lc_value = lc($header->[1]);
+            # First Connection header wins for keep-alive; any of them can
+            # carry the upgrade token.
+            $connection_header //= $lc_value;
+            $has_conn_upgrade = 1 if index($lc_value, 'upgrade') >= 0;
+        }
+        elsif ($name eq 'sec-websocket-key') {
+            $has_ws_key = 1;
+        }
+        elsif ($name eq 'accept') {
+            $accepts_sse = 1 if index($header->[1], 'text/event-stream') >= 0;
+        }
+    }
 
-    # Check if this is an SSE request
-    my $is_sse = !$is_websocket && $self->_is_sse_request($request);
+    my $is_websocket = $has_upgrade && $has_conn_upgrade && $has_ws_key;
+    my $is_sse = !$is_websocket && $accepts_sse;
+    $request->{_keep_alive} = _keep_alive_for($request->{http_version} // '1.1', $connection_header);
 
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
-    $self->{request_start} = [gettimeofday];
+    # Request timing feeds only the access log's duration field
+    $self->{request_start} = $self->{access_log} ? [gettimeofday] : undef;
     $self->{current_request} = $request;  # Store for access logging
 
     if ($is_websocket) {
@@ -2249,51 +2370,6 @@ sub _try_handle_request {
     # Use adopt_future for proper error tracking instead of retain
     # This ensures errors are propagated to the server's error handling
     $self->{server}->adopt_future($self->{request_future});
-}
-
-sub _is_websocket_upgrade {
-    my ($self, $request) = @_;
-
-    # Check for WebSocket upgrade headers
-    my $has_upgrade = 0;
-    my $has_connection_upgrade = 0;
-    my $has_ws_key = 0;
-
-    for my $header (@{$request->{headers}}) {
-        my ($name, $value) = @$header;
-        if ($name eq 'upgrade' && lc($value) eq 'websocket') {
-            $has_upgrade = 1;
-        }
-        elsif ($name eq 'connection') {
-            # Connection header can have multiple values
-            $has_connection_upgrade = 1 if lc($value) =~ /upgrade/;
-        }
-        elsif ($name eq 'sec-websocket-key') {
-            $has_ws_key = 1;
-        }
-    }
-
-    return $has_upgrade && $has_connection_upgrade && $has_ws_key;
-}
-
-sub _is_sse_request {
-    my ($self, $request) = @_;
-
-    # SSE detection per spec:
-    # - Accept header includes text/event-stream
-    # - Request has not been upgraded to WebSocket (already checked)
-    # Note: SSE works with any HTTP method (GET, POST, etc.) to support
-    # modern patterns like htmx 4 and datastar using fetch-event-source
-
-    for my $header (@{$request->{headers}}) {
-        my ($name, $value) = @$header;
-        if ($name eq 'accept') {
-            # Check if Accept header includes text/event-stream
-            return 1 if $value =~ m{text/event-stream};
-        }
-    }
-
-    return 0;
 }
 
 async sub _handle_request {
@@ -2369,7 +2445,7 @@ async sub _handle_request {
     }
 
     # Determine if we should keep the connection alive
-    my $keep_alive = $self->_should_keep_alive($request);
+    my $keep_alive = $request->{_keep_alive} // $self->_should_keep_alive($request);
 
     if ($keep_alive) {
         # Reset for next request
@@ -2394,12 +2470,28 @@ async sub _handle_request {
     }
 }
 
+# Keep-alive decision from the HTTP version and the first Connection header
+# value (already lowercased): HTTP/1.1 defaults to keep-alive unless the
+# header carries 'close'; HTTP/1.0 defaults to close unless it carries
+# 'keep-alive'; unknown versions close.
+sub _keep_alive_for {
+    my ($http_version, $connection_header) = @_;
+
+    if ($http_version eq '1.1') {
+        return 0 if $connection_header && index($connection_header, 'close') >= 0;
+        return 1;
+    }
+    if ($http_version eq '1.0') {
+        return 1 if $connection_header && index($connection_header, 'keep-alive') >= 0;
+        return 0;
+    }
+    return 0;
+}
+
 sub _should_keep_alive {
     my ($self, $request) = @_;
 
-    my $http_version = $request->{http_version} // '1.1';
-
-    # Check for Connection header
+    # Check for Connection header (first one wins)
     my $connection_header;
     for my $header (@{$request->{headers}}) {
         if ($header->[0] eq 'connection') {
@@ -2408,20 +2500,7 @@ sub _should_keep_alive {
         }
     }
 
-    # HTTP/1.1: keep-alive by default unless Connection: close
-    if ($http_version eq '1.1') {
-        return 0 if $connection_header && $connection_header =~ /close/;
-        return 1;
-    }
-
-    # HTTP/1.0: close by default unless Connection: keep-alive
-    if ($http_version eq '1.0') {
-        return 1 if $connection_header && $connection_header =~ /keep-alive/;
-        return 0;
-    }
-
-    # Unknown version: close connection
-    return 0;
+    return _keep_alive_for($request->{http_version} // '1.1', $connection_header);
 }
 
 sub _create_scope {
@@ -2467,19 +2546,194 @@ sub _create_scope {
     return $scope;
 }
 
+# The receive implementation, a package-level async sub: every $receive->()
+# call on every request shares this one compiled body. Per-request state
+# lives in the $st hashref built by _create_receive; the connection is held
+# weakly across awaits so a pending receive never keeps a dead connection
+# alive.
+async sub _receive_impl {
+    my ($self, $st) = @_;
+    weaken($self);
+
+    return { type => 'http.disconnect' } unless $self;
+    return { type => 'http.disconnect' } if $self->{closed};
+
+    # Check queue first - events from disconnect handler
+    if (@{$self->{receive_queue}}) {
+        return shift @{$self->{receive_queue}};
+    }
+
+    # If body is already complete, wait for disconnect
+    if ($st->{body_complete}) {
+        if (!$self->{receive_pending}) {
+            $self->{receive_pending} = Future->new;
+        }
+
+        if ($self->{closed}) {
+            $self->{receive_pending} = undef;
+            return { type => 'http.disconnect' };
+        }
+
+        my $result = await $self->{receive_pending};
+        # receive_pending may be completed with a value (disconnect event)
+        # or just done() as a signal
+        return $result if ref $result eq 'HASH';
+        # If no value, check queue
+        if (@{$self->{receive_queue}}) {
+            return shift @{$self->{receive_queue}};
+        }
+        return { type => 'http.disconnect' };
+    }
+
+    # For requests without body, return empty body immediately
+    if (!$st->{has_body}) {
+        $st->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Send 100 Continue if client expects it (before reading body)
+    if ($st->{expect_continue} && !$st->{continue_sent}) {
+        $st->{continue_sent} = 1;
+        $self->_stream_write($self->{protocol}->serialize_continue);
+    }
+
+    # Handle chunked Transfer-Encoding
+    if ($st->{is_chunked}) {
+        # Wait for data if buffer is empty
+        while (length($self->{buffer}) == 0 && !$self->{closed}) {
+            if (!$self->{receive_pending}) {
+                $self->{receive_pending} = Future->new;
+            }
+            await $self->{receive_pending};
+            $self->{receive_pending} = undef;
+
+            # Check queue after waiting
+            if (@{$self->{receive_queue}}) {
+                return shift @{$self->{receive_queue}};
+            }
+        }
+
+        # Try to parse chunked data
+        my ($data, $consumed, $complete) = $self->{protocol}->parse_chunked_body($self->{buffer});
+
+        # Check for parse error (invalid chunk size)
+        if (ref($data) eq 'HASH' && $data->{error}) {
+            $self->_handle_disconnect('protocol_error');
+            $self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
+            $self->_close;
+            return { type => 'http.disconnect' };
+        }
+
+        if ($consumed > 0) {
+            substr($self->{buffer}, 0, $consumed) = '';
+
+            # Track total bytes read for max_body_size check
+            $st->{bytes_read} += length($data // '');
+
+            # Check max_body_size for chunked requests (0 = unlimited)
+            if ($self->{max_body_size} && $st->{bytes_read} > $self->{max_body_size}) {
+                # Body too large - close connection
+                $self->_send_error_response(413, 'Payload Too Large');
+                $self->_handle_disconnect('body_too_large');
+                $self->_close;
+                return { type => 'http.disconnect' };
+            }
+
+            if ($complete) {
+                $st->{body_complete} = 1;
+            }
+
+            return {
+                type => 'http.request',
+                body => $data // '',
+                more => $complete ? 0 : 1,
+            };
+        }
+
+        # Need more data - wait for it
+        if (!$self->{receive_pending}) {
+            $self->{receive_pending} = Future->new;
+        }
+        await $self->{receive_pending};
+        $self->{receive_pending} = undef;
+
+        return { type => 'http.disconnect' } if $self->{closed};
+        # Signal the caller to retry rather than re-entering the parser
+        # here: an empty chunk flagged more => 1
+        return { type => 'http.request', body => '', more => 1 };
+    }
+
+    # Handle Content-Length based body reading
+    my $remaining = $st->{content_length} - $st->{bytes_read};
+
+    if ($remaining <= 0) {
+        $st->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Wait for data if buffer is empty
+    while (length($self->{buffer}) == 0 && !$self->{closed}) {
+        if (!$self->{receive_pending}) {
+            $self->{receive_pending} = Future->new;
+        }
+        await $self->{receive_pending};
+        $self->{receive_pending} = undef;
+
+        # Check queue after waiting
+        if (@{$self->{receive_queue}}) {
+            return shift @{$self->{receive_queue}};
+        }
+    }
+
+    # Return disconnect if closed while waiting
+    if ($self->{closed} && length($self->{buffer}) == 0) {
+        return { type => 'http.disconnect' };
+    }
+
+    # Read up to 64KB or remaining bytes, whichever is smaller
+    my $to_read = $remaining < 65536 ? $remaining : 65536;
+    $to_read = length($self->{buffer}) if length($self->{buffer}) < $to_read;
+
+    my $body = substr($self->{buffer}, 0, $to_read, '');
+    $st->{bytes_read} += length($body);
+
+    # Check if we've read all the body
+    my $more = ($st->{bytes_read} < $st->{content_length}) ? 1 : 0;
+
+    if (!$more) {
+        $st->{body_complete} = 1;
+    }
+
+    return {
+        type => 'http.request',
+        body => $body,
+        more => $more,
+    };
+}
+
 sub _create_receive {
     my ($self, $request) = @_;
 
     my $content_length = $request->{content_length};
     my $is_chunked = $request->{chunked} // 0;
-    my $expect_continue = $request->{expect_continue} // 0;
-    my $continue_sent = 0;
-    my $body_complete = 0;
-    my $bytes_read = 0;
-    my $chunk_size = 65536;  # 64KB chunks for large bodies
-
-    # For requests without Content-Length and not chunked, treat as no body
-    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
+    my $st = {
+        content_length  => $content_length,
+        is_chunked      => $is_chunked,
+        expect_continue => $request->{expect_continue} // 0,
+        continue_sent   => 0,
+        body_complete   => 0,
+        bytes_read      => 0,
+        # For requests without Content-Length and not chunked, treat as no body
+        has_body        => (defined($content_length) && $content_length > 0 || $is_chunked),
+    };
 
     weaken(my $weak_self = $self);
 
@@ -2488,172 +2742,7 @@ sub _create_receive {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return Future->done({ type => 'http.disconnect' }) if $weak_self->{closed};
 
-        # The actual async implementation
-        my $future = (async sub {
-            return { type => 'http.disconnect' } unless $weak_self;
-            return { type => 'http.disconnect' } if $weak_self->{closed};
-
-            # Check queue first - events from disconnect handler
-            if (@{$weak_self->{receive_queue}}) {
-                return shift @{$weak_self->{receive_queue}};
-            }
-
-            # If body is already complete, wait for disconnect
-            if ($body_complete) {
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-
-                if ($weak_self->{closed}) {
-                    $weak_self->{receive_pending} = undef;
-                    return { type => 'http.disconnect' };
-                }
-
-                my $result = await $weak_self->{receive_pending};
-                # receive_pending may be completed with a value (disconnect event)
-                # or just done() as a signal
-                return $result if ref $result eq 'HASH';
-                # If no value, check queue
-                if (@{$weak_self->{receive_queue}}) {
-                    return shift @{$weak_self->{receive_queue}};
-                }
-                return { type => 'http.disconnect' };
-            }
-
-            # For requests without body, return empty body immediately
-            if (!$has_body) {
-                $body_complete = 1;
-                return {
-                    type => 'http.request',
-                    body => '',
-                    more => 0,
-                };
-            }
-
-            # Send 100 Continue if client expects it (before reading body)
-            if ($expect_continue && !$continue_sent) {
-                $continue_sent = 1;
-                $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
-            }
-
-            # Handle chunked Transfer-Encoding
-            if ($is_chunked) {
-                # Wait for data if buffer is empty
-                while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-                    if (!$weak_self->{receive_pending}) {
-                        $weak_self->{receive_pending} = Future->new;
-                    }
-                    await $weak_self->{receive_pending};
-                    $weak_self->{receive_pending} = undef;
-
-                    # Check queue after waiting
-                    if (@{$weak_self->{receive_queue}}) {
-                        return shift @{$weak_self->{receive_queue}};
-                    }
-                }
-
-                # Try to parse chunked data
-                my ($data, $consumed, $complete) = $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
-
-                # Check for parse error (invalid chunk size)
-                if (ref($data) eq 'HASH' && $data->{error}) {
-                    $weak_self->_handle_disconnect('protocol_error');
-                    $weak_self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
-                    $weak_self->_close;
-                    return { type => 'http.disconnect' };
-                }
-
-                if ($consumed > 0) {
-                    substr($weak_self->{buffer}, 0, $consumed) = '';
-
-                    # Track total bytes read for max_body_size check
-                    $bytes_read += length($data // '');
-
-                    # Check max_body_size for chunked requests (0 = unlimited)
-                    if ($weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
-                        # Body too large - close connection
-                        $weak_self->_send_error_response(413, 'Payload Too Large');
-                        $weak_self->_handle_disconnect('body_too_large');
-                        $weak_self->_close;
-                        return { type => 'http.disconnect' };
-                    }
-
-                    if ($complete) {
-                        $body_complete = 1;
-                    }
-
-                    return {
-                        type => 'http.request',
-                        body => $data // '',
-                        more => $complete ? 0 : 1,
-                    };
-                }
-
-                # Need more data - wait for it
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-                await $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
-
-                # Recursive call to re-process - but we can't use __SUB__ in nested async
-                # Just return disconnect if closed
-                return { type => 'http.disconnect' } if $weak_self->{closed};
-                # This shouldn't happen often - caller should retry
-                return { type => 'http.request', body => '', more => 1 };
-            }
-
-            # Handle Content-Length based body reading
-            my $remaining = $content_length - $bytes_read;
-
-            if ($remaining <= 0) {
-                $body_complete = 1;
-                return {
-                    type => 'http.request',
-                    body => '',
-                    more => 0,
-                };
-            }
-
-            # Wait for data if buffer is empty
-            while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-                await $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
-
-                # Check queue after waiting
-                if (@{$weak_self->{receive_queue}}) {
-                    return shift @{$weak_self->{receive_queue}};
-                }
-            }
-
-            # Return disconnect if closed while waiting
-            if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
-                return { type => 'http.disconnect' };
-            }
-
-            # Read up to chunk_size or remaining bytes, whichever is smaller
-            my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
-            $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
-
-            my $body = substr($weak_self->{buffer}, 0, $to_read, '');
-            $bytes_read += length($body);
-
-            # Check if we've read all the body
-            my $more = ($bytes_read < $content_length) ? 1 : 0;
-
-            if (!$more) {
-                $body_complete = 1;
-            }
-
-            return {
-                type => 'http.request',
-                body => $body,
-                more => $more,
-            };
-        })->();
+        my $future = _receive_impl($weak_self, $st);
 
         # Track this Future so we can cancel it on close
         push @{$weak_self->{receive_futures}}, $future;
@@ -2665,54 +2754,38 @@ sub _create_receive {
     };
 }
 
-sub _create_send {
-    my ($self, $request) = @_;
+# Send dispatch, shared by every request. The common events (response.start,
+# an unthrottled body chunk, trailers, fullflush) never suspend, so they run
+# in this plain sub and return an immediate Future, avoiding the async-sub
+# state machine on every $send->() call. Paths that genuinely suspend
+# (write backpressure, file/fh streaming) delegate to _send_body_slow. An
+# exception thrown before the first await in an async sub becomes a failed
+# Future; the eval below preserves exactly that contract for the fast paths.
+sub _send_event {
+    my ($self, $st, $event) = @_;
+    return Future->done unless $self;
+    return Future->done if $self->{closed};
 
-    my $chunked = 0;
-    my $response_started = 0;
-    my $expects_trailers = 0;
-    my $body_complete = 0;
-    my $is_head_request = ($request->{method} // '') eq 'HEAD';
-    my $http_version = $request->{http_version} // '1.1';
-    my $is_http10 = ($http_version eq '1.0');
-
-    # Check if HTTP/1.0 client requested keep-alive
-    my $client_wants_keepalive = 0;
-    if ($is_http10) {
-        for my $h (@{$request->{headers}}) {
-            if ($h->[0] eq 'connection' && lc($h->[1]) =~ /keep-alive/) {
-                $client_wants_keepalive = 1;
-                last;
-            }
-        }
-    }
-
-    weaken(my $weak_self = $self);
-
-    return async sub  {
-        my ($event) = @_;
-        return Future->done unless $weak_self;
-        return Future->done if $weak_self->{closed};
-
+    my $slow = eval {
         # Reset stall timer on write activity
-        $weak_self->_reset_stall_timer;
+        $self->_reset_stall_timer;
 
         my $type = $event->{type} // '';
 
         # Dev-mode event validation (PAGI spec compliance)
-        if ($weak_self->{validate_events}) {
+        if ($self->{validate_events}) {
             require PAGI::Server::EventValidator;
             PAGI::Server::EventValidator::validate_http_send($event);
         }
 
         if ($type eq 'http.response.start') {
-            return if $response_started;
-            $response_started = 1;
-            $weak_self->{response_started} = 1;
-            $weak_self->{current_connection_state}->_mark_response_started
-                if $weak_self->{current_connection_state};
-            $weak_self->{response_status} = $event->{status} // 200;  # Track for logging
-            $expects_trailers = $event->{trailers} // 0;
+            return undef if $st->{response_started};
+            $st->{response_started} = 1;
+            $self->{response_started} = 1;
+            $self->{current_connection_state}->_mark_response_started
+                if $self->{current_connection_state};
+            $self->{response_status} = $event->{status} // 200;  # Track for logging
+            $st->{expects_trailers} = $event->{trailers} // 0;
 
             my $status = $event->{status} // 200;
             my $headers = $event->{headers} // [];
@@ -2726,132 +2799,77 @@ sub _create_send {
                 }
             }
 
-            # Add Date header
-            my @final_headers = @$headers;
-            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            # Date goes through the serializer directly on the common path;
+            # only the HTTP/1.0 branches that append Connection headers
+            # still copy the array (and then carry the date pair themselves,
+            # preserving the original header order).
+            my $date = $self->{protocol}->format_date;
+            my $out_headers = $headers;
+            my $date_arg = $date;
 
             # For HEAD requests, don't use chunked encoding (no body will be sent)
             # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
-            if ($is_head_request || $is_http10) {
-                $chunked = 0;
-                if ($is_http10) {
+            if ($st->{is_head_request} || $st->{is_http10}) {
+                $st->{chunked} = 0;
+                if ($st->{is_http10}) {
                     if (!$has_content_length) {
                         # No Content-Length means we can't do keep-alive
-                        push @final_headers, ['connection', 'close'];
-                    } elsif ($client_wants_keepalive) {
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'close']];
+                        $date_arg = undef;
+                    } elsif ($st->{client_wants_keepalive}) {
                         # HTTP/1.0 client requested keep-alive and we can honor it
                         # Must explicitly acknowledge with Connection: keep-alive
-                        push @final_headers, ['connection', 'keep-alive'];
+                        $out_headers = [@$headers, ['date', $date], ['connection', 'keep-alive']];
+                        $date_arg = undef;
                     }
                 }
             } else {
-                $chunked = !$has_content_length;
+                $st->{chunked} = !$has_content_length;
             }
 
-            my $response = $weak_self->{protocol}->serialize_response_start(
-                $status, \@final_headers, $chunked, $http_version
+            my $response = $self->{protocol}->serialize_response_start(
+                $status, $out_headers, $st->{chunked}, $st->{http_version}, $date_arg
             );
 
             # Buffer the headers instead of writing them now; they are flushed
             # together with the first body write (or at finalization). This
             # coalesces the common "start + complete body" case into a single
             # stream write instead of one per headers/chunk/terminator.
-            $weak_self->{_resp_pending} = $response;
+            $self->{_resp_pending} = $response;
         }
         elsif ($type eq 'http.response.body') {
-            return unless $response_started;
-            return if $body_complete;
+            return undef unless $st->{response_started};
+            return undef if $st->{body_complete};
 
             # For HEAD requests, suppress the body but track completion
-            if ($is_head_request) {
+            if ($st->{is_head_request}) {
                 my $more = $event->{more} // 0;
                 # HEAD has headers but no body, so flush the buffered headers now.
-                $weak_self->_flush_pending_headers;
+                $self->_flush_pending_headers;
                 if (!$more) {
-                    $body_complete = 1;
+                    $st->{body_complete} = 1;
                 }
-                return;  # Don't send any body for HEAD
+                return undef;  # Don't send any body for HEAD
             }
 
-            # --- BACKPRESSURE CHECK ---
-            # Wait for buffer to drain if we're above high watermark
-            # This prevents unbounded memory growth with slow clients
-            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
-                await $weak_self->_wait_for_drain;
-                # Re-check connection state after await
-                return Future->done unless $weak_self;
-                return Future->done if $weak_self->{closed};
+            # Suspending paths: write backpressure or file/fh streaming
+            if (defined $event->{file} or defined $event->{fh}
+                or $self->_get_write_buffer_size >= $self->{write_high_watermark}) {
+                return $self->_send_body_slow($st, $event);
             }
-            # --- END BACKPRESSURE CHECK ---
 
-            # Determine body source: body, file, or fh (mutually exclusive)
-            my $body = $event->{body};
-            my $file = $event->{file};
-            my $fh = $event->{fh};
-            my $offset = $event->{offset} // 0;
-            my $length = $event->{length};
-
-            if (defined $file) {
-                # File path response - stream from file (async, non-blocking)
-                # File responses are implicitly complete (more is ignored)
-                $weak_self->_flush_pending_headers;   # headers before the file body
-                await $weak_self->_send_file_response($file, $offset, $length, $chunked);
-                $body_complete = 1;
-            }
-            elsif (defined $fh) {
-                # Filehandle response - stream from handle (async, non-blocking)
-                # Filehandle responses are implicitly complete (more is ignored)
-                $weak_self->_flush_pending_headers;   # headers before the fh body
-                await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
-                $body_complete = 1;
-            }
-            else {
-                # Traditional body response
-                $body //= '';
-                my $more = $event->{more} // 0;
-
-                $weak_self->{_response_size} += length($body);
-
-                # Coalesce any buffered headers, the body (chunk framing if
-                # chunked), and the final terminator into a single stream write.
-                # The common start + complete-body response becomes one write
-                # rather than three.
-                my $out = $weak_self->{_resp_pending};
-                $out = '' unless defined $out;
-                $weak_self->{_resp_pending} = undef;
-
-                if ($chunked) {
-                    if (length $body) {
-                        my $len = sprintf("%x", length($body));
-                        $out .= "$len\r\n$body\r\n";
-                    }
-                    if (!$more && !$expects_trailers) {
-                        $out .= "0\r\n\r\n";
-                    }
-                }
-                else {
-                    $out .= $body;
-                }
-
-                $weak_self->{stream}->write($out) if length $out;
-                $weak_self->_notify_transport_write;
-
-                # Handle completion for body responses
-                if (!$more) {
-                    $body_complete = 1;
-                }
-            }
+            $self->_emit_body_chunk($st, $event->{body}, $event->{more} // 0);
         }
         elsif ($type eq 'http.response.trailers') {
-            return unless $response_started;
-            return unless $expects_trailers;
-            return unless $chunked;  # Trailers only work with chunked encoding
+            return undef unless $st->{response_started};
+            return undef unless $st->{expects_trailers};
+            return undef unless $st->{chunked};  # Trailers only work with chunked encoding
 
             my $trailer_headers = $event->{headers} // [];
 
             # Send final chunk + trailers (prepend any still-buffered headers).
-            my $trailers = $weak_self->{_resp_pending} // '';
-            $weak_self->{_resp_pending} = undef;
+            my $trailers = $self->{_resp_pending} // '';
+            $self->{_resp_pending} = undef;
             $trailers .= "0\r\n";
             for my $header (@$trailer_headers) {
                 my ($name, $value) = @$header;
@@ -2861,19 +2879,19 @@ sub _create_send {
             }
             $trailers .= "\r\n";
 
-            $weak_self->{stream}->write($trailers);
-            $body_complete = 1;
+            $self->_stream_write($trailers);
+            $st->{body_complete} = 1;
         }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush
             # Per spec: servers that don't advertise the extension must reject
-            unless (exists $weak_self->{extensions}{fullflush}) {
+            unless (exists $self->{extensions}{fullflush}) {
                 warn "PAGI: http.fullflush event rejected - extension not enabled\n";
                 die "Extension not enabled: fullflush\n";
             }
 
             # Force flush by ensuring TCP_NODELAY and flushing any pending writes
-            my $handle = $weak_self->{stream}->write_handle;
+            my $handle = $self->{stream}->write_handle;
             if ($handle && $handle->can('setsockopt')) {
                 # Ensure TCP_NODELAY is set to disable Nagle buffering
                 require Socket;
@@ -2890,8 +2908,132 @@ sub _create_send {
             _unrecognized_event_type($type, 'http');
         }
 
-        return;
+        undef;
     };
+    if (my $error = $@) {
+        return Future->fail($error);
+    }
+
+    return ref $slow ? $slow : Future->done;
+}
+
+# Serialize and write one traditional body chunk (coalescing any buffered
+# response headers, chunk framing, and the terminator into a single stream
+# write). Shared by the fast path in _send_event and the post-backpressure
+# path in _send_body_slow.
+sub _emit_body_chunk {
+    my ($self, $st, $body, $more) = @_;
+
+    $body //= '';
+
+    $self->{_response_size} += length($body);
+
+    # Coalesce any buffered headers, the body (chunk framing if
+    # chunked), and the final terminator into a single stream write.
+    # The common start + complete-body response becomes one write
+    # rather than three.
+    my $out = $self->{_resp_pending};
+    $out = '' unless defined $out;
+    $self->{_resp_pending} = undef;
+
+    if ($st->{chunked}) {
+        if (length $body) {
+            my $len = sprintf("%x", length($body));
+            $out .= "$len\r\n$body\r\n";
+        }
+        if (!$more && !$st->{expects_trailers}) {
+            $out .= "0\r\n\r\n";
+        }
+    }
+    else {
+        $out .= $body;
+    }
+
+    $self->_write_app_data($out);
+
+    # Handle completion for body responses
+    if (!$more) {
+        $st->{body_complete} = 1;
+    }
+    return;
+}
+
+# The suspending body paths: wait out write backpressure, then stream from a
+# file path or filehandle, or emit the (now unthrottled) body chunk. The
+# connection is held weakly across awaits.
+async sub _send_body_slow {
+    my ($self, $st, $event) = @_;
+    weaken($self);
+
+    # --- BACKPRESSURE CHECK ---
+    # Wait for buffer to drain if we're above high watermark
+    # This prevents unbounded memory growth with slow clients
+    if ($self->_get_write_buffer_size >= $self->{write_high_watermark}) {
+        await $self->_wait_for_drain;
+        # Re-check connection state after await
+        return Future->done unless $self;
+        return Future->done if $self->{closed};
+    }
+    # --- END BACKPRESSURE CHECK ---
+
+    # Determine body source: body, file, or fh (mutually exclusive)
+    my $file = $event->{file};
+    my $fh = $event->{fh};
+    my $offset = $event->{offset} // 0;
+    my $length = $event->{length};
+
+    if (defined $file) {
+        # File path response - stream from file (async, non-blocking)
+        # File responses are implicitly complete (more is ignored)
+        $self->_flush_pending_headers;   # headers before the file body
+        await $self->_send_file_response($file, $offset, $length, $st->{chunked});
+        $st->{body_complete} = 1;
+    }
+    elsif (defined $fh) {
+        # Filehandle response - stream from handle (async, non-blocking)
+        # Filehandle responses are implicitly complete (more is ignored)
+        $self->_flush_pending_headers;   # headers before the fh body
+        await $self->_send_fh_response($fh, $offset, $length, $st->{chunked});
+        $st->{body_complete} = 1;
+    }
+    else {
+        $self->_emit_body_chunk($st, $event->{body}, $event->{more} // 0);
+    }
+
+    return;
+}
+
+sub _create_send {
+    my ($self, $request) = @_;
+
+    my $http_version = $request->{http_version} // '1.1';
+    my $is_http10 = ($http_version eq '1.0');
+
+    # Check if HTTP/1.0 client requested keep-alive
+    my $client_wants_keepalive = 0;
+    if ($is_http10) {
+        for my $h (@{$request->{headers}}) {
+            if ($h->[0] eq 'connection' && lc($h->[1]) =~ /keep-alive/) {
+                $client_wants_keepalive = 1;
+                last;
+            }
+        }
+    }
+
+    my $st = {
+        chunked                => 0,
+        response_started       => 0,
+        expects_trailers       => 0,
+        body_complete          => 0,
+        is_head_request        => (($request->{method} // '') eq 'HEAD'),
+        http_version           => $http_version,
+        is_http10              => $is_http10,
+        client_wants_keepalive => $client_wants_keepalive,
+    };
+
+    weaken(my $weak_self = $self);
+
+    return sub { _send_event($weak_self, $st, @_) };
 }
 
 # Flush any response headers buffered by http.response.start that were not yet
@@ -2901,7 +3043,7 @@ sub _flush_pending_headers {
     my $pending = $self->{_resp_pending};
     return unless defined $pending && length $pending;
     $self->{_resp_pending} = undef;
-    $self->{stream}->write($pending);
+    $self->_stream_write($pending);
 }
 
 sub _send_error_response {
@@ -2920,7 +3062,7 @@ sub _send_error_response {
     my $response = $self->{protocol}->serialize_response_start($status, $headers, 0);
     $response .= $body;
 
-    $self->{stream}->write($response);
+    $self->_stream_write($response);
     $self->{response_started} = 1;
     # A server-synthesized response is still "this request's response started".
     $self->{current_connection_state}->_mark_response_started
@@ -3083,7 +3225,7 @@ sub _send_close_frame {
         buffer => pack('n', $code) . $reason,
     );
 
-    $self->{stream}->write($frame->to_bytes);
+    $self->_stream_write($frame->to_bytes);
     $self->{close_sent} = 1;
 }
 
@@ -3095,6 +3237,9 @@ sub _close {
 
     # Cancel pending drain waiters early (before other cleanup)
     $self->_cancel_drain_waiters('connection closing');
+
+    # Unflushed bytes are abandoned with the stream's write queue
+    $self->{_outbound_bytes} = 0;
 
     # Clean up HTTP/2 per-stream state
     if ($self->{h2_streams}) {
@@ -3375,7 +3520,7 @@ sub _finish_sse_stream {
     # Send chunked terminator if SSE was started and the stream is still writable
     if ($self->{sse_started} && !$self->{closed} &&
         $self->{stream} && $self->{stream}->write_handle) {
-        $self->{stream}->write("0\r\n\r\n");
+        $self->_stream_write("0\r\n\r\n");
     }
 
     # Write access log entry (logs at connection close with total duration)
@@ -3639,7 +3784,7 @@ sub _create_sse_send {
                 $status, \@final_headers, 1  # chunked = 1
             );
 
-            $weak_self->{stream}->write($response);
+            $weak_self->_stream_write($response);
 
             # Set protocol-specific keepalive writer (HTTP/1.1 chunked)
             $weak_self->{sse_keepalive_writer} = sub {
@@ -3647,7 +3792,7 @@ sub _create_sse_send {
                 return unless $weak_self;
                 return if $weak_self->{closed};
                 my $len = sprintf("%x", length($text));
-                $weak_self->{stream}->write("$len\r\n$text\r\n");
+                $weak_self->_stream_write("$len\r\n$text\r\n");
             };
         }
         elsif ($type eq 'sse.send') {
@@ -3665,8 +3810,7 @@ sub _create_sse_send {
 
             # Send as chunked data
             my $len = sprintf("%x", length($sse_data));
-            $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
-            $weak_self->_notify_transport_write;
+            $weak_self->_write_app_data("$len\r\n$sse_data\r\n");
         }
         elsif ($type eq 'sse.comment') {
             return unless $weak_self->{sse_started};
@@ -3674,7 +3818,7 @@ sub _create_sse_send {
             my $comment = _format_sse_comment($event);
 
             my $len = sprintf("%x", length($comment));
-            $weak_self->{stream}->write("$len\r\n$comment\r\n");
+            $weak_self->_stream_write("$len\r\n$comment\r\n");
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -3727,7 +3871,7 @@ sub _create_sse_send {
             );
             my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
             $response .= $body;
-            $weak_self->{stream}->write($response);
+            $weak_self->_stream_write($response);
             $weak_self->{response_started} = 1;
             $weak_self->{response_status}  = $status;   # access log
             # Declined: close the connection (no event stream was started).
@@ -3977,7 +4121,7 @@ sub _create_websocket_send {
 
             push @headers, "\r\n";
 
-            $weak_self->{stream}->write(join('', @headers));
+            $weak_self->_stream_write(join('', @headers));
 
             # Switch to WebSocket mode
             $weak_self->{websocket_mode} = 1;
@@ -4028,8 +4172,7 @@ sub _create_websocket_send {
             }
 
             my $bytes = $frame->to_bytes;
-            $weak_self->{stream}->write($bytes);
-            $weak_self->_notify_transport_write;
+            $weak_self->_write_app_data($bytes);
         }
         elsif ($type eq 'websocket.http.response.start') {
             # Custom handshake denial (websocket.http.response extension). Only
@@ -4060,7 +4203,7 @@ sub _create_websocket_send {
             );
             my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
             $response .= $body;
-            $weak_self->{stream}->write($response);
+            $weak_self->_stream_write($response);
             $weak_self->{response_started} = 1;
             $weak_self->{response_status}  = $status;   # access log
             # Handshake rejected: close like the bare-403 path (no upgrade).
@@ -4082,7 +4225,7 @@ sub _create_websocket_send {
                 buffer => pack('n', $code) . $reason,
             );
 
-            $weak_self->{stream}->write($frame->to_bytes);
+            $weak_self->_stream_write($frame->to_bytes);
             $weak_self->{close_sent} = 1;
 
             # If we received a close frame, close immediately
@@ -4247,7 +4390,7 @@ sub _process_websocket_frames {
                     type   => 'close',
                     buffer => pack('n', $code) . $reason,
                 );
-                $self->{stream}->write($close_frame->to_bytes);
+                $self->_stream_write($close_frame->to_bytes);
                 $self->{close_sent} = 1;
             }
 
@@ -4263,7 +4406,7 @@ sub _process_websocket_frames {
                 type   => 'pong',
                 buffer => $bytes,
             );
-            $self->{stream}->write($pong->to_bytes);
+            $self->_stream_write($pong->to_bytes);
         }
         elsif ($opcode == 10) {
             # Pong - cancel any pending timeout (response to our ping)
@@ -4292,8 +4435,6 @@ async sub _send_file_response {
 
     $self->{_response_size} += $length;
 
-    my $stream = $self->{stream};
-
     if ($self->{sync_file_threshold} > 0 && $length <= $self->{sync_file_threshold}) {
         # Small file fast path: read directly in-process
         # For files <= 64KB, a simple read() is fast and avoids async overhead
@@ -4306,11 +4447,11 @@ async sub _send_file_response {
 
         if ($chunked) {
             my $len = sprintf("%x", length($data));
-            $stream->write("$len\r\n$data\r\n");
-            $stream->write("0\r\n\r\n");
+            $self->_stream_write("$len\r\n$data\r\n");
+            $self->_stream_write("0\r\n\r\n");
         }
         else {
-            $stream->write($data);
+            $self->_stream_write($data);
         }
     }
     else {
@@ -4324,10 +4465,10 @@ async sub _send_file_response {
                 my ($chunk) = @_;
                 if ($chunked) {
                     my $len = sprintf("%x", length($chunk));
-                    $stream->write("$len\r\n$chunk\r\n");
+                    $self->_stream_write("$len\r\n$chunk\r\n");
                 }
                 else {
-                    $stream->write($chunk);
+                    $self->_stream_write($chunk);
                 }
                 return;  # Sync callback
             },
@@ -4338,7 +4479,7 @@ async sub _send_file_response {
 
         # Send final chunk terminator if chunked
         if ($chunked) {
-            $stream->write("0\r\n\r\n");
+            $self->_stream_write("0\r\n\r\n");
         }
     }
 }
@@ -4359,7 +4500,6 @@ async sub _send_fh_response {
     # TODO: Consider IO::Async::FileStream for better event loop integration.
 
     my $remaining = $length;  # undef means read to EOF
-    my $stream = $self->{stream};
 
     while (1) {
         my $to_read = FILE_CHUNK_SIZE;
@@ -4377,10 +4517,10 @@ async sub _send_fh_response {
 
         if ($chunked) {
             my $len = sprintf("%x", length($chunk));
-            $stream->write("$len\r\n$chunk\r\n");
+            $self->_stream_write("$len\r\n$chunk\r\n");
         }
         else {
-            $stream->write($chunk);
+            $self->_stream_write($chunk);
         }
 
         if (defined $remaining) {
@@ -4390,7 +4530,7 @@ async sub _send_fh_response {
 
     # Send final chunk if chunked encoding
     if ($chunked) {
-        $stream->write("0\r\n\r\n");
+        $self->_stream_write("0\r\n\r\n");
     }
 }
 

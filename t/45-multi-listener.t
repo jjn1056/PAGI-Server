@@ -7,6 +7,23 @@ use IO::Async::Loop;
 use IO::Socket::UNIX;
 use IO::Socket::INET;
 use Future::AsyncAwait;
+use POSIX qw(WNOHANG);
+
+# Run the event loop until the forked client exits, so the server can answer
+# it no matter how slowly the child is scheduled (a fixed serve window
+# strands a slow child once waitpid blocks the loop). The deadline is only a
+# guard against a genuinely hung child.
+sub serve_until_reaped {
+    my ($loop, $pid, $deadline_secs) = @_;
+    my $deadline = time + $deadline_secs;
+    while (time < $deadline) {
+        return 1 if waitpid($pid, WNOHANG) != 0;
+        $loop->loop_once(0.05);
+    }
+    kill 'KILL', $pid;
+    waitpid($pid, 0);
+    return 0;
+}
 
 plan skip_all => "Unix sockets not supported on Windows" if $^O eq 'MSWin32';
 
@@ -16,6 +33,12 @@ use PAGI::Server;
 subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $loop = IO::Async::Loop->new;
     my $socket_path = tmpnam() . '.sock';
+
+    # Hang-guard deadline scale: honor PERL_TEST_TIME_OUT_FACTOR (set by
+    # slow-box smokers and CI), clamped to a minimum of 1x like perl core's
+    # t/test.pl watchdog.
+    my $factor = $ENV{PERL_TEST_TIME_OUT_FACTOR};
+    $factor = 1 unless defined $factor && $factor =~ /^\d+$/ && $factor >= 1;
 
     my @captured_scopes;
     my $app = async sub {
@@ -65,8 +88,7 @@ subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $tcp_resp = '';
     my $tcp_resp_file = "/tmp/pagi_multi_tcp_$$";
     if (my $pid = fork()) {
-        $loop->delay_future(after => 1)->get;
-        waitpid($pid, 0);
+        serve_until_reaped($loop, $pid, 15 * $factor);
         if (-e $tcp_resp_file) {
             open my $fh, '<', $tcp_resp_file;
             local $/;
@@ -98,8 +120,7 @@ subtest 'TCP + Unix socket simultaneously (single worker)' => sub {
     my $unix_resp = '';
     my $unix_resp_file = "/tmp/pagi_multi_unix_$$";
     if (my $pid = fork()) {
-        $loop->delay_future(after => 1)->get;
-        waitpid($pid, 0);
+        serve_until_reaped($loop, $pid, 15 * $factor);
         if (-e $unix_resp_file) {
             open my $fh, '<', $unix_resp_file;
             local $/;

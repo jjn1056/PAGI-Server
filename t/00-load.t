@@ -7,8 +7,10 @@ my @core_modules = qw(
     PAGI::Server
     PAGI::Server::Connection
     PAGI::Server::ConnectionState
+    PAGI::Server::TransportState
     PAGI::Server::EventValidator
     PAGI::Server::AsyncFile
+    PAGI::Server::Listener
     PAGI::Server::Protocol::HTTP1
     PAGI::Server::Runner
 );
