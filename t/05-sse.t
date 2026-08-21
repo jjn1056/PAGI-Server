@@ -93,6 +93,7 @@ subtest 'SSE broadcaster streams events' => sub {
 # Test 2: SSE scope type is 'sse'
 subtest 'SSE scope type is sse' => sub {
     my $scope_type = '';
+    my $pagi;
 
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
@@ -112,6 +113,7 @@ subtest 'SSE scope type is sse' => sub {
         }
 
         $scope_type = $scope->{type};
+        $pagi = $scope->{pagi};
 
         await $send->({
             type    => 'sse.start',
@@ -135,7 +137,7 @@ subtest 'SSE scope type is sse' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 1 unless $sock;
+        skip "Cannot connect", 3 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
@@ -151,6 +153,8 @@ subtest 'SSE scope type is sse' => sub {
         close $sock;
 
         is($scope_type, 'sse', 'Scope type is sse');
+        is($pagi->{version}, '0.4', 'SSE scope uses core PAGI version 0.4');
+        is($pagi->{spec_version}, '0.3', 'SSE scope keeps spec_version 0.3');
     }
 
     $server->shutdown->get;

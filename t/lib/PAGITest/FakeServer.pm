@@ -5,7 +5,7 @@ use warnings;
 our $VERSION = '0.001';
 
 # Minimal implementation of the PAGI server-runner contract
-# (new(%options) + run) used to test the CLI -> server_options ->
+# (new(%options) + run) used by this Runner plugin seam to test CLI -> server_options ->
 # constructor chain without opening sockets.
 
 sub new {

@@ -84,6 +84,16 @@ my $app = async sub {
 $app;  # the file returns the coderef
 ```
 
+Application files and `-e` expressions may instead return an already-created
+object with a `to_app` method. `pagi-server` calls `to_app` once while
+loading and passes only the resulting coderef into connection dispatch:
+
+```perl
+use MyApp::Root;
+
+MyApp::Root->new;
+```
+
 Run it with the bundled `pagi-server` launcher:
 
 ```bash
@@ -99,13 +109,15 @@ You can also drive `PAGI::Server` directly from your own event loop:
 ```perl
 use IO::Async::Loop;
 use PAGI::Server;
+use MyApp::Root;
 
 # If you use Future::IO-based libraries, load this BEFORE them:
 use Future::IO::Impl::IOAsync;
 
 my $loop   = IO::Async::Loop->new;
 my $server = PAGI::Server->new(
-    app  => $app,
+    # A native coderef or an instantiated object with to_app.
+    app  => MyApp::Root->new,
     host => '127.0.0.1',
     port => 5000,
 );
@@ -113,6 +125,10 @@ my $server = PAGI::Server->new(
 $loop->add($server);
 $server->listen->get;  # start accepting connections
 ```
+
+When passed a provider object directly, `PAGI::Server` calls `to_app` exactly
+once during construction and stores only the resulting coderef.
+Package-name strings are not providers; instantiate the class first.
 
 ## Command-line usage
 

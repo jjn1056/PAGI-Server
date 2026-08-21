@@ -146,6 +146,57 @@ subtest 'load app from file' => sub {
     is($runner->{app}, $app, 'app stored in runner');
 };
 
+subtest 'app file may return an instantiated provider object' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $app_file = File::Spec->catfile($tmpdir, 'provider_app.pl');
+
+    open my $fh, '>', $app_file or die "Cannot write $app_file: $!";
+    print $fh <<'APP';
+package PAGITest::FileProvider;
+our $TO_APP_CALLS = 0;
+sub to_app {
+    $TO_APP_CALLS++;
+    return sub { };
+}
+bless {}, __PACKAGE__;
+APP
+    close $fh;
+
+    my $runner = PAGI::Server::Runner->new;
+    $runner->{app_spec} = $app_file;
+    my $app = $runner->load_app;
+
+    ok(ref $app eq 'CODE', 'file provider is normalized to a coderef');
+    no warnings 'once';
+    is($PAGITest::FileProvider::TO_APP_CALLS, 1, 'file provider to_app called exactly once');
+};
+
+subtest 'blessed coderef from app file remains a native app' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $app_file = File::Spec->catfile($tmpdir, 'blessed_app.pl');
+
+    open my $fh, '>', $app_file or die "Cannot write $app_file: $!";
+    print $fh <<'APP';
+package PAGITest::BlessedApp;
+our $TO_APP_CALLS = 0;
+sub to_app {
+    $TO_APP_CALLS++;
+    die "to_app must not be called for a native coderef";
+}
+my $app = sub { };
+bless $app, __PACKAGE__;
+APP
+    close $fh;
+
+    my $runner = PAGI::Server::Runner->new;
+    $runner->{app_spec} = $app_file;
+    my $app = $runner->load_app;
+
+    ok(eval { $app->isa('PAGITest::BlessedApp') }, 'blessed coderef remains the loaded app');
+    no warnings 'once';
+    is($PAGITest::BlessedApp::TO_APP_CALLS, 0, 'native coderef takes precedence over to_app');
+};
+
 subtest 'load app from file sets FindBin::Bin to app directory' => sub {
     my $tmpdir = tempdir(CLEANUP => 1);
     my $app_file = File::Spec->catfile($tmpdir, 'findbin_app.pl');
@@ -214,6 +265,35 @@ MOD
     is($runner->{app_args}{root}, '/tmp', 'module app_args parsed');
 };
 
+subtest '_load_module normalizes the value returned by the constructor' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $pm = File::Spec->catfile($tmpdir, 'MyProviderFactory.pm');
+    open my $fh, '>', $pm or die "Cannot write $pm: $!";
+    print $fh <<'MOD';
+package MyProviderFactory;
+sub new { bless {}, 'MyConstructedProvider' }
+
+package MyConstructedProvider;
+our $TO_APP_CALLS = 0;
+sub to_app {
+    $TO_APP_CALLS++;
+    return sub { };
+}
+1;
+MOD
+    close $fh;
+
+    local @INC = ($tmpdir, @INC);
+    my $runner = PAGI::Server::Runner->new;
+    $runner->{argv} = ['MyProviderFactory'];
+
+    my $app = $runner->load_app;
+
+    ok(ref $app eq 'CODE', 'constructed provider is normalized to a coderef');
+    no warnings 'once';
+    is($MyConstructedProvider::TO_APP_CALLS, 1, 'constructed provider to_app called exactly once');
+};
+
 # Test 11: Default app (requires PAGI-Tools for PAGI::App::Directory)
 subtest 'default app loads Directory' => sub {
     SKIP: {
@@ -268,7 +348,7 @@ subtest 'error on non-coderef file' => sub {
 
     like(
         dies { $runner->load_app },
-        qr/must return a coderef/i,
+        qr/must be a coderef or instantiated application-provider object/i,
         'dies on non-coderef'
     );
 };
@@ -461,10 +541,30 @@ subtest '-e inline code' => sub {
     is($runner->{app_spec}, '-e', 'app_spec is -e');
 };
 
+subtest '-e may return an instantiated provider object' => sub {
+    {
+        package PAGITest::EvalProvider;
+        our $TO_APP_CALLS = 0;
+        sub to_app {
+            $TO_APP_CALLS++;
+            return sub { };
+        }
+    }
+
+    our $eval_provider = bless {}, 'PAGITest::EvalProvider';
+    my $runner = PAGI::Server::Runner->new;
+    $runner->parse_options('-e', '$main::eval_provider');
+
+    my $app = $runner->load_app;
+
+    ok(ref $app eq 'CODE', '-e provider is normalized to a coderef');
+    is($PAGITest::EvalProvider::TO_APP_CALLS, 1, '-e provider to_app called exactly once');
+};
+
 # Test 29: -M module loading (requires PAGI-Tools for PAGI::App::File)
 subtest '-M module loading' => sub {
     my $runner = PAGI::Server::Runner->new;
-    $runner->parse_options('-M', 'PAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
+    $runner->parse_options('-M', 'PAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")');
 
     # Option parsing is pure string handling — no module load required.
     is(scalar @{$runner->{modules}}, 1, 'one module stored');
@@ -483,7 +583,7 @@ subtest '-M module loading' => sub {
 subtest 'cuddled -M option' => sub {
     # Pure option parsing of the cuddled -MFoo form; no module load required.
     my $runner = PAGI::Server::Runner->new;
-    $runner->parse_options('-MPAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")->to_app');
+    $runner->parse_options('-MPAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")');
 
     is(scalar @{$runner->{modules}}, 1, 'cuddled module parsed');
     is($runner->{modules}[0], 'PAGI::App::File', 'correct cuddled module');
@@ -496,7 +596,7 @@ subtest '-e error handling' => sub {
 
     like(
         dies { $runner->load_app },
-        qr/must return a coderef/,
+        qr/must be a coderef or instantiated application-provider object/,
         '-e dies if not coderef'
     );
 };

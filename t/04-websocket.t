@@ -193,6 +193,7 @@ subtest 'Clean close handshake' => sub {
 # Test 5: WebSocket scope type is 'websocket'
 subtest 'WebSocket scope type is websocket' => sub {
     my $scope_type = '';
+    my $pagi;
 
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
@@ -212,6 +213,7 @@ subtest 'WebSocket scope type is websocket' => sub {
         }
 
         $scope_type = $scope->{type};
+        $pagi = $scope->{pagi};
 
         my $event = await $receive->();
         await $send->({ type => 'websocket.accept' });
@@ -233,6 +235,8 @@ subtest 'WebSocket scope type is websocket' => sub {
     };
 
     is($scope_type, 'websocket', 'Scope type is websocket');
+    is($pagi->{version}, '0.4', 'WebSocket scope uses core PAGI version 0.4');
+    is($pagi->{spec_version}, '0.3', 'WebSocket scope keeps spec_version 0.3');
 
     $server->shutdown->get;
 };

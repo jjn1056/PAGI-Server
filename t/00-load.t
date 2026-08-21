@@ -5,6 +5,7 @@ use Test2::V0;
 # Core modules that must always load
 my @core_modules = qw(
     PAGI::Server
+    PAGI::Server::AppNormalizer
     PAGI::Server::Connection
     PAGI::Server::ConnectionState
     PAGI::Server::EventValidator

@@ -1,5 +1,24 @@
 # Revision history for PAGI-Server
 
+0.002007 - UNRELEASED
+
+  Specification Alignment
+  - Advertise PAGI core version 0.4 on HTTP, HTTP/2, WebSocket, SSE, and
+    lifespan scopes while retaining each protocol's independent 0.3
+    spec_version.
+  - Accept either a native PAGI coderef or an instantiated application-provider
+    object from app files, module constructors, -e expressions, direct
+    PAGI::Server construction, and configure(app => ...). Providers are
+    normalized through to_app exactly once, blessed coderefs retain native-app
+    precedence, and package-name strings are not treated as providers.
+  - Clarify that PAGI::Server::Runner's new/run server backend seam is its own
+    plugin convention rather than a construction API required by PAGI.
+
+  Bug Fixes
+  - Fail the Future returned by $send when a file response's handle cannot be
+    read, instead of treating a read error as EOF. Applications may now safely
+    close a file resource only after the corresponding send Future resolves.
+
 0.002006 - 2026-07-04
 
   Bug Fixes

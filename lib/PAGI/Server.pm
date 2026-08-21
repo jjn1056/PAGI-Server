@@ -45,6 +45,7 @@ use Scalar::Util qw(weaken refaddr);
 use Socket qw(sockaddr_family unpack_sockaddr_in unpack_sockaddr_un AF_UNIX AF_INET);
 use POSIX ();
 
+use PAGI::Server::AppNormalizer ();
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
 
@@ -751,9 +752,14 @@ Creates a new PAGI::Server instance. Options:
 
 =over 4
 
-=item app => \&coderef (required)
+=item app => $app (required)
 
-The PAGI application coderef with signature: async sub ($scope, $receive, $send)
+Either a PAGI application coderef with signature
+C<async sub ($scope, $receive, $send)> or an instantiated application-provider
+object implementing C<to_app>. A provider is normalized exactly once during
+construction, and C<to_app> must return a coderef. Package-name strings are not
+providers. C<configure(app =E<gt> $app)> applies the same normalization rules.
+Only the normalized coderef is retained for per-connection dispatch.
 
 =item host => $host
 
@@ -2180,7 +2186,9 @@ B<Graceful shutdown for maintenance:>
 sub _init {
     my ($self, $params) = @_;
 
-    $self->{app}              = delete $params->{app} or die "app is required";
+    my $app = delete $params->{app};
+    die "app is required" unless defined $app;
+    $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
 
     # Extract listener-related params
     my $listen      = delete $params->{listen};
@@ -2386,7 +2394,8 @@ sub configure {
     my ($self, %params) = @_;
 
     if (exists $params{app}) {
-        $self->{app} = delete $params{app};
+        my $app = delete $params{app};
+        $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
     }
     if (exists $params{host}) {
         $self->{host} = delete $params{host};
@@ -4059,7 +4068,7 @@ async sub _run_lifespan_startup {
     my $scope = {
         type => 'lifespan',
         pagi => {
-            version      => '0.3',
+            version      => '0.4',
             spec_version => '0.3',
             is_worker    => $self->{is_worker} // 0,
             worker_num   => $self->{worker_num},  # undef for single-worker, 1-N for multi-worker
