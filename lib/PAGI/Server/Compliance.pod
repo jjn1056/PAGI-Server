@@ -58,7 +58,9 @@ on WebSocket-over-HTTP/2 (see L</"Transport Flow Control (pagi.transport)">).
 
 =item * B<Connection state> (C<pagi.connection>) for HTTP scopes --
 C<is_connected>, C<disconnect_reason>, C<on_disconnect> (abnormal only),
-C<on_complete> (success only), and C<disconnect_future>.
+C<on_complete> (success only), and C<disconnect_future>. Tracked
+independently per stream on HTTP/2 (see L</"Connection State
+(pagi.connection)">).
 
 =item * B<WebSocket Denial Response> (the C<websocket.http.response> extension)
 -- reject a handshake with a custom HTTP response instead of a bare C<403>, on
@@ -253,6 +255,52 @@ normally.
 The long-term goal is parity: C<pagi.transport> for every streaming scope type
 over every transport, so an application need not know whether it runs over
 HTTP/1.1 or HTTP/2.
+
+=head2 Connection State (pagi.connection)
+
+PAGI exposes connection-lifecycle introspection to applications through the
+C<pagi.connection> scope key (see L<PAGI::Spec::Www/"Connection State">):
+C<is_connected>, C<disconnect_reason>, C<on_disconnect> (fires on an abnormal
+end only), C<on_complete> (fires on a clean completion only), and
+C<disconnect_future>. Exactly one of C<on_disconnect> / C<on_complete> fires
+per request; a request ends in one of two terminal states, B<completed>
+(clean) or B<disconnected> (abnormal), never both.
+
+On HTTP/2 each stream carries its own C<pagi.connection>, tracked
+independently of every other stream multiplexed on the same connection: one
+stream completing does not affect another still in flight. A stream reaches
+its terminal state exactly once, when the stream closes -- a response whose
+terminal event completed with no HTTP/2 error code on the stream is a clean
+completion; an early close or a nonzero error code is an abnormal disconnect
+(reason C<client_closed>). A whole-connection teardown (server shutdown,
+socket error) sweeps every still-open stream's connection state with the
+connection-level disconnect reason, so a stream mid-response when the
+connection dies still reports why.
+
+C<disconnect_future> follows the three possible states at the moment it is
+first called: while the request is still in flight it returns a fresh,
+pending Future that resolves later if the connection disconnects
+abnormally; after an abnormal disconnect it returns a Future already
+resolved with the disconnect reason; after a clean completion it returns a
+Future that is deliberately left pending forever, since a clean completion
+has no disconnect reason to resolve it with.
+
+B<Application Left a Response Incomplete:> when C<http.response.start> has
+been sent but the response's terminal event never arrives -- the final body
+chunk (C<more =E<gt> 0>), a C<file>/C<fh> body, or (having declared
+C<trailers =E<gt> 1>) the trailers event -- because the application returned
+early or raised an error, PAGI::Server forces an abnormal closure rather
+than synthesizing terminal framing that was never sent. On HTTP/1.1 the
+connection closes with no chunked terminator and is not kept alive or
+reused for pipelining. On HTTP/2 the stream is reset with C<RST_STREAM>
+(C<INTERNAL_ERROR>); other streams multiplexed on the same connection are
+unaffected. Either way C<on_disconnect> fires with reason C<server_error>
+(never C<on_complete>), and the server logs a warning unless the client had
+already disconnected first, in which case there is nothing new to report.
+
+C<pagi.connection> is provided for C<http> scopes on both HTTP/1.1 and
+HTTP/2. WebSocket and SSE scopes do not receive C<pagi.connection> on either
+transport -- they use their own dedicated disconnect events instead.
 
 =head2 Known Limitations
 

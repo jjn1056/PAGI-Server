@@ -34,6 +34,26 @@
     (previously HTTP/1.1 HTTP and SSE only), so an application advertising
     the fullflush extension gets working flush semantics on every scope PAGI
     offers it on.
+  - HTTP/2 streams now drive their own pagi.connection state to a terminal
+    value exactly once when the stream closes: a response whose terminal
+    event completed with no HTTP/2 error code marks the stream complete
+    (on_complete fires); an early close or a nonzero error code marks it
+    disconnected (on_disconnect fires, reason client_closed). A
+    whole-connection teardown (server shutdown, socket error) sweeps every
+    still-open stream's connection state with the connection-level
+    disconnect reason. WebSocket and SSE streams over HTTP/2 still have no
+    pagi.connection (per spec, they use their own disconnect events).
+  - An application that returns, or throws, after http.response.start
+    without ever sending the response's terminal event (the final body
+    chunk with more => 0, a file/fh body, or declared trailers) now
+    triggers the PAGI spec's forced abnormal closure on both transports,
+    instead of a silent keep-alive or an open stream: HTTP/1.1 closes the
+    connection with no chunked terminator and no keep-alive; HTTP/2 sends
+    RST_STREAM (INTERNAL_ERROR). Either way on_disconnect fires with reason
+    server_error (never on_complete), and the server logs a warning unless
+    the client had already disconnected. On HTTP/2, a request that resolves
+    without ever starting a response also now marks the stream's connection
+    state server_error before the 500 backstop is synthesized.
   - HTTP/2 trailers remain unimplemented: http.response.trailers still fails
     the send Future ("not yet implemented on HTTP/2") pending a
     Net::HTTP2::nghttp2 release adding a submit_trailer binding, tracked as
@@ -49,6 +69,12 @@
   - http.response.trailers on an HTTP/1 response declared with Content-Length
     (not chunked) now fails the send Future ("requires chunked framing")
     instead of silently vanishing; trailers ride chunked framing only.
+  - disconnect_future called for the first time after the request has
+    already completed cleanly now returns a Future that stays pending
+    forever, instead of one already resolved with undef -- a clean
+    completion is not a disconnect, so there is nothing for the Future to
+    resolve with. A Future requested after an abnormal disconnect is
+    unaffected: still already resolved with the disconnect reason.
 
 0.002006 - 2026-07-04
 
