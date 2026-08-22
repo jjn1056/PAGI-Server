@@ -8,6 +8,7 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 use Socket qw(AF_UNIX SOCK_STREAM);
+use Time::HiRes ();
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -385,6 +386,36 @@ sub make_keepalive_router_app {
 # Sends an in-band "keepalive:..." text control frame and runs a few settle
 # rounds so the server has processed it (and started/stopped its timer)
 # before the caller establishes a timing baseline.
+# Pump exchange rounds for a WALL-CLOCK duration rather than a round count.
+# Keepalive intervals are wall-clock, and an exchange round is only *at
+# most* 0.1s (loop_once returns early when the socket already has data), so
+# a cadence measurement has to be timed, not counted.
+sub run_for_seconds {
+    my ($client, $client_sock, $seconds) = @_;
+    my $deadline = Time::HiRes::time() + $seconds;
+    while (Time::HiRes::time() < $deadline) {
+        exchange_frames($client, $client_sock, 1);
+    }
+}
+
+# Pong-answer every ping seen so far on a stream's accumulated raw DATA that
+# has not been answered yet. $answered is the running count of pings already
+# answered; the new count is returned.
+sub answer_new_pings {
+    my ($client, $client_sock, $stream_id, $raw, $answered) = @_;
+    my @pings = grep { $_->{opcode} == 9 } extract_ws_frames($raw);
+    while ($answered < @pings) {
+        my $ping = $pings[$answered++];
+        my $pong = Protocol::WebSocket::Frame->new(
+            type   => 'pong',
+            buffer => $ping->{bytes},
+            masked => 1,
+        );
+        send_stream_data($client, $client_sock, $stream_id, $pong->to_bytes);
+    }
+    return $answered;
+}
+
 sub send_ws_text {
     my ($client, $client_sock, $stream_id, $text) = @_;
     my $frame = Protocol::WebSocket::Frame->new(
@@ -629,6 +660,202 @@ subtest 'interval => 0 stops further pings' => sub {
         exchange_frames($client, $client_sock, 1);
     }
     is(ping_count($ws_data), $baseline, 'no further pings arrived after interval => 0');
+
+    # No-timeout mode: this subtest configured an interval with no timeout
+    # and never answered a single ping. With no timeout there is no
+    # dead-connection check at all, so the stream must survive untouched --
+    # no disconnect, and in fact nothing beyond the scope's opening
+    # websocket.connect (the only other traffic was the two keepalive
+    # control messages, which the router consumes).
+    is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
+        'no-timeout keepalive delivered zero disconnect events');
+    is([map { $_->{type} } @events], ['websocket.connect'],
+        'the only app-visible event was the opening websocket.connect');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# A second keepalive event supersedes the first (last wins)
+# ============================================================
+subtest 'a second keepalive event supersedes the first: the ping cadence changes' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $ws_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $ws_data .= $data if defined $ws_stream_id && $sid == $ws_stream_id;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+
+    # Both settings use interval-only (no timeout), so an unanswered ping
+    # can never tear the stream down mid-measurement and the two phases
+    # differ in exactly one thing: the interval.
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.5');
+
+    # Wait for the first slow ping so the measurement window starts on a
+    # settled timer. Expected at ~0.5s; ceiling 6s is a 12x margin.
+    my $deadline = Time::HiRes::time() + 6;
+    exchange_frames($client, $client_sock, 1)
+        while ping_count($ws_data) < 1 && Time::HiRes::time() < $deadline;
+    ok(ping_count($ws_data) >= 1, 'saw the first ping at the initial 0.5s interval');
+
+    # Measure both cadences over the SAME 1.5s wall-clock window. Measured
+    # on this box: 2 pings at the 0.5s interval, 15 at the 0.1s one (the
+    # fast count is capped by the ~0.1s exchange-round poll resolution).
+    my $before_slow = ping_count($ws_data);
+    run_for_seconds($client, $client_sock, 1.5);
+    my $slow_pings = ping_count($ws_data) - $before_slow;
+
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.1');
+    my $before_fast = ping_count($ws_data);
+    run_for_seconds($client, $client_sock, 1.5);
+    my $fast_pings = ping_count($ws_data) - $before_fast;
+
+    # A superseded timer would leave the cadence unchanged ($fast == $slow).
+    # Threshold 2x the slow count: with the measured 2 vs 15 that puts the
+    # bar at 4, a 3.75x margin below the observed fast count.
+    note("cadence over 1.5s: 0.5s interval -> $slow_pings pings; "
+       . "0.1s interval -> $fast_pings pings");
+    ok($fast_pings > 2 * $slow_pings,
+        'the second keepalive event replaced the cadence (last wins)')
+        or diag("slow window: $slow_pings pings; fast window: $fast_pings pings");
+
+    is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
+        'no disconnect while re-arming keepalive (old pong-timer state did not wedge)');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Inbound ws PING (opcode 9) is answered with a PONG (opcode 10)
+# ============================================================
+subtest 'an inbound ws ping frame is answered with a pong carrying its payload' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $ws_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $ws_data .= $data if defined $ws_stream_id && $sid == $ws_stream_id;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+
+    # No keepalive is armed on this stream, so the server sends no pings of
+    # its own: any opcode-10 frame on the wire can only be the answer to
+    # this client ping.
+    my $ping = Protocol::WebSocket::Frame->new(
+        type   => 'ping',
+        buffer => 'probe',
+        masked => 1,
+    );
+    send_stream_data($client, $client_sock, $ws_stream_id, $ping->to_bytes);
+    # 10 rounds (up to 1s) is a ~10x margin over the single round a
+    # feed()-processed answer needs to reach the client.
+    exchange_frames($client, $client_sock, 10);
+
+    my @pongs = grep { $_->{opcode} == 10 } extract_ws_frames($ws_data);
+    is(scalar @pongs, 1, 'server answered the inbound ping with exactly one pong');
+    is($pongs[0]{bytes}, 'probe', 'the pong echoes the ping payload')
+        if @pongs;
+    is(ping_count($ws_data), 0, 'server sent no pings of its own (no keepalive armed)');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Two keepalive-armed WS streams: the silent one times out, the ponging one
+# survives and keeps exchanging messages
+# ============================================================
+subtest 'a keepalive timeout on one armed stream leaves its ponging sibling working' => sub {
+    my @events_a;
+    my @events_b;
+    my $app = make_keepalive_router_app('/ws/a' => \@events_a, '/ws/b' => \@events_b);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my ($a_stream_id, $b_stream_id);
+    my $a_data = '';
+    my $b_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            if (defined $a_stream_id && $sid == $a_stream_id) { $a_data .= $data; }
+            elsif (defined $b_stream_id && $sid == $b_stream_id) { $b_data .= $data; }
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws/a', \$a_stream_id);
+    open_ws_stream_tracked($client, $client_sock, '/ws/b', \$b_stream_id);
+
+    # BOTH streams arm the same interval/timeout -- the only difference is
+    # that B's pings get answered and A's never do. B is armed first so its
+    # pong-answering loop is already the thing under way when A's timeout
+    # (interval 0.2 + timeout 0.3 = ~0.5s) expires.
+    start_keepalive_control($client, $client_sock, $b_stream_id, 'keepalive:0.2,0.3');
+    start_keepalive_control($client, $client_sock, $a_stream_id, 'keepalive:0.2,0.3');
+
+    # Ceiling 60 rounds (up to 6s) is a >= 12x margin over A's expected
+    # ~0.5s teardown.
+    my $b_answered = 0;
+    my $saw_a_disconnect = 0;
+    for (1 .. 60) {
+        $b_answered = answer_new_pings($client, $client_sock, $b_stream_id,
+                                       $b_data, $b_answered);
+        if (grep { $_->{type} eq 'websocket.disconnect' } @events_a) {
+            $saw_a_disconnect = 1;
+            last;
+        }
+        exchange_frames($client, $client_sock, 1);
+    }
+    ok($saw_a_disconnect, 'stream A (pong withheld) disconnected within the bounded window');
+
+    my @a_disconnects = grep { $_->{type} eq 'websocket.disconnect' } @events_a;
+    is(scalar @a_disconnects, 1, 'stream A got exactly one disconnect');
+    if (@a_disconnects) {
+        is($a_disconnects[0]{code}, 1006, 'stream A code is 1006');
+        is($a_disconnects[0]{reason}, 'keepalive_timeout', "stream A reason is 'keepalive_timeout'");
+    }
+    is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events_b), 0,
+        'stream B (ponging) was not disconnected by its sibling timing out');
+    ok($b_answered >= 1, 'stream B answered at least one of its own keepalive pings')
+        or diag("b_answered: $b_answered");
+
+    # B still exchanges application messages AFTER A's teardown: round-trip
+    # a text frame through the router's echo control, answering B's pings
+    # throughout so its own keepalive stays satisfied.
+    send_ws_text($client, $client_sock, $b_stream_id, 'echo:still-here');
+    my $echoed = 0;
+    for (1 .. 30) {
+        $b_answered = answer_new_pings($client, $client_sock, $b_stream_id,
+                                       $b_data, $b_answered);
+        exchange_frames($client, $client_sock, 1);
+        if (grep { $_->{opcode} == 1 && $_->{bytes} eq 'still-here' }
+                 extract_ws_frames($b_data)) {
+            $echoed = 1;
+            last;
+        }
+    }
+    ok($echoed, 'stream B round-tripped a text message after A timed out');
 
     $stream_io->close_now;
     $loop->remove($server);
