@@ -947,13 +947,11 @@ sub _h2_create_send {
             return;
         }
 
-        # 3. Phase-1 stubs: valid events whose HTTP/2 behavior lands in Phase 2.
-        #    These fail BEFORE the sequence machine advances, so a conforming
-        #    app that probes them can still finish its response.
+        # 3. Phase-1 stub: trailers behavior lands in Phase 2b. This fails
+        #    BEFORE the sequence machine advances, so a conforming app that
+        #    probes it can still finish its response.
         die "http.response.trailers is not yet implemented on HTTP/2\n"
             if $type eq 'http.response.trailers';
-        die "http.fullflush is not yet implemented on HTTP/2\n"
-            if $type eq 'http.fullflush';
 
         # 4. file body: streamed through the send queue via $emit_chunk, one
         # chunk at a time, under this stream's own backpressure.
@@ -1151,6 +1149,11 @@ sub _h2_create_send {
                     $weak_self->_h2_write_pending;
                 }
             }
+        }
+        elsif ($type eq 'http.fullflush') {
+            # Hand any pending frames to the session's write path (design §8.4).
+            $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
+            $weak_self->_h2_write_pending;
         }
         else {
             _unrecognized_event_type($type, 'http');
@@ -1763,6 +1766,11 @@ sub _h2_create_sse_send {
                 headers => $ss->{sse_decline_headers},
                 body    => $ss->{sse_decline_body},
             );
+            $weak_self->_h2_write_pending;
+        }
+        elsif ($type eq 'http.fullflush') {
+            # Hand any pending frames to the session's write path (design §8.4).
+            $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
             $weak_self->_h2_write_pending;
         }
         else {
