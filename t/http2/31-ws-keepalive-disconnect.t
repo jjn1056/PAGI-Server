@@ -356,6 +356,26 @@ sub make_keepalive_router_app {
                 await $send->(\%ka);
                 next;
             }
+            # "close:CODE,REASON" -- app-initiated closure, the send-closure
+            # 'websocket.close' branch.
+            if ($event->{type} eq 'websocket.receive'
+                && defined $event->{text}
+                && $event->{text} =~ /^close:(\d+),(.*)$/) {
+                await $send->({
+                    type   => 'websocket.close',
+                    code   => $1 + 0,
+                    reason => $2,
+                });
+                return;
+            }
+            # "echo:TEXT" -- bounce TEXT straight back, so a test can prove a
+            # stream still exchanges messages after some other event.
+            if ($event->{type} eq 'websocket.receive'
+                && defined $event->{text}
+                && $event->{text} =~ /^echo:(.*)$/) {
+                await $send->({ type => 'websocket.send', text => $1 });
+                next;
+            }
             push @$events, $event;
             last if $event->{type} eq 'websocket.disconnect';
         }
@@ -365,14 +385,19 @@ sub make_keepalive_router_app {
 # Sends an in-band "keepalive:..." text control frame and runs a few settle
 # rounds so the server has processed it (and started/stopped its timer)
 # before the caller establishes a timing baseline.
-sub start_keepalive_control {
-    my ($client, $client_sock, $stream_id, $control_text) = @_;
+sub send_ws_text {
+    my ($client, $client_sock, $stream_id, $text) = @_;
     my $frame = Protocol::WebSocket::Frame->new(
         type   => 'text',
-        buffer => $control_text,
+        buffer => $text,
         masked => 1,
     );
     send_stream_data($client, $client_sock, $stream_id, $frame->to_bytes);
+}
+
+sub start_keepalive_control {
+    my ($client, $client_sock, $stream_id, $control_text) = @_;
+    send_ws_text($client, $client_sock, $stream_id, $control_text);
     # 2 rounds (0.2s) is a full interval's worth of headroom for the server
     # to receive+dispatch the control event and (re)start the timer.
     exchange_frames($client, $client_sock, 2);
@@ -604,6 +629,95 @@ subtest 'interval => 0 stops further pings' => sub {
         exchange_frames($client, $client_sock, 1);
     }
     is(ping_count($ws_data), $baseline, 'no further pings arrived after interval => 0');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Every WebSocket closure path releases the stream's keepalive timer
+# ============================================================
+# A closure that leaves the periodic ping timer armed leaves it ticking on
+# a stream that no longer exists, pinging into a half-closed stream for the
+# life of the connection. Two paths used to do exactly that: the app's own
+# 'websocket.close' send event, and the server-initiated protocol close for
+# an invalid-UTF-8 TEXT frame.
+#
+# These are white-box on purpose: the leak has no observable wire symptom
+# other than stray pings, and asserting on the timer itself is what pins
+# the release down. Keepalive is armed with an interval and NO timeout, so
+# nothing ELSE can tear the stream down and clean the timer up incidentally
+# -- the release under test is the only thing that can clear it.
+#
+# The stream-state hashref is captured before the close and asserted on
+# afterwards, because h2_streams drops its entry once the stream is
+# reclaimed and the question is what happened to that stream's timer.
+
+subtest 'app-initiated websocket.close releases the keepalive timer' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.2');
+
+    my $ss = $conn->{h2_streams}{$ws_stream_id};
+    ok($ss, 'server holds stream state for the accepted ws stream');
+    my $timer = $ss && $ss->{ws_ka_timer};
+    ok($timer && $timer->is_running, 'keepalive timer armed before the close');
+
+    # App closes; the client deliberately never ends its own side, so the
+    # stream stays half-closed(local) and on_stream_close cannot fire and
+    # sweep the timer for us.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,bye');
+    # 10 rounds (1s) is a 5x margin over the 0.2s interval -- a still-armed
+    # timer would have ticked several times by here.
+    exchange_frames($client, $client_sock, 10);
+
+    ok(!$ss->{ws_ka_timer}, 'stream keepalive timer released after websocket.close');
+    ok($timer && !$timer->is_running, 'the armed timer itself is stopped');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'invalid-UTF-8 protocol close releases the keepalive timer' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.2');
+
+    my $ss = $conn->{h2_streams}{$ws_stream_id};
+    ok($ss, 'server holds stream state for the accepted ws stream');
+    my $timer = $ss && $ss->{ws_ka_timer};
+    ok($timer && $timer->is_running, 'keepalive timer armed before the close');
+
+    # Invalid UTF-8 in a TEXT frame: the server sends Close(1007) itself.
+    my $bad = Protocol::WebSocket::Frame->new(
+        type   => 'text',
+        buffer => "\xFF\xFE",
+        masked => 1,
+    );
+    send_stream_data($client, $client_sock, $ws_stream_id, $bad->to_bytes);
+    exchange_frames($client, $client_sock, 10);
+
+    my @disconnects = grep { $_->{type} eq 'websocket.disconnect' } @events;
+    is(scalar @disconnects, 1, 'exactly one disconnect event');
+    is($disconnects[0]{code}, 1007, 'code is 1007 (invalid payload data)')
+        if @disconnects;
+
+    ok(!$ss->{ws_ka_timer}, 'stream keepalive timer released after the 1007 close');
+    ok($timer && !$timer->is_running, 'the armed timer itself is stopped');
 
     $stream_io->close_now;
     $loop->remove($server);

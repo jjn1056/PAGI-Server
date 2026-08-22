@@ -1570,16 +1570,10 @@ sub _h2_create_websocket_send {
                 return;
             }
 
-            my $code = $event->{code} // 1000;
-            my $reason = $event->{reason} // '';
-
-            my $frame = Protocol::WebSocket::Frame->new(
-                type   => 'close',
-                buffer => pack('n', $code) . $reason,
-            );
-
-            # Send close frame + END_STREAM
-            $weak_self->{h2_session}->submit_data($stream_id, $frame->to_bytes, 1);
+            # Close frame + END_STREAM, and release this stream's keepalive
+            # (_h2_ws_close does both). Runs outside feed(), so flush here.
+            $weak_self->_h2_ws_close($stream_id,
+                $event->{code} // 1000, $event->{reason} // '');
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'websocket.keepalive') {
@@ -2073,15 +2067,28 @@ sub _h2_process_ws_frames {
     $self->_h2_wake_pending($stream);
 }
 
+# Send a Close frame with END_STREAM on one h2 WebSocket stream. The WS
+# session on that stream is over once this returns, so this is also where
+# the stream's keepalive is released -- every closure path funnels through
+# here, and releasing it at the funnel is what keeps a ping timer from
+# outliving its stream (it would otherwise keep pinging a half-closed
+# stream for the life of the connection).
+#
+# Callers inside feed() need no flush (_h2_process_data flushes after
+# feed() returns); callers outside it must call _h2_write_pending
+# themselves.
 sub _h2_ws_close {
     my ($self, $stream_id, $code, $reason) = @_;
+
+    if (my $stream = $self->{h2_streams}{$stream_id}) {
+        $self->_h2_stop_ws_keepalive($stream);
+    }
 
     my $frame = Protocol::WebSocket::Frame->new(
         type   => 'close',
         buffer => pack('n', $code) . ($reason // ''),
     );
     $self->{h2_session}->submit_data($stream_id, $frame->to_bytes, 1);
-    # No _h2_write_pending — called from inside feed(); flushed by _h2_process_data
 }
 
 # HTTP/2 per-stream WebSocket keepalive (design section 10.2 -- the h2
