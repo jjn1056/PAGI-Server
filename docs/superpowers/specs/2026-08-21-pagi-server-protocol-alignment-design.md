@@ -357,6 +357,22 @@ HEADERS with END_STREAM and marks the response terminal. Without the
 declaration, the trailers event fails. On HEAD, it is validated and discarded
 while still completing the response.
 
+**Dependency gap and phasing (decision, John, 2026-08-22):** the installed
+`Net::HTTP2::nghttp2` (0.008, same author) exposes no trailer API — no
+`submit_trailer`/`submit_headers` on its Session class, and the streaming
+data-callback contract (`($chunk, $eof)`) cannot end a stream with trailing
+HEADERS instead of END_STREAM — so this section cannot be implemented
+against the current dependency. Ruling: **B-then-A**. Phase 2 ships every
+other part of HTTP/2 parity now, keeping the Phase 1 loud stub for trailers
+("not yet implemented on HTTP/2") with one refinement: on HEAD, a trailers
+event is accepted and discarded (the PAGI HEAD section's rule is
+implementable without wire support since nothing is transmitted). The full
+implementation becomes **Phase 2b**, gated on a `Net::HTTP2::nghttp2`
+release adding a thin `nghttp2_submit_trailer()` binding and a cpanfile
+floor bump here; until then the limitation is documented in the compliance
+POD. Phase 2b is tracked as deferred work to revisit after the first pass
+over all phases.
+
 ### 8.4 Fullflush capability
 
 If the `fullflush` extension is advertised on an HTTP/2 HTTP scope,
