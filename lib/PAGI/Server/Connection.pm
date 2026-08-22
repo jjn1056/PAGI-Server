@@ -708,12 +708,15 @@ sub _h2_dispatch_stream {
                 # Mark BEFORE the response settles: submitting it (below) can
                 # complete the stream synchronously once flushed, and
                 # _h2_on_close would then mark this same connection_state
-                # 'client_closed' if it got there first. _mark_disconnected
-                # is idempotent -- first mark wins -- so marking here first
+                # terminal if it got there first. _mark_disconnected is
+                # idempotent -- first mark wins -- so marking here first
                 # guarantees the app observes server_error. The synthesized
-                # 500 is this stream's response, so also mark it started.
-                $cs->_mark_disconnected('server_error') if $cs;
+                # 500 is this stream's response (spec section 9.1), so mark
+                # it started FIRST: _mark_disconnected fires on_disconnect
+                # callbacks synchronously, and they must observe
+                # response_started true.
                 $cs->_mark_response_started if $cs;
+                $cs->_mark_disconnected('server_error') if $cs;
                 eval {
                     $weak_self->{h2_session}->submit_response($stream_id,
                         status  => 500,
@@ -903,6 +906,8 @@ sub _h2_create_send {
     # $eof_pending / $streaming_started stay closure-local.
     my $eof_pending = 0;
     my $streaming_started = 0;
+    # Mirrors the stream state's own starting point (see the seq_state =>
+    # 'initial' initializer in _h2_on_request); the two must stay in step.
     my $seq = 'initial';
     my $is_head = (($stream_state->{pseudo}{':method'} // '') eq 'HEAD');
 

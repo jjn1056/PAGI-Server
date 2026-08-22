@@ -483,10 +483,20 @@ sub terminate {
     return $self->{nghttp2}->terminate_session($error_code);
 }
 
-# Internal: reset a single stream with RST_STREAM. Used by Connection.pm's
-# h2 dispatch wrapper to abort a stream whose response was left started but
-# incomplete (app returned early or threw after http.response.start), and
-# by nothing else -- not part of the documented Session API above.
+=head2 submit_rst_stream
+
+    $session->submit_rst_stream($stream_id, $error_code);
+
+Reset a single stream with RST_STREAM, leaving the rest of the session
+untouched. C<$error_code> is an RFC 9113 section 7 error code (for example
+C<2>, INTERNAL_ERROR).
+
+Used by the server's HTTP/2 dispatch to abort a stream whose response was
+left started but incomplete -- the application returned early or threw after
+C<http.response.start>, so there is no honest way to finish the body.
+
+=cut
+
 sub submit_rst_stream {
     my ($self, $stream_id, $error_code) = @_;
     return $self->{nghttp2}->submit_rst_stream($stream_id, $error_code);

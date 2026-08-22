@@ -133,11 +133,15 @@ sub read_response {
 # --- the test ----------------------------------------------------------------
 
 subtest 'h2: app returning without a response yields 500' => sub {
-    my $disconnect_reason;   # undef unless on_disconnect fires
+    my $disconnect_reason;      # undef unless on_disconnect fires
+    my $started_at_disconnect;  # response_started as the callback observed it
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         my $cs = $scope->{'pagi.connection'};
-        $cs->on_disconnect(sub { $disconnect_reason = $_[0] });
+        $cs->on_disconnect(sub {
+            $disconnect_reason    = $_[0];
+            $started_at_disconnect = $cs->response_started;
+        });
         await $receive->();   # consume the request
         return;               # no http.response.start -> incomplete
     };
@@ -164,6 +168,10 @@ subtest 'h2: app returning without a response yields 500' => sub {
         'an h2 app that starts no response gets a 500 backstop');
     is($disconnect_reason, 'server_error',
         'on_disconnect fired with server_error for the no-response path');
+    # Spec section 9.1: the server-generated 500 IS this request's response,
+    # so a callback watching the disconnect must see response_started true.
+    is($started_at_disconnect, 1,
+        'on_disconnect observed response_started true (the 500 is the response)');
 
     $stream->close_now;
     $loop->remove($server);
