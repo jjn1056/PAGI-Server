@@ -463,6 +463,7 @@ sub _h2_on_request {
         ws_accepted  => 0,
         ws_frame     => undef,   # Protocol::WebSocket::Frame for parsing
         ws_connect_sent => 0,
+        ws_disconnect_delivered => 0,   # True once the scope's single websocket.disconnect has been queued
     };
 
     # Check Content-Length against max_body_size limit before dispatching
@@ -510,13 +511,9 @@ sub _h2_on_body {
         $self->_h2_process_ws_frames($stream_id, $stream, $data) if length($data);
 
         if ($eof) {
-            # END_STREAM = client closing the WebSocket stream
-            push @{$stream->{receive_queue}}, {
-                type   => 'websocket.disconnect',
-                code   => 1005,
-                reason => '',
-            };
-            $self->_h2_wake_pending($stream);
+            # END_STREAM with no close handshake (bare END_STREAM): abnormal
+            # closure per RFC 6455 (Www.pod "Disconnect - receive event").
+            $self->_h2_ws_enqueue_disconnect($stream, 1006, 'client_closed');
         }
         return;
     }
@@ -562,6 +559,19 @@ sub _h2_wake_pending {
     }
 }
 
+# Enqueue the scope's single websocket.disconnect event (PAGI: exactly one
+# per WebSocket scope). Every h2 delivery site MUST come through here.
+sub _h2_ws_enqueue_disconnect {
+    my ($self, $stream, $code, $reason) = @_;
+    return if $stream->{ws_disconnect_delivered}++;
+    push @{$stream->{receive_queue}}, {
+        type   => 'websocket.disconnect',
+        code   => $code,
+        reason => $reason,
+    };
+    $self->_h2_wake_pending($stream);
+}
+
 sub _h2_on_close {
     my ($self, $stream_id, $error_code) = @_;
 
@@ -602,11 +612,10 @@ sub _h2_on_close {
 
     # Enqueue disconnect event
     if ($stream->{is_websocket}) {
-        push @{$stream->{receive_queue}}, {
-            type   => 'websocket.disconnect',
-            code   => 1006,
-            reason => '',
-        };
+        # Close without a WebSocket close handshake (RST_STREAM, timeout, ...):
+        # abnormal closure per RFC 6455. Deduped -- a no-op if the close-frame
+        # or bare-END_STREAM path already delivered the scope's one disconnect.
+        $self->_h2_ws_enqueue_disconnect($stream, 1006, 'client_closed');
     } elsif ($stream->{is_sse}) {
         push @{$stream->{receive_queue}}, {
             type   => 'sse.disconnect',
@@ -1930,6 +1939,8 @@ sub _h2_process_ws_frames {
             my $text = eval { Encode::decode('UTF-8', $bytes, Encode::FB_CROAK) };
             unless (defined $text) {
                 $self->_h2_ws_close($stream_id, 1007, 'Invalid UTF-8');
+                # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                $self->_h2_ws_enqueue_disconnect($stream, 1007, 'protocol_error');
                 return;
             }
             push @{$stream->{receive_queue}}, {
@@ -1951,12 +1962,8 @@ sub _h2_process_ws_frames {
             # RFC 6455 Section 5.5.1: Close frame payload is 0 or >=2 bytes
             if (length($bytes) == 1) {
                 $self->_h2_ws_close($stream_id, 1002, 'Invalid close frame');
-                push @{$stream->{receive_queue}}, {
-                    type   => 'websocket.disconnect',
-                    code   => 1002,
-                    reason => 'Invalid close frame',
-                };
-                $self->_h2_wake_pending($stream);
+                # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
                 return;
             }
 
@@ -1977,12 +1984,8 @@ sub _h2_process_ws_frames {
                 }
                 unless ($valid_code) {
                     $self->_h2_ws_close($stream_id, 1002, 'Invalid close code');
-                    push @{$stream->{receive_queue}}, {
-                        type   => 'websocket.disconnect',
-                        code   => 1002,
-                        reason => 'Invalid close code',
-                    };
-                    $self->_h2_wake_pending($stream);
+                    # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                    $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
                     return;
                 }
 
@@ -1992,12 +1995,8 @@ sub _h2_process_ws_frames {
                     my $decoded = eval { Encode::decode('UTF-8', $reason_copy, Encode::FB_CROAK) };
                     unless (defined $decoded) {
                         $self->_h2_ws_close($stream_id, 1007, 'Invalid UTF-8 in close reason');
-                        push @{$stream->{receive_queue}}, {
-                            type   => 'websocket.disconnect',
-                            code   => 1007,
-                            reason => 'Invalid UTF-8 in close reason',
-                        };
-                        $self->_h2_wake_pending($stream);
+                        # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                        $self->_h2_ws_enqueue_disconnect($stream, 1007, 'protocol_error');
                         return;
                     }
                 }
@@ -2011,11 +2010,9 @@ sub _h2_process_ws_frames {
             $self->{h2_session}->submit_data($stream_id, $close_frame->to_bytes, 1);
             # No _h2_write_pending — inside feed(); flushed by _h2_process_data
 
-            push @{$stream->{receive_queue}}, {
-                type   => 'websocket.disconnect',
-                code   => $code,
-                reason => $reason,
-            };
+            # Peer's Close frame: its own code (1005 default when the frame
+            # carried none) and reason text (Www.pod "Disconnect - receive event").
+            $self->_h2_ws_enqueue_disconnect($stream, $code, $reason);
         }
         elsif ($opcode == 9) {
             # Ping — respond with pong
