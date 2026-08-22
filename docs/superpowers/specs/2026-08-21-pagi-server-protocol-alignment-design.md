@@ -557,6 +557,41 @@ This is a light parse shared by both transports — not full content
 negotiation, which stays application/middleware territory. The
 WebSocket-upgrade precedence check is unchanged.
 
+### 11.6 Connection reuse after an SSE stream ends (HTTP/1.1)
+
+Decision (John, 2026-08-22): the server honors the `Connection: keep-alive`
+header it emits on `sse.start`. Today `_finish_sse_stream` writes the
+chunked terminator and then unconditionally closes the TCP connection,
+breaking the reuse promise — pooled clients (Net::Async::HTTP, browsers,
+curl) return the socket to their pool and the next request hits a dead
+socket (live-reproduced; Phase 1's t/52 works around it with a fresh
+client per SSE call). The alternative — declaring `Connection: close` —
+was rejected: it would require a PAGI spec change (Www.pod mandates
+keep-alive on `sse.start`) and permanently penalize the short
+POST-SSE-exchange pattern (fetch-event-source/datastar) with a TCP+TLS
+handshake per exchange.
+
+Required behavior after this phase:
+
+- When an HTTP/1.1 SSE stream ends **cleanly** (application return or
+  `sse.close`), the server writes the chunked terminator, resets
+  per-request SSE state (stream flags, keepalive/idle timers, the send
+  closure's sequence state via a fresh request cycle), and returns the
+  connection to normal keep-alive request handling — the same contract an
+  ordinary HTTP response gets, including the pipelined-data check.
+- Keep-alive still yields to the usual overrides: a client `Connection:
+  close`, HTTP/1.0 semantics, server shutdown, or an **abnormal** end
+  (client disconnect, timeout, write error), which closes as today.
+- The clean-end path must not fire `on_disconnect`/`sse.disconnect`
+  merely because the stream ended; disconnect events remain reserved for
+  abnormal ends per the PAGI spec.
+- Phase 1's post-`sse.close` raise contract is unaffected: further sends
+  on the ended stream's scope still fail via the sequence machine (which
+  no longer depends on the transport being closed).
+- t/52's fresh-client-per-SSE-call workaround is removed and replaced
+  with a positive assertion: one pooled client performs an SSE exchange
+  and a subsequent ordinary request on the same connection.
+
 ## 12. Lifespan and worker alignment
 
 The lifespan send function uses the shared base validation rules. Unknown
@@ -895,7 +930,8 @@ One implementation plan should execute these phases on the existing branch:
    transports share the section 9.3 contract).
 4. HTTP/2 WebSocket validation, keepalive, and disconnect semantics.
 5. SSE request bodies, UTF-8, detection (media-range parse on both
-   transports), and HTTP/2 per-stream timers/state.
+   transports), HTTP/1.1 keep-alive after clean stream end (section 11.6),
+   and HTTP/2 per-stream timers/state.
 6. Lifespan worker propagation and `off` removal, Date, extension
    truthfulness, and remaining connection-state consistency.
 7. Documentation, drift audit, optional TLS verification, and final suite.
