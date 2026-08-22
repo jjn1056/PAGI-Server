@@ -2656,6 +2656,7 @@ sub _create_send {
     my $response_started = 0;
     my $expects_trailers = 0;
     my $body_complete = 0;
+    my $seq = 'initial';
     my $is_head_request = ($request->{method} // '') eq 'HEAD';
     my $http_version = $request->{http_version} // '1.1';
     my $is_http10 = ($http_version eq '1.0');
@@ -2683,14 +2684,13 @@ sub _create_send {
 
         my $type = $event->{type} // '';
 
-        # Dev-mode event validation (PAGI spec compliance)
-        if ($weak_self->{validate_events}) {
-            require PAGI::Server::EventValidator;
-            PAGI::Server::EventValidator::validate_http_send($event);
-        }
+        # Mandatory event validation and sequencing (PAGI spec compliance).
+        # Order per spec: transport-closed no-op check above runs first.
+        PAGI::Server::EventValidator::validate_http_send(
+            $event, { extensions => $weak_self->{extensions} });
+        $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {
-            return if $response_started;
             $response_started = 1;
             $weak_self->{response_started} = 1;
             $weak_self->{current_connection_state}->_mark_response_started
@@ -2743,9 +2743,6 @@ sub _create_send {
             $weak_self->{_resp_pending} = $response;
         }
         elsif ($type eq 'http.response.body') {
-            return unless $response_started;
-            return if $body_complete;
-
             # For HEAD requests, suppress the body but track completion
             if ($is_head_request) {
                 my $more = $event->{more} // 0;
@@ -2827,7 +2824,6 @@ sub _create_send {
             }
         }
         elsif ($type eq 'http.response.trailers') {
-            return unless $response_started;
             return unless $expects_trailers;
             return unless $chunked;  # Trailers only work with chunked encoding
 
@@ -3074,7 +3070,11 @@ sub _send_close_frame {
 sub _close {
     my ($self) = @_;
 
-    return if $self->{closed};
+    # Idempotency guard for cleanup, kept separate from the "closed" flag
+    # itself: _handle_disconnect_and_close may already have set {closed} = 1
+    # before calling here, so the send-side closed-check sees it early.
+    return if $self->{_cleanup_done};
+    $self->{_cleanup_done} = 1;
     $self->{closed} = 1;
 
     # Cancel pending drain waiters early (before other cleanup)
@@ -3172,6 +3172,16 @@ sub _close {
 # This method holds a strong reference to $self throughout the operation.
 sub _handle_disconnect_and_close {
     my ($self, $reason) = @_;
+
+    # Mark the transport closed before notifying: _handle_disconnect below
+    # completes any pending receive(), which can synchronously resume the
+    # app coroutine (it may run straight through a subsequent send()), so
+    # the send-side closed-check needs "closed" to already be true at that
+    # point (spec order: closed-check precedes validation). Resource
+    # cleanup itself still happens in _close, gated by its own idempotency
+    # flag so it isn't skipped by this early flip.
+    $self->{closed} = 1;
+
     $self->_handle_disconnect($reason);
     $self->_close;
 }

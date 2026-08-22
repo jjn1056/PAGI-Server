@@ -781,18 +781,20 @@ subtest 'send() after disconnect returns completed Future' => sub {
             more => 0,
         });
 
-        # Now try to send AFTER response is complete
-        # This should be a no-op (not throw an error)
+        # Now try to send AFTER response is complete (same connection, no
+        # disconnect involved). Mandatory sequencing now rejects this: a
+        # send after the response reaches 'complete' state must croak
+        # rather than be silently ignored (PAGI spec compliance).
         eval {
             await $send->({
                 type => 'http.response.body',
-                body => 'This should be ignored',
+                body => 'This should be rejected',
                 more => 0,
             });
         };
 
         if ($@) {
-            $error_during_send = 1;
+            $error_during_send = $@;
         }
 
         $app_completed = 1;
@@ -822,7 +824,8 @@ subtest 'send() after disconnect returns completed Future' => sub {
     $loop->delay_future(after => 0.2)->get;
 
     ok($app_completed, 'App completed without error');
-    ok(!$error_during_send, 'No error thrown when sending after response complete');
+    like($error_during_send, qr/response already complete/,
+        'send after response complete raises a validation error');
 
     $loop->remove($http);
     $server->shutdown->get;
