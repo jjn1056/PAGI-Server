@@ -578,6 +578,10 @@ sub _h2_on_close {
     my $stream = $self->{h2_streams}{$stream_id};
     return unless $stream;
 
+    # This stream is going away one way or another -- stop its keepalive
+    # timers so they don't fire (or leak) after the stream state is reclaimed.
+    $self->_h2_stop_ws_keepalive($stream) if $stream->{is_websocket};
+
     # Drive this stream's own connection_state to its terminal state exactly
     # once. Three outcomes, and the h2 error code alone does not separate
     # them -- a server-sent END_STREAM closes a stream with error code 0 just
@@ -1569,6 +1573,19 @@ sub _h2_create_websocket_send {
             $weak_self->{h2_session}->submit_data($stream_id, $frame->to_bytes, 1);
             $weak_self->_h2_write_pending;
         }
+        elsif ($type eq 'websocket.keepalive') {
+            return unless $ss->{ws_accepted};
+
+            my $interval = $event->{interval} // 0;
+            my $timeout  = $event->{timeout};
+
+            if ($interval > 0) {
+                $weak_self->_h2_start_ws_keepalive($stream_id, $ss, $interval, $timeout);
+            }
+            else {
+                $weak_self->_h2_stop_ws_keepalive($ss);
+            }
+        }
 
         return;
     };
@@ -1965,7 +1982,11 @@ sub _h2_process_ws_frames {
             };
         }
         elsif ($opcode == 8) {
-            # Close frame
+            # Close frame -- the WS session on this stream is ending, one way
+            # or another (a validation failure below closes it too), so stop
+            # this stream's keepalive up front.
+            $self->_h2_stop_ws_keepalive($stream);
+
             my ($code, $reason) = (1005, '');
 
             # RFC 6455 Section 5.5.1: Close frame payload is 0 or >=2 bytes
@@ -2032,7 +2053,12 @@ sub _h2_process_ws_frames {
             $self->{h2_session}->submit_data($stream_id, $pong->to_bytes, 0);
             # No _h2_write_pending — inside feed(); flushed by _h2_process_data
         }
-        # Opcode 10 (pong) — ignore
+        elsif ($opcode == 10) {
+            # Pong — clear this stream's keepalive wait flag (response to
+            # our own ping); cancel only the per-stream pong-timeout
+            # Countdown, not the periodic ping timer itself.
+            $self->_h2_cancel_ws_pong_timeout($stream);
+        }
     }
 
     $self->_h2_wake_pending($stream);
@@ -2047,6 +2073,130 @@ sub _h2_ws_close {
     );
     $self->{h2_session}->submit_data($stream_id, $frame->to_bytes, 1);
     # No _h2_write_pending — called from inside feed(); flushed by _h2_process_data
+}
+
+# HTTP/2 per-stream WebSocket keepalive (design section 10.2 -- the h2
+# analogue of _start_ws_keepalive/_stop_ws_keepalive). h1 shares one TCP
+# stream per connection, so its keepalive state and timers live on $self;
+# h2 multiplexes many WebSocket streams per connection, so this state and
+# these timers live on the per-stream hash ($ss, aka $self->{h2_streams}
+# {$stream_id}) and the ping is delivered as an h2 DATA frame via
+# submit_data + _h2_write_pending rather than a raw stream write.
+sub _h2_start_ws_keepalive {
+    my ($self, $stream_id, $ss, $interval, $timeout) = @_;
+
+    # Last event wins: stop whatever was running before applying new settings.
+    $self->_h2_stop_ws_keepalive($ss);
+
+    return unless $interval && $interval > 0;
+    return unless $self->{server};
+
+    $ss->{ws_ka_interval} = $interval;
+    $ss->{ws_ka_timeout}  = $timeout // 0;
+
+    weaken(my $weak_self = $self);
+    weaken(my $weak_ss   = $ss);
+
+    my $timer = IO::Async::Timer::Periodic->new(
+        interval => $interval,
+        on_tick  => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            return unless $weak_ss;
+            return unless $weak_ss->{ws_accepted};
+
+            my $ping = Protocol::WebSocket::Frame->new(
+                type   => 'ping',
+                buffer => '',
+            );
+            $weak_self->{h2_session}->submit_data($stream_id, $ping->to_bytes, 0);
+            $weak_self->_h2_write_pending;
+
+            # Start pong timeout if configured
+            if ($weak_ss->{ws_ka_timeout} > 0) {
+                $weak_ss->{ws_ka_waiting_pong} = 1;
+                $weak_self->_h2_start_ws_pong_timeout($stream_id, $weak_ss);
+            }
+        },
+    );
+
+    $ss->{ws_ka_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _h2_start_ws_pong_timeout {
+    my ($self, $stream_id, $ss) = @_;
+
+    # Don't start another timeout if one is running
+    return if $ss->{ws_ka_pong_timer};
+    return unless $ss->{ws_ka_timeout} > 0;
+    return unless $self->{server};
+
+    weaken(my $weak_self = $self);
+    weaken(my $weak_ss   = $ss);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $ss->{ws_ka_timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            return unless $weak_ss;
+
+            if ($weak_ss->{ws_ka_waiting_pong}) {
+                # No pong received within timeout - close only THIS stream.
+                if ($weak_self->{server} && $weak_self->{server}->can('_log')) {
+                    $weak_self->{server}->_log(warn =>
+                        "HTTP/2 WebSocket stream $stream_id keepalive timeout - no pong received within $weak_ss->{ws_ka_timeout}s");
+                }
+
+                $weak_self->_h2_stop_ws_keepalive($weak_ss);
+
+                # End the stream the same way _h2_ws_close does (close frame +
+                # END_STREAM), then the scope's one disconnect event -- same
+                # order the protocol-violation paths above use. This runs
+                # outside feed() (async timer callback), so flush explicitly.
+                $weak_self->_h2_ws_close($stream_id, 1006, 'keepalive_timeout');
+                $weak_self->_h2_ws_enqueue_disconnect($weak_ss, 1006, 'keepalive_timeout');
+                $weak_self->_h2_write_pending;
+            }
+        },
+    );
+
+    $ss->{ws_ka_pong_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _h2_cancel_ws_pong_timeout {
+    my ($self, $ss) = @_;
+    return unless $ss;
+
+    $ss->{ws_ka_waiting_pong} = 0;
+
+    return unless $ss->{ws_ka_pong_timer};
+    $ss->{ws_ka_pong_timer}->stop if $ss->{ws_ka_pong_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($ss->{ws_ka_pong_timer});
+    }
+    $ss->{ws_ka_pong_timer} = undef;
+}
+
+sub _h2_stop_ws_keepalive {
+    my ($self, $ss) = @_;
+    return unless $ss;
+
+    # Stop pong timeout first
+    $self->_h2_cancel_ws_pong_timeout($ss);
+
+    return unless $ss->{ws_ka_timer};
+    $ss->{ws_ka_timer}->stop if $ss->{ws_ka_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($ss->{ws_ka_timer});
+    }
+    $ss->{ws_ka_timer}     = undef;
+    $ss->{ws_ka_interval}  = 0;
+    $ss->{ws_ka_timeout}   = 0;
 }
 
 # Request stall timeout - closes connection if no I/O activity during request processing
@@ -3508,6 +3658,10 @@ sub _close {
     # Clean up HTTP/2 per-stream state
     if ($self->{h2_streams}) {
         for my $stream (values %{$self->{h2_streams}}) {
+            # Whole connection is going away -- stop every WS stream's
+            # keepalive timers so none leak past this teardown sweep.
+            $self->_h2_stop_ws_keepalive($stream) if $stream->{is_websocket};
+
             if ($stream->{body_pending} && !$stream->{body_pending}->is_ready) {
                 my $event = $stream->{is_sse}
                     ? { type => 'sse.disconnect', reason => 'client_closed' }

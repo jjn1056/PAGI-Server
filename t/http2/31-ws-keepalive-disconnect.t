@@ -210,6 +210,378 @@ sub disconnects_seen {
 }
 
 # ============================================================
+# Test: per-stream WebSocket keepalive on h2 (design section 10.2)
+# ============================================================
+# The h2 WS send closure validates+advances 'websocket.keepalive' (the
+# machine already permits it in 'accepted') but had no dispatch branch, so
+# the event silently did nothing. These subtests drive the app's
+# websocket.keepalive event end-to-end: ping frames delivered as h2 DATA,
+# pong-answered survival, pong-withheld disconnect (1006/'keepalive_timeout',
+# exactly once) with a sibling stream unaffected, per-stream isolation
+# between two concurrent WS streams, and interval=>0 stopping the timer.
+#
+# Timing: every scenario below uses interval => 0.2s / timeout => 0.3s.
+# exchange_frames($client, $sock, 1) advances one 0.1s round, so
+# interval == 2 rounds and timeout == 3 rounds. Ceilings are stated in
+# rounds with the computed margin against the expected round count, per
+# the timing-measurement rule (an intermittent failure gets a measured
+# margin, not a shrug).
+
+# Track stream ids by reference so the on_data_chunk_recv callback (wired
+# up BEFORE any stream exists) can dispatch by id once one is opened.
+sub open_ws_stream_tracked {
+    my ($client, $client_sock, $path, $id_ref) = @_;
+    $path //= '/ws';
+
+    # Assign the id synchronously (nghttp2 allocates it immediately) BEFORE
+    # exchange_frames runs, so the data-capture callback can already route
+    # by id for anything that arrives during the handshake round-trip.
+    $$id_ref = $client->submit_request(
+        method    => 'CONNECT',
+        path      => $path,
+        scheme    => 'https',
+        authority => 'localhost',
+        headers   => [
+            [':protocol', 'websocket'],
+            ['sec-websocket-version', '13'],
+        ],
+        body      => sub { return undef },   # streaming: keep open
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock);
+
+    return $$id_ref;
+}
+
+sub open_get_stream_tracked {
+    my ($client, $client_sock, $path, $id_ref) = @_;
+    $path //= '/get';
+
+    $$id_ref = $client->submit_request(
+        method    => 'GET',
+        path      => $path,
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock);
+
+    return $$id_ref;
+}
+
+# Re-parses the FULL accumulated raw DATA buffer for a WS stream on every
+# call (a fresh Protocol::WebSocket::Frame parser each time) and returns
+# every complete frame seen so far as {opcode, bytes}. Idempotent and
+# cumulative by design -- callers compare counts across checkpoints rather
+# than tracking incremental parser state themselves.
+sub extract_ws_frames {
+    my ($raw) = @_;
+    my @frames;
+    my $parser = Protocol::WebSocket::Frame->new;
+    $parser->append($raw);
+    while (defined(my $bytes = $parser->next_bytes)) {
+        push @frames, { opcode => $parser->opcode, bytes => $bytes };
+    }
+    return @frames;
+}
+
+sub ping_count {
+    my ($raw) = @_;
+    return scalar grep { $_->{opcode} == 9 } extract_ws_frames($raw);
+}
+
+# App router used by all keepalive subtests below. A single app instance
+# serves every stream on the test connection (the server takes one app per
+# connection), so streams are routed to the caller's event array by path:
+#
+#   %path_events = ( '/ws' => \@events )                      -- one WS stream
+#   %path_events = ( '/ws/a' => \@a, '/ws/b' => \@b )          -- two WS streams
+#
+# Keepalive is driven ENTIRELY by an in-band text control message,
+# "keepalive:INTERVAL[,TIMEOUT]", rather than being auto-started at accept
+# time. This is deliberate: open_ws_stream_tracked's handshake wait (10
+# rounds / 1s, the same default the rest of this file uses) is far longer
+# than the 0.2s/0.3s interval/timeout under test, so auto-starting keepalive
+# before the handshake settles would let ping+timeout fire (and disconnect
+# the stream) before a test's polling loop even begins. Deferring the start
+# to an explicit control message lets each subtest establish a clean timing
+# baseline itself, right after confirming the stream is open.
+#
+# A '/get' (or any non-websocket) path gets an immediate 200 "sibling-ok" --
+# used to prove the h2 connection/session keeps serving other streams
+# regardless of what happens to a WS stream's keepalive.
+sub make_keepalive_router_app {
+    my (%path_events) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+
+        if ($scope->{type} eq 'http') {
+            await $send->({
+                type    => 'http.response.start',
+                status  => 200,
+                headers => [['content-type', 'text/plain']],
+            });
+            await $send->({ type => 'http.response.body', body => 'sibling-ok', more => 0 });
+            return;
+        }
+
+        return unless $scope->{type} eq 'websocket';
+        my $events = $path_events{$scope->{path}};
+        return unless $events;
+
+        await $send->({ type => 'websocket.accept' });
+
+        while (1) {
+            my $event = await $receive->();
+            if ($event->{type} eq 'websocket.receive'
+                && defined $event->{text}
+                && $event->{text} =~ /^keepalive:([\d.]+)(?:,([\d.]+))?$/) {
+                my %ka = (type => 'websocket.keepalive', interval => $1 + 0);
+                $ka{timeout} = $2 + 0 if defined $2;
+                await $send->(\%ka);
+                next;
+            }
+            push @$events, $event;
+            last if $event->{type} eq 'websocket.disconnect';
+        }
+    };
+}
+
+# Sends an in-band "keepalive:..." text control frame and runs a few settle
+# rounds so the server has processed it (and started/stopped its timer)
+# before the caller establishes a timing baseline.
+sub start_keepalive_control {
+    my ($client, $client_sock, $stream_id, $control_text) = @_;
+    my $frame = Protocol::WebSocket::Frame->new(
+        type   => 'text',
+        buffer => $control_text,
+        masked => 1,
+    );
+    send_stream_data($client, $client_sock, $stream_id, $frame->to_bytes);
+    # 2 rounds (0.2s) is a full interval's worth of headroom for the server
+    # to receive+dispatch the control event and (re)start the timer.
+    exchange_frames($client, $client_sock, 2);
+}
+
+# ============================================================
+# Ping observed as a ws ping frame in h2 DATA; answered pong survives >= 2
+# intervals (no disconnect)
+# ============================================================
+subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 intervals' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $ws_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $ws_data .= $data if defined $ws_stream_id && $sid == $ws_stream_id;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.2,0.3');
+
+    # First ping is expected at ~2 rounds (interval 0.2s / 0.1s per round),
+    # counted from the settled baseline start_keepalive_control establishes.
+    # Ceiling: 50 rounds (5s) is a ~25x margin over the expected 2 rounds.
+    my $seen_first_ping = 0;
+    for (1 .. 50) {
+        exchange_frames($client, $client_sock, 1);
+        if (ping_count($ws_data) >= 1) { $seen_first_ping = 1; last; }
+    }
+    ok($seen_first_ping, 'a ws ping frame (opcode 9) arrived within the bounded window');
+
+    # Answer every ping seen so far, then keep answering new ones as they
+    # arrive for a further bounded window. 3 total pings observed proves the
+    # connection survived >= 2 full intervals (0.4s) while the app kept
+    # answering -- comfortably inside the 45-round (4.5s) ceiling, an ~11x
+    # margin over the 4 rounds (0.4s) needed for 2 intervals.
+    my $answered = 0;
+    for (1 .. 45) {
+        my @frames = extract_ws_frames($ws_data);
+        my @pings  = grep { $_->{opcode} == 9 } @frames;
+        while ($answered < @pings) {
+            my $ping = $pings[$answered++];
+            my $pong = Protocol::WebSocket::Frame->new(
+                type   => 'pong',
+                buffer => $ping->{bytes},
+                masked => 1,
+            );
+            send_stream_data($client, $client_sock, $ws_stream_id, $pong->to_bytes);
+        }
+        last if $answered >= 3;
+        exchange_frames($client, $client_sock, 1);
+    }
+
+    ok($answered >= 3, 'observed and answered >= 3 pings (>= 2 full intervals of liveness)')
+        or diag("answered: $answered");
+    is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
+        'no disconnect event while pongs were answered');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Pong withheld -> exactly one disconnect 1006/'keepalive_timeout'; a
+# sibling plain-GET stream on the same connection still serves
+# ============================================================
+subtest 'withheld pong times out exactly one disconnect; sibling GET still serves' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $ws_data = '';
+    my $get_stream_id;
+    my %get_headers;
+    my $get_body = '';
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $get_headers{$name} = $value if defined $get_stream_id && $sid == $get_stream_id;
+            return 0;
+        },
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            if (defined $ws_stream_id && $sid == $ws_stream_id) { $ws_data .= $data; }
+            elsif (defined $get_stream_id && $sid == $get_stream_id) { $get_body .= $data; }
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.2,0.3');
+
+    # Never answer any ping. Disconnect is expected once ping (2 rounds) +
+    # timeout (3 rounds) = 5 rounds have elapsed. Ceiling: 50 rounds (5s) is
+    # a 10x margin over the expected 5 rounds (0.5s).
+    my $saw_disconnect = 0;
+    for (1 .. 50) {
+        exchange_frames($client, $client_sock, 1);
+        if (grep { $_->{type} eq 'websocket.disconnect' } @events) { $saw_disconnect = 1; last; }
+    }
+    ok($saw_disconnect, 'disconnect event delivered within the bounded window');
+
+    my @disconnects = grep { $_->{type} eq 'websocket.disconnect' } @events;
+    is(scalar @disconnects, 1, 'exactly one disconnect event');
+    if (@disconnects) {
+        is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
+        is($disconnects[0]{reason}, 'keepalive_timeout', "reason is 'keepalive_timeout'");
+    }
+
+    # Sibling: opened AFTER the ws stream's forced teardown, on the SAME h2
+    # connection -- proves the connection (and other streams on it) are
+    # unaffected by one stream's keepalive-timeout close.
+    open_get_stream_tracked($client, $client_sock, '/get', \$get_stream_id);
+    exchange_frames($client, $client_sock, 5);
+
+    is($get_headers{':status'}, '200', 'sibling GET stream still gets a response');
+    is($get_body, 'sibling-ok', 'sibling GET stream still gets its body');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Two concurrent WS streams, keepalive on stream A only -> stream B never
+# receives pings
+# ============================================================
+subtest 'keepalive on one stream does not leak pings to a sibling WS stream' => sub {
+    my @events_a;
+    my @events_b;
+    my $app = make_keepalive_router_app('/ws/a' => \@events_a, '/ws/b' => \@events_b);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my ($a_stream_id, $b_stream_id);
+    my $a_data = '';
+    my $b_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            if (defined $a_stream_id && $sid == $a_stream_id) { $a_data .= $data; }
+            elsif (defined $b_stream_id && $sid == $b_stream_id) { $b_data .= $data; }
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws/a', \$a_stream_id);
+    open_ws_stream_tracked($client, $client_sock, '/ws/b', \$b_stream_id);
+    # Interval only, no timeout: no dead-connection detection needed for A
+    # to stay alive, so the test never has to answer A's pongs.
+    start_keepalive_control($client, $client_sock, $a_stream_id, 'keepalive:0.2');
+
+    # Window: 25 rounds (2.5s) covers >= 2 of A's 0.2s intervals (4 rounds /
+    # 0.4s) with a ~6x margin.
+    my $a_saw_ping = 0;
+    for (1 .. 25) {
+        exchange_frames($client, $client_sock, 1);
+        if (ping_count($a_data) >= 1) { $a_saw_ping = 1; }
+    }
+    ok($a_saw_ping, 'stream A (keepalive enabled) received at least one ping');
+    is(ping_count($b_data), 0, 'stream B (no keepalive) received zero ping frames');
+    is(length($b_data), 0, 'stream B received no DATA at all (nothing else to send)');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# interval => 0 after starting stops further pings
+# ============================================================
+subtest 'interval => 0 stops further pings' => sub {
+    my @events;
+    my $app = make_keepalive_router_app('/ws' => \@events);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my $ws_stream_id;
+    my $ws_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $ws_data .= $data if defined $ws_stream_id && $sid == $ws_stream_id;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0.2');
+
+    # First ping expected at ~2 rounds; 50-round (5s) ceiling is a ~25x margin.
+    my $seen_first_ping = 0;
+    for (1 .. 50) {
+        exchange_frames($client, $client_sock, 1);
+        if (ping_count($ws_data) >= 1) { $seen_first_ping = 1; last; }
+    }
+    ok($seen_first_ping, 'saw the first ping before disabling keepalive');
+
+    # Disable keepalive; settle rounds let the server process the control
+    # message and stop the timer before establishing the "no more pings"
+    # baseline used below.
+    start_keepalive_control($client, $client_sock, $ws_stream_id, 'keepalive:0');
+    my $baseline = ping_count($ws_data);
+
+    # Window: 30 rounds (3s) covers >= 2 more 0.2s intervals (4 rounds /
+    # 0.4s) with a ~7x margin -- long enough that a still-running timer
+    # would have fired again.
+    for (1 .. 30) {
+        exchange_frames($client, $client_sock, 1);
+    }
+    is(ping_count($ws_data), $baseline, 'no further pings arrived after interval => 0');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
 # Peer Close(4321, "bye") -> exactly one disconnect, 4321/"bye"
 # ============================================================
 subtest 'peer Close(4321, "bye") delivers exactly one disconnect with the peer code/reason' => sub {
