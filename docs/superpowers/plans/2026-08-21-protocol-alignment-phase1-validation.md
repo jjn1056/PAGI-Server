@@ -980,6 +980,7 @@ Update the row in the same commit as the task (Global Constraints). "Tests" = re
 | 8. Lifespan | complete (review clean, 0 findings) | 5afe3ea | t/lifespan-send-validation.t new / 6 files 16 tests | task-8-report.md |
 | 9. Deprecation + docs | complete (review clean) | 5f59d80 | t40+t25 31/31; podchecker ×3 | task-9-report.md |
 | 10. Phase gate | complete (1 gate fix: sse fullflush) | 7496c10 | full suite 113 files / 630 tests PASS | /tmp/phase1-full-suite2.out; whitespace/POD/syntax clean; spec drift: none (a7ed9cc) |
+| Final review (opus, ae0a12e..0a2d907) | With fixes → fix wave clean | b628bad, 98ee9cc | 72 tests / 5 covering files PASS | final-fixwave re-review: all addressed, no new breakage. Deferred items triaged; Phase 2 carry-list in the phase summary |
 
 ## Deviations
 
