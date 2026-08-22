@@ -970,16 +970,16 @@ Update the row in the same commit as the task (Global Constraints). "Tests" = re
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. Primitive shapes | not started | — | — | — |
-| 2. Shared headers | not started | — | — | — |
-| 3. Registries + gating | not started | — | — | — |
-| 4. Sequence machines | not started | — | — | — |
-| 5. h1 HTTP wiring | not started | — | — | — |
-| 6. h1 SSE/WS wiring | not started | — | — | — |
-| 7. h2 wiring | not started | — | — | — |
-| 8. Lifespan | not started | — | — | — |
-| 9. Deprecation + docs | not started | — | — | — |
-| 10. Phase gate | not started | — | — | — |
+| 1. Primitive shapes | complete (review clean) | 3ca85d9 | 5 new subtests / t40 17/17 | /tmp/phase1-task1-pass.out |
+| 2. Shared headers | complete (1 fix round: POD) | 44bcd93, b3defc7 | 1 new subtest / t40+t15 25 tests | /tmp/phase1-task2-pass.out; podchecker OK |
+| 3. Registries + gating | complete (review clean) | f791698 | 3 new subtests / t40 21/21 | task-3-report.md; podchecker OK |
+| 4. Sequence machines | complete (1 fix round: fallback tests) | 0711f55, 46fac6d | 4 subtests, 64 assertions / t40 25/25 | /tmp/phase1-task4-fix1.out; full suite 349/349 at the time |
+| 5. h1 HTTP wiring | complete (2 fix rounds; opus review) | c379d51, b34788d | t/52 new / step-4 list 87/87; fix list 68/68 | /tmp/phase1-task5-fix2.out; review 46fac6d..b34788d |
+| 6. h1 SSE/WS wiring | complete (1 fix round: decline_complete) | 4cc414d, cc7385a | t/52 SSE+WS sections / 9-file list 63 tests | task-6-report.md fix round 1 |
+| 7. h2 wiring | complete (1 fix round: ws carve-out) | 9b38f45, 33bdb73 | t/http2/26 new / t/http2 138/138 | task-7-report.md fix round 1 |
+| 8. Lifespan | complete (review clean, 0 findings) | 5afe3ea | t/lifespan-send-validation.t new / 6 files 16 tests | task-8-report.md |
+| 9. Deprecation + docs | complete (review clean) | 5f59d80 | t40+t25 31/31; podchecker ×3 | task-9-report.md |
+| 10. Phase gate | complete (1 gate fix: sse fullflush) | 7496c10 | full suite 113 files / 630 tests PASS | /tmp/phase1-full-suite2.out; whitespace/POD/syntax clean; spec drift: none (a7ed9cc) |
 
 ## Deviations
 
