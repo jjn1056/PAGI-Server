@@ -258,6 +258,20 @@ subtest 'disconnect_future does not resolve on completion' => sub {
     ok(!$future->is_ready, 'disconnect_future remains pending after clean completion');
 };
 
+subtest 'disconnect_future requested after clean completion stays pending' => sub {
+    my $conn = PAGI::Server::ConnectionState->new;
+    $conn->_mark_complete;
+    my $f = $conn->disconnect_future;
+    ok( $f, 'future returned' );
+    ok( !$f->is_ready, 'deliberately left pending — completion is not a disconnect' );
+
+    my $conn2 = PAGI::Server::ConnectionState->new;
+    $conn2->_mark_disconnected('client_closed');
+    my $f2 = $conn2->disconnect_future;
+    ok( $f2->is_ready, 'after abnormal disconnect: already resolved' );
+    is( $f2->get, 'client_closed', 'carries the reason' );
+};
+
 subtest 'on_complete after already completed fires immediately' => sub {
     my $conn = PAGI::Server::ConnectionState->new();
     $conn->_mark_complete;

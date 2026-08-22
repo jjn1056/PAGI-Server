@@ -193,7 +193,22 @@ closes but this Future is deliberately left pending — use C<on_complete> to
 observe normal completion.
 
 The Future is created lazily on first call, avoiding allocation overhead
-for handlers that don't need async disconnect detection.
+for handlers that don't need async disconnect detection. Its behavior
+depends on which of the three connection states is current at call time:
+
+=over 4
+
+=item * B<connected> — a fresh, pending Future is returned; it resolves
+later if C<_mark_disconnected> occurs.
+
+=item * B<disconnected (abnormal)> — a Future already resolved with the
+disconnect reason is returned.
+
+=item * B<completed (clean)> — a Future is returned and left pending
+forever; the completion already happened and was not a disconnect, so
+there is nothing for it to resolve with.
+
+=back
 
 The Future resolves with the disconnect reason string.
 
@@ -221,8 +236,10 @@ sub disconnect_future {
         $self->{_future} = Future->new;
     }
 
-    # If already disconnected, resolve immediately
-    unless (${$self->{_connected}}) {
+    # Resolve immediately only for an ABNORMAL end. After a clean completion
+    # the connection is closed but this Future is deliberately left pending —
+    # completion is not a disconnect (on_complete is the completion signal).
+    if (!${$self->{_connected}} && !$self->{_completed}) {
         $self->{_future}->done(${$self->{_reason}});
     }
 
