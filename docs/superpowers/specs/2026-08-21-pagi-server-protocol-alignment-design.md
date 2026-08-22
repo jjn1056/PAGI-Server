@@ -56,6 +56,8 @@ Those changes remain part of this branch and final review.
 - **Role:** read-only authoritative contract
 - **Branch observed at the end of the audit:** `spec-clarifications`
 - **Commit observed at the end of the audit:** `4c4abf05d7b157ecbe8d81f36cc15befbc79e7ae`
+- **Current baseline after drift check:** `main` at `a7ed9cc` (merge of
+  `spec-clarifications`, five commits `84a85d7..8c43abb`)
 - **Owned changes:** none
 - **Deployment boundary:** none in this project
 - **Push target:** none
@@ -66,6 +68,37 @@ implementation begins, and again before final verification, the implementer
 must compare the relevant current PAGI clauses with this design. Contract drift
 is handled by updating this design or recording an explicit deviation; it is
 not resolved by editing PAGI from this project.
+
+### 2.3 Specification drift check (2026-08-21, after spec merge)
+
+The spec review completed and merged to PAGI `main` as `a7ed9cc` after this
+design's audit snapshot. Five clarifications landed; their disposition here:
+
+1. **`http.response.body` payload keys** (`84a85d7`): at most one of
+   `body`/`file`/`fh`; omitting all three means an empty body chunk. This
+   design already said "at most one" in section 7.1. No change.
+2. **HEAD response semantics** (`4c4abf0`): server suppresses the body on
+   every HTTP version; `Content-Length` passthrough; no chunked framing;
+   `file`/`fh` never opened or statted; trailers discarded. Section 8.2
+   already matches. No change.
+3. **Incomplete response after `more => 1`** (`bbf9c09`): NEW normative
+   section "Application Left a Response Incomplete". Forced abnormal
+   closure on both transports, never synthesized terminal framing,
+   `on_disconnect` with reason `server_error` (a standard token, not an
+   `x-` reason), never `on_complete`. This puts the HTTP/1 incomplete-
+   response path in scope (it previously kept "current backstop behavior")
+   and pins the HTTP/2 reason. Sections 9.3, 15.3, and 21 updated.
+4. **SSE detection** (`3cac188`): the substring Accept match is no longer
+   conforming. Detection is an exact `text/event-stream` media-range match
+   with `q > 0`; wildcards and `q=0` never signal SSE. Both server
+   detection sites use substring matching today. New section 11.5 and
+   tests in 15.5.
+5. **Lifespan modes** (`8c43abb`): strict mode (`on`) is sanctioned as
+   explicit operator configuration; a decline-tolerant `auto` remains the
+   required default; **an `off` switch is now expressly nonconforming**
+   ("A server must not offer an 'off' switch for this protocol"). This
+   reverses this design's earlier decision to keep `off` as a documented
+   override. Section 12 updated; `off` is removed in this project.
 
 ## 3. Evidence from the alignment audit
 
@@ -364,22 +397,48 @@ callbacks, Futures, response-started state, and reasons.
 
 ### 9.3 Application failure and incomplete responses
 
+A response is **incomplete** per PAGI's "Application Left a Response
+Incomplete" section when the application's Future resolves after response
+start but before the terminal event: the final body event with `more => 0`,
+a `file`/`fh` body, or — when start declared `trailers => 1` — the trailers
+event. The server must make truncation observable to the client and must
+never synthesize the missing terminal framing.
+
 For a still-connected HTTP/2 stream:
 
 - if the application fails or returns before response start, emit and log the
   server 500 backstop, end that stream, and mark the server response lifecycle;
 - if it fails after response start or returns with an incomplete response,
-  truncate/reset that stream without taking down sibling streams;
+  reset that stream (RST_STREAM, e.g. INTERNAL_ERROR) without signaling
+  END_STREAM and without taking down sibling streams;
 - pending producer waits and transport callbacks are released or cancelled;
-- the abnormal per-stream state uses a standard PAGI reason where applicable,
-  or an `x-`-prefixed server reason when no standard token describes an
-  application failure.
+- the incomplete-response and post-start-failure paths report
+  `on_disconnect` with the standard reason `server_error` and never fire
+  `on_complete`; other abnormal per-stream states use the applicable
+  standard PAGI reason, or an `x-`-prefixed server reason when no standard
+  token fits.
 
 If the client already cancelled the stream, do not log an application error
-and do not synthesize a 500. Treat later sends as no-ops.
+and do not synthesize a 500. Treat later sends as no-ops. Per the same spec
+section, a client that disconnected before the application's Future resolved
+means no incomplete-response error is logged.
 
-HTTP/1 keeps its current backstop behavior and is covered by parity tests for
-the same connected/disconnected distinction.
+HTTP/1 is equally in scope: its current behavior on an incomplete response
+is nonconforming. Today the keep-alive decision ignores whether the body
+framing finished, so a chunked response with no terminator can be kept
+alive and even serve a pipelined request, and `_mark_complete` fires
+`on_complete` unconditionally when the application returns. After this
+project, an HTTP/1 incomplete response:
+
+- closes the connection without writing the chunked terminator (or, for a
+  `Content-Length`-framed response, before the declared length), so the
+  client observes truncation;
+- never keeps the connection alive or serves a pipelined request;
+- fires `on_disconnect` with reason `server_error`, never `on_complete`;
+- logs at error level unless the client had already disconnected.
+
+Both transports remain covered by parity tests for the same
+connected/disconnected distinction.
 
 ## 10. HTTP/2 WebSocket alignment
 
@@ -468,6 +527,26 @@ corresponding header, except for connection/framing headers the protocol
 requires the server to control. HTTP/2 never emits HTTP/1-only Connection or
 chunked-framing headers.
 
+### 11.5 SSE detection
+
+Both detection sites use raw substring matching today (the HTTP/1 header
+scan and the HTTP/2 request dispatch), which classifies an explicit refusal
+(`Accept: text/event-stream;q=0`) as an SSE request and false-positives on
+any token containing the substring. PAGI now defines detection as a boolean
+client-signal check:
+
+- combine the values of all `Accept` headers and parse the result as a
+  comma-separated list of media ranges (RFC 9110 section 12.5.1);
+- assign the `sse` scope iff the exact range `text/event-stream` appears,
+  case-insensitively, with an effective quality value greater than zero;
+- `q=0` is an explicit refusal and never signals SSE;
+- wildcard ranges (`*/*`, `text/*`) never signal SSE;
+- media-type parameters other than `q` are ignored for the test.
+
+This is a light parse shared by both transports — not full content
+negotiation, which stays application/middleware territory. The
+WebSocket-upgrade precedence check is unchanged.
+
 ## 12. Lifespan and worker alignment
 
 The lifespan send function uses the shared base validation rules. Unknown
@@ -484,9 +563,17 @@ The mandatory validator itself is unconditional and therefore needs no worker
 toggle. Each worker still runs its own lifespan exchange and receives its own
 worker metadata as required by the existing implementation.
 
-`lifespan_mode => off` remains an explicit operator override. Its
-non-conforming effect is documented honestly rather than hidden, but changing
-or removing that option is outside this project.
+**`lifespan_mode => 'off'` is removed.** PAGI's Lifespan spec now states
+that skipping the protocol is nonconforming ("A server must not offer an
+'off' switch for this protocol"), reversing this design's earlier decision
+to keep it as a documented override. The constructor and `set_app_config`
+reject `'off'` with the same die-on-invalid-value behavior as any other
+unrecognized mode, and `pagi-server --lifespan off` fails at startup with a
+message pointing at the spec rationale. The remaining modes are `auto`
+(decline-tolerant, the required default) and `on` (strict: a decline is a
+fatal startup failure), both of which the existing implementation already
+handles. This is a breaking change recorded in `Changes` and the upgrading
+note.
 
 ## 13. Server-supplied headers and advertised capabilities
 
@@ -589,6 +676,15 @@ Test:
 Tests must assert that a cancelled stream causes neither a synthetic 500 nor an
 application-error log.
 
+Incomplete-response tests run on both transports and assert the full
+contract: HTTP/1 closes without the chunked terminator and never keeps the
+connection alive or serves a pipelined request; HTTP/2 resets only the
+affected stream with no END_STREAM; both fire `on_disconnect` with
+`server_error`, never `on_complete`; both log at error level unless the
+client already disconnected; and a promised-but-unsent trailers event
+(`trailers => 1` declared, terminal body sent, no trailers event) also
+counts as incomplete.
+
 ### 15.4 WebSocket over HTTP/2
 
 Test:
@@ -615,7 +711,13 @@ Test:
 - invalid newline/retry and encoding failures;
 - two concurrent H2 SSE streams with different keepalive text and intervals;
 - closing one stream without affecting the other;
-- start/decline first-send-wins behavior on both HTTP versions.
+- start/decline first-send-wins behavior on both HTTP versions;
+- detection on both transports: exact `text/event-stream` (with and without
+  parameters, mixed case) classifies as `sse`; `text/event-stream;q=0`,
+  `*/*`, `text/*`, and substring near-misses (e.g. a longer token
+  containing the substring) classify as `http`; repeated `Accept` headers
+  combine; a matching range alongside higher-q alternatives still
+  classifies as `sse`.
 
 ### 15.6 Lifespan, workers, headers, and extensions
 
@@ -623,6 +725,8 @@ Test:
 
 - unknown and wrong-phase lifespan events;
 - lifespan configuration propagation into a real or controlled worker seam;
+- `lifespan_mode => 'off'` rejected by the constructor, `set_app_config`,
+  and `pagi-server --lifespan off`;
 - Date preservation without server duplication across relevant response paths;
 - extension advertisement matching each transport's accepted events.
 
@@ -658,7 +762,9 @@ Documentation must distinguish:
 
 - PAGI MUST behavior now enforced;
 - optional capabilities still omitted, such as `response_complete`;
-- explicit operator overrides such as `lifespan_mode => off`;
+- the explicit operator strict mode `lifespan_mode => 'on'` and the removal
+  of `'off'` (with the upgrading note naming the replacement: applications
+  that do not use lifespan simply decline);
 - known performance characteristics of application-owned filehandles;
 - the separate future generic conformance-suite project.
 
@@ -670,6 +776,16 @@ The meaningful compatibility change is stricter failure of invalid
 applications. Examples include missing HTTP status, misspelled event type,
 invalid integer text, response body before response start, or an SSE stream
 event after decline began. These used to be defaulted or ignored on some paths.
+
+Two further deliberate behavior changes, both spec-driven:
+
+- `lifespan_mode => 'off'` is removed (see section 12); deployments using it
+  must drop the option — an application that does not use lifespan declines
+  at effectively no cost.
+- SSE detection tightens (see section 11.5): requests whose `Accept` only
+  matched by substring or wildcard now receive an `http` scope. Real SSE
+  clients (`EventSource`, `fetch-event-source`) send the exact media type
+  and are unaffected.
 
 Valid applications retain the same API. HTTP/2 clients gain missing behavior;
 they should not observe a semantic regression. Per-stream resets replace
@@ -764,11 +880,14 @@ One implementation plan should execute these phases on the existing branch:
 
 1. Mandatory shared event validation and protocol state checks.
 2. HTTP/2 HTTP parity: HEAD, file/fh, trailers, fullflush, and body completion.
-3. HTTP/2 connection lifecycle, connection state, and error handling.
+3. Connection lifecycle, connection state, and error handling: HTTP/2
+   per-stream state plus the HTTP/1 incomplete-response fix (both
+   transports share the section 9.3 contract).
 4. HTTP/2 WebSocket validation, keepalive, and disconnect semantics.
-5. SSE request bodies, UTF-8, and HTTP/2 per-stream timers/state.
-6. Lifespan worker propagation, Date, extension truthfulness, and remaining
-   connection-state consistency.
+5. SSE request bodies, UTF-8, detection (media-range parse on both
+   transports), and HTTP/2 per-stream timers/state.
+6. Lifespan worker propagation and `off` removal, Date, extension
+   truthfulness, and remaining connection-state consistency.
 7. Documentation, drift audit, optional TLS verification, and final suite.
 
 Each phase should produce one or more narrow commits with its tests. The final
@@ -787,13 +906,18 @@ The project is complete when:
    once.
 5. HTTP/2 WebSocket keepalive and disconnect behavior is per-stream and
    spec-correct.
-6. SSE request bodies and UTF-8 output are correct on HTTP/1 and HTTP/2, and
+6. SSE request bodies and UTF-8 output are correct on HTTP/1 and HTTP/2,
+   detection follows the media-range rule on both transports, and
    concurrent H2 streams cannot affect one another.
-7. Lifespan events validate and worker configuration is preserved.
-8. Built-in advertised capabilities are truthful and Date is not duplicated.
-9. The final local PAGI drift check finds no unaddressed material change.
-10. Focused tests, the complete suite, syntax/POD checks, and diff checks pass;
+7. Lifespan events validate, worker configuration is preserved, and
+   `lifespan_mode => 'off'` is rejected everywhere it could be supplied.
+8. An incomplete response is observably truncated on both transports,
+   fires `on_disconnect` with `server_error`, and never fires
+   `on_complete` or reuses the HTTP/1 connection.
+9. Built-in advertised capabilities are truthful and Date is not duplicated.
+10. The final local PAGI drift check finds no unaddressed material change.
+11. Focused tests, the complete suite, syntax/POD checks, and diff checks pass;
     TLS verification either passes or remains an explicit release blocker.
-11. Compliance and upgrading documentation describe the resulting behavior.
-12. The branch contains only owned PAGI::Server changes and is ready for one
+12. Compliance and upgrading documentation describe the resulting behavior.
+13. The branch contains only owned PAGI::Server changes and is ready for one
     user review and one pull request.
