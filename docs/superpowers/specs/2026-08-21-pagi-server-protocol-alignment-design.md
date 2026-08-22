@@ -50,6 +50,16 @@ The branch already contains:
 
 Those changes remain part of this branch and final review.
 
+**Coordination with `perf/http-serving-25`:** a separate in-flight
+performance branch (checked out in the primary PAGI-Server working
+directory) rewrites the HTTP/1 send dispatcher and hot paths this project
+also touches. Decision (John, 2026-08-21): the perf branch has its own
+issues and is handled separately; this alignment project stays based on
+`main` (`b2290dd`) and does NOT rebase onto or read from the perf branch.
+The alignment work merges first; the perf branch then merges/rebases on top
+of the combined result. All code references in this design and its plans
+are against the `main`-based worktree, not the perf branch.
+
 ### 2.2 PAGI specification repository
 
 - **Repository:** `/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI`
