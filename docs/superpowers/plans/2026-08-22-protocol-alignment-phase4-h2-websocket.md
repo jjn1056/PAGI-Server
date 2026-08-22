@@ -88,6 +88,19 @@ sub _h2_ws_enqueue_disconnect {
 
 ---
 
+### Task 2b: h2 warns on server-caused abnormal ends (log-parity, ratified fix-now)
+
+**Files:** Modify `lib/PAGI/Server/Connection.pm` (`_h2_dispatch_stream` wrapper); extend `t/http2/24-incomplete-response.t`.
+
+**Interfaces:**
+- Consumes: the wrapper's `$client_gone` carve-out (C1 shape: `$cs ? defined($cs->disconnect_reason) : ...`).
+- Produces: the carve-out distinguishes WHO caused the abnormal end — a recorded reason of `server_error` means the client did not go anywhere, so the incomplete/threw warns still fire; client-side reasons (`client_closed`, timeouts) stay silent. Per the PAGI spec's incomplete-response section, the log carve-out is only for "the client had already disconnected."
+- RED: h2 app declares `trailers => 1`, sends terminal body (server END_STREAMs early — the Phase-2b gap), returns; today: reason `server_error` (correct) but NO warning. Assert exactly one "PAGI application returned with an incomplete response (HTTP/2 stream ...)" warning; client wire behavior unchanged (200 + full body); no double-warn on the plain `/incomplete` path (already-warned case must not regress to two).
+
+- [ ] Step 1 RED (tee `/tmp/phase4-task2b-fail.out`, read); Step 2 implement; Step 3 GREEN + neighbors: `prove -l t/http2/24-incomplete-response.t t/http2/30-connection-state.t t/http2/12-error-handling.t` (tee `/tmp/phase4-task2b-pass.out`, read). Step 4 commit: `fix(h2): warn on server-caused abnormal ends per the spec's log rule`
+
+---
+
 ### Task 3: Documentation
 
 **Files:** `Changes`, `lib/PAGI/Server/Compliance.pod`.
@@ -109,6 +122,7 @@ sub _h2_ws_enqueue_disconnect {
 |------|--------|--------|-----------------------|-----------------------|
 | 1. Exactly-one disconnect | not started | — | — | — |
 | 2. Per-stream keepalive | not started | — | — | — |
+| 2b. Server-caused-end log parity | not started | — | — | — |
 | 3. Docs | not started | — | — | — |
 | 4. Phase gate | not started | — | — | — |
 

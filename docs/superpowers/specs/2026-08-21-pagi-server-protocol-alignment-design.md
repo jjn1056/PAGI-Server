@@ -72,6 +72,16 @@ are against the `main`-based worktree, not the perf branch.
   trailers framing rule (reject on Content-Length-framed responses, never
   drop) — ratified by John after the server-side fix landed (commit
   09a06ab); the server already conforms, no work created.
+- **Baseline bump (2026-08-22, second):** `main` at `f04c029` adds the
+  post-completion-exception rule (delivery defines completion: on_complete
+  fires, reason stays undef, SHOULD log, MAY close) — ratified by John on
+  ASGI evidence (spec silent; Uvicorn logs-only and keeps the connection).
+  Work created: h1 currently fires on_disconnect('server_error') for this
+  case (final-review I4) — alignment scheduled in phase 6. Also decided:
+  the h2 server-caused-abnormal-end logging gap is fixed in phase 4, and
+  the 413 path gains _mark_disconnected('body_too_large') + receive wake
+  in phase 6 (the spec's standard-reason table already provides the token;
+  ratified as consistent with RFC 9110 15.5.14 practice).
 - **Owned changes:** none
 - **Deployment boundary:** none in this project
 - **Push target:** none
@@ -953,7 +963,10 @@ One implementation plan should execute these phases on the existing branch:
    transports), HTTP/1.1 keep-alive after clean stream end (section 11.6),
    and HTTP/2 per-stream timers/state.
 6. Lifespan worker propagation and `off` removal, Date, extension
-   truthfulness, and remaining connection-state consistency.
+   truthfulness, and remaining connection-state consistency — including
+   (ratified 2026-08-22) h1 post-completion-exception alignment to the
+   spec's delivery-defines-completion rule, and the h2 413 path marking
+   `body_too_large` and waking the pending receive.
 7. Documentation, drift audit, optional TLS verification, and final suite.
 
 Each phase should produce one or more narrow commits with its tests. The final
