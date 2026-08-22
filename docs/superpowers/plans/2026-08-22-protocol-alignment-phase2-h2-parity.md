@@ -398,7 +398,7 @@ git commit -m "test(h2): client reset during file transfer is quiet and leak-fre
 
 **Interfaces:**
 - Consumes: the closure's existing `$chunked` var (set in the start branch) and `$is_head` equivalent (`$request->{method} eq 'HEAD'` check used by the h1 HEAD path).
-- Produces: ordering in the h1 closure for `http.response.trailers`: HEAD-discard first (accept + advance + discard, PAGI HEAD rule), then a pre-advance framing check `die "http.response.trailers requires chunked framing (response declared content-length)\n"` when `!$chunked`, then the existing chunked trailers write. The silent `return unless $chunked;` is REMOVED. The machine never records `complete` for trailers that never went out (the die fires before `advance_http` for the non-chunked case — same stub-before-advance pattern as h2).
+- Produces: ordering in the h1 closure for `http.response.trailers`: HEAD-discard first (accept + advance + discard, PAGI HEAD rule), then the framing check `die "http.response.trailers requires chunked framing (response declared content-length)\n"` when `!$chunked`, then the existing chunked trailers write. The silent `return unless $chunked;` is REMOVED. The machine never records `complete` for trailers that never went out — implemented per **Deviation D1** as advance-then-rollback (h1 has one hoisted `advance_http` call site; `advance_http` is pure, and `$seq` is restored before the die propagates, with no await in between), not the h2 stub-before-advance shape originally written here.
 
 - [ ] **Step 1: Write the failing tests** — `t/53-trailers-framing.t` (h1 server, Net::Async::HTTP client, t/52 idioms):
 
@@ -503,4 +503,4 @@ git commit -m "docs: record h2 parity gains and the trailers dependency gate"
 
 ## Deviations
 
-None recorded. A deviation gets an ID, a rationale, and John's sign-off here BEFORE work builds on it.
+- **D1 (Task 6, commit 09a06ab)** — h1 non-chunked trailers rejection uses advance-then-rollback instead of the plan's "die before advance". Rationale: h1 has a single hoisted `advance_http` call site (Phase 1 architecture); a literal pre-advance die would require restructuring the closure. Equivalence: `advance_http` is a pure function (no side effects beyond its return value — pinned by a code comment), `$seq` is restored before the die propagates, and no await sits between advance and rollback, so the binding requirement — the machine never records completion for undelivered trailers — holds; reviewer-traced in both the task review and the final whole-phase review. Controller-ruled 2026-08-22; **awaiting John's sign-off** (surfaced in the Phase 2 summary).
