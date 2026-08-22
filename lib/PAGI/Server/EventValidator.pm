@@ -59,13 +59,16 @@ sub validate_headers {
 }
 
 # =============================================================================
-# PAGI::Server::EventValidator - Dev-mode event field validation
+# PAGI::Server::EventValidator - Mandatory outgoing-event validation
 #
 # Per main.mkdn: Servers must raise exceptions if events are missing required
-# fields or event fields are of the wrong type.
+# fields, event fields are of the wrong type, the type is unrecognized, or
+# events arrive out of sequence.
 #
-# This module provides optional validation for PAGI events. Enable in dev mode
-# for early bug detection; disable in production for zero overhead.
+# This module is the shared authority for both event shape and send-sequence
+# validation. Every send path in PAGI::Server::Connection and the lifespan
+# send path in PAGI::Server call it unconditionally, in every environment;
+# there is no way to disable it.
 # =============================================================================
 
 # =============================================================================
@@ -549,20 +552,25 @@ __END__
 
 =head1 NAME
 
-PAGI::Server::EventValidator - Dev-mode event field validation
+PAGI::Server::EventValidator - Mandatory outgoing-event validation
 
 =head1 SYNOPSIS
 
-    # Enable in PAGI::Server
-    my $server = PAGI::Server->new(
-        app => $app,
-        validate_events => 1,  # Enable validation
-    );
+    use PAGI::Server::EventValidator;
+
+    # Shape validation (per protocol family)
+    PAGI::Server::EventValidator::validate_http_send($event, \%opts);
+
+    # Send-sequence validation (pure state-transition functions)
+    my $next_state = PAGI::Server::EventValidator::advance_http($state, $event);
 
 =head1 DESCRIPTION
 
-This module provides optional validation for PAGI events. When enabled,
-it validates that:
+This module is the shared, mandatory validator for every event a PAGI
+application sends to the server. C<PAGI::Server::Connection> calls it on
+every send path (HTTP/1, HTTP/2, WebSocket, SSE) and C<PAGI::Server> calls
+it on the lifespan send path; validation cannot be disabled and runs in
+every environment, including production. It checks that:
 
 =over 4
 
@@ -572,10 +580,18 @@ it validates that:
 
 =item * Mutually exclusive fields are handled properly
 
+=item * The event type is recognized (and, for extension-gated types, the
+extension is enabled)
+
+=item * Events arrive in a legal order for their protocol family (see the
+C<advance_*> functions)
+
 =back
 
-Enable this in development to catch bugs early. Disable in production
-for zero overhead.
+A malformed, mis-sequenced, unrecognized, or unadvertised-extension event
+causes the corresponding C<$send> Future to fail; see
+L<PAGI::Server::Connection> for how these functions are wired into each
+send path.
 
 =head1 FUNCTIONS
 

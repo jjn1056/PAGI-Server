@@ -120,7 +120,7 @@ sub new {
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (default 64KB)
-        validate_events => $args{validate_events} // 0,  # Dev-mode event validation (0 = disabled)
+        validate_events => $args{validate_events} // 0,  # Deprecated: core event validation is mandatory; this flag is retained for compatibility and controls nothing.
         # Send-side backpressure (watermarks in bytes)
         # Defaults match Python asyncio: 64KB high, 16KB low (high/4)
         write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this

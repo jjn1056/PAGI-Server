@@ -1573,13 +1573,10 @@ B<CLI:> C<--shutdown-timeout 30>
 
 =item validate_events => $bool
 
-Enable runtime validation of outbound events your application sends (HTTP,
-WebSocket, and SSE), catching malformed event structures with a clear error
-instead of undefined behavior. Default: off, but B<auto-enabled> when the
-environment is development (C<< $ENV{PAGI_ENV} eq 'development' >>, which
-C<pagi-server -E development> sets). Pass an explicit value to override the
-auto-detection. Intended for development; leave off in production to avoid
-the per-event overhead.
+B<Deprecated, no-op.> Outbound event validation (shape and send sequencing,
+per the PAGI spec) is always performed on every send path, in every
+environment; there is no way to disable it. This option is accepted for
+backward compatibility, is ignored, and will be removed in a future release.
 
 =item loop_type => $backend
 
@@ -2329,7 +2326,7 @@ sub _init {
         die "Invalid loop_type '$lt': must contain only letters, digits, and ::\n"
             unless $lt =~ /\A[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)*\z/;
     }
-    # Dev-mode event validation: explicit flag, or auto-enable in development mode
+    # Deprecated: core event validation is mandatory; this flag is retained for compatibility and controls nothing.
     $self->{validate_events}     = delete $params->{validate_events}
         // (($ENV{PAGI_ENV} // '') eq 'development' ? 1 : 0);
 

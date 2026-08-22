@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 
 # =============================================================================
-# Test: PAGI::Server::EventValidator - Dev-mode event validation
+# Test: PAGI::Server::EventValidator - Mandatory event validation
 #
 # Per main.mkdn: Servers must raise exceptions if events are missing required
 # fields or event fields are of the wrong type.
@@ -283,68 +283,19 @@ subtest 'sse.keepalive validation' => sub {
 };
 
 # =============================================================================
-# Server Integration Test (source inspection)
+# Server Integration Test (behavioral)
 # =============================================================================
 
-subtest 'server has validation hooks' => sub {
-    my $source = do {
-        open my $fh, '<', 'lib/PAGI/Server/Connection.pm' or die "Cannot read: $!";
-        local $/;
-        <$fh>;
-    };
-
-    # Verify validate_events flag in constructor
-    like(
-        $source,
-        qr/validate_events\s*=>\s*\$args\{validate_events\}/,
-        'validate_events in Connection constructor'
-    );
-
-    # Verify validation calls in send handlers (HTTP, SSE, H2 SSE, WebSocket)
-    my @validation_calls = $source =~ /EventValidator::validate_/g;
-    is(scalar @validation_calls, 4, 'four validation calls (HTTP, SSE, H2 SSE, WebSocket)');
-
-    # Verify conditional on validate_events
-    like(
-        $source,
-        qr/if \(\$weak_self->\{validate_events\}\)/,
-        'validation is conditional on flag'
-    );
-};
-
-subtest 'PAGI::Server exposes validate_events option' => sub {
-    my $source = do {
-        open my $fh, '<', 'lib/PAGI/Server.pm' or die "Cannot read: $!";
-        local $/;
-        <$fh>;
-    };
-
-    like(
-        $source,
-        qr/\{validate_events\}\s*=\s*delete \$params->\{validate_events\}/,
-        'validate_events in Server _init'
-    );
-
-    like(
-        $source,
-        qr/validate_events\s*=>\s*\$self->\{validate_events\}/,
-        'validate_events passed to Connection'
-    );
-};
-
-subtest 'PAGI::Server auto-enables validate_events via PAGI_ENV' => sub {
-    my $source = do {
-        open my $fh, '<', 'lib/PAGI/Server.pm' or die "Cannot read: $!";
-        local $/;
-        <$fh>;
-    };
-
-    # Check that validate_events checks PAGI_ENV
-    like(
-        $source,
-        qr/PAGI_ENV.*development/s,
-        'validate_events checks PAGI_ENV for development mode'
-    );
+subtest 'validate_events is a deprecated no-op' => sub {
+    # Core validation is unconditional: t/52-mandatory-validation.t and
+    # t/http2/26-mandatory-validation.t construct servers with
+    # validate_events => 0 and prove malformed sends still fail.
+    # Here: the option is still accepted for compatibility.
+    require PAGI::Server;
+    ok( lives { PAGI::Server->new(app => sub {}, quiet => 1, validate_events => 0) },
+        'validate_events => 0 accepted' );
+    ok( lives { PAGI::Server->new(app => sub {}, quiet => 1, validate_events => 1) },
+        'validate_events => 1 accepted' );
 };
 
 # =============================================================================

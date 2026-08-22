@@ -19,6 +19,16 @@
     read, instead of treating a read error as EOF. Applications may now safely
     close a file resource only after the corresponding send Future resolves.
 
+  Specification Alignment
+  - PAGI outgoing-event validation is now mandatory on every send path
+    (HTTP/1, HTTP/2, WebSocket, SSE, lifespan): malformed, mis-sequenced,
+    unknown, and unadvertised-extension events fail the $send Future in
+    all environments. validate_events is deprecated and ignored.
+  - Send sequencing is enforced per scope: events before response start,
+    duplicate starts, bodies after completion, undeclared trailers, and
+    wrong-phase lifespan results now fail instead of being silently
+    ignored or defaulted.
+
 0.002006 - 2026-07-04
 
   Bug Fixes
