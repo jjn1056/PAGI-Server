@@ -21,6 +21,23 @@
     duplicate starts, bodies after completion, undeclared trailers, and
     wrong-phase lifespan results now fail instead of being silently
     ignored or defaulted.
+  - HTTP/2 HEAD requests now suppress the response body like HTTP/1: the app
+    responds exactly as it would to GET, but DATA frames are never sent,
+    file/fh bodies are never opened, and trailers are accepted and discarded
+    rather than transmitted.
+  - HTTP/2 http.response.body events now stream file and filehandle bodies
+    through the per-stream send queue, under the same per-stream backpressure
+    watermark as chunked bodies. Filehandles remain application-owned: the
+    server never closes them, and a read failure fails the send Future
+    without treating it as EOF, matching HTTP/1.
+  - http.fullflush now flushes pending output on HTTP/2 HTTP and SSE streams
+    (previously HTTP/1.1 HTTP and SSE only), so an application advertising
+    the fullflush extension gets working flush semantics on every scope PAGI
+    offers it on.
+  - HTTP/2 trailers remain unimplemented: http.response.trailers still fails
+    the send Future ("not yet implemented on HTTP/2") pending a
+    Net::HTTP2::nghttp2 release adding a submit_trailer binding, tracked as
+    Phase 2b.
 
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
@@ -29,6 +46,9 @@
   - The HTTP/1 SSE decline response now sends Connection: close explicitly, so
     pooled clients do not attempt to reuse a socket the server has already
     closed.
+  - http.response.trailers on an HTTP/1 response declared with Content-Length
+    (not chunked) now fails the send Future ("requires chunked framing")
+    instead of silently vanishing; trailers ride chunked framing only.
 
 0.002006 - 2026-07-04
 

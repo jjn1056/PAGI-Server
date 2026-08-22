@@ -215,6 +215,14 @@ Zero failures across 60,000 total requests under concurrent load.
 =item * Server SETTINGS: configurable max_concurrent_streams, initial_window_size,
 max_frame_size, max_header_list_size
 
+=item * HEAD request body suppression, matching HTTP/1.1: DATA frames are
+withheld and file/fh bodies are never opened
+
+=item * File and filehandle body streaming through the per-stream send queue,
+under the same per-stream backpressure watermark as chunked bodies
+
+=item * C<http.fullflush> on HTTP and SSE streams
+
 =back
 
 =head2 Transport Flow Control (pagi.transport)
@@ -245,6 +253,24 @@ normally.
 The long-term goal is parity: C<pagi.transport> for every streaming scope type
 over every transport, so an application need not know whether it runs over
 HTTP/1.1 or HTTP/2.
+
+=head2 Known Limitations
+
+=over 4
+
+=item * B<Trailers (C<http.response.trailers>)>
+
+Not yet implemented over HTTP/2. The installed L<Net::HTTP2::nghttp2>
+exposes no trailer API, so C<http.response.trailers> fails the send Future
+with C<"http.response.trailers is not yet implemented on HTTP/2"> instead of
+transmitting anything -- an application declaring C<trailers =E<gt> 1> and
+sending trailers over HTTP/2 sees that failure where HTTP/1.1 would succeed.
+On a HEAD request the event is accepted and discarded rather than failing,
+since HEAD sends no body and nothing needs to reach the wire. Full support
+is gated on a L<Net::HTTP2::nghttp2> release adding an
+C<nghttp2_submit_trailer()> binding.
+
+=back
 
 =head2 Enabling HTTP/2
 
