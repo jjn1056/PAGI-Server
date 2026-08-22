@@ -16,6 +16,9 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # callbacks from outside the app closure (mirrors t/53's cross-scope pattern).
 package Inc;
 our ($REASON, $COMPLETED, $CL_REASON, $CL_COMPLETED, $OK_COMPLETED);
+our ($THROW_REASON, $THROW_COMPLETED);
+our ($CANCEL_REASON, $CANCEL_COMPLETED, $CANCEL_WAITING, $CANCEL_RETURNED);
+our ($TR_REASON, $TR_COMPLETED, $TR_SENT);
 package main;
 
 # An http app that, for /none, RETURNS without ever sending a response. The
@@ -32,13 +35,50 @@ my $app = async sub {
     my ($scope, $receive, $send) = @_;
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
+    my $path = $scope->{path} // '/';
+
+    # /cancel-before-start registers its callbacks and raises its flag BEFORE
+    # the body loop below, because the whole point is that the client closes
+    # while the app is still parked in that loop.
+    if ($path eq '/cancel-before-start') {
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $Inc::CANCEL_REASON = $_[0] });
+        $conn->on_complete(sub { $Inc::CANCEL_COMPLETED = 1 });
+        $Inc::CANCEL_WAITING = 1;
+    }
+
     while (1) {
         my $e = await $receive->();
         last if $e->{type} ne 'http.request';
         last unless $e->{more};
     }
 
-    my $path = $scope->{path} // '/';
+    if ($path eq '/cancel-before-start') {
+        $Inc::CANCEL_RETURNED = 1;
+        return;   # no response ever started -- the client is already gone
+    }
+
+    if ($path eq '/throw-none') {
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $Inc::THROW_REASON = $_[0] });
+        $conn->on_complete(sub { $Inc::THROW_COMPLETED = 1 });
+        die "boom before start\n";
+    }
+
+    if ($path eq '/trailers-promised') {
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $Inc::TR_REASON = $_[0] });
+        $conn->on_complete(sub { $Inc::TR_COMPLETED = 1 });
+        # No content-length => chunked framing. Declaring trailers defers the
+        # chunked terminator to the trailers write, so returning without the
+        # trailers event leaves the body unterminated on the wire.
+        await $send->({ type => 'http.response.start', status => 200,
+                         trailers => 1,
+                         headers  => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'promised', more => 0 });
+        $Inc::TR_SENT = 1;
+        return;   # the promised trailers event never comes
+    }
 
     return if $path eq '/none';
 
@@ -225,6 +265,144 @@ subtest '/half-cl: content-length response left short forces abnormal closure' =
 
     is($Inc::CL_REASON, 'server_error', '/half-cl: on_disconnect fired with server_error');
     ok(!$Inc::CL_COMPLETED, '/half-cl: on_complete never fired');
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+subtest '/throw-none: app failure before start yields 500 and server_error' => sub {
+    my $loop = IO::Async::Loop->new;
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    $loop->add($server);
+    $server->listen->get;
+
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+
+    my $resp = eval { $http->GET('http://127.0.0.1:' . $server->port . '/throw-none')->get };
+    ok($resp, 'got an HTTP response (server did not just drop the connection)')
+        or diag("GET /throw-none failed: $@");
+    is($resp->code, 500, 'an app failure before start is turned into a 500') if $resp;
+
+    ok((scalar grep { /PAGI application error: boom before start/ } @warnings),
+        'the application error is logged') or diag("warnings: @warnings");
+
+    $loop->loop_once(0.1) for 1..3;
+
+    is($Inc::THROW_REASON, 'server_error',
+        '/throw-none: on_disconnect fired with server_error');
+    ok(!$Inc::THROW_COMPLETED, '/throw-none: on_complete never fired');
+
+    $server->shutdown->get;
+    $loop->remove($http);
+    $loop->remove($server);
+};
+
+# Spec carve-out: when the client is already gone, an app that returns
+# without a response is not a protocol error to report -- there is nobody to
+# send a 500 to and nothing to log. The h2 twin lives in
+# t/http2/30-connection-state.t.
+subtest '/cancel-before-start: client gone before start synthesizes nothing' => sub {
+    my $loop = IO::Async::Loop->new;
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    ) or die "connect failed: $!";
+
+    # Announce a body and never send it: the app parks in its receive loop
+    # with no response started.
+    print $sock "POST /cancel-before-start HTTP/1.1\r\n";
+    print $sock "Host: 127.0.0.1:$port\r\n";
+    print $sock "Content-Length: 10\r\n";
+    print $sock "\r\n";
+
+    for (1 .. 100) {
+        last if $Inc::CANCEL_WAITING;
+        $loop->loop_once(0.05);
+    }
+    ok($Inc::CANCEL_WAITING, 'app is parked in receive() with no response started');
+
+    # Half-close: the server sees the client go away, but this side can still
+    # read, so a synthesized 500 would be observable if one were sent.
+    shutdown($sock, 1) or die "shutdown: $!";
+
+    my $response = $read_until_eof->($loop, $sock);
+
+    ok($Inc::CANCEL_RETURNED, 'app returned after the client went away');
+    is($response, '', 'no 500 (no bytes at all) was sent to the departed client');
+    ok(!(scalar grep { /without starting a response/i } @warnings),
+        'no incomplete-response warning for a client that already disconnected')
+        or diag("warnings: @warnings");
+
+    is($Inc::CANCEL_REASON, 'client_closed',
+        '/cancel-before-start: on_disconnect fired with client_closed');
+    ok(!$Inc::CANCEL_COMPLETED, '/cancel-before-start: on_complete never fired');
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# Design section 15.3: a promised-but-unsent trailers event counts as an
+# incomplete response. On h1 the declared trailers defer the chunked
+# terminator to the trailers write, so the truncation is visible on the wire.
+# The h2 twin is t/http2/24-incomplete-response.t's /promised-trailers.
+subtest '/trailers-promised: declared trailers never sent is an incomplete response' => sub {
+    my $loop = IO::Async::Loop->new;
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    ) or die "connect failed: $!";
+
+    print $sock "GET /trailers-promised HTTP/1.1\r\n";
+    print $sock "Host: 127.0.0.1:$port\r\n";
+    print $sock "\r\n";
+
+    my $response = $read_until_eof->($loop, $sock);
+
+    ok($Inc::TR_SENT, 'app sent the terminal body and returned');
+    like($response, qr/^HTTP\/1\.1 200/, '/trailers-promised: status line 200');
+    like($response, qr/Transfer-Encoding:\s*chunked/i, '/trailers-promised: chunked framing');
+    like($response, qr/\r\n\r\n8\r\npromised\r\n\z/,
+        '/trailers-promised: ends with the body chunk -- no terminator, no trailer section');
+    unlike($response, qr/0\r\n\r\n\z/,
+        '/trailers-promised: no chunked terminator was synthesized');
+
+    ok((scalar grep { /returned with an incomplete response/i } @warnings),
+        'the incomplete response is logged') or diag("warnings: @warnings");
+
+    $loop->loop_once(0.1) for 1..3;
+
+    is($Inc::TR_REASON, 'server_error',
+        '/trailers-promised: on_disconnect fired with server_error');
+    ok(!$Inc::TR_COMPLETED, '/trailers-promised: on_complete never fired');
 
     close $sock;
     $server->shutdown->get;

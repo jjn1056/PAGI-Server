@@ -147,6 +147,11 @@ our $CANCEL_WAITING  = 0;   # app is parked in receive(), no response started
 our $CANCEL_RETURNED = 0;   # app reached its return AFTER the reset
 our $CANCEL_EVENT;          # event type receive() woke with
 
+our $SWEEP_CS;
+our $SWEEP_COMPLETE = 0;
+our $SWEEP_DISCONNECT;
+our $SWEEP_HELD = 0;
+
 our $DUAL_CS_A;
 our $DUAL_COMPLETE_A = 0;
 our $DUAL_DISCONNECT_A;
@@ -198,6 +203,29 @@ my $rst_app = async sub {
     await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
     $H2CS::RST_HELD = 1;
     await Future->new;   # never resolves -- held until the stream is reset
+    return;
+};
+
+# Connection-teardown app: starts a response and holds, so the stream is
+# still open (and its connection_state still live) when the whole connection
+# is torn down under it.
+my $sweep_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    my $cs = $scope->{'pagi.connection'};
+    $H2CS::SWEEP_CS = $cs;
+    $cs->on_complete(sub { $H2CS::SWEEP_COMPLETE = 1 });
+    $cs->on_disconnect(sub { $H2CS::SWEEP_DISCONNECT = $_[0] });
+
+    while (1) {
+        my $e = await $receive->();
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+
+    await $send->({ type => 'http.response.start', status => 200,
+                     headers => [['content-type', 'text/plain']] });
+    await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+    $H2CS::SWEEP_HELD = 1;
+    await Future->new;   # held open until the connection is torn down
     return;
 };
 
@@ -410,7 +438,60 @@ subtest 'h2: client RST before response start synthesizes nothing and logs nothi
 };
 
 # =============================================================================
-# Test 4: two concurrent streams -- independent terminal states (spec 9.1)
+# Test 4: connection-level teardown sweeps every still-open stream
+# =============================================================================
+# A connection-level disconnect (server shutdown, socket error, timeout) never
+# reaches _h2_on_close for streams that are still mid-response, so
+# _handle_disconnect sweeps them itself. Without that sweep, an app holding a
+# stream open when the connection dies would never learn why -- or that it
+# died at all. Drives _handle_disconnect directly (white-box on the harness,
+# t/http2/30 style) because the reason under test is one only the connection
+# layer can produce.
+
+subtest 'h2: connection teardown sweeps an open stream with the connection reason' => sub {
+    my ($conn, $stream_io, $client_sock, $server) =
+        create_h2c_connection(app => $sweep_app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+    );
+    h2c_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/sweep',
+        scheme    => 'http',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    for (1 .. 100) {
+        $loop->loop_once(0.05);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        last if $H2CS::SWEEP_HELD;
+    }
+    ok($H2CS::SWEEP_HELD, 'app is holding the stream open mid-response');
+    ok($H2CS::SWEEP_CS->is_connected, 'the held stream is still connected before teardown');
+
+    $conn->_handle_disconnect('server_shutdown');
+    $loop->loop_once(0.05) for 1 .. 3;
+
+    is($H2CS::SWEEP_CS->is_connected, 0, 'the held stream is disconnected by the teardown');
+    is($H2CS::SWEEP_CS->disconnect_reason, 'server_shutdown',
+        "the held stream inherits the connection's reason");
+    is($H2CS::SWEEP_DISCONNECT, 'server_shutdown',
+        'on_disconnect fired with the connection reason');
+    is($H2CS::SWEEP_COMPLETE, 0, 'on_complete did NOT fire');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Test 5: two concurrent streams -- independent terminal states (spec 9.1)
 # =============================================================================
 
 subtest 'h2: two concurrent streams have independent connection_state' => sub {

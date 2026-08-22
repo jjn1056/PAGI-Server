@@ -299,6 +299,9 @@ use constant H2_CANCEL_CODE => 8;   # RST_STREAM error code CANCEL (RFC 9113)
 
 package Cancel;
 our $RESULT;
+our $CS;              # connection_state of the stream the client resets
+our $COMPLETE = 0;    # flips true if on_complete ever fires (it must not)
+our $DISCONNECT;      # reason string once on_disconnect fires
 package main;
 
 # Mirrors t/http2/28-file-fh.t's fixture shape: large enough (> 4x
@@ -321,6 +324,10 @@ my $STREAM_GONE_TEXT = "PAGI::h2 stream gone\n";
 my $slow_file_app = async sub {
     my ($scope, $receive, $send) = @_;
     die "unsupported scope" if $scope->{type} ne 'http';
+    my $cs = $scope->{'pagi.connection'};
+    $Cancel::CS = $cs;
+    $cs->on_complete(sub { $Cancel::COMPLETE = 1 });
+    $cs->on_disconnect(sub { $Cancel::DISCONNECT = $_[0] });
     while (1) {
         my $e = await $receive->();
         last if $e->{type} ne 'http.request' || !$e->{more};
@@ -437,6 +444,17 @@ subtest 'client RST while the file pump is blocked on drain is quiet and leak-fr
         'file send ended quietly (no raised error)' );
     is( $headers{':status'}, 200,
         'original 200 response was not replaced with a synthesized 500' );
+
+    # Design section 15.3: a cancel landing while the app is blocked on drain
+    # is a client cancellation like any other -- the stream's own
+    # connection_state must report it as such, and must never claim the
+    # response completed.
+    ok( $Cancel::CS, 'app captured a connection_state' );
+    is( $Cancel::CS->is_connected, 0, 'connection_state is terminal after the reset' );
+    is( $Cancel::CS->disconnect_reason, 'client_closed',
+        "disconnect_reason is 'client_closed' after the mid-transfer reset" );
+    is( $Cancel::DISCONNECT, 'client_closed', 'on_disconnect fired with client_closed' );
+    is( $Cancel::COMPLETE, 0, 'on_complete never fired' );
 };
 
 # Server stays healthy: a fresh request on a brand-new h2 connection still
