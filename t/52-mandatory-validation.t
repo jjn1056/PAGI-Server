@@ -123,4 +123,133 @@ like( $http->GET("http://127.0.0.1:$dev_port/bad-status")->get->content,
 $dev_server->shutdown->get;
 
 $server->shutdown->get;
+
+# --- SSE: mis-sequencing and malformed fields fail the send Future ---
+my $sse_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    if ($scope->{type} eq 'sse') {
+        my $e = await $receive->();   # sse.request
+        my $path = $scope->{path} // '/';
+        if ($path eq '/sse-send-before-start') {
+            my $err = do { local $@; eval { await $send->({ type => 'sse.send', data => 'early' }) }; $@ };
+            # decline with the error so the client can read it as a plain response
+            await $send->({ type => 'sse.http.response.start', status => 200, headers => [['content-type','text/plain']] });
+            ($err //= 'NO-ERROR') =~ s/\n/ /g;
+            await $send->({ type => 'sse.http.response.body', body => $err, more => 0 });
+            return;
+        }
+        if ($path eq '/sse-newline-event') {
+            await $send->({ type => 'sse.start', status => 200 });
+            my $err = do { local $@; eval { await $send->({ type => 'sse.send', data => 'x', event => "a\nb" }) }; $@ };
+            ($err //= 'NO-ERROR') =~ s/\n/ /g;
+            await $send->({ type => 'sse.send', data => "err=$err" });
+            await $send->({ type => 'sse.close' });
+            return;
+        }
+        if ($path eq '/sse-send-after-close') {
+            await $send->({ type => 'sse.start', status => 200 });
+            await $send->({ type => 'sse.send', data => 'one' });
+            await $send->({ type => 'sse.close' });
+            my $err = do { local $@; eval { await $send->({ type => 'sse.send', data => 'late' }) }; $@ };
+            $SseAfterClose::ERR = $err;   # observed via package var after request
+            return;
+        }
+    }
+    die "unsupported scope $scope->{type}";
+};
+
+my $sse_server = PAGI::Server->new(app => $sse_app, host => '127.0.0.1', port => 0, quiet => 1, validate_events => 0);
+$loop->add($sse_server);
+$sse_server->listen->get;
+my $sse_port = $sse_server->port;
+
+my $sse_get = sub {
+    # A fresh client per call, deliberately not pooled through $http: a
+    # completed SSE stream always closes the connection server-side (see
+    # _finish_sse_stream), but the sse.start response still advertises
+    # "Connection: keep-alive" (pre-existing, out of this task's scope to
+    # change). A pooled client would try to reuse that dead socket for the
+    # next request and fail with "Connection closed while awaiting header".
+    my $client = Net::Async::HTTP->new;
+    $loop->add($client);
+    my $res = $client->GET("http://127.0.0.1:$sse_port$_[0]", headers => { Accept => 'text/event-stream' })->get;
+    $loop->remove($client);
+    return $res;
+};
+
+like( $sse_get->('/sse-send-before-start')->content, qr/before sse\.start/,
+    'sse.send before sse.start fails the Future' );
+like( $sse_get->('/sse-newline-event')->content, qr/must not contain newline/,
+    'newline in sse event name fails' );
+$sse_get->('/sse-send-after-close');
+like( $SseAfterClose::ERR // '', qr/after sse\.close/,
+    'sse.send after sse.close fails' );
+$sse_server->shutdown->get;
+
+# --- WebSocket: shape and mis-sequencing errors on the send path ---
+my $ws_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    if ($scope->{type} eq 'websocket') {
+        my $e = await $receive->();   # websocket.connect
+        my $err1 = do { local $@; eval { await $send->({ type => 'websocket.send', bytes => 'a', text => 'b' }) }; $@ };
+        ($WsErrs::SHAPE = $err1 // 'NO-ERROR') =~ s/\n/ /g;
+        my $err2 = do { local $@; eval { await $send->({ type => 'websocket.keepalive', interval => 1 }) }; $@ };
+        ($WsErrs::SEQ = $err2 // 'NO-ERROR') =~ s/\n/ /g;
+        await $send->({ type => 'websocket.accept' });
+        await $send->({ type => 'websocket.close' });
+        return;
+    }
+    die "unsupported scope $scope->{type}";
+};
+
+my $ws_server = PAGI::Server->new(app => $ws_app, host => '127.0.0.1', port => 0, quiet => 1, validate_events => 0);
+$loop->add($ws_server);
+$ws_server->listen->get;
+my $ws_port = $ws_server->port;
+
+# Raw handshake boilerplate lifted from t/04-websocket.t: the app under test
+# reads/writes application-level events, so a raw socket lets us drive the
+# handshake without a WebSocket client library getting in the way.
+use IO::Socket::INET;
+
+my $ws_sock = IO::Socket::INET->new(
+    PeerAddr => '127.0.0.1',
+    PeerPort => $ws_port,
+    Proto    => 'tcp',
+    Timeout  => 5,
+);
+
+SKIP: {
+    skip "Cannot connect", 2 unless $ws_sock;
+
+    my $key = 'dGhlIHNhbXBsZSBub25jZQ==';
+    print $ws_sock "GET / HTTP/1.1\r\n";
+    print $ws_sock "Host: 127.0.0.1:$ws_port\r\n";
+    print $ws_sock "Upgrade: websocket\r\n";
+    print $ws_sock "Connection: Upgrade\r\n";
+    print $ws_sock "Sec-WebSocket-Key: $key\r\n";
+    print $ws_sock "Sec-WebSocket-Version: 13\r\n";
+    print $ws_sock "\r\n";
+
+    # Pump the loop until the server closes the connection (it does so right
+    # after the app's websocket.close, once the shape/sequence errors above
+    # have already landed in the package vars).
+    $ws_sock->blocking(0);
+    my $deadline = time + 5;
+    while (time < $deadline) {
+        my $buf;
+        my $n = sysread($ws_sock, $buf, 4096);
+        last if defined($n) && $n == 0;   # EOF: server closed
+        $loop->loop_once(0.1);
+    }
+    close $ws_sock;
+
+    like( $WsErrs::SHAPE // '', qr/exactly one of bytes\/text/,
+        'websocket.send with both bytes and text fails shape validation' );
+    like( $WsErrs::SEQ // '', qr/cannot send 'websocket\.keepalive'/,
+        'websocket.keepalive before accept fails sequencing' );
+}
+
+$ws_server->shutdown->get;
+
 done_testing;

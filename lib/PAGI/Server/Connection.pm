@@ -3591,6 +3591,7 @@ sub _create_sse_send {
     my ($self, $request) = @_;
 
     weaken(my $weak_self = $self);
+    my $seq = 'initial';
 
     return async sub  {
         my ($event) = @_;
@@ -3598,31 +3599,24 @@ sub _create_sse_send {
 
         my $type = $event->{type} // '';
 
-        # After an application-initiated sse.close the stream is closed: a second
-        # sse.close is a no-op, but any other send is a programming error and
-        # raises (a failed Future the application's `await $send` will throw).
-        if ($weak_self->{sse_close_sent}) {
-            return Future->done if $type eq 'sse.close';
-            die "cannot send '$type' after sse.close\n";
-        }
+        # Once the machine has already recorded this stream as closed (an
+        # app-initiated sse.close ran, which closes the transport as a side
+        # effect of ending the stream), the machine -- not the transport-
+        # closed check below -- decides what happens next: idempotent no-op
+        # for a repeat sse.close, croak for anything else.
+        my $already_closed = ($seq eq 'closed');
 
-        # Transport already gone (client disconnect): sends are a silent no-op.
-        return Future->done if $weak_self->{closed};
+        # Transport already gone for reasons other than our own close (a real
+        # client disconnect): sends are a silent no-op.
+        return Future->done if $weak_self->{closed} && !$already_closed;
 
-        # After an sse.http.response.start (decline), only the decline body may
-        # follow; a stream event is a programming error (first-send-wins).
-        if ($weak_self->{sse_decline_started} && $type !~ /^sse\.http\.response\./) {
-            die "cannot send '$type' after sse.http.response.start\n";
-        }
+        # Reset SSE idle timer on send activity (skip once fully closed)
+        $weak_self->_reset_sse_idle_timer unless $already_closed;
 
-        # Reset SSE idle timer on send activity
-        $weak_self->_reset_sse_idle_timer;
-
-        # Dev-mode event validation (PAGI spec compliance)
-        if ($weak_self->{validate_events}) {
-            require PAGI::Server::EventValidator;
-            PAGI::Server::EventValidator::validate_sse_send($event);
-        }
+        # Mandatory event validation and sequencing (PAGI spec compliance).
+        # Order per spec: transport-closed no-op check above runs first.
+        PAGI::Server::EventValidator::validate_sse_send($event);
+        $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
 
         if ($type eq 'sse.start') {
             return if $weak_self->{sse_started};
@@ -3710,7 +3704,8 @@ sub _create_sse_send {
             # Explicit application-initiated end of the SSE stream. End it now,
             # decoupled from the application returning. `reason` is server-side
             # metadata only and is never written to the wire. Idempotency for a
-            # repeat sse.close is handled by the sse_close_sent guard above.
+            # repeat sse.close is handled by advance_sse (the 'closed' state
+            # accepts another sse.close as a no-op).
             $weak_self->{sse_close_sent} = 1;
             $weak_self->{sse_disconnect_reason} = $event->{reason}
                 if defined $event->{reason};
@@ -3719,8 +3714,7 @@ sub _create_sse_send {
         elsif ($type eq 'sse.http.response.start') {
             # Decline the SSE stream and return a normal HTTP response. Valid only
             # before sse.start; namespaced under sse. (mirrors websocket.http.response.*).
-            die "cannot decline with sse.http.response.start after sse.start\n"
-                if $weak_self->{sse_started};
+            # A decline-after-start attempt is already rejected by advance_sse.
             return if $weak_self->{sse_decline_started};   # idempotent
             $weak_self->{sse_decline_started} = 1;
             $weak_self->{sse_decline_status}  = $event->{status} // 200;
@@ -3743,6 +3737,11 @@ sub _create_sse_send {
                 ['content-length', length $body],
                 ['date', $weak_self->{protocol}->format_date],
             );
+            # This response is always followed by closing the connection; tell
+            # a keep-alive-pooling client so it doesn't reuse a dead socket.
+            unless (grep { lc($_->[0]) eq 'connection' } @headers) {
+                push @headers, ['connection', 'close'];
+            }
             my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
             $response .= $body;
             $weak_self->{stream}->write($response);
@@ -3944,6 +3943,7 @@ sub _create_websocket_send {
     my ($self, $request) = @_;
 
     weaken(my $weak_self = $self);
+    my $seq = 'connecting';
 
     return async sub  {
         my ($event) = @_;
@@ -3955,14 +3955,17 @@ sub _create_websocket_send {
 
         my $type = $event->{type} // '';
 
-        # Dev-mode event validation (PAGI spec compliance)
-        if ($weak_self->{validate_events}) {
-            require PAGI::Server::EventValidator;
-            PAGI::Server::EventValidator::validate_websocket_send($event);
-        }
+        # Mandatory event validation and sequencing (PAGI spec compliance).
+        # Order per spec: transport-closed no-op check above runs first.
+        # websocket.http.response is always available on this path (the scope
+        # advertises it unconditionally; see _create_websocket_scope), unlike
+        # connection-level extensions such as fullflush.
+        PAGI::Server::EventValidator::validate_websocket_send(
+            $event, { extensions => { %{$weak_self->{extensions}}, 'websocket.http.response' => {} } });
+        $seq = PAGI::Server::EventValidator::advance_websocket($seq, $event);
 
         if ($type eq 'websocket.accept') {
-            return if $weak_self->{websocket_accepted};
+            # A duplicate accept is already rejected by advance_websocket.
 
             # Complete the WebSocket handshake
             my $ws_key = $weak_self->{ws_key};
