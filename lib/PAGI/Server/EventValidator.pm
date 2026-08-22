@@ -412,6 +412,30 @@ C<websocket.http.response.body>.
 Validates SSE send events: C<sse.start>, C<sse.send>, C<sse.comment>,
 C<sse.keepalive>.
 
+=head2 check_header_value($value)
+
+Checks a single header value for byte safety: dies with a C<\n>-terminated
+message if C<$value> contains a CR, LF, or null byte. Returns C<$value>
+unchanged on success.
+
+=head2 check_header_name($name)
+
+Checks a single header name for byte safety: dies with a C<\n>-terminated
+message if C<$name> contains a CR, LF, or null byte, and dies with a
+separate C<\n>-terminated message if it contains any other control
+character. Returns C<$name> unchanged on success.
+
+=head2 validate_headers($headers, $event_type)
+
+Validates a C<headers> field shared by every event shape that carries one
+(C<http.response.start>, C<http.response.trailers>, C<websocket.accept>,
+C<websocket.http.response.start>, C<sse.http.response.start>, C<sse.start>).
+C<$event_type> is the event type string used in croak messages. Croaks
+unless C<$headers> is an array reference of 2-element array references,
+each holding a defined, non-reference name and value; each name and value
+is then passed through C<check_header_name> and C<check_header_value>.
+Returns nothing.
+
 =head1 SEE ALSO
 
 L<PAGI::Server>, L<PAGI::Server::Connection>
