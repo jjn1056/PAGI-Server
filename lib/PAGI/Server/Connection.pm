@@ -809,6 +809,7 @@ sub _h2_create_send {
     # $eof_pending / $streaming_started stay closure-local.
     my $eof_pending = 0;
     my $streaming_started = 0;
+    my $seq = 'initial';
 
     # Data callback for nghttp2's streaming response.
     # Returns ($data, $eof) when data is available, or undef to defer.
@@ -872,13 +873,41 @@ sub _h2_create_send {
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
-        return if $weak_self->{closed};
 
         my $type = $event->{type} // '';
 
+        # Once the machine has recorded the response complete, the machine
+        # decides what happens next -- 'complete' has no idempotent case, so
+        # any further send always raises -- not the stream-gone check below.
+        # h2_streams entries for a finished stream are reclaimed
+        # asynchronously by _h2_on_close, so by the time a post-complete send
+        # arrives $ss may already be gone.
+        my $already_closed = ($seq eq 'complete');
+
+        my $ss = $weak_self->{h2_streams}{$stream_id};
+        return if !$ss && !$already_closed;
+
+        return if $weak_self->{closed} && !$already_closed;
+
+        # 1. Shape validation (mandatory)
+        PAGI::Server::EventValidator::validate_http_send(
+            $event, { extensions => $weak_self->{extensions} });
+
+        # 2. Phase-1 stubs: valid events whose HTTP/2 behavior lands in Phase 2.
+        #    These fail BEFORE the sequence machine advances, so a conforming
+        #    app that probes them can still finish its response.
+        die "http.response.trailers is not yet implemented on HTTP/2\n"
+            if $type eq 'http.response.trailers';
+        die "http.fullflush is not yet implemented on HTTP/2\n"
+            if $type eq 'http.fullflush';
+        die "http.response.body 'file'/'fh' is not yet implemented on HTTP/2\n"
+            if $type eq 'http.response.body'
+            && (defined $event->{file} || defined $event->{fh});
+
+        # 3. Sequence enforcement
+        $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+
         if ($type eq 'http.response.start') {
-            my $ss = $weak_self->{h2_streams}{$stream_id} or return;
-            return if $ss->{response_started};
             $ss->{response_started} = 1;
             $ss->{connection_state}->_mark_response_started if $ss->{connection_state};
 
@@ -892,9 +921,6 @@ sub _h2_create_send {
             }
         }
         elsif ($type eq 'http.response.body') {
-            my $ss = $weak_self->{h2_streams}{$stream_id} or return;
-            return unless $ss->{response_started};
-
             my $body = $event->{body} // '';
             my $more = $event->{more} // 0;
 
@@ -1089,6 +1115,7 @@ sub _h2_create_websocket_send {
     my ($self, $stream_id, $stream_state) = @_;
 
     weaken(my $weak_self = $self);
+    my $seq = 'connecting';
 
     return async sub {
         my ($event) = @_;
@@ -1100,8 +1127,16 @@ sub _h2_create_websocket_send {
 
         my $type = $event->{type} // '';
 
+        # websocket.http.response is always available on this path (the
+        # scope advertises it unconditionally; see
+        # _h2_create_websocket_scope), unlike connection-level extensions
+        # such as fullflush.
+        PAGI::Server::EventValidator::validate_websocket_send(
+            $event, { extensions => { %{$weak_self->{extensions}}, 'websocket.http.response' => {} } });
+        $seq = PAGI::Server::EventValidator::advance_websocket($seq, $event);
+
         if ($type eq 'websocket.accept') {
-            return if $ss->{ws_accepted};
+            # A duplicate accept is already rejected by advance_websocket.
 
             # HTTP/2 WebSocket: respond with 200 (not 101)
             my @headers;
@@ -1328,6 +1363,7 @@ sub _h2_create_sse_send {
     my ($self, $stream_id, $stream_state) = @_;
 
     weaken(my $weak_self = $self);
+    my $seq = 'initial';
 
     # Streaming state for the data-provider pull pattern. The send queue lives on
     # per-stream state ($ss->{send_queue} / $ss->{send_queue_bytes}) so the
@@ -1393,35 +1429,29 @@ sub _h2_create_sse_send {
         my ($event) = @_;
         return unless $weak_self;
 
-        my $ss = $weak_self->{h2_streams}{$stream_id};
-        return unless $ss;
-
         my $type = $event->{type} // '';
 
-        # After an application-initiated sse.close on THIS stream, a second
-        # sse.close is a no-op and any other send raises. Tracked per-stream
-        # ($ss), since HTTP/2 multiplexes many SSE streams over one connection.
-        if ($ss->{sse_close_sent}) {
-            return if $type eq 'sse.close';
-            die "cannot send '$type' after sse.close\n";
-        }
+        # Once the machine has already recorded this stream as closed --
+        # either an app-initiated sse.close or a completed decline response
+        # -- the machine, not the stream-gone check below, decides what
+        # happens next: idempotent no-op for a repeat sse.close, croak for
+        # anything else (decline_complete has no idempotent case; it croaks
+        # unconditionally). h2_streams entries for a closed stream are
+        # reclaimed asynchronously by _h2_on_close, so by the time a
+        # post-close send arrives $ss may already be gone.
+        my $already_closed = ($seq eq 'closed' || $seq eq 'decline_complete');
 
-        # After an sse.http.response.start (decline), only the decline body may
-        # follow; a stream event is a programming error (first-send-wins).
-        if ($ss->{sse_decline_started} && $type !~ /^sse\.http\.response\./) {
-            die "cannot send '$type' after sse.http.response.start\n";
-        }
+        my $ss = $weak_self->{h2_streams}{$stream_id};
+        return if !$ss && !$already_closed;
 
-        return if $weak_self->{closed};
+        return if $weak_self->{closed} && !$already_closed;
 
-        # Reset SSE idle timer on send activity
-        $weak_self->_reset_sse_idle_timer;
+        # Reset SSE idle timer on send activity (skip once fully closed)
+        $weak_self->_reset_sse_idle_timer unless $already_closed;
 
-        # Dev-mode event validation (PAGI spec compliance)
-        if ($weak_self->{validate_events}) {
-            require PAGI::Server::EventValidator;
-            PAGI::Server::EventValidator::validate_sse_send($event);
-        }
+        # Mandatory event validation and sequencing (PAGI spec compliance).
+        PAGI::Server::EventValidator::validate_sse_send($event);
+        $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -1525,6 +1555,12 @@ sub _h2_create_sse_send {
             }
         }
         elsif ($type eq 'sse.close') {
+            # A repeat sse.close after the stream's h2_streams entry has
+            # already been reclaimed (see the already-closed comment above)
+            # is the idempotent no-op advance_sse just allowed; nothing left
+            # to do.
+            return unless $ss;
+
             # End THIS HTTP/2 stream now: flush remaining queued events, then the
             # data_callback emits a final END_STREAM frame. `reason` is
             # server-side only and is never written to the wire.
@@ -1536,8 +1572,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'sse.http.response.start') {
-            die "cannot decline with sse.http.response.start after sse.start\n"
-                if $ss->{response_started};
+            # A decline-after-start attempt is already rejected by advance_sse.
             return if $ss->{sse_decline_started};   # idempotent
             $ss->{sse_decline_started} = 1;
             $ss->{sse_decline_status}  = $event->{status} // 200;
