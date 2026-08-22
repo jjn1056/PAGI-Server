@@ -493,7 +493,8 @@ git commit -m "docs: record h2 parity gains and the trailers dependency gate"
 | 6. h1 trailers framing | complete (review clean; deviation D1 ruled: advance-then-rollback) | 09a06ab | t/53 new / 66/66, 4 files | /tmp/phase2-task6-pass.out |
 | 7. Dead code + t/38 | complete (review clean, zero findings; "six" corrected to five) | 856422a | t/38 behavioral / 58/58 + perl -c | /tmp/phase2-task7-pass.out |
 | 8. Docs | complete (review clean, zero findings) | 1b5440d | podchecker OK; smoke 9/9 | task-8-report.md |
-| 9. Phase gate | complete | (this commit) | full suite 117 files / 664 tests PASS | /tmp/phase2-full-suite.out; whitespace/POD/syntax clean; spec drift: none (a7ed9cc) |
+| 9. Phase gate | complete | 760ce9f | full suite 117 files / 664 tests PASS | /tmp/phase2-full-suite.out; whitespace/POD/syntax clean; spec drift: none (a7ed9cc) |
+| Final review (opus, 1a5bf1a..760ce9f) | With fixes → wave clean | 17c55ca (D1 docs), 01929bf, 8adfa8e | post-wave full suite 117 files / 668 tests PASS | re-review: all 8 findings addressed, no new breakage; /tmp/phase2-full-suite2.out |
 
 ## Deferred (tracked for after the first pass)
 
