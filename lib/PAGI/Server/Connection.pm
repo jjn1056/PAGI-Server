@@ -799,6 +799,15 @@ sub _h2_rst_error_code {
         : 2;   # NGHTTP2_INTERNAL_ERROR per RFC 9113 section 7
 }
 
+# RST_STREAM error code for a stream the server no longer needs but that is
+# nobody's fault -- RFC 9113 section 7 CANCEL. Same binding-constant lookup
+# with a literal fallback as _h2_rst_error_code above.
+sub _h2_rst_cancel_code {
+    return Net::HTTP2::nghttp2->can('NGHTTP2_CANCEL')
+        ? Net::HTTP2::nghttp2::NGHTTP2_CANCEL()
+        : 8;   # NGHTTP2_CANCEL per RFC 9113 section 7
+}
+
 sub _h2_create_scope {
     my ($self, $stream_id, $stream_state) = @_;
 
@@ -2152,12 +2161,24 @@ sub _h2_start_ws_pong_timeout {
 
                 $weak_self->_h2_stop_ws_keepalive($weak_ss);
 
-                # End the stream the same way _h2_ws_close does (close frame +
-                # END_STREAM), then the scope's one disconnect event -- same
-                # order the protocol-violation paths above use. This runs
-                # outside feed() (async timer callback), so flush explicitly.
-                $weak_self->_h2_ws_close($stream_id, 1006, 'keepalive_timeout');
+                # RFC 6455 section 7.4.1: 1006 MUST NOT be set as the status
+                # code of a Close control frame -- it means "the connection
+                # dropped with no close handshake". So a keepalive timeout
+                # does not send a Close frame at all: it tears the stream
+                # down with RST_STREAM, the HTTP/2 analogue of h1 dropping
+                # the transport. The app still sees 1006/'keepalive_timeout'.
+                #
+                # Order dependency: the enqueue MUST precede the flush. The
+                # flush is the only call here that can synchronously drive
+                # on_stream_close (which enqueues the generic 1006/
+                # 'client_closed'), and the enqueue is first-wins-deduped, so
+                # enqueueing first is what makes 'keepalive_timeout' the
+                # reason the app observes. Do not hoist _h2_write_pending.
                 $weak_self->_h2_ws_enqueue_disconnect($weak_ss, 1006, 'keepalive_timeout');
+                $weak_self->{h2_session}->submit_rst_stream(
+                    $stream_id, _h2_rst_cancel_code());
+                # This runs outside feed() (async timer callback), so flush
+                # explicitly.
                 $weak_self->_h2_write_pending;
             }
         },

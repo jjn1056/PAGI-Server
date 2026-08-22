@@ -290,6 +290,21 @@ sub ping_count {
     return scalar grep { $_->{opcode} == 9 } extract_ws_frames($raw);
 }
 
+sub pong_count {
+    my ($raw) = @_;
+    return scalar grep { $_->{opcode} == 10 } extract_ws_frames($raw);
+}
+
+# Every status code carried by a Close frame (opcode 8) seen on the wire so
+# far. A Close frame with a 0-byte payload carries no code and contributes
+# nothing.
+sub close_codes {
+    my ($raw) = @_;
+    return map  { unpack('n', substr($_->{bytes}, 0, 2)) }
+           grep { $_->{opcode} == 8 && length($_->{bytes}) >= 2 }
+           extract_ws_frames($raw);
+}
+
 # App router used by all keepalive subtests below. A single app instance
 # serves every stream on the test connection (the server takes one app per
 # connection), so streams are routed to the caller's event array by path:
@@ -475,6 +490,19 @@ subtest 'withheld pong times out exactly one disconnect; sibling GET still serve
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'keepalive_timeout', "reason is 'keepalive_timeout'");
     }
+
+    # RFC 6455 section 7.4.1: 1006 MUST NOT appear as the status code of a
+    # Close control frame -- it is reserved for an abnormal drop with no
+    # close handshake, which is precisely what a keepalive timeout is. The
+    # app-facing event above still reports 1006/'keepalive_timeout' (that is
+    # the API contract); the WIRE must carry no Close frame saying 1006.
+    # 10 settle rounds (1s) after the disconnect is a ~10x margin over the
+    # single round it takes a flushed frame to reach the client.
+    exchange_frames($client, $client_sock, 10);
+    my @wire_close_codes = close_codes($ws_data);
+    is(scalar(grep { $_ == 1006 } @wire_close_codes), 0,
+        'no ws Close frame carrying code 1006 was written to the wire')
+        or diag('close codes on the wire: ' . join(', ', @wire_close_codes));
 
     # Sibling: opened AFTER the ws stream's forced teardown, on the SAME h2
     # connection -- proves the connection (and other streams on it) are
