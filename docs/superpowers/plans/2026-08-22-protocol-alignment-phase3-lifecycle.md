@@ -204,6 +204,7 @@ Update the method's POD paragraph accordingly.
 | 4. h2 incomplete/RST | complete (review clean; 2 judgment calls confirmed: carve-out-first, $cs gate) | 69113af | t/http2/24 extended / 39 tests, 5 files + full t/http2 169/169 | /tmp/phase3-task4-pass.out |
 | 5. Docs | complete (review clean; all facts code-verified) | e70f179 | podchecker ×2; smoke 9/9 | task-5-report.md |
 | 6. Phase gate | complete | (this commit) | full suite 118 files / 680 tests PASS | /tmp/phase3-full-suite.out; whitespace/POD/syntax clean; spec drift: none (56bf730) |
+| Final review (opus, 80baee2..412f85e) | With fixes → wave clean | 43fd7f2, 5d1b797, b7f7f6b, f7f5d55 (+78f46b1 D2/D3 docs) | post-wave full suite 118 files / 687 tests PASS | re-review: all addressed, no new breakage; I4 verified untouched (John decision pending); /tmp/phase3-full-suite2.out |
 
 ## Deferred (carried, not this phase)
 
