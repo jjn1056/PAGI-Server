@@ -68,6 +68,10 @@ are against the `main`-based worktree, not the perf branch.
 - **Commit observed at the end of the audit:** `4c4abf05d7b157ecbe8d81f36cc15befbc79e7ae`
 - **Current baseline after drift check:** `main` at `a7ed9cc` (merge of
   `spec-clarifications`, five commits `84a85d7..8c43abb`)
+- **Baseline bump (2026-08-22):** `main` at `56bf730` adds the HTTP/1.1
+  trailers framing rule (reject on Content-Length-framed responses, never
+  drop) — ratified by John after the server-side fix landed (commit
+  09a06ab); the server already conforms, no work created.
 - **Owned changes:** none
 - **Deployment boundary:** none in this project
 - **Push target:** none
