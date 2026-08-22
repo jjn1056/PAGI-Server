@@ -810,6 +810,7 @@ sub _h2_create_send {
     my $eof_pending = 0;
     my $streaming_started = 0;
     my $seq = 'initial';
+    my $is_head = (($stream_state->{pseudo}{':method'} // '') eq 'HEAD');
 
     # Data callback for nghttp2's streaming response.
     # Returns ($data, $eof) when data is available, or undef to defer.
@@ -893,7 +894,25 @@ sub _h2_create_send {
         PAGI::Server::EventValidator::validate_http_send(
             $event, { extensions => $weak_self->{extensions} });
 
-        # 2. Phase-1 stubs: valid events whose HTTP/2 behavior lands in Phase 2.
+        # 2. HEAD: the server suppresses the body (PAGI Www.pod "HEAD Requests").
+        # The app responds exactly as for GET; we discard payloads, never open
+        # file/fh, and accept-and-discard trailers. Sequence state still
+        # advances so the lifecycle (completion, post-complete raises) matches GET.
+        if ($is_head && ($type eq 'http.response.body' || $type eq 'http.response.trailers')) {
+            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+            if ($seq eq 'complete' && !$ss->{h2_head_finished}) {
+                $ss->{h2_head_finished} = 1;
+                $weak_self->{h2_session}->submit_response($stream_id,
+                    status  => $status,
+                    headers => \@response_headers,
+                    body    => '',
+                );
+                $weak_self->_h2_write_pending;
+            }
+            return;
+        }
+
+        # 3. Phase-1 stubs: valid events whose HTTP/2 behavior lands in Phase 2.
         #    These fail BEFORE the sequence machine advances, so a conforming
         #    app that probes them can still finish its response.
         die "http.response.trailers is not yet implemented on HTTP/2\n"
@@ -904,7 +923,7 @@ sub _h2_create_send {
             if $type eq 'http.response.body'
             && (defined $event->{file} || defined $event->{fh});
 
-        # 3. Sequence enforcement
+        # 4. Sequence enforcement
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {
