@@ -7,6 +7,23 @@ our $VERSION = '0.002006';
 
 use Carp qw(croak);
 
+# --- Primitive shape checks (anchored; undef and refs are always false) ---
+
+sub _is_nonneg_int {
+    my ($v) = @_;
+    return defined $v && !ref $v && $v =~ /\A[0-9]+\z/;
+}
+
+sub _is_bool01 {
+    my ($v) = @_;
+    return defined $v && !ref $v && $v =~ /\A[01]\z/;
+}
+
+sub _is_nonneg_number {
+    my ($v) = @_;
+    return defined $v && !ref $v && $v =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
+}
+
 # =============================================================================
 # PAGI::Server::EventValidator - Dev-mode event field validation
 #
@@ -43,13 +60,19 @@ sub _validate_http_response_start {
     # status is required (Int)
     croak "http.response.start requires 'status' field"
         unless exists $event->{status};
-    croak "http.response.start 'status' must be an integer"
-        unless defined $event->{status} && $event->{status} =~ /^\d+$/;
+    croak "http.response.start 'status' must be a non-negative integer"
+        unless _is_nonneg_int($event->{status});
 
     # headers must be ArrayRef if present
     if (exists $event->{headers} && defined $event->{headers}) {
         croak "http.response.start 'headers' must be an array reference"
             unless ref $event->{headers} eq 'ARRAY';
+    }
+
+    # trailers must be 0 or 1 if present
+    if (exists $event->{trailers} && defined $event->{trailers}) {
+        croak "http.response.start 'trailers' must be 0 or 1"
+            unless _is_bool01($event->{trailers});
     }
 }
 
@@ -65,16 +88,22 @@ sub _validate_http_response_body {
     croak "http.response.body requires exactly one of body/file/fh (got $count)"
         unless $count <= 1;  # 0 is OK - defaults to empty body
 
-    # offset must be integer if present
+    # offset must be a non-negative integer if present
     if (exists $event->{offset} && defined $event->{offset}) {
-        croak "http.response.body 'offset' must be an integer"
-            unless $event->{offset} =~ /^\d+$/;
+        croak "http.response.body 'offset' must be a non-negative integer"
+            unless _is_nonneg_int($event->{offset});
     }
 
-    # length must be integer if present
+    # length must be a non-negative integer if present
     if (exists $event->{length} && defined $event->{length}) {
-        croak "http.response.body 'length' must be an integer"
-            unless $event->{length} =~ /^\d+$/;
+        croak "http.response.body 'length' must be a non-negative integer"
+            unless _is_nonneg_int($event->{length});
+    }
+
+    # more must be 0 or 1 if present
+    if (exists $event->{more} && defined $event->{more}) {
+        croak "http.response.body 'more' must be 0 or 1"
+            unless _is_bool01($event->{more});
     }
 }
 
@@ -129,10 +158,8 @@ sub _validate_websocket_accept {
 sub _validate_websocket_send_event {
     my ($event) = @_;
 
-    # Exactly one of bytes or text must be present
-    my $has_bytes = exists $event->{bytes};
-    my $has_text = exists $event->{text};
-    my $count = $has_bytes + $has_text;
+    # Exactly one of bytes or text must be present and defined
+    my $count = (defined $event->{bytes} ? 1 : 0) + (defined $event->{text} ? 1 : 0);
 
     croak "websocket.send requires exactly one of bytes/text (got $count)"
         unless $count == 1;
@@ -141,10 +168,10 @@ sub _validate_websocket_send_event {
 sub _validate_websocket_close {
     my ($event) = @_;
 
-    # code must be integer if present
+    # code must be a non-negative integer if present
     if (exists $event->{code} && defined $event->{code}) {
-        croak "websocket.close 'code' must be an integer"
-            unless $event->{code} =~ /^\d+$/;
+        croak "websocket.close 'code' must be a non-negative integer"
+            unless _is_nonneg_int($event->{code});
     }
 }
 
@@ -154,8 +181,14 @@ sub _validate_websocket_keepalive {
     # interval is required (Number)
     croak "websocket.keepalive requires 'interval' field"
         unless exists $event->{interval};
-    croak "websocket.keepalive 'interval' must be a number"
-        unless defined $event->{interval} && $event->{interval} =~ /^[\d.]+$/;
+    croak "websocket.keepalive 'interval' must be a non-negative number"
+        unless _is_nonneg_number($event->{interval});
+
+    # timeout must be a non-negative number if present
+    if (exists $event->{timeout} && defined $event->{timeout}) {
+        croak "websocket.keepalive 'timeout' must be a non-negative number"
+            unless _is_nonneg_number($event->{timeout});
+    }
 }
 
 sub _validate_ws_denial_start {
@@ -164,8 +197,8 @@ sub _validate_ws_denial_start {
     # status is required (Int)
     croak "websocket.http.response.start requires 'status' field"
         unless exists $event->{status};
-    croak "websocket.http.response.start 'status' must be an integer"
-        unless defined $event->{status} && $event->{status} =~ /^\d+$/;
+    croak "websocket.http.response.start 'status' must be a non-negative integer"
+        unless _is_nonneg_int($event->{status});
 
     # headers must be ArrayRef if present
     if (exists $event->{headers} && defined $event->{headers}) {
@@ -177,10 +210,10 @@ sub _validate_ws_denial_start {
 sub _validate_ws_denial_body {
     my ($event) = @_;
 
-    # more must be integer if present
+    # more must be 0 or 1 if present
     if (exists $event->{more} && defined $event->{more}) {
-        croak "websocket.http.response.body 'more' must be an integer"
-            unless $event->{more} =~ /^\d+$/;
+        croak "websocket.http.response.body 'more' must be 0 or 1"
+            unless _is_bool01($event->{more});
     }
 }
 
@@ -221,8 +254,8 @@ sub _validate_sse_decline_start {
 
     croak "sse.http.response.start requires 'status' field"
         unless exists $event->{status} && defined $event->{status};
-    croak "sse.http.response.start 'status' must be an integer"
-        unless $event->{status} =~ /^\d+$/;
+    croak "sse.http.response.start 'status' must be a non-negative integer"
+        unless _is_nonneg_int($event->{status});
     if (exists $event->{headers} && defined $event->{headers}) {
         croak "sse.http.response.start 'headers' must be an array reference"
             unless ref $event->{headers} eq 'ARRAY';
@@ -233,8 +266,8 @@ sub _validate_sse_decline_body {
     my ($event) = @_;
 
     if (exists $event->{more} && defined $event->{more}) {
-        croak "sse.http.response.body 'more' must be an integer"
-            unless $event->{more} =~ /^\d+$/;
+        croak "sse.http.response.body 'more' must be 0 or 1"
+            unless _is_bool01($event->{more});
     }
 }
 
@@ -251,10 +284,10 @@ sub _validate_sse_close {
 sub _validate_sse_start {
     my ($event) = @_;
 
-    # status must be integer if present
+    # status must be a non-negative integer if present
     if (exists $event->{status} && defined $event->{status}) {
-        croak "sse.start 'status' must be an integer"
-            unless $event->{status} =~ /^\d+$/;
+        croak "sse.start 'status' must be a non-negative integer"
+            unless _is_nonneg_int($event->{status});
     }
 
     # headers must be ArrayRef if present
@@ -272,6 +305,17 @@ sub _validate_sse_send_event {
         unless exists $event->{data};
     croak "sse.send 'data' must be a string"
         unless defined $event->{data} && !ref $event->{data};
+
+    for my $f (qw(event id)) {
+        next unless exists $event->{$f} && defined $event->{$f};
+        croak "sse.send '$f' must be a string" if ref $event->{$f};
+        croak "sse.send '$f' must not contain newline characters"
+            if $event->{$f} =~ /[\r\n]/;
+    }
+    if (exists $event->{retry} && defined $event->{retry}) {
+        croak "sse.send 'retry' must be a non-negative integer"
+            unless _is_nonneg_int($event->{retry});
+    }
 }
 
 sub _validate_sse_comment {
@@ -290,8 +334,8 @@ sub _validate_sse_keepalive {
     # interval is required (Number)
     croak "sse.keepalive requires 'interval' field"
         unless exists $event->{interval};
-    croak "sse.keepalive 'interval' must be a number"
-        unless defined $event->{interval} && $event->{interval} =~ /^[\d.]+$/;
+    croak "sse.keepalive 'interval' must be a non-negative number"
+        unless _is_nonneg_number($event->{interval});
 }
 
 1;

@@ -29,14 +29,14 @@ subtest 'http.response.start validation' => sub {
     # Non-integer status should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => 'ok' }) },
-        qr/must be an integer/,
+        qr/must be a non-negative integer/,
         'non-integer status throws'
     );
 
     # Undef status should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => undef }) },
-        qr/must be an integer/,
+        qr/must be a non-negative integer/,
         'undef status throws'
     );
 
@@ -81,14 +81,14 @@ subtest 'http.response.body validation' => sub {
     # Invalid offset should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', offset => 'bad' }) },
-        qr/'offset' must be an integer/,
+        qr/'offset' must be a non-negative integer/,
         'non-integer offset throws'
     );
 
     # Invalid length should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', length => 'bad' }) },
-        qr/'length' must be an integer/,
+        qr/'length' must be a non-negative integer/,
         'non-integer length throws'
     );
 
@@ -164,7 +164,7 @@ subtest 'websocket.close validation' => sub {
     # Invalid code should die
     like(
         dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.close', code => 'bad' }) },
-        qr/'code' must be an integer/,
+        qr/'code' must be a non-negative integer/,
         'non-integer code throws'
     );
 
@@ -191,7 +191,7 @@ subtest 'websocket.keepalive validation' => sub {
     # Invalid interval should die
     like(
         dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.keepalive', interval => 'bad' }) },
-        qr/'interval' must be a number/,
+        qr/'interval' must be a non-negative number/,
         'non-number interval throws'
     );
 
@@ -271,7 +271,7 @@ subtest 'sse.keepalive validation' => sub {
     # Invalid interval should die
     like(
         dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 'x' }) },
-        qr/'interval' must be a number/,
+        qr/'interval' must be a non-negative number/,
         'non-number interval throws'
     );
 
@@ -344,6 +344,89 @@ subtest 'PAGI::Server auto-enables validate_events via PAGI_ENV' => sub {
         $source,
         qr/PAGI_ENV.*development/s,
         'validate_events checks PAGI_ENV for development mode'
+    );
+};
+
+# =============================================================================
+# Strict primitive shape checks
+# =============================================================================
+
+subtest 'anchored numeric validation' => sub {
+    for my $bad ("5\n", " 5", "5 ", "+5", "-5", "5.0", "0x5", [], {}) {
+        my $label = ref $bad ? ref($bad) . ' ref' : "'" . ($bad =~ s/\n/\\n/r) . "'";
+        like(
+            dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => $bad }) },
+            qr/must be a non-negative integer/,
+            "status $label throws"
+        );
+    }
+    ok(
+        lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => 200 }) },
+        'plain integer status ok'
+    );
+};
+
+subtest 'boolean-like fields accept only 0 or 1' => sub {
+    for my $bad (2, -1, 'yes', '', "1\n", 1.5) {
+        like(
+            dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', more => $bad }) },
+            qr/'more' must be 0 or 1/,
+            "more '$bad' throws"
+        );
+    }
+    ok( lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', more => 1 }) }, 'more 1 ok');
+    ok( lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', more => 0 }) }, 'more 0 ok');
+    like(
+        dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => 200, trailers => 'soon' }) },
+        qr/'trailers' must be 0 or 1/,
+        'trailers non-bool throws'
+    );
+};
+
+subtest 'sse.send field safety' => sub {
+    like(
+        dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.send', data => 'x', event => "up\ndate" }) },
+        qr/'event' must not contain newline/,
+        'newline in event throws'
+    );
+    like(
+        dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.send', data => 'x', id => "1\r2" }) },
+        qr/'id' must not contain newline/,
+        'CR in id throws'
+    );
+    like(
+        dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.send', data => 'x', retry => -5 }) },
+        qr/'retry' must be a non-negative integer/,
+        'negative retry throws'
+    );
+    ok(
+        lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.send', data => "multi\nline", event => 'update', id => '7', retry => 3000 }) },
+        'valid full sse.send ok (data may contain newlines)'
+    );
+};
+
+subtest 'interval validation is anchored' => sub {
+    for my $bad ('1.2.3', '.', '', '5x', "3\n") {
+        like(
+            dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => $bad }) },
+            qr/'interval' must be a non-negative number/,
+            "interval '$bad' throws"
+        );
+    }
+    ok( lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 0 }) }, 'interval 0 ok');
+    ok( lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.keepalive', interval => 30.5, timeout => 20 }) }, 'float interval + timeout ok');
+    like(
+        dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.keepalive', interval => 30, timeout => 'later' }) },
+        qr/'timeout' must be a non-negative number/,
+        'non-numeric ws timeout throws'
+    );
+};
+
+subtest 'websocket.send payload must be defined' => sub {
+    like(
+        dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.send', bytes => undef }) },
+        qr/exactly one of bytes\/text/,
+        'undef bytes does not count as provided'
     );
 };
 
