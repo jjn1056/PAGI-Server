@@ -21,6 +21,10 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 #                      send must fail the Future (RFC 7230 -- trailers ride
 #                      chunked framing only), and the body already delivered
 #                      via Content-Length must still reach the client intact.
+#                      The app then returns without another send attempt, so
+#                      per Phase 3 Task 2 the connection closes abnormally
+#                      (server_error, no keep-alive) even though the body
+#                      was fully delivered.
 #   /chunked-trailers  control: chunked framing + trailers=>1: trailers must
 #                      still be transmitted on the wire, unchanged from
 #                      before this fix.
@@ -39,20 +43,21 @@ my $app = async sub {
     if ($path eq '/cl-trailers') {
         # Content-length framing: the body is fully framed by Content-Length
         # already, so there is no place left to carry trailers.
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $T::CL_DISC_REASON = $_[0] });
         await $send->({ type => 'http.response.start', status => 200,
                          trailers => 1,
                          headers => [['content-type', 'text/plain'],
                                      ['content-length', '2']] });
         await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
-        # CROSS-PHASE NOTE (Phase 3, incomplete-response work): the die in
-        # the send closure fires before advance_http would have recorded
-        # 'complete', so it rolls the machine's $seq back to
+        # The die in the send closure fires before advance_http would have
+        # recorded 'complete', so it rolls the machine's $seq back to
         # 'awaiting_trailers' instead. This app just captures the error and
-        # returns -- the machine state is left at 'awaiting_trailers'
-        # un-inspected. Phase 3 should decide whether a send loop that dies
-        # here (app returns without another send attempt) needs any further
-        # handling, or whether "app returned with $seq != complete" is
-        # already covered by existing incomplete-response rules.
+        # returns without another send attempt. Per Phase 3 Task 2, the
+        # app-return path treats a started-but-not-'complete' $seq as an
+        # incomplete response: it forces an abnormal closure (server_error,
+        # no keep-alive) even though the Content-Length-framed body above
+        # was already delivered in full.
         my $err = do { local $@; eval { await $send->({ type => 'http.response.trailers', headers => [['x-t', '1']] }) }; $@ };
         $T::CL_ERR = $err;
         return;
@@ -86,13 +91,60 @@ my $port = $server->port;
 my $http = Net::Async::HTTP->new;
 $loop->add($http);
 
-# --- /cl-trailers: content-length response, trailers fail loudly -----------
+# --- /cl-trailers: content-length response, trailers fail loudly, and the --
+# app-return afterward now closes the connection abnormally (Phase 3 Task 2).
+# Raw socket, not $http: we need to observe the connection actually close
+# (EOF with no further bytes) rather than have a pooled client's transparent
+# reconnect hide it. Deliberately no "Connection: close" request header --
+# HTTP/1.1 keep-alive is the client's default; the server must veto it
+# anyway. $http itself is left untouched here, so its first use below (for
+# /head-trailers) is naturally a fresh connection.
+my @cl_warnings;
+{
+    local $SIG{__WARN__} = sub { push @cl_warnings, $_[0] };
 
-my $cl_res = $http->GET("http://127.0.0.1:$port/cl-trailers")->get;
-is( $cl_res->content, 'ok',
-    '/cl-trailers still delivers the content-length-framed body' );
+    my $cl_sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    ) or die "connect failed: $!";
+
+    print $cl_sock "GET /cl-trailers HTTP/1.1\r\n";
+    print $cl_sock "Host: 127.0.0.1:$port\r\n";
+    print $cl_sock "\r\n";
+
+    $cl_sock->blocking(0);
+    my $cl_response = '';
+    my $deadline = time + 5;
+    while (time < $deadline) {
+        my $buf;
+        my $n = sysread($cl_sock, $buf, 4096);
+        if (defined $n) {
+            last if $n == 0;   # EOF: server closed the connection
+            $cl_response .= $buf;
+        }
+        $loop->loop_once(0.1);
+    }
+    close $cl_sock;
+
+    like( $cl_response, qr/^HTTP\/1\.1 200/, '/cl-trailers: status line 200' );
+    like( $cl_response, qr/\r\n\r\nok\z/,
+        '/cl-trailers: content-length-framed body "ok" fully delivered, then EOF (connection closed, no more bytes)' );
+}
+
 like( $T::CL_ERR, qr/requires chunked framing/,
     'trailers on content-length response fail the Future' );
+
+$loop->loop_once(0.1) for 1..3;
+
+is( $T::CL_DISC_REASON, 'server_error',
+    '/cl-trailers: app-return after the failed trailers send reports on_disconnect(server_error)' );
+
+ok(
+    (scalar grep { /returned with an incomplete response/i } @cl_warnings),
+    '/cl-trailers: incomplete-response warning logged'
+);
 
 # --- /chunked-trailers: control -- raw socket, trailers actually on the wire
 

@@ -121,6 +121,7 @@ sub new {
         buffer        => '',
         closed        => 0,
         response_started => 0,
+        h1_seq        => 'initial',  # Mirrors the h1 send closure's $seq (see _create_send)
         response_status  => undef,  # Track response status for logging
         _response_size   => 0,      # Track response body bytes for logging
         request_start    => undef,  # Track request start time for logging
@@ -2559,6 +2560,23 @@ async sub _handle_request {
         return;
     }
 
+    # The application resolved with a started but incomplete response
+    # (terminal body/file/fh — or promised trailers — never sent). Per the
+    # PAGI spec this is an abnormal end: never synthesize the terminal
+    # framing, never keep the connection alive, and report server_error
+    # through on_disconnect — a truncated response must be observable as
+    # truncated.
+    if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {
+        $self->_flush_pending_headers;   # headers may still be buffered; no terminator follows
+        unless ($self->{closed}) {
+            warn "PAGI application returned with an incomplete response\n";
+        }
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
+        $self->_handle_disconnect_and_close('server_error');
+        return;
+    }
+
     # Flush any headers buffered by response.start that were never paired with a
     # body write (a started-but-bodyless response).
     $self->_flush_pending_headers;
@@ -2589,6 +2607,7 @@ async sub _handle_request {
         # Reset for next request
         $self->{handling_request} = 0;
         $self->{response_started} = 0;
+        $self->{h1_seq} = 'initial';
         $self->{_resp_pending} = undef;
         $self->{response_status} = undef;
         $self->{_response_size} = 0;
@@ -2885,6 +2904,10 @@ sub _create_send {
     my $chunked = 0;
     my $expects_trailers = 0;
     my $seq = 'initial';
+    # Publish the closure-local $seq on $self so the app-return path in
+    # _handle_request can tell a completed response from one the app left
+    # incomplete (see the mirror contract at every $seq assignment below).
+    $self->{h1_seq} = $seq;
     my $is_head_request = ($request->{method} // '') eq 'HEAD';
     my $http_version = $request->{http_version} // '1.1';
     my $is_http10 = ($http_version eq '1.0');
@@ -2918,6 +2941,7 @@ sub _create_send {
             $event, { extensions => $weak_self->{extensions} });
         my $seq_before_advance = $seq;
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+        $weak_self->{h1_seq} = $seq;
 
         if ($type eq 'http.response.start') {
             $weak_self->{response_started} = 1;
@@ -3013,6 +3037,7 @@ sub _create_send {
                 } or do {
                     my $error = $@;
                     $seq = $seq_before_advance;
+                    $weak_self->{h1_seq} = $seq;
                     die $error;
                 };
             }
@@ -3028,6 +3053,7 @@ sub _create_send {
                 } or do {
                     my $error = $@;
                     $seq = $seq_before_advance;
+                    $weak_self->{h1_seq} = $seq;
                     die $error;
                 };
             }
@@ -3092,6 +3118,7 @@ sub _create_send {
                 # its return value, which is what makes advance-then-rollback
                 # safe.
                 $seq = $seq_before_advance;
+                $weak_self->{h1_seq} = $seq;
                 die "http.response.trailers requires chunked framing (response declared content-length)\n";
             }
 
