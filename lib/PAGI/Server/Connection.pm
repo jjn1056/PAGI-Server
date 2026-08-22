@@ -1120,12 +1120,23 @@ sub _h2_create_websocket_send {
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
-        return if $weak_self->{closed};
-
-        my $ss = $weak_self->{h2_streams}{$stream_id};
-        return unless $ss;
 
         my $type = $event->{type} // '';
+
+        # Once the machine has recorded the connection closed or the denial
+        # response complete, the machine decides what happens next -- both
+        # 'closed' and 'denial_complete' have no idempotent case, so any
+        # further send always raises -- not the stream-gone check below.
+        # h2_streams entries for a finished stream are reclaimed
+        # asynchronously by _h2_on_close (websocket.close itself triggers
+        # this via END_STREAM, same mechanism as the h2 HTTP/SSE closures),
+        # so by the time a post-close send arrives $ss may already be gone.
+        my $already_closed = ($seq eq 'closed' || $seq eq 'denial_complete');
+
+        my $ss = $weak_self->{h2_streams}{$stream_id};
+        return if !$ss && !$already_closed;
+
+        return if $weak_self->{closed} && !$already_closed;
 
         # websocket.http.response is always available on this path (the
         # scope advertises it unconditionally; see

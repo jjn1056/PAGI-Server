@@ -330,4 +330,61 @@ sse_probe(app => $sse_app2);
 like( $sse_decline_complete_err // '', qr/decline response already complete/,
     'sse.http.response.body after a completed decline raises on h2, not silently swallowed' );
 
+# ============================================================
+# WebSocket: mis-sequencing after a terminal state raises, not swallowed
+# ============================================================
+# Same class of bug as the SSE/HTTP carve-outs above: websocket.close itself
+# ends the stream (submit_data with END_STREAM), and _h2_on_close reclaims
+# the h2_streams entry for that stream asynchronously -- independent of
+# protocol family. A post-close/post-denial-complete send must still raise
+# through advance_websocket, not silently no-op on a "stream gone" check.
+
+sub ws_probe {
+    my (%args) = @_;
+    my ($conn, $stream_io, $client_sock, $server) =
+        create_h2c_connection(app => $args{app});
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+    $client->submit_request(
+        method    => 'CONNECT',
+        path      => $args{path} // '/ws',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [
+            [':protocol', 'websocket'],
+            ['sec-websocket-version', '13'],
+        ],
+        body      => sub { return undef },   # streaming: keep open
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+    $stream_io->close_now;
+    $loop->remove($server);
+}
+
+my $ws_after_close_err;
+my $ws_app1 = async sub {
+    my ($scope, $receive, $send) = @_;
+    await $send->({ type => 'websocket.accept' });
+    await $send->({ type => 'websocket.close' });
+    my $err = do { local $@; eval { await $send->({ type => 'websocket.send', text => 'late' }) }; $@ };
+    $ws_after_close_err = $err;
+};
+ws_probe(app => $ws_app1);
+like( $ws_after_close_err // '', qr/after websocket\.close/,
+    'websocket.send after websocket.close raises on h2, not silently swallowed' );
+
+my $ws_denial_complete_err;
+my $ws_app2 = async sub {
+    my ($scope, $receive, $send) = @_;
+    await $send->({ type => 'websocket.http.response.start', status => 403,
+                    headers => [['content-type','text/plain']] });
+    await $send->({ type => 'websocket.http.response.body', body => 'no', more => 0 });
+    my $err = do { local $@; eval { await $send->({ type => 'websocket.http.response.body', body => 'extra', more => 0 }) }; $@ };
+    $ws_denial_complete_err = $err;
+};
+ws_probe(app => $ws_app2);
+like( $ws_denial_complete_err // '', qr/denial response already complete/,
+    'websocket.http.response.body after a completed denial raises on h2, not silently swallowed' );
+
 done_testing;
