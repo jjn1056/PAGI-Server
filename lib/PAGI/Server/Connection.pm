@@ -3061,7 +3061,29 @@ sub _create_send {
         }
         elsif ($type eq 'http.response.trailers') {
             return unless $expects_trailers;
-            return unless $chunked;  # Trailers only work with chunked encoding
+
+            if ($is_head_request) {
+                # HEAD: accept-and-discard, per PAGI Www.pod's HEAD rule
+                # (mirrors the h2 HEAD block from Phase 2 Task 1). The
+                # generic advance_http call above already advanced the
+                # machine; transmit nothing.
+                $body_complete = 1;
+                return;
+            }
+
+            unless ($chunked) {
+                # Trailers ride chunked framing only (RFC 7230); a
+                # content-length response has no place to put them, and
+                # silently dropping promised trailers lies to the
+                # application. advance_http already advanced $seq to
+                # 'complete' generically above (it can't know the framing
+                # can't carry trailers) -- roll it back to its pre-event
+                # value, same guard/hoist pattern used by the file/fh arms
+                # above, so the machine stays 'awaiting_trailers' and never
+                # claims a response completed that never actually went out.
+                $seq = $seq_before_advance;
+                die "http.response.trailers requires chunked framing (response declared content-length)\n";
+            }
 
             my $trailer_headers = $event->{headers} // [];
 
