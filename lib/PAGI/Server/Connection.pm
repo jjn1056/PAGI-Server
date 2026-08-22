@@ -28,16 +28,6 @@ my $_cached_log_timestamp;
 my $_cached_log_time = 0;
 
 # =============================================================================
-# Unrecognized Event Type Handler (PAGI spec compliance)
-# =============================================================================
-# Per main.mkdn: "Servers must raise exceptions if... The type field is unrecognized"
-
-sub _unrecognized_event_type {
-    my ($type, $protocol) = @_;
-    die "Unrecognized event type '$type' for $protocol protocol\n";
-}
-
-# =============================================================================
 # Header Validation (CRLF Injection Prevention)
 # =============================================================================
 # RFC 7230 Section 3.2.6: Field values MUST NOT contain CR or LF
@@ -1155,9 +1145,6 @@ sub _h2_create_send {
             $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
             $weak_self->_h2_write_pending;
         }
-        else {
-            _unrecognized_event_type($type, 'http');
-        }
     };
 }
 
@@ -1772,9 +1759,6 @@ sub _h2_create_sse_send {
             # Hand any pending frames to the session's write path (design §8.4).
             $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
             $weak_self->_h2_write_pending;
-        }
-        else {
-            _unrecognized_event_type($type, 'sse');
         }
 
         return;
@@ -2865,9 +2849,7 @@ sub _create_send {
     my ($self, $request) = @_;
 
     my $chunked = 0;
-    my $response_started = 0;
     my $expects_trailers = 0;
-    my $body_complete = 0;
     my $seq = 'initial';
     my $is_head_request = ($request->{method} // '') eq 'HEAD';
     my $http_version = $request->{http_version} // '1.1';
@@ -2904,7 +2886,6 @@ sub _create_send {
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {
-            $response_started = 1;
             $weak_self->{response_started} = 1;
             $weak_self->{current_connection_state}->_mark_response_started
                 if $weak_self->{current_connection_state};
@@ -2956,14 +2937,10 @@ sub _create_send {
             $weak_self->{_resp_pending} = $response;
         }
         elsif ($type eq 'http.response.body') {
-            # For HEAD requests, suppress the body but track completion
+            # For HEAD requests, suppress the body
             if ($is_head_request) {
-                my $more = $event->{more} // 0;
                 # HEAD has headers but no body, so flush the buffered headers now.
                 $weak_self->_flush_pending_headers;
-                if (!$more) {
-                    $body_complete = 1;
-                }
                 return;  # Don't send any body for HEAD
             }
 
@@ -3004,7 +2981,6 @@ sub _create_send {
                     $seq = $seq_before_advance;
                     die $error;
                 };
-                $body_complete = 1;
             }
             elsif (defined $fh) {
                 # Filehandle response - stream from handle (async, non-blocking)
@@ -3020,7 +2996,6 @@ sub _create_send {
                     $seq = $seq_before_advance;
                     die $error;
                 };
-                $body_complete = 1;
             }
             else {
                 # Traditional body response
@@ -3052,11 +3027,6 @@ sub _create_send {
 
                 $weak_self->{stream}->write($out) if length $out;
                 $weak_self->_notify_transport_write;
-
-                # Handle completion for body responses
-                if (!$more) {
-                    $body_complete = 1;
-                }
             }
         }
         elsif ($type eq 'http.response.trailers') {
@@ -3067,7 +3037,6 @@ sub _create_send {
                 # (mirrors the h2 HEAD block from Phase 2 Task 1). The
                 # generic advance_http call above already advanced the
                 # machine; transmit nothing.
-                $body_complete = 1;
                 return;
             }
 
@@ -3081,6 +3050,9 @@ sub _create_send {
                 # value, same guard/hoist pattern used by the file/fh arms
                 # above, so the machine stays 'awaiting_trailers' and never
                 # claims a response completed that never actually went out.
+                # advance_http is a pure function with no side effects beyond
+                # its return value, which is what makes advance-then-rollback
+                # safe.
                 $seq = $seq_before_advance;
                 die "http.response.trailers requires chunked framing (response declared content-length)\n";
             }
@@ -3100,7 +3072,6 @@ sub _create_send {
             $trailers .= "\r\n";
 
             $weak_self->{stream}->write($trailers);
-            $body_complete = 1;
         }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush
@@ -3122,10 +3093,6 @@ sub _create_send {
             # The above TCP_NODELAY ensures no Nagle buffering delays.
             # For this reference implementation, we return immediately as the
             # write buffer will be flushed by the event loop.
-        }
-        else {
-            # Per PAGI spec: servers must raise exceptions for unrecognized event types
-            _unrecognized_event_type($type, 'http');
         }
 
         return;
@@ -4004,10 +3971,6 @@ sub _create_sse_send {
                 $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
             }
         }
-        else {
-            # Per PAGI spec: servers must raise exceptions for unrecognized event types
-            _unrecognized_event_type($type, 'sse');
-        }
 
         return;
     };
@@ -4378,10 +4341,6 @@ sub _create_websocket_send {
             else {
                 $weak_self->_stop_ws_keepalive;
             }
-        }
-        else {
-            # Per PAGI spec: servers must raise exceptions for unrecognized event types
-            _unrecognized_event_type($type, 'websocket');
         }
 
         return;
