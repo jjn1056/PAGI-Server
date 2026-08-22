@@ -140,6 +140,13 @@ our $RST_COMPLETE = 0;
 our $RST_DISCONNECT;
 our $RST_HELD = 0;   # flipped once the app has started streaming and is holding
 
+our $CANCEL_CS;
+our $CANCEL_COMPLETE = 0;
+our $CANCEL_DISCONNECT;
+our $CANCEL_WAITING  = 0;   # app is parked in receive(), no response started
+our $CANCEL_RETURNED = 0;   # app reached its return AFTER the reset
+our $CANCEL_EVENT;          # event type receive() woke with
+
 our $DUAL_CS_A;
 our $DUAL_COMPLETE_A = 0;
 our $DUAL_DISCONNECT_A;
@@ -192,6 +199,25 @@ my $rst_app = async sub {
     $H2CS::RST_HELD = 1;
     await Future->new;   # never resolves -- held until the stream is reset
     return;
+};
+
+# Cancel-before-response-start app: parks in receive() (the client keeps the
+# request stream open, so no body event is ever complete), then returns as
+# soon as the reset wakes it -- so the app really does reach the dispatch
+# wrapper with no response started, which is the only way to exercise the
+# wrapper's client-already-gone carve-out.
+my $cancel_before_start_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    my $cs = $scope->{'pagi.connection'};
+    $H2CS::CANCEL_CS = $cs;
+    $cs->on_complete(sub { $H2CS::CANCEL_COMPLETE = 1 });
+    $cs->on_disconnect(sub { $H2CS::CANCEL_DISCONNECT = $_[0] });
+
+    $H2CS::CANCEL_WAITING = 1;
+    my $e = await $receive->();
+    $H2CS::CANCEL_EVENT    = $e->{type};
+    $H2CS::CANCEL_RETURNED = 1;
+    return;   # never started a response
 };
 
 # Two-stream app: routes on path so one stream completes cleanly while the
@@ -316,7 +342,75 @@ subtest 'h2: client RST_STREAM drives connection_state to client_closed' => sub 
 };
 
 # =============================================================================
-# Test 3: two concurrent streams -- independent terminal states (spec 9.1)
+# Test 3: client RST BEFORE the response started -- quiet cancellation
+# =============================================================================
+# Design section 15.3: "a cancelled stream causes neither a synthetic 500 nor
+# an application-error log", and the spec's client-cancel carve-out covers a
+# cancel that lands before the response ever starts. The app here reaches the
+# dispatch wrapper (it returns once the reset wakes its receive), so the
+# wrapper's no-response branch is genuinely reached and must stay silent.
+
+subtest 'h2: client RST before response start synthesizes nothing and logs nothing' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my ($conn, $stream_io, $client_sock, $server) =
+        create_h2c_connection(app => $cancel_before_start_app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{$sid}{$n} = $v; return 0 },
+    );
+    h2c_handshake($client, $client_sock);
+
+    # body => sub { undef } defers the request body forever: the request
+    # stream stays open (no END_STREAM), so the app's receive() blocks.
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/cancel-before-start',
+        scheme    => 'http',
+        authority => 'localhost',
+        body      => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    for (1 .. 100) {
+        $loop->loop_once(0.05);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        last if $H2CS::CANCEL_WAITING;
+    }
+    ok($H2CS::CANCEL_WAITING, 'app is parked in receive() with no response started');
+    ok(!exists $headers{$stream_id}, 'no response headers sent before the reset');
+
+    $client->submit_rst_stream($stream_id, H2_CANCEL_CODE);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok($H2CS::CANCEL_RETURNED, 'app returned after the reset (dispatch wrapper reached)');
+    is($H2CS::CANCEL_EVENT, 'http.disconnect', 'receive() woke with http.disconnect');
+
+    ok(!exists $headers{$stream_id},
+        'no synthetic 500 was sent for the cancelled stream');
+    ok(!(grep { /PAGI application error/ } @warnings),
+        'no application-error log for the cancelled stream')
+        or diag("warnings: @warnings");
+    ok(!(grep { /returned without starting a response/ } @warnings),
+        'no no-response warning for the cancelled stream')
+        or diag("warnings: @warnings");
+
+    is($H2CS::CANCEL_CS->disconnect_reason, 'client_closed',
+        "disconnect_reason is 'client_closed'");
+    is($H2CS::CANCEL_COMPLETE, 0, 'on_complete did NOT fire');
+    is($H2CS::CANCEL_DISCONNECT, 'client_closed', 'on_disconnect reason is client_closed');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Test 4: two concurrent streams -- independent terminal states (spec 9.1)
 # =============================================================================
 
 subtest 'h2: two concurrent streams have independent connection_state' => sub {

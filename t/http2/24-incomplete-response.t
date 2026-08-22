@@ -189,6 +189,11 @@ our $THROW_COMPLETE = 0;
 our $THROW_DISCONNECT;
 our $THROW_STARTED = 0;
 
+our $DONE_CS;
+our $DONE_COMPLETE = 0;
+our $DONE_DISCONNECT;
+our $DONE_SENT = 0;
+
 package main;
 
 use constant H2_INTERNAL_ERROR_CODE => 2;   # NGHTTP2_INTERNAL_ERROR (RFC 9113 section 7)
@@ -224,6 +229,18 @@ my $lifecycle_app = async sub {
                          headers => [['content-type', 'text/plain']] });
         $Incomplete::THROW_STARTED = 1;
         await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+        die "boom\n";
+    }
+    elsif ($path eq '/throw-after-complete') {
+        my $cs = $scope->{'pagi.connection'};
+        $Incomplete::DONE_CS = $cs;
+        $cs->on_complete(sub { $Incomplete::DONE_COMPLETE = 1 });
+        $cs->on_disconnect(sub { $Incomplete::DONE_DISCONNECT = $_[0] });
+
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'all-done', more => 0 });
+        $Incomplete::DONE_SENT = 1;
         die "boom\n";
     }
     else {
@@ -334,6 +351,58 @@ subtest 'h2: app throwing after response started resets the stream' => sub {
 
     is($headers{$stream_id2}{':status'}, '200',
         'a second stream on the same connection still serves after the reset');
+
+    $stream->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# /throw-after-complete: the app delivered a COMPLETE response and only then
+# threw. The response is already on the wire, so there is nothing to
+# synthesize or reset -- but the exception is still the application's, and it
+# must be logged exactly once. The stream itself completed cleanly, so the
+# clean-completion half of the lifecycle stands: on_complete fires,
+# on_disconnect does not.
+# =============================================================================
+
+subtest 'h2: app throwing after a COMPLETE response still logs the error' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $lifecycle_app);
+
+    my (%headers, %body, %closed);
+    my $client = create_client(
+        on_header          => sub { my ($sid, $n, $v) = @_; $headers{$sid}{$n} = $v; return 0 },
+        on_data_chunk_recv => sub { my ($sid, $data) = @_; $body{$sid} .= $data; return 0 },
+        on_stream_close    => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/throw-after-complete',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 30);
+
+    ok($Incomplete::DONE_SENT, 'app delivered the terminal body before throwing');
+    is($headers{$stream_id}{':status'}, '200', 'the complete response was delivered');
+    is($body{$stream_id}, 'all-done', 'the full body was delivered');
+    is($closed{$stream_id}, 0, 'stream closed cleanly (END_STREAM, no RST)');
+
+    my @errors = grep {
+        /PAGI application error after response started \(HTTP\/2 stream $stream_id\): boom/
+    } @warnings;
+    is(scalar(@errors), 1,
+        'the post-completion exception is logged exactly once')
+        or diag("warnings: @warnings");
+
+    ok($Incomplete::DONE_CS, 'app captured a connection_state');
+    is($Incomplete::DONE_COMPLETE, 1, 'on_complete fired (the response did complete)');
+    is($Incomplete::DONE_DISCONNECT, undef, 'on_disconnect did NOT fire');
 
     $stream->close_now;
     $loop->remove($server);

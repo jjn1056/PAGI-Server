@@ -661,13 +661,24 @@ sub _h2_dispatch_stream {
 
             # Client-already-gone carve-out: if the client reset this stream
             # (or the whole connection tore down) while the app's Future was
-            # still pending, _h2_on_close already ran -- it marked $cs
-            # terminal (or, for the h2_streams-deleted case below, ran and
-            # completed its deferred cleanup). Either way there is nothing
-            # left to report: no synthesized 500, no incomplete-response RST,
-            # no warning about a stream the client no longer cares about.
-            my $client_gone = !$weak_self->{h2_streams}{$stream_id}
-                || ($cs && !$cs->is_connected);
+            # still pending, _h2_on_close already ran and drove $cs to an
+            # ABNORMAL terminal state. There is then nothing left to report:
+            # no synthesized 500, no incomplete-response RST, no warning
+            # about a stream the client no longer cares about.
+            #
+            # The test is "abnormal", not merely "terminal": a clean
+            # _mark_complete also leaves $cs disconnected, and it happens
+            # routinely BEFORE the app returns (the send closure flushes
+            # END_STREAM synchronously, so _h2_on_close -> _mark_complete
+            # normally runs inside the app's final await). Keying off
+            # is_connected would swallow every exception thrown after a
+            # fully-delivered response. An abnormal end has a
+            # disconnect_reason; a clean completion leaves it undef.
+            # Streams with no connection_state (WebSocket/SSE) fall back to
+            # the h2_streams entry, whose deferred delete is the only
+            # gone-signal they have.
+            my $client_gone = $cs ? defined($cs->disconnect_reason)
+                                  : !$weak_self->{h2_streams}{$stream_id};
 
             if ($client_gone) {
                 # Nothing to do.
