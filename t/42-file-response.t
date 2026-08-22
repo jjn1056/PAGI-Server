@@ -678,6 +678,93 @@ subtest 'zero-length file works' => sub {
     );
 };
 
+subtest 'file response offset past EOF sends zero bytes (chunked)' => sub {
+    # PAGI spec (Www.pod, Response Body validation): an offset past the end
+    # of the file SHOULD send zero bytes, not fail the response. No
+    # content-length header here, so this exercises the chunked framing
+    # path for a length-clamped-to-zero body.
+    # The app alternates: past-EOF (empty) on the first request, then a
+    # normal full-file response on the second -- so the "connection still
+    # usable" assertion below actually distinguishes a desynced connection
+    # (which would return the wrong bytes for request 2) from a healthy one.
+    my $request_count = 0;
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            $request_count++;
+            if ($request_count == 1) {
+                await $send->({
+                    type => 'http.response.start',
+                    status => 200,
+                    headers => [
+                        ['content-type', 'text/plain'],
+                    ],
+                });
+                await $send->({
+                    type => 'http.response.body',
+                    file => $test_file,
+                    offset => 999_999_999,
+                });
+            }
+            else {
+                await $send->({
+                    type => 'http.response.start',
+                    status => 200,
+                    headers => [
+                        ['content-type', 'text/plain'],
+                        ['content-length', length($test_content)],
+                    ],
+                });
+                await $send->({
+                    type => 'http.response.body',
+                    file => $test_file,
+                });
+            }
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for offset past EOF');
+            is($response->content, '', 'offset past EOF returns empty content');
+
+            # The connection must still be usable afterward -- a malformed
+            # zero-length chunk terminator would desync the next response.
+            my $second = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($second->code, 200, 'connection still usable for a follow-up request');
+            is($second->content, $test_content, 'follow-up request gets normal content');
+        }
+    );
+};
+
+subtest 'file response offset past EOF sends zero bytes (content-length)' => sub {
+    # Same rule, but with an explicit Content-Length: 0 header, exercising
+    # the non-chunked (sync fast-path) framing.
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', 0],
+                ],
+            });
+            await $send->({
+                type => 'http.response.body',
+                file => $test_file,
+                offset => 999_999_999,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for offset past EOF');
+            is($response->content, '', 'offset past EOF returns empty content');
+        }
+    );
+};
+
 # =============================================================================
 # Test: Threshold boundary behavior
 # =============================================================================

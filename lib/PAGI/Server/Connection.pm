@@ -4521,8 +4521,12 @@ async sub _send_file_response {
 
     # Get file size if length not specified
     my $file_size = -s $file;
-    die "Cannot stat file $file: $!" unless defined $file_size;
+    die "Cannot stat file $file: $!\n" unless defined $file_size;
     $length //= $file_size - $offset;
+
+    # PAGI spec (Www.pod, Response Body validation): an offset past the end
+    # of the file SHOULD send zero bytes rather than fail the response.
+    $length = 0 if $length < 0;
 
     $self->{_response_size} += $length;
 
@@ -4539,8 +4543,13 @@ async sub _send_file_response {
         die "Failed to read file $file: $!" unless defined $bytes_read;
 
         if ($chunked) {
-            my $len = sprintf("%x", length($data));
-            $stream->write("$len\r\n$data\r\n");
+            # A zero-length body IS the terminator chunk -- writing a
+            # separate empty data chunk before it would send "0\r\n\r\n"
+            # twice and desync the connection.
+            if (length($data)) {
+                my $len = sprintf("%x", length($data));
+                $stream->write("$len\r\n$data\r\n");
+            }
             $stream->write("0\r\n\r\n");
         }
         else {
