@@ -454,4 +454,37 @@ subtest 'header tuple and byte safety validation' => sub {
         qr/contains CR, LF, or null byte/, 'sse decline headers validated');
 };
 
+subtest 'unknown event types are rejected per family' => sub {
+    like( dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.bod' }) },
+        qr/Unrecognized event type 'http\.response\.bod' for http protocol/, 'http typo throws');
+    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.pong' }) },
+        qr/Unrecognized event type .* for websocket protocol/, 'ws unknown throws');
+    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.push' }) },
+        qr/Unrecognized event type .* for sse protocol/, 'sse unknown throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send({}) },
+        qr/Unrecognized event type '' for http protocol/, 'missing type throws');
+    ok( lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', unknown_extra => 1 }) },
+        'extra fields on a known type remain legal');
+};
+
+subtest 'extension-gated event types' => sub {
+    like( dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.fullflush' }) },
+        qr/Extension not enabled: fullflush/, 'fullflush without extension throws');
+    ok( lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.fullflush' }, { extensions => { fullflush => {} } }) },
+        'fullflush with extension ok');
+    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }) },
+        qr/Extension not enabled: websocket\.http\.response/, 'ws denial without extension throws');
+    ok( lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }, { extensions => { 'websocket.http.response' => {} } }) },
+        'ws denial with extension ok');
+};
+
+subtest 'lifespan send validation' => sub {
+    ok( lives { PAGI::Server::EventValidator::validate_lifespan_send({ type => 'lifespan.startup.complete' }) }, 'startup.complete ok');
+    ok( lives { PAGI::Server::EventValidator::validate_lifespan_send({ type => 'lifespan.startup.failed', message => 'db down' }) }, 'startup.failed with message ok');
+    like( dies { PAGI::Server::EventValidator::validate_lifespan_send({ type => 'lifespan.startup.done' }) },
+        qr/Unrecognized event type .* for lifespan protocol/, 'unknown lifespan type throws');
+    like( dies { PAGI::Server::EventValidator::validate_lifespan_send({ type => 'lifespan.shutdown.failed', message => {} }) },
+        qr/'message' must be a string/, 'ref message throws');
+};
+
 done_testing;

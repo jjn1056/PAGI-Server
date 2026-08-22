@@ -73,7 +73,8 @@ sub validate_headers {
 # =============================================================================
 
 sub validate_http_send {
-    my ($event) = @_;
+    my ($event, $opts) = @_;
+    my $ext = ($opts && $opts->{extensions}) || {};
     my $type = $event->{type} // '';
 
     if ($type eq 'http.response.start') {
@@ -85,7 +86,14 @@ sub validate_http_send {
     elsif ($type eq 'http.response.trailers') {
         _validate_http_response_trailers($event);
     }
-    # http.fullflush has no required fields beyond type
+    elsif ($type eq 'http.fullflush') {
+        croak "Extension not enabled: fullflush"
+            unless exists $ext->{fullflush};
+    }
+    else {
+        croak "Unrecognized event type '$type' for http protocol";
+    }
+    return;
 }
 
 sub _validate_http_response_start {
@@ -152,7 +160,8 @@ sub _validate_http_response_trailers {
 # =============================================================================
 
 sub validate_websocket_send {
-    my ($event) = @_;
+    my ($event, $opts) = @_;
+    my $ext = ($opts && $opts->{extensions}) || {};
     my $type = $event->{type} // '';
 
     if ($type eq 'websocket.accept') {
@@ -168,11 +177,19 @@ sub validate_websocket_send {
         _validate_websocket_keepalive($event);
     }
     elsif ($type eq 'websocket.http.response.start') {
+        croak "Extension not enabled: websocket.http.response"
+            unless exists $ext->{'websocket.http.response'};
         _validate_ws_denial_start($event);
     }
     elsif ($type eq 'websocket.http.response.body') {
+        croak "Extension not enabled: websocket.http.response"
+            unless exists $ext->{'websocket.http.response'};
         _validate_ws_denial_body($event);
     }
+    else {
+        croak "Unrecognized event type '$type' for websocket protocol";
+    }
+    return;
 }
 
 sub _validate_websocket_accept {
@@ -272,7 +289,10 @@ sub validate_sse_send {
     elsif ($type eq 'sse.http.response.body') {
         _validate_sse_decline_body($event);
     }
-    # http.fullflush has no required fields beyond type
+    else {
+        croak "Unrecognized event type '$type' for sse protocol";
+    }
+    return;
 }
 
 sub _validate_sse_decline_start {
@@ -360,6 +380,28 @@ sub _validate_sse_keepalive {
         unless _is_nonneg_number($event->{interval});
 }
 
+# =============================================================================
+# Lifespan Event Validation
+# =============================================================================
+
+sub validate_lifespan_send {
+    my ($event) = @_;
+    my $type = $event->{type} // '';
+
+    if ($type eq 'lifespan.startup.complete' or $type eq 'lifespan.shutdown.complete') {
+        # no fields beyond type
+    }
+    elsif ($type eq 'lifespan.startup.failed' or $type eq 'lifespan.shutdown.failed') {
+        if (exists $event->{message} && defined $event->{message}) {
+            croak "$type 'message' must be a string" if ref $event->{message};
+        }
+    }
+    else {
+        croak "Unrecognized event type '$type' for lifespan protocol";
+    }
+    return;
+}
+
 1;
 
 __END__
@@ -396,21 +438,41 @@ for zero overhead.
 
 =head1 FUNCTIONS
 
-=head2 validate_http_send($event)
+=head2 validate_http_send($event, $opts)
 
 Validates HTTP send events: C<http.response.start>, C<http.response.body>,
-C<http.response.trailers>.
+C<http.response.trailers>, C<http.fullflush>. C<$opts> is an optional hash
+reference of the form C<< { extensions => \%scope_extensions } >>;
+C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
+C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
+with C<"Unrecognized event type '$type' for http protocol">.
 
-=head2 validate_websocket_send($event)
+=head2 validate_websocket_send($event, $opts)
 
 Validates WebSocket send events: C<websocket.accept>, C<websocket.send>,
 C<websocket.close>, C<websocket.keepalive>, C<websocket.http.response.start>,
-C<websocket.http.response.body>.
+C<websocket.http.response.body>. C<$opts> is an optional hash reference of
+the form C<< { extensions => \%scope_extensions } >>; the two
+C<websocket.http.response.*> types croak with
+C<"Extension not enabled: websocket.http.response"> unless
+C<$opts-E<gt>{extensions}{'websocket.http.response'}> exists. Any other
+event type croaks with C<"Unrecognized event type '$type' for websocket protocol">.
 
 =head2 validate_sse_send($event)
 
 Validates SSE send events: C<sse.start>, C<sse.send>, C<sse.comment>,
-C<sse.keepalive>.
+C<sse.keepalive>, C<sse.close>, C<sse.http.response.start>,
+C<sse.http.response.body>. Any other event type croaks with
+C<"Unrecognized event type '$type' for sse protocol">.
+
+=head2 validate_lifespan_send($event)
+
+Validates lifespan send events: C<lifespan.startup.complete>,
+C<lifespan.startup.failed>, C<lifespan.shutdown.complete>,
+C<lifespan.shutdown.failed>. For the C<*.failed> types, C<message> is
+optional but must be a defined non-reference string when present. Any
+other event type croaks with
+C<"Unrecognized event type '$type' for lifespan protocol">.
 
 =head2 check_header_value($value)
 
