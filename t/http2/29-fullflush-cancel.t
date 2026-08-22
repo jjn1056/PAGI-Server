@@ -423,6 +423,11 @@ subtest 'client RST while the file pump is blocked on drain is quiet and leak-fr
         $client_sock->syswrite($out) if length($out);
     }
 
+    # M8: after settling, the reset stream's h2_streams entry must have
+    # been reclaimed -- a leaked entry here would accumulate across
+    # repeated client resets.
+    is( scalar keys %{ $conn->{h2_streams} }, 0, 'no leaked stream state' );
+
     $stream_io->close_now;
     $loop->remove($server);
 

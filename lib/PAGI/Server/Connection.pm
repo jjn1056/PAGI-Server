@@ -891,7 +891,8 @@ sub _h2_create_send {
     # vanished (client reset) while the last chunk was in flight.
     my $finish_body_stream = sub {
         $eof_pending = 1;
-        my $live = $weak_self->{h2_streams}{$stream_id} or return;
+        return unless $weak_self;
+        return unless $weak_self->{h2_streams}{$stream_id};
         $weak_self->{h2_session}->resume_stream($stream_id);
         $weak_self->_h2_write_pending;
     };
@@ -944,22 +945,28 @@ sub _h2_create_send {
             if $type eq 'http.response.trailers';
 
         # 4. file body: streamed through the send queue via $emit_chunk, one
-        # chunk at a time, under this stream's own backpressure.
-        if (defined $event->{file}) {
+        # chunk at a time, under this stream's own backpressure. The type
+        # guard (not just "defined $event->{file}") keeps a nonconforming
+        # http.response.start carrying a stray 'file' key from being
+        # misrouted into this arm.
+        if ($type eq 'http.response.body' && defined $event->{file}) {
             my $file   = $event->{file};
             my $offset = $event->{offset} // 0;
             my $length = $event->{length};
 
-            # Fail BEFORE submitting headers or advancing state so the app
-            # can recover (a failed file/fh send must NOT mark the
-            # response complete — see the h1 twin in _create_send).
-            die "File not found: $file\n"  unless -f $file;
-            die "Cannot read file: $file\n" unless -r $file;
-
+            # Snapshot+advance BEFORE the -f/-r checks (and the checks live
+            # inside the eval below) so a file event arriving in an illegal
+            # sequence state reports the SEQUENCE error, not a misleading
+            # "File not found" -- h1 parity. A failed file send must NOT
+            # mark the response complete, so on failure $seq rolls back to
+            # $seq_before exactly as the h1 twin in _create_send does.
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
             my $ok = eval {
+                die "File not found: $file\n"  unless -f $file;
+                die "Cannot read file: $file\n" unless -r $file;
+
                 if (!$streaming_started) {
                     $streaming_started = 1;
                     $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
@@ -970,13 +977,39 @@ sub _h2_create_send {
                     );
                     $weak_self->_h2_write_pending;
                 }
-                my $loop = $weak_self->{server}->loop;
-                await PAGI::Server::AsyncFile->read_file_chunked(
-                    $loop, $file, $emit_chunk,
-                    offset => $offset,
-                    (defined $length ? (length => $length) : ()),
-                    chunk_size => FILE_CHUNK_SIZE,
-                );
+
+                # Mirror h1's effective-length computation (_send_file_response)
+                # so the sync-vs-async choice below sees the same number h1
+                # would, including the Www.pod rule that an offset past EOF
+                # clamps to zero bytes rather than failing.
+                my $file_size = -s $file;
+                die "Cannot stat file $file: $!\n" unless defined $file_size;
+                my $effective_length = $length // ($file_size - $offset);
+                $effective_length = 0 if $effective_length < 0;
+
+                if ($weak_self->{sync_file_threshold} > 0
+                    && $effective_length <= $weak_self->{sync_file_threshold}) {
+                    # Small-file fast path (parity with h1's sync_file_threshold):
+                    # a file at or under the threshold is read synchronously,
+                    # in-process, as ONE queue chunk -- avoiding a worker-pool
+                    # round trip for a body small enough that it costs more
+                    # than it saves. The no-slurp rule targets large files.
+                    open my $fh, '<:raw', $file or die "Cannot open file $file: $!\n";
+                    seek($fh, $offset, 0) if $offset;
+                    my $bytes_read = read($fh, my $data, $effective_length);
+                    die "Failed to read file $file: $!\n" unless defined $bytes_read;
+                    close $fh;
+                    await $emit_chunk->($data);
+                }
+                else {
+                    my $loop = $weak_self->{server}->loop;
+                    await PAGI::Server::AsyncFile->read_file_chunked(
+                        $loop, $file, $emit_chunk,
+                        offset => $offset,
+                        (defined $length ? (length => $length) : ()),
+                        chunk_size => FILE_CHUNK_SIZE,
+                    );
+                }
                 1;
             };
             if (!$ok) {
@@ -993,8 +1026,9 @@ sub _h2_create_send {
         # chunk at a time, under this stream's own backpressure. The
         # application owns $fh (opened before the send, closed or not by the
         # app afterward) -- the server never closes it. Mirrors the file arm
-        # above; the read loop is adapted from h1's _send_fh_response.
-        if (defined $event->{fh}) {
+        # above; the read loop is adapted from h1's _send_fh_response. The
+        # type guard mirrors the file arm's M1 fix above.
+        if ($type eq 'http.response.body' && defined $event->{fh}) {
             my $fh = $event->{fh};
 
             my $seq_before = $seq;
@@ -3030,7 +3064,11 @@ sub _create_send {
             }
         }
         elsif ($type eq 'http.response.trailers') {
-            return unless $expects_trailers;
+            # No "return unless $expects_trailers" guard here: advance_http
+            # (called unconditionally above, line ~2886) already croaks for
+            # undeclared trailers -- "cannot send http.response.trailers:
+            # trailers were not declared or body is not complete" -- before
+            # execution ever reaches this branch, so the guard was dead code.
 
             if ($is_head_request) {
                 # HEAD: accept-and-discard, per PAGI Www.pod's HEAD rule

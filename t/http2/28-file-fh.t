@@ -179,12 +179,21 @@ binmode $big_fh;
 print $big_fh $pattern;
 close $big_fh;
 
+# Small fixture (well under the default 64KB sync_file_threshold) so I3's
+# h2 sync fast-path is the one actually exercised for /file-small below.
+my $small_content = substr($pattern, 0, 500);
+my ($small_fh, $small_file) = tempfile(UNLINK => 1);
+binmode $small_fh;
+print $small_fh $small_content;
+close $small_fh;
+
 # ============================================================
 # App
 # ============================================================
 
 package File;
-our $BIG = $big_file;
+our $BIG   = $big_file;
+our $SMALL = $small_file;
 package main;
 
 $File::app = async sub {
@@ -214,6 +223,32 @@ $File::app = async sub {
                          headers => [['content-type','application/octet-stream']] });
         await $send->({ type => 'http.response.body', file => $File::BIG,
                          offset => 999_999_999 });
+        return;
+    }
+    if ($path eq '/file-small') {
+        # I3: a file at or under sync_file_threshold (default 64KB) takes
+        # the h2 sync fast path (one queue chunk, no worker-pool round
+        # trip). We can't easily assert "no worker was used" from here, so
+        # this asserts byte-exact correctness -- the threshold path is the
+        # one actually exercised for a file this size.
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','application/octet-stream']] });
+        await $send->({ type => 'http.response.body', file => $File::SMALL });
+        return;
+    }
+    if ($path eq '/file-before-start') {
+        # M2: a file event (bad file) arriving in an illegal sequence state
+        # (before http.response.start) must report the SEQUENCE error, not
+        # the misleading "File not found" -- h1 parity.
+        my $err = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', file => '/nonexistent' }) };
+            $@;
+        };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','text/plain']] });
+        await $send->({ type => 'http.response.body', body => "err=$err", more => 0 });
         return;
     }
     if ($path eq '/file-missing') {
@@ -277,12 +312,16 @@ is( length get_h2('/file-full')->{body}, 300_000, 'full file streamed' );
 is( get_h2('/file-full')->{body}, $pattern, 'byte-exact content' );
 is( get_h2('/file-range')->{body}, substr($pattern,1000,1000), 'offset+length honored' );
 is( get_h2('/file-past-eof')->{body}, '', 'offset past EOF sends zero bytes, stream ends cleanly' );
-like( get_h2('/file-missing')->{body}, qr/err=.+/, 'open failure fails the Future; app recovered with a normal body' );
+is( get_h2('/file-small')->{body}, $small_content,
+    'small file (<= sync_file_threshold) reads correctly via the h2 sync fast path (I3)' );
+like( get_h2('/file-before-start')->{body}, qr/err=.*before http\.response\.start/,
+    'file event before start reports the SEQUENCE error, not File not found (M2)' );
+like( get_h2('/file-missing')->{body}, qr/err=.*File not found/, 'open failure fails the Future; app recovered with a normal body' );
 is( get_h2('/file-after-chunks')->{body}, 'x' . $pattern, 'file appended to an in-progress stream' );
 
 is( get_h2('/fh-full')->{body}, $pattern, 'fh streamed byte-exact' );
 ok( $FhOwn::CLOSED_OK, 'application still owns the handle after the send resolves' );
 is( get_h2('/fh-range')->{body}, substr($pattern,1000,1000), 'fh offset+length honored' );
-like( get_h2('/fh-closed')->{body}, qr/err=.+/, 'closed fh fails the Future; app recovered' );
+like( get_h2('/fh-closed')->{body}, qr/err=.*Failed to read filehandle/, 'closed fh fails the Future; app recovered' );
 
 done_testing;
