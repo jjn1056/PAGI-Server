@@ -3599,12 +3599,15 @@ sub _create_sse_send {
 
         my $type = $event->{type} // '';
 
-        # Once the machine has already recorded this stream as closed (an
-        # app-initiated sse.close ran, which closes the transport as a side
-        # effect of ending the stream), the machine -- not the transport-
-        # closed check below -- decides what happens next: idempotent no-op
-        # for a repeat sse.close, croak for anything else.
-        my $already_closed = ($seq eq 'closed');
+        # Once the machine has already recorded this stream as closed --
+        # either an app-initiated sse.close (which closes the transport as a
+        # side effect of ending the stream) or a completed decline response
+        # (whose finalize branch also closes the transport as a side
+        # effect) -- the machine, not the transport-closed check below,
+        # decides what happens next: idempotent no-op for a repeat
+        # sse.close, croak for anything else (decline_complete has no
+        # idempotent case; it croaks unconditionally).
+        my $already_closed = ($seq eq 'closed' || $seq eq 'decline_complete');
 
         # Transport already gone for reasons other than our own close (a real
         # client disconnect): sends are a silent no-op.
@@ -3714,8 +3717,9 @@ sub _create_sse_send {
         elsif ($type eq 'sse.http.response.start') {
             # Decline the SSE stream and return a normal HTTP response. Valid only
             # before sse.start; namespaced under sse. (mirrors websocket.http.response.*).
-            # A decline-after-start attempt is already rejected by advance_sse.
-            return if $weak_self->{sse_decline_started};   # idempotent
+            # A decline-after-start attempt, and a repeat sse.http.response.start,
+            # are already rejected by advance_sse (the 'declining' state only
+            # accepts sse.http.response.body).
             $weak_self->{sse_decline_started} = 1;
             $weak_self->{sse_decline_status}  = $event->{status} // 200;
             $weak_self->{sse_decline_headers} = [

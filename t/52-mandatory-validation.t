@@ -154,6 +154,13 @@ my $sse_app = async sub {
             $SseAfterClose::ERR = $err;   # observed via package var after request
             return;
         }
+        if ($path eq '/sse-send-after-decline-complete') {
+            await $send->({ type => 'sse.http.response.start', status => 200, headers => [['content-type','text/plain']] });
+            await $send->({ type => 'sse.http.response.body', body => 'done', more => 0 });
+            my $err = do { local $@; eval { await $send->({ type => 'sse.http.response.body', body => 'extra', more => 0 }) }; $@ };
+            $SseAfterDeclineComplete::ERR = $err;   # observed via package var after request
+            return;
+        }
     }
     die "unsupported scope $scope->{type}";
 };
@@ -184,6 +191,9 @@ like( $sse_get->('/sse-newline-event')->content, qr/must not contain newline/,
 $sse_get->('/sse-send-after-close');
 like( $SseAfterClose::ERR // '', qr/after sse\.close/,
     'sse.send after sse.close fails' );
+$sse_get->('/sse-send-after-decline-complete');
+like( $SseAfterDeclineComplete::ERR // '', qr/decline response already complete/,
+    'sse.http.response.body after a completed decline fails, not silently swallowed' );
 $sse_server->shutdown->get;
 
 # --- WebSocket: shape and mis-sequencing errors on the send path ---
