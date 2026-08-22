@@ -66,7 +66,9 @@ independently per stream on HTTP/2 (see L</"Connection State
 -- reject a handshake with a custom HTTP response instead of a bare C<403>, on
 both HTTP/1.1 and HTTP/2.
 
-=item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT).
+=item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT), including
+per-stream C<websocket.keepalive> (see L</"WebSocket over HTTP/2 (RFC
+8441)">).
 
 =item * B<TLS introspection> (the C<tls> extension) -- certificates, negotiated
 version, and cipher suite. The server negotiates TLS 1.3 by default
@@ -255,6 +257,60 @@ normally.
 The long-term goal is parity: C<pagi.transport> for every streaming scope type
 over every transport, so an application need not know whether it runs over
 HTTP/1.1 or HTTP/2.
+
+=head2 WebSocket over HTTP/2 (RFC 8441)
+
+PAGI::Server accepts a WebSocket upgrade over HTTP/2 through RFC 8441
+Extended CONNECT (C<:protocol => 'websocket'>). Each accepted stream carries
+its own C<websocket.receive>/C<websocket.disconnect> event stream,
+multiplexed alongside every other stream on the connection.
+
+=head3 Keepalive
+
+C<websocket.keepalive> is supported per stream. An HTTP/2 connection
+multiplexes many WebSocket streams, so keepalive state and its timers live
+on the individual stream rather than the connection -- unlike HTTP/1.1,
+where one WebSocket occupies the whole connection and keepalive is
+connection-wide. A ping is delivered as an RFC 6455 ping frame carried in
+an HTTP/2 C<DATA> frame on that stream; the peer's pong (opcode 10) clears
+the stream's wait flag. Each C<websocket.keepalive> event for a stream
+supersedes any keepalive already running on it, and C<interval =E<gt> 0>
+stops it. When C<timeout> is given and no pong arrives
+within it, only that stream closes -- code C<1006>, reason
+C<keepalive_timeout> -- other streams multiplexed on the same connection
+are unaffected. An omitted C<timeout> means the server never checks for a
+missing pong.
+
+=head3 Disconnect
+
+Each HTTP/2 WebSocket stream's scope receives exactly one
+C<websocket.disconnect> event, whichever of the conditions below closes it
+first. C<code> and C<reason> pair up the same way as
+L<PAGI::Spec::Www/"Disconnect - receive event"> describes for the
+reference server:
+
+=over 4
+
+=item * B<The peer sent a Close frame.> C<code> is the peer's own close
+code (C<1005> if the frame carried none) and C<reason> is the peer's own
+reason text, which is commonly empty. The server does not substitute a
+token.
+
+=item * B<Abnormal drop with no close handshake> -- a bare C<END_STREAM>,
+an C<RST_STREAM>, or any other stream teardown that did not go through a
+Close frame. C<code> is C<1006> and C<reason> is C<client_closed>.
+
+=item * B<Keepalive pong timeout.> C<code> is C<1006> and C<reason> is
+C<keepalive_timeout>.
+
+=item * B<Server-initiated protocol close> -- the server detected a
+framing or protocol violation (an invalid close frame, an invalid close
+code, or invalid UTF-8 in a text frame or in a Close frame's reason) and
+sent the Close frame itself. C<code> is the RFC 6455 code for the fault
+(C<1002> for a framing/protocol error, C<1007> for invalid UTF-8) and
+C<reason> is C<protocol_error>.
+
+=back
 
 =head2 Connection State (pagi.connection)
 

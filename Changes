@@ -58,6 +58,13 @@
     the send Future ("not yet implemented on HTTP/2") pending a
     Net::HTTP2::nghttp2 release adding a submit_trailer binding, tracked as
     Phase 2b.
+  - websocket.keepalive is now implemented over HTTP/2: per-stream ping/pong
+    timers (the h2 multiplexing analogue of the HTTP/1.1 connection-wide
+    keepalive), with pings delivered as h2 DATA-framed RFC 6455 ping frames.
+    An interval with no pong within its optional timeout closes only that
+    stream (code 1006, reason keepalive_timeout); other streams on the
+    same connection are unaffected. interval => 0 stops keepalive; an
+    omitted timeout means no dead-connection detection.
 
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
@@ -75,6 +82,27 @@
     completion is not a disconnect, so there is nothing for the Future to
     resolve with. A Future requested after an abnormal disconnect is
     unaffected: still already resolved with the disconnect reason.
+  - HTTP/2 WebSocket streams now deliver exactly one websocket.disconnect
+    event per scope; every delivery site (peer Close frame, bare
+    END_STREAM, RST_STREAM/other stream close, server-initiated protocol
+    close, keepalive pong timeout) routes through a single dedup point, so
+    a stream that hits more than one of these in sequence still only
+    reports the first. A bare END_STREAM with no close handshake
+    previously reported two events (1005/empty-reason, then a second
+    1006/empty-reason from the stream close) and now reports exactly one,
+    code 1006 and reason client_closed. RST_STREAM and other abnormal
+    stream closes now likewise report reason client_closed instead of an
+    empty string. Server-initiated protocol closes (invalid close frame,
+    invalid close code, invalid UTF-8 in a text frame or close reason) now
+    report the spec's protocol_error reason token instead of an ad hoc
+    human-readable string (e.g. "Invalid close frame").
+  - HTTP/2's "client already disconnected, nothing new to report" log
+    carve-out no longer suppresses the incomplete-response/threw warning
+    for a stream whose connection state recorded server_error (the SERVER
+    caused the abnormal end, e.g. an early END_STREAM on a
+    trailers-declared response that never sent its trailers). Per the PAGI
+    spec, the carve-out applies only when the client had already
+    disconnected; a server-caused end must still warn.
 
 0.002006 - 2026-07-04
 
