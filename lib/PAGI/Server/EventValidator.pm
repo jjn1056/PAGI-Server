@@ -402,6 +402,147 @@ sub validate_lifespan_send {
     return;
 }
 
+# =============================================================================
+# Sequence State Machines
+#
+# Each advance_* function is a pure transition function: given the current
+# per-connection sequence state and a (shape-already-validated) event, it
+# returns the next state or croaks describing the send-order violation.
+# Dispatchers run shape validation first and call these separately.
+# =============================================================================
+
+sub _http_body_is_terminal {
+    my ($event) = @_;
+    return 1 if defined $event->{file} || defined $event->{fh};
+    my $more = $event->{more} // 0;
+    return !$more;
+}
+
+sub advance_http {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+
+    croak "cannot send '$type': response already complete"
+        if $state eq 'complete';
+
+    if ($state eq 'initial') {
+        croak "cannot send '$type' before http.response.start"
+            unless $type eq 'http.response.start';
+        return $event->{trailers} ? 'started_t' : 'started';
+    }
+
+    croak "cannot send duplicate http.response.start"
+        if $type eq 'http.response.start';
+
+    if ($type eq 'http.response.trailers') {
+        croak "cannot send http.response.trailers: trailers were not declared or body is not complete"
+            unless $state eq 'awaiting_trailers';
+        return 'complete';
+    }
+
+    return $state if $type eq 'http.fullflush';
+
+    if ($type eq 'http.response.body') {
+        if ($state eq 'started') {
+            return _http_body_is_terminal($event) ? 'complete' : 'started';
+        }
+        if ($state eq 'started_t') {
+            return _http_body_is_terminal($event) ? 'awaiting_trailers' : 'started_t';
+        }
+    }
+
+    # awaiting_trailers state only accepts trailers/fullflush (handled above);
+    # anything else here means a body chunk arrived after completion was
+    # already declared but before the required trailers were sent.
+    croak "cannot send '$type' during http response phase '$state'";
+}
+
+sub advance_websocket {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+
+    croak "cannot send '$type' after websocket.close"
+        if $state eq 'closed';
+    croak "cannot send '$type': denial response already complete"
+        if $state eq 'denial_complete';
+
+    if ($state eq 'connecting') {
+        return 'accepted' if $type eq 'websocket.accept';
+        return 'closed' if $type eq 'websocket.close';
+        return 'denial' if $type eq 'websocket.http.response.start';
+        croak "cannot send '$type' before websocket.accept";
+    }
+
+    if ($state eq 'accepted') {
+        return 'accepted' if $type eq 'websocket.send' || $type eq 'websocket.keepalive';
+        return 'closed' if $type eq 'websocket.close';
+        croak "cannot send '$type' after websocket.accept";
+    }
+
+    if ($state eq 'denial') {
+        if ($type eq 'websocket.http.response.body') {
+            my $more = $event->{more} // 0;
+            return $more ? 'denial' : 'denial_complete';
+        }
+        croak "cannot send '$type' after websocket.http.response.start";
+    }
+
+    croak "cannot send '$type' in websocket state '$state'";
+}
+
+sub advance_sse {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+
+    if ($state eq 'closed') {
+        return 'closed' if $type eq 'sse.close';
+        croak "cannot send '$type' after sse.close";
+    }
+    croak "cannot send '$type': decline response already complete"
+        if $state eq 'decline_complete';
+
+    if ($state eq 'initial') {
+        return 'streaming' if $type eq 'sse.start';
+        return 'declining' if $type eq 'sse.http.response.start';
+        croak "cannot send '$type' before sse.start";
+    }
+
+    if ($state eq 'streaming') {
+        return 'streaming' if $type eq 'sse.send' || $type eq 'sse.comment' || $type eq 'sse.keepalive';
+        return 'closed' if $type eq 'sse.close';
+        croak "cannot decline with sse.http.response.start after sse.start"
+            if $type eq 'sse.http.response.start';
+        croak "cannot send duplicate sse.start"
+            if $type eq 'sse.start';
+        croak "cannot send '$type' after sse.start";
+    }
+
+    if ($state eq 'declining') {
+        if ($type eq 'sse.http.response.body') {
+            my $more = $event->{more} // 0;
+            return $more ? 'declining' : 'decline_complete';
+        }
+        croak "cannot send '$type' after sse.http.response.start";
+    }
+
+    croak "cannot send '$type' in sse state '$state'";
+}
+
+sub advance_lifespan {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+
+    if ($state eq 'startup_pending') {
+        return 'running' if $type eq 'lifespan.startup.complete';
+        return 'finished' if $type eq 'lifespan.startup.failed';
+    }
+    elsif ($state eq 'shutdown_pending') {
+        return 'finished' if $type eq 'lifespan.shutdown.complete' || $type eq 'lifespan.shutdown.failed';
+    }
+
+    croak "cannot send '$type' during lifespan phase '$state'";
+}
+
 1;
 
 __END__
@@ -473,6 +614,97 @@ C<lifespan.shutdown.failed>. For the C<*.failed> types, C<message> is
 optional but must be a defined non-reference string when present. Any
 other event type croaks with
 C<"Unrecognized event type '$type' for lifespan protocol">.
+
+=head2 advance_http($state, $event)
+
+Pure send-sequence transition function for the HTTP family. Does not
+validate event shape; call C<validate_http_send> separately first. States:
+C<initial>, C<started>, C<started_t> (trailers declared), C<awaiting_trailers>,
+C<complete>. Starting state is C<initial>.
+
+From C<initial>, C<http.response.start> advances to C<started>, or to
+C<started_t> if the start event's C<trailers> field is true. From C<started>
+or C<started_t>, C<http.response.body> events with a true C<more> field (and
+no C<file>/C<fh>) keep the same state; a terminal body chunk (C<more> false,
+absent, or a C<file>/C<fh> body) advances C<started> to C<complete> and
+C<started_t> to C<awaiting_trailers>. C<http.response.trailers> only
+succeeds from C<awaiting_trailers>, advancing to C<complete>.
+C<http.fullflush> is legal in C<started>, C<started_t>, and
+C<awaiting_trailers> and leaves the state unchanged.
+
+Croaks: any event in C<initial> other than C<http.response.start>
+(C<"cannot send '<type>' before http.response.start">); C<http.response.start>
+outside C<initial> (C<"cannot send duplicate http.response.start">);
+C<http.response.trailers> outside C<awaiting_trailers>
+(C<"cannot send http.response.trailers: trailers were not declared or body is not complete">);
+any event once C<complete> (C<"cannot send '<type>': response already complete">).
+
+=head2 advance_websocket($state, $event)
+
+Pure send-sequence transition function for the WebSocket family. Does not
+validate event shape; call C<validate_websocket_send> separately first.
+States: C<connecting>, C<accepted>, C<denial>, C<denial_complete>, C<closed>.
+Starting state is C<connecting>.
+
+From C<connecting>: C<websocket.accept> advances to C<accepted>;
+C<websocket.close> advances to C<closed>; C<websocket.http.response.start>
+(a denial) advances to C<denial>. From C<accepted>: C<websocket.send> and
+C<websocket.keepalive> keep C<accepted>; C<websocket.close> advances to
+C<closed>. From C<denial>: C<websocket.http.response.body> with a true
+C<more> field keeps C<denial>; a terminal body chunk advances to
+C<denial_complete>.
+
+Croaks: C<websocket.send>/C<websocket.keepalive> before accept
+(C<"cannot send '<type>' before websocket.accept">); any denial or accept
+event once C<accepted> (C<"cannot send '<type>' after websocket.accept">);
+any non-body event once denial has started
+(C<"cannot send '<type>' after websocket.http.response.start">); any event
+once C<closed> (C<"cannot send '<type>' after websocket.close">, including a
+second C<websocket.close> - unlike SSE, WebSocket close is not idempotent);
+any event once C<denial_complete>
+(C<"cannot send '<type>': denial response already complete">).
+
+=head2 advance_sse($state, $event)
+
+Pure send-sequence transition function for the SSE family. Does not
+validate event shape; call C<validate_sse_send> separately first. States:
+C<initial>, C<streaming>, C<declining>, C<decline_complete>, C<closed>.
+Starting state is C<initial>.
+
+From C<initial>: C<sse.start> advances to C<streaming>;
+C<sse.http.response.start> (a decline) advances to C<declining>. From
+C<streaming>: C<sse.send>, C<sse.comment>, and C<sse.keepalive> keep
+C<streaming>; C<sse.close> advances to C<closed>. From C<declining>:
+C<sse.http.response.body> with a true C<more> field keeps C<declining>; a
+terminal body chunk advances to C<decline_complete>. From C<closed>,
+C<sse.close> is idempotent and stays C<closed>.
+
+Croaks: any event in C<initial> other than C<sse.start>/decline start
+(C<"cannot send '<type>' before sse.start">); a decline start after
+C<sse.start> (C<"cannot decline with sse.http.response.start after sse.start">);
+a duplicate C<sse.start> (C<"cannot send duplicate sse.start">); any other
+event once C<streaming> (C<"cannot send '<type>' after sse.start">); any
+non-body event once declining has started
+(C<"cannot send '<type>' after sse.http.response.start">); any event other
+than C<sse.close> once C<closed> (C<"cannot send '<type>' after sse.close">);
+any event once C<decline_complete>
+(C<"cannot send '<type>': decline response already complete">).
+
+=head2 advance_lifespan($state, $event)
+
+Pure send-sequence transition function for the lifespan family. Does not
+validate event shape; call C<validate_lifespan_send> separately first.
+States: C<startup_pending>, C<running>, C<shutdown_pending>, C<finished>.
+Starting state is C<startup_pending>. The server itself moves C<running> to
+C<shutdown_pending> when it emits the shutdown event; this function does not
+perform that transition.
+
+From C<startup_pending>: C<lifespan.startup.complete> advances to
+C<running>; C<lifespan.startup.failed> advances to C<finished>. From
+C<shutdown_pending>: C<lifespan.shutdown.complete> or
+C<lifespan.shutdown.failed> advances to C<finished>. Every other
+C<($state, $event)> combination croaks with
+C<"cannot send '<type>' during lifespan phase '<state>'">.
 
 =head2 check_header_value($value)
 

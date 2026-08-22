@@ -487,4 +487,86 @@ subtest 'lifespan send validation' => sub {
         qr/'message' must be a string/, 'ref message throws');
 };
 
+# =============================================================================
+# Sequence State Machines
+# =============================================================================
+
+subtest 'advance_http transition matrix' => sub {
+    my $adv = \&PAGI::Server::EventValidator::advance_http;
+    is( $adv->('initial', { type => 'http.response.start', status => 200 }), 'started', 'start -> started');
+    is( $adv->('initial', { type => 'http.response.start', status => 200, trailers => 1 }), 'started_t', 'start+trailers -> started_t');
+    is( $adv->('started', { type => 'http.response.body', body => 'x', more => 1 }), 'started', 'streaming chunk keeps started');
+    is( $adv->('started', { type => 'http.response.body', body => 'x' }), 'complete', 'terminal body -> complete');
+    is( $adv->('started', { type => 'http.response.body', file => '/tmp/f' }), 'complete', 'file body -> complete');
+    is( $adv->('started', { type => 'http.response.body', fh => \*STDOUT, more => 1 }), 'complete', 'fh body is always terminal regardless of more');
+    is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 1 }), 'started_t', 'streaming chunk keeps started_t');
+    is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 0 }), 'awaiting_trailers', 'terminal body with declared trailers -> awaiting_trailers');
+    is( $adv->('awaiting_trailers', { type => 'http.response.trailers', headers => [] }), 'complete', 'trailers -> complete');
+    is( $adv->('started', { type => 'http.fullflush' }), 'started', 'fullflush leaves started unchanged');
+    is( $adv->('started_t', { type => 'http.fullflush' }), 'started_t', 'fullflush leaves started_t unchanged');
+    is( $adv->('awaiting_trailers', { type => 'http.fullflush' }), 'awaiting_trailers', 'fullflush leaves awaiting_trailers unchanged');
+    like( dies { $adv->('initial', { type => 'http.response.body', body => 'x' }) }, qr/before http\.response\.start/, 'body before start');
+    like( dies { $adv->('initial', { type => 'http.response.trailers' }) }, qr/before http\.response\.start/, 'trailers before start');
+    like( dies { $adv->('started', { type => 'http.response.start', status => 200 }) }, qr/duplicate http\.response\.start/, 'duplicate start');
+    like( dies { $adv->('started_t', { type => 'http.response.start', status => 200 }) }, qr/duplicate http\.response\.start/, 'duplicate start after trailers declared');
+    like( dies { $adv->('started', { type => 'http.response.trailers' }) }, qr/not declared/, 'undeclared trailers');
+    like( dies { $adv->('started_t', { type => 'http.response.trailers' }) }, qr/not declared/, 'trailers before body complete');
+    like( dies { $adv->('complete', { type => 'http.response.body', body => 'x' }) }, qr/already complete/, 'body after completion');
+    like( dies { $adv->('complete', { type => 'http.response.trailers' }) }, qr/already complete/, 'trailers after completion');
+    like( dies { $adv->('complete', { type => 'http.response.start', status => 200 }) }, qr/already complete/, 'start after completion');
+    like( dies { $adv->('awaiting_trailers', { type => 'http.response.body', body => 'x' }) }, qr/awaiting_trailers/, 'body while awaiting trailers is rejected');
+};
+
+subtest 'advance_sse close is idempotent, streams stay exclusive' => sub {
+    my $adv = \&PAGI::Server::EventValidator::advance_sse;
+    is( $adv->('initial', { type => 'sse.start' }), 'streaming', 'start -> streaming');
+    is( $adv->('streaming', { type => 'sse.send', data => 'x' }), 'streaming', 'send keeps streaming');
+    is( $adv->('streaming', { type => 'sse.comment', comment => 'x' }), 'streaming', 'comment keeps streaming');
+    is( $adv->('streaming', { type => 'sse.keepalive', interval => 15 }), 'streaming', 'keepalive keeps streaming');
+    is( $adv->('streaming', { type => 'sse.close' }), 'closed', 'close -> closed');
+    is( $adv->('closed', { type => 'sse.close' }), 'closed', 'second close idempotent');
+    is( $adv->('declining', { type => 'sse.http.response.body', more => 1 }), 'declining', 'decline body chunk keeps declining');
+    is( $adv->('declining', { type => 'sse.http.response.body' }), 'decline_complete', 'terminal decline body -> decline_complete');
+    like( dies { $adv->('closed', { type => 'sse.send', data => 'x' }) }, qr/after sse\.close/, 'send after close');
+    is( $adv->('initial', { type => 'sse.http.response.start', status => 404 }), 'declining', 'decline start');
+    like( dies { $adv->('initial', { type => 'sse.send', data => 'x' }) }, qr/before sse\.start/, 'send before start');
+    like( dies { $adv->('streaming', { type => 'sse.http.response.start', status => 404 }) }, qr/after sse\.start/, 'decline after start');
+    like( dies { $adv->('streaming', { type => 'sse.start' }) }, qr/duplicate sse\.start/, 'duplicate start');
+    like( dies { $adv->('declining', { type => 'sse.send', data => 'x' }) }, qr/after sse\.http\.response\.start/, 'stream event while declining');
+    like( dies { $adv->('decline_complete', { type => 'sse.close' }) }, qr/decline response already complete/, 'anything after decline complete');
+};
+
+subtest 'advance_websocket denial and accept are exclusive' => sub {
+    my $adv = \&PAGI::Server::EventValidator::advance_websocket;
+    is( $adv->('connecting', { type => 'websocket.accept' }), 'accepted', 'accept');
+    is( $adv->('connecting', { type => 'websocket.http.response.start', status => 401 }), 'denial', 'denial start');
+    is( $adv->('connecting', { type => 'websocket.close' }), 'closed', 'close while connecting');
+    is( $adv->('accepted', { type => 'websocket.send', text => 'x' }), 'accepted', 'send keeps accepted');
+    is( $adv->('accepted', { type => 'websocket.keepalive', interval => 30 }), 'accepted', 'keepalive keeps accepted');
+    is( $adv->('accepted', { type => 'websocket.close' }), 'closed', 'close after accept');
+    is( $adv->('denial', { type => 'websocket.http.response.body', more => 1 }), 'denial', 'denial body chunk keeps denial');
+    is( $adv->('denial', { type => 'websocket.http.response.body' }), 'denial_complete', 'terminal denial body -> denial_complete');
+    like( dies { $adv->('connecting', { type => 'websocket.keepalive', interval => 30 }) }, qr/before websocket\.accept/, 'keepalive before accept');
+    like( dies { $adv->('connecting', { type => 'websocket.send', text => 'x' }) }, qr/before websocket\.accept/, 'send before accept');
+    like( dies { $adv->('accepted', { type => 'websocket.accept' }) }, qr/after websocket\.accept/, 'duplicate accept');
+    like( dies { $adv->('accepted', { type => 'websocket.http.response.start', status => 401 }) }, qr/after websocket\.accept/, 'denial after accept');
+    like( dies { $adv->('accepted', { type => 'websocket.http.response.body' }) }, qr/after websocket\.accept/, 'denial body after accept');
+    like( dies { $adv->('denial', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.http\.response\.start/, 'frame while denying');
+    like( dies { $adv->('denial', { type => 'websocket.keepalive', interval => 30 }) }, qr/after websocket\.http\.response\.start/, 'keepalive while denying');
+    like( dies { $adv->('closed', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.close/, 'send after close');
+    like( dies { $adv->('closed', { type => 'websocket.close' }) }, qr/after websocket\.close/, 'second close also croaks (websocket close is not idempotent)');
+    like( dies { $adv->('denial_complete', { type => 'websocket.close' }) }, qr/denial response already complete/, 'anything after denial complete');
+};
+
+subtest 'advance_lifespan phases' => sub {
+    my $adv = \&PAGI::Server::EventValidator::advance_lifespan;
+    is( $adv->('startup_pending', { type => 'lifespan.startup.complete' }), 'running', 'startup completes');
+    is( $adv->('startup_pending', { type => 'lifespan.startup.failed' }), 'finished', 'startup fails');
+    is( $adv->('shutdown_pending', { type => 'lifespan.shutdown.complete' }), 'finished', 'shutdown completes');
+    is( $adv->('shutdown_pending', { type => 'lifespan.shutdown.failed' }), 'finished', 'shutdown fails');
+    like( dies { $adv->('startup_pending', { type => 'lifespan.shutdown.complete' }) }, qr/during lifespan phase 'startup_pending'/, 'shutdown result during startup');
+    like( dies { $adv->('running', { type => 'lifespan.startup.complete' }) }, qr/during lifespan phase 'running'/, 'late startup result');
+    like( dies { $adv->('finished', { type => 'lifespan.startup.complete' }) }, qr/during lifespan phase 'finished'/, 'anything after finished');
+};
+
 done_testing;
