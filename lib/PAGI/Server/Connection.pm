@@ -4000,7 +4000,22 @@ sub _create_websocket_send {
     return async sub  {
         my ($event) = @_;
         return Future->done unless $weak_self;
-        return Future->done if $weak_self->{closed};
+
+        # Once the machine has recorded the connection closed or the denial
+        # response complete, the machine decides what happens next -- both
+        # 'closed' and 'denial_complete' have no idempotent case, so any
+        # further send always raises -- not the transport-closed check below.
+        # Only app-initiated terminals get this carve-out: websocket.close
+        # itself flips {closed} synchronously via _handle_disconnect_and_close
+        # when the client had already sent its own close frame first, but
+        # that's still the app's own logical close (it chose to answer with
+        # websocket.close), so a post-close send from the app is a protocol
+        # violation, not a benign transport no-op. A real client disconnect
+        # with no app-initiated terminal in play still falls through to the
+        # plain no-op below.
+        my $already_closed = ($seq eq 'closed' || $seq eq 'denial_complete');
+
+        return Future->done if $weak_self->{closed} && !$already_closed;
 
         # Reset WebSocket idle timer on send activity
         $weak_self->_reset_ws_idle_timer;

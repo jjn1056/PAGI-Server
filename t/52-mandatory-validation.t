@@ -219,40 +219,44 @@ my $ws_port = $ws_server->port;
 
 # Raw handshake boilerplate lifted from t/04-websocket.t: the app under test
 # reads/writes application-level events, so a raw socket lets us drive the
-# handshake without a WebSocket client library getting in the way.
+# handshake without a WebSocket client library getting in the way. Pumps the
+# loop until the server closes the connection, so that whatever the app
+# coroutine recorded in its package vars is settled by the time we assert.
 use IO::Socket::INET;
 
-my $ws_sock = IO::Socket::INET->new(
-    PeerAddr => '127.0.0.1',
-    PeerPort => $ws_port,
-    Proto    => 'tcp',
-    Timeout  => 5,
-);
-
-SKIP: {
-    skip "Cannot connect", 2 unless $ws_sock;
+my $ws_handshake_and_drain = sub {
+    my ($port) = @_;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+    return unless $sock;
 
     my $key = 'dGhlIHNhbXBsZSBub25jZQ==';
-    print $ws_sock "GET / HTTP/1.1\r\n";
-    print $ws_sock "Host: 127.0.0.1:$ws_port\r\n";
-    print $ws_sock "Upgrade: websocket\r\n";
-    print $ws_sock "Connection: Upgrade\r\n";
-    print $ws_sock "Sec-WebSocket-Key: $key\r\n";
-    print $ws_sock "Sec-WebSocket-Version: 13\r\n";
-    print $ws_sock "\r\n";
+    print $sock "GET / HTTP/1.1\r\n";
+    print $sock "Host: 127.0.0.1:$port\r\n";
+    print $sock "Upgrade: websocket\r\n";
+    print $sock "Connection: Upgrade\r\n";
+    print $sock "Sec-WebSocket-Key: $key\r\n";
+    print $sock "Sec-WebSocket-Version: 13\r\n";
+    print $sock "\r\n";
 
-    # Pump the loop until the server closes the connection (it does so right
-    # after the app's websocket.close, once the shape/sequence errors above
-    # have already landed in the package vars).
-    $ws_sock->blocking(0);
+    $sock->blocking(0);
     my $deadline = time + 5;
     while (time < $deadline) {
         my $buf;
-        my $n = sysread($ws_sock, $buf, 4096);
+        my $n = sysread($sock, $buf, 4096);
         last if defined($n) && $n == 0;   # EOF: server closed
         $loop->loop_once(0.1);
     }
-    close $ws_sock;
+    close $sock;
+    return 1;
+};
+
+SKIP: {
+    skip "Cannot connect", 2 unless $ws_handshake_and_drain->($ws_port);
 
     like( $WsErrs::SHAPE // '', qr/exactly one of bytes\/text/,
         'websocket.send with both bytes and text fails shape validation' );
@@ -261,5 +265,65 @@ SKIP: {
 }
 
 $ws_server->shutdown->get;
+
+# --- WebSocket: sends after a terminal state raise, not swallowed ---
+# Same class of bug as the SSE carve-out above: websocket.close and a
+# completed denial response both flip the connection's {closed} flag as a
+# side effect (see _handle_disconnect_and_close), independent of a genuine
+# client disconnect. A post-close/post-denial-complete send must still raise
+# through advance_websocket, not silently no-op on the transport-closed check.
+
+my $ws_after_close_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    if ($scope->{type} eq 'websocket') {
+        my $e = await $receive->();   # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        # App-initiated close with no client close received: the transport
+        # isn't gone for real, only the app's own logical close.
+        await $send->({ type => 'websocket.close' });
+        my $err = do { local $@; eval { await $send->({ type => 'websocket.send', text => 'late' }) }; $@ };
+        ($WsAfterClose::ERR = $err // 'NO-ERROR') =~ s/\n/ /g;
+        return;
+    }
+    die "unsupported scope $scope->{type}";
+};
+my $ws_after_close_server = PAGI::Server->new(
+    app => $ws_after_close_app, host => '127.0.0.1', port => 0, quiet => 1, validate_events => 0);
+$loop->add($ws_after_close_server);
+$ws_after_close_server->listen->get;
+
+SKIP: {
+    skip "Cannot connect", 1 unless $ws_handshake_and_drain->($ws_after_close_server->port);
+
+    like( $WsAfterClose::ERR // '', qr/after websocket\.close/,
+        'websocket.send after websocket.close raises, not silently swallowed' );
+}
+$ws_after_close_server->shutdown->get;
+
+my $ws_denial_complete_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    if ($scope->{type} eq 'websocket') {
+        my $e = await $receive->();   # websocket.connect
+        await $send->({ type => 'websocket.http.response.start', status => 403,
+                        headers => [['content-type','text/plain']] });
+        await $send->({ type => 'websocket.http.response.body', body => 'no', more => 0 });
+        my $err = do { local $@; eval { await $send->({ type => 'websocket.http.response.body', body => 'extra', more => 0 }) }; $@ };
+        ($WsDenialComplete::ERR = $err // 'NO-ERROR') =~ s/\n/ /g;
+        return;
+    }
+    die "unsupported scope $scope->{type}";
+};
+my $ws_denial_complete_server = PAGI::Server->new(
+    app => $ws_denial_complete_app, host => '127.0.0.1', port => 0, quiet => 1, validate_events => 0);
+$loop->add($ws_denial_complete_server);
+$ws_denial_complete_server->listen->get;
+
+SKIP: {
+    skip "Cannot connect", 1 unless $ws_handshake_and_drain->($ws_denial_complete_server->port);
+
+    like( $WsDenialComplete::ERR // '', qr/denial response already complete/,
+        'websocket.http.response.body after a completed denial raises, not silently swallowed' );
+}
+$ws_denial_complete_server->shutdown->get;
 
 done_testing;
