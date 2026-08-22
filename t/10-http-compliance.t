@@ -737,11 +737,12 @@ subtest 'Max header size configuration is passed correctly' => sub {
     })->()->get;
 };
 
-# Test 18: send() after disconnect is a no-op per spec
-# This tests the unit behavior of the send function when connection is closed
-subtest 'send() after disconnect returns completed Future' => sub {
-    # Test the _create_send implementation directly by verifying
-    # that it returns immediately when closed flag is set
+# Test 18: send() after the response is complete raises, per mandatory
+# sequencing (PAGI spec compliance) -- not the genuine post-disconnect no-op,
+# which lives in t/52-mandatory-validation.t's /post-close case.
+subtest 'send() after response completion raises "response already complete"' => sub {
+    # Exercise the _create_send implementation directly by verifying that a
+    # send after the response has completed fails the returned Future.
 
     # First verify by examining the send() return behavior in a streaming test
     # where the client disconnects mid-stream

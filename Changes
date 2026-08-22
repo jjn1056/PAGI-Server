@@ -13,13 +13,6 @@
     precedence, and package-name strings are not treated as providers.
   - Clarify that PAGI::Server::Runner's new/run server backend seam is its own
     plugin convention rather than a construction API required by PAGI.
-
-  Bug Fixes
-  - Fail the Future returned by $send when a file response's handle cannot be
-    read, instead of treating a read error as EOF. Applications may now safely
-    close a file resource only after the corresponding send Future resolves.
-
-  Specification Alignment
   - PAGI outgoing-event validation is now mandatory on every send path
     (HTTP/1, HTTP/2, WebSocket, SSE, lifespan): malformed, mis-sequenced,
     unknown, and unadvertised-extension events fail the $send Future in
@@ -28,6 +21,14 @@
     duplicate starts, bodies after completion, undeclared trailers, and
     wrong-phase lifespan results now fail instead of being silently
     ignored or defaulted.
+
+  Bug Fixes
+  - Fail the Future returned by $send when a file response's handle cannot be
+    read, instead of treating a read error as EOF. Applications may now safely
+    close a file resource only after the corresponding send Future resolves.
+  - The HTTP/1 SSE decline response now sends Connection: close explicitly, so
+    pooled clients do not attempt to reuse a socket the server has already
+    closed.
 
 0.002006 - 2026-07-04
 
