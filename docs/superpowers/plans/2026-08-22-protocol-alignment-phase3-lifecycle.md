@@ -213,4 +213,5 @@ Update the method's POD paragraph accordingly.
 
 ## Deviations
 
-None recorded. A deviation gets an ID, a rationale, and John's sign-off here BEFORE work builds on it.
+- **D2 (Task 4, commit 69113af)** — the dispatch wrapper's incomplete/threw branches are additionally gated on `$ss->{connection_state}` presence, and the client-gone carve-out is evaluated FIRST rather than last as the task's numbered list read. Rationale: ws/sse h2 streams carry no `pagi.connection` (spec: N/A) and no `seq_state` mirrors, so ungated they would be spuriously RST'd as "incomplete" on every normal app return; and the spec's own no-500-after-disconnect rule requires the carve-out to precede the backstop. Reviewer-verified against the spec's Applicability table and the scope-creation code. Controller-ruled 2026-08-22; recorded here per the final review's audit (was previously ledger-only).
+- **D3 (final fix wave)** — `_h2_on_close`'s abnormal fork attributes `server_error` (not `client_closed`) when `error_code == 0` and `seq_state` never reached `complete`: a zero-code close with the response short of terminal can only be a server-originated early END_STREAM (today: the promised-trailers Phase-2b gap), which the PAGI spec classes as an incomplete response. Controller-ruled 2026-08-22 from final-review finding I1.
