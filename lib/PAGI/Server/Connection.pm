@@ -896,6 +896,16 @@ sub _h2_create_send {
         return;
     };
 
+    # Shared tail for the file/fh arms below: mark EOF pending and resume the
+    # stream once the read loop finishes without error. A no-op if the stream
+    # vanished (client reset) while the last chunk was in flight.
+    my $finish_body_stream = sub {
+        $eof_pending = 1;
+        my $live = $weak_self->{h2_streams}{$stream_id} or return;
+        $weak_self->{h2_session}->resume_stream($stream_id);
+        $weak_self->_h2_write_pending;
+    };
+
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
@@ -944,9 +954,6 @@ sub _h2_create_send {
             if $type eq 'http.response.trailers';
         die "http.fullflush is not yet implemented on HTTP/2\n"
             if $type eq 'http.fullflush';
-        die "http.response.body 'fh' is not yet implemented on HTTP/2\n"
-            if $type eq 'http.response.body'
-            && defined $event->{fh};
 
         # 4. file body: streamed through the send queue via $emit_chunk, one
         # chunk at a time, under this stream's own backpressure.
@@ -990,17 +997,71 @@ sub _h2_create_send {
                 $seq = $seq_before;               # recoverable, per contract
                 die $err;
             }
-            $eof_pending = 1;
-            my $live = $weak_self->{h2_streams}{$stream_id} or return;
-            $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $finish_body_stream->();
             return;
         }
 
-        # 5. Sequence enforcement (start / plain body / fullflush). advance_http
-        # is deliberately called from three places in this sub — the HEAD
-        # block above, the file arm above, and here — each has different
-        # pre/post-state needs; do not consolidate them.
+        # 5. fh body: streamed through the send queue via $emit_chunk, one
+        # chunk at a time, under this stream's own backpressure. The
+        # application owns $fh (opened before the send, closed or not by the
+        # app afterward) -- the server never closes it. Mirrors the file arm
+        # above; the read loop is adapted from h1's _send_fh_response.
+        if (defined $event->{fh}) {
+            my $fh = $event->{fh};
+
+            my $seq_before = $seq;
+            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+
+            my $ok = eval {
+                if (!$streaming_started) {
+                    $streaming_started = 1;
+                    $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
+                    $weak_self->{h2_session}->submit_response_streaming(
+                        $stream_id,
+                        status => $status, headers => \@response_headers,
+                        data_callback => $data_callback,
+                    );
+                    $weak_self->_h2_write_pending;
+                }
+                if (my $off = $event->{offset}) {
+                    seek($fh, $off, 0) or die "Cannot seek: $!\n";
+                }
+                my $remaining = $event->{length};
+                while (1) {
+                    my $to_read = FILE_CHUNK_SIZE;
+                    if (defined $remaining) {
+                        $to_read = $remaining if $remaining < $to_read;
+                        last if $to_read <= 0;
+                    }
+                    # The bare block scopes only the 'closed' warning
+                    # suppression around read() -- a bare block is itself a
+                    # one-iteration loop, so die/last/await must live outside
+                    # it or 'last' would only exit the block, not this while.
+                    my ($bytes_read, $chunk);
+                    { no warnings 'closed';
+                      $bytes_read = read($fh, $chunk, $to_read);
+                    }
+                    die "Failed to read filehandle: $!\n" unless defined $bytes_read;
+                    last if $bytes_read == 0;
+                    await $emit_chunk->($chunk);
+                    $remaining -= $bytes_read if defined $remaining;
+                }
+                1;
+            };
+            if (!$ok) {
+                my $err = $@;
+                return if $err eq $STREAM_GONE;   # client reset: quiet no-op
+                $seq = $seq_before;               # recoverable, per contract
+                die $err;
+            }
+            $finish_body_stream->();
+            return;
+        }
+
+        # 6. Sequence enforcement (start / plain body / fullflush). advance_http
+        # is deliberately called from four places in this sub — the HEAD
+        # block above, the file arm, the fh arm, and here — each has
+        # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {

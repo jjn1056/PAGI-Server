@@ -235,6 +235,37 @@ $File::app = async sub {
         await $send->({ type => 'http.response.body', file => $File::BIG });
         return;
     }
+    if ($path eq '/fh-full') {
+        open my $fh, '<:raw', $File::BIG or die "Cannot open: $!";
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','application/octet-stream']] });
+        await $send->({ type => 'http.response.body', fh => $fh });
+        $FhOwn::CLOSED_OK = (close $fh ? 1 : 0);
+        return;
+    }
+    if ($path eq '/fh-range') {
+        open my $fh, '<:raw', $File::BIG or die "Cannot open: $!";
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','application/octet-stream']] });
+        await $send->({ type => 'http.response.body', fh => $fh,
+                         offset => 1000, length => 1000 });
+        close $fh;
+        return;
+    }
+    if ($path eq '/fh-closed') {
+        open my $fh, '<:raw', $File::BIG or die "Cannot open: $!";
+        close $fh;
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','text/plain']] });
+        my $err = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', fh => $fh }) };
+            $@;
+        };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.body', body => "err=$err", more => 0 });
+        return;
+    }
     die "unknown path $path";
 };
 
@@ -248,5 +279,10 @@ is( get_h2('/file-range')->{body}, substr($pattern,1000,1000), 'offset+length ho
 is( get_h2('/file-past-eof')->{body}, '', 'offset past EOF sends zero bytes, stream ends cleanly' );
 like( get_h2('/file-missing')->{body}, qr/err=.+/, 'open failure fails the Future; app recovered with a normal body' );
 is( get_h2('/file-after-chunks')->{body}, 'x' . $pattern, 'file appended to an in-progress stream' );
+
+is( get_h2('/fh-full')->{body}, $pattern, 'fh streamed byte-exact' );
+ok( $FhOwn::CLOSED_OK, 'application still owns the handle after the send resolves' );
+is( get_h2('/fh-range')->{body}, substr($pattern,1000,1000), 'fh offset+length honored' );
+like( get_h2('/fh-closed')->{body}, qr/err=.+/, 'closed fh fails the Future; app recovered' );
 
 done_testing;
