@@ -532,6 +532,7 @@ subtest 'advance_sse close is idempotent, streams stay exclusive' => sub {
     like( dies { $adv->('initial', { type => 'sse.send', data => 'x' }) }, qr/before sse\.start/, 'send before start');
     like( dies { $adv->('streaming', { type => 'sse.http.response.start', status => 404 }) }, qr/after sse\.start/, 'decline after start');
     like( dies { $adv->('streaming', { type => 'sse.start' }) }, qr/duplicate sse\.start/, 'duplicate start');
+    like( dies { $adv->('streaming', { type => 'sse.http.response.body', body => 'x' }) }, qr/after sse\.start/, 'decline body while streaming croaks');
     like( dies { $adv->('declining', { type => 'sse.send', data => 'x' }) }, qr/after sse\.http\.response\.start/, 'stream event while declining');
     like( dies { $adv->('decline_complete', { type => 'sse.close' }) }, qr/decline response already complete/, 'anything after decline complete');
 };
@@ -553,6 +554,7 @@ subtest 'advance_websocket denial and accept are exclusive' => sub {
     like( dies { $adv->('accepted', { type => 'websocket.http.response.body' }) }, qr/after websocket\.accept/, 'denial body after accept');
     like( dies { $adv->('denial', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.http\.response\.start/, 'frame while denying');
     like( dies { $adv->('denial', { type => 'websocket.keepalive', interval => 30 }) }, qr/after websocket\.http\.response\.start/, 'keepalive while denying');
+    like( dies { $adv->('denial', { type => 'websocket.accept' }) }, qr/after websocket\.http\.response\.start/, 'accept while denying');
     like( dies { $adv->('closed', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.close/, 'send after close');
     like( dies { $adv->('closed', { type => 'websocket.close' }) }, qr/after websocket\.close/, 'second close also croaks (websocket close is not idempotent)');
     like( dies { $adv->('denial_complete', { type => 'websocket.close' }) }, qr/denial response already complete/, 'anything after denial complete');
