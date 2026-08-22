@@ -569,16 +569,30 @@ sub _h2_on_close {
     return unless $stream;
 
     # Drive this stream's own connection_state to its terminal state exactly
-    # once: a fully-sent response (seq_state reached 'complete') with no h2
-    # error is a clean completion; anything else (early close, nonzero error
-    # code) is an abnormal disconnect. Both are idempotent, so a stream a
-    # wrapper already marked (e.g. server_error) keeps that first reason.
+    # once. Three outcomes, and the h2 error code alone does not separate
+    # them -- a server-sent END_STREAM closes a stream with error code 0 just
+    # as a client's clean close does:
+    #
+    #   1. seq_state 'complete' and no error code -- the whole response went
+    #      out and the stream ended cleanly: a completion, not a disconnect.
+    #   2. no error code but the response never reached 'complete' -- the
+    #      stream ended early with no h2-level error, which on this side only
+    #      the server can cause (h2 puts END_STREAM on the terminal body, so
+    #      an app that declared trailers and never sent them lands here).
+    #      An early end to an unfinished response is an incomplete response
+    #      per the PAGI spec, and the fault is the server's: the client did
+    #      nothing and must not be blamed with 'client_closed'.
+    #   3. a nonzero error code -- the peer reset the stream (CANCEL,
+    #      INTERNAL_ERROR, ...): the client went away.
+    #
+    # Both marks are idempotent, so a stream the dispatch wrapper already
+    # marked (e.g. server_error before its own RST) keeps that first reason.
     if (my $cs = $stream->{connection_state}) {
         if (($stream->{seq_state} // '') eq 'complete' && !$error_code) {
             $cs->_mark_complete;
+        } elsif (!$error_code) {
+            $cs->_mark_disconnected('server_error');
         } else {
-            # Close before the response finished, or a nonzero error code.
-            # NGHTTP2_CANCEL(8)/NO_ERROR-early = the client went away.
             $cs->_mark_disconnected('client_closed');
         }
     }

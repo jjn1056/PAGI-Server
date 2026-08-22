@@ -194,6 +194,11 @@ our $DONE_COMPLETE = 0;
 our $DONE_DISCONNECT;
 our $DONE_SENT = 0;
 
+our $TRAILERS_CS;
+our $TRAILERS_COMPLETE = 0;
+our $TRAILERS_DISCONNECT;
+our $TRAILERS_SENT = 0;
+
 package main;
 
 use constant H2_INTERNAL_ERROR_CODE => 2;   # NGHTTP2_INTERNAL_ERROR (RFC 9113 section 7)
@@ -230,6 +235,19 @@ my $lifecycle_app = async sub {
         $Incomplete::THROW_STARTED = 1;
         await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
         die "boom\n";
+    }
+    elsif ($path eq '/promised-trailers') {
+        my $cs = $scope->{'pagi.connection'};
+        $Incomplete::TRAILERS_CS = $cs;
+        $cs->on_complete(sub { $Incomplete::TRAILERS_COMPLETE = 1 });
+        $cs->on_disconnect(sub { $Incomplete::TRAILERS_DISCONNECT = $_[0] });
+
+        await $send->({ type => 'http.response.start', status => 200,
+                         trailers => 1,
+                         headers  => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'body-only', more => 0 });
+        $Incomplete::TRAILERS_SENT = 1;
+        return;   # the promised trailers event never comes
     }
     elsif ($path eq '/throw-after-complete') {
         my $cs = $scope->{'pagi.connection'};
@@ -403,6 +421,56 @@ subtest 'h2: app throwing after a COMPLETE response still logs the error' => sub
     ok($Incomplete::DONE_CS, 'app captured a connection_state');
     is($Incomplete::DONE_COMPLETE, 1, 'on_complete fired (the response did complete)');
     is($Incomplete::DONE_DISCONNECT, undef, 'on_disconnect did NOT fire');
+
+    $stream->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# /promised-trailers: trailers declared, terminal body sent, trailers event
+# never sent (design section 15.3's promised-but-unsent trailers row).
+#
+# h2 puts END_STREAM on the terminal body, so the stream closes cleanly with
+# error code 0 while the response sequence is still 'awaiting_trailers' --
+# an early END_STREAM the SERVER originated. The client did nothing wrong and
+# must not be blamed for it: the reason is 'server_error' (deviation D3), not
+# 'client_closed'. This is an attribution fix only -- the bytes on the wire
+# are unchanged.
+# =============================================================================
+
+subtest 'h2: promised-but-unsent trailers report server_error, not client_closed' => sub {
+    my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $lifecycle_app);
+
+    my (%headers, %body, %closed);
+    my $client = create_client(
+        on_header          => sub { my ($sid, $n, $v) = @_; $headers{$sid}{$n} = $v; return 0 },
+        on_data_chunk_recv => sub { my ($sid, $data) = @_; $body{$sid} .= $data; return 0 },
+        on_stream_close    => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/promised-trailers',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 30);
+
+    ok($Incomplete::TRAILERS_SENT, 'app sent the terminal body and returned');
+
+    # Wire behavior is unchanged by this fix.
+    is($headers{$stream_id}{':status'}, '200', 'client still receives status 200');
+    is($body{$stream_id}, 'body-only', 'client still receives the full body');
+    is($closed{$stream_id}, 0, 'stream still closed with error code 0');
+
+    ok($Incomplete::TRAILERS_CS, 'app captured a connection_state');
+    is($Incomplete::TRAILERS_CS->disconnect_reason, 'server_error',
+        "the server-originated early END_STREAM is attributed to the server");
+    is($Incomplete::TRAILERS_DISCONNECT, 'server_error',
+        "on_disconnect fired with 'server_error'");
+    is($Incomplete::TRAILERS_COMPLETE, 0, 'on_complete never fired');
 
     $stream->close_now;
     $loop->remove($server);
