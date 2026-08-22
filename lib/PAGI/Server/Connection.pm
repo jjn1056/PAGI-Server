@@ -700,7 +700,16 @@ sub _h2_dispatch_stream {
             # Streams with no connection_state (WebSocket/SSE) fall back to
             # the h2_streams entry, whose deferred delete is the only
             # gone-signal they have.
-            my $client_gone = $cs ? defined($cs->disconnect_reason)
+            #
+            # A recorded reason of 'server_error' is NOT a client-gone signal:
+            # it means the SERVER caused the abnormal end (e.g. _h2_on_close's
+            # early-END_STREAM fork for a trailers-declared response that
+            # never sent its trailers). Per the PAGI spec's incomplete-
+            # response section, the log carve-out exists only for "the client
+            # had already disconnected" -- so server-caused ends must still
+            # warn.
+            my $reason = $cs ? $cs->disconnect_reason : undef;
+            my $client_gone = $cs ? (defined($reason) && $reason ne 'server_error')
                                   : !$weak_self->{h2_streams}{$stream_id};
 
             if ($client_gone) {

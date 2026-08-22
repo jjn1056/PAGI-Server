@@ -310,8 +310,12 @@ subtest 'h2: response started but never finished resets the stream' => sub {
     is($Incomplete::COMPLETE, 0, 'on_complete never fired');
     is($Incomplete::DISCONNECT, 'server_error', "on_disconnect fired with 'server_error'");
 
-    ok((grep { /PAGI application returned with an incomplete response \(HTTP\/2 stream $stream_id\)/ } @warnings),
-        'incomplete-response warning was logged');
+    my @incomplete_warnings = grep {
+        /PAGI application returned with an incomplete response \(HTTP\/2 stream $stream_id\)/
+    } @warnings;
+    is(scalar(@incomplete_warnings), 1,
+        'incomplete-response warning was logged exactly once (no double-warn regression)')
+        or diag("warnings: @warnings");
 
     # A second stream on the SAME connection still serves.
     my $stream_id2 = $client->submit_request(
@@ -444,9 +448,17 @@ subtest 'h2: app throwing after a COMPLETE response still logs the error' => sub
 # must not be blamed for it: the reason is 'server_error' (deviation D3), not
 # 'client_closed'. This is an attribution fix only -- the bytes on the wire
 # are unchanged.
+#
+# The dispatch wrapper's client-gone carve-out must not swallow this case:
+# the spec's log carve-out exists only for "the client had already
+# disconnected" -- a server_error reason means the SERVER caused the abnormal
+# end, so the incomplete-response warning must still fire.
 # =============================================================================
 
 subtest 'h2: promised-but-unsent trailers report server_error, not client_closed' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
     my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $lifecycle_app);
 
     my (%headers, %body, %closed);
@@ -479,6 +491,13 @@ subtest 'h2: promised-but-unsent trailers report server_error, not client_closed
     is($Incomplete::TRAILERS_DISCONNECT, 'server_error',
         "on_disconnect fired with 'server_error'");
     is($Incomplete::TRAILERS_COMPLETE, 0, 'on_complete never fired');
+
+    my @incomplete_warnings = grep {
+        /PAGI application returned with an incomplete response \(HTTP\/2 stream $stream_id\)/
+    } @warnings;
+    is(scalar(@incomplete_warnings), 1,
+        'server-caused early END_STREAM still logs the incomplete-response warning')
+        or diag("warnings: @warnings");
 
     $stream->close_now;
     $loop->remove($server);
