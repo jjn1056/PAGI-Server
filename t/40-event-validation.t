@@ -430,4 +430,28 @@ subtest 'websocket.send payload must be defined' => sub {
     );
 };
 
+subtest 'header tuple and byte safety validation' => sub {
+    my $start = sub { { type => 'http.response.start', status => 200, headers => $_[0] } };
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ 'not-a-tuple' ])) },
+        qr/each header must be a 2-element array reference/, 'flat element throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ ['a','b','c'] ])) },
+        qr/each header must be a 2-element array reference/, '3-element tuple throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ ['a', undef] ])) },
+        qr/header name and value must be defined strings/, 'undef value throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ [['ref'],'b'] ])) },
+        qr/header name and value must be defined strings/, 'ref name throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ ['x-evil', "a\r\nInjected: yes"] ])) },
+        qr/contains CR, LF, or null byte/, 'CRLF value throws');
+    like( dies { PAGI::Server::EventValidator::validate_http_send($start->([ ["x\x01bad", 'v'] ])) },
+        qr/contains control characters/, 'control char in name throws');
+    ok( lives { PAGI::Server::EventValidator::validate_http_send($start->([ ['content-type','text/plain'], ['set-cookie','a=1'], ['set-cookie','b=2'] ])) },
+        'valid headers with duplicates ok');
+
+    # Shared across families: ws denial start and sse decline start use the same checks
+    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401, headers => [ ['h',"v\n"] ] }, { extensions => { 'websocket.http.response' => {} } }) },
+        qr/contains CR, LF, or null byte/, 'ws denial headers validated');
+    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.http.response.start', status => 404, headers => [ ['h',"v\0"] ] }) },
+        qr/contains CR, LF, or null byte/, 'sse decline headers validated');
+};
+
 done_testing;

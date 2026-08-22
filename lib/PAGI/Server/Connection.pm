@@ -18,6 +18,7 @@ use Time::HiRes qw(gettimeofday tv_interval);
 use PAGI::Server::AsyncFile;
 use PAGI::Server::ConnectionState;
 use PAGI::Server::TransportState;
+use PAGI::Server::EventValidator;
 
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
@@ -41,26 +42,9 @@ sub _unrecognized_event_type {
 # =============================================================================
 # RFC 7230 Section 3.2.6: Field values MUST NOT contain CR or LF
 
-sub _validate_header_value {
-    my ($value) = @_;
+sub _validate_header_value { PAGI::Server::EventValidator::check_header_value($_[0]) }
 
-    if ($value =~ /[\r\n\0]/) {
-        die "Invalid header value: contains CR, LF, or null byte\n";
-    }
-    return $value;
-}
-
-sub _validate_header_name {
-    my ($name) = @_;
-
-    if ($name =~ /[\r\n\0]/) {
-        die "Invalid header name: contains CR, LF, or null byte\n";
-    }
-    if ($name =~ /[[:cntrl:]]/) {
-        die "Invalid header name: contains control characters\n";
-    }
-    return $name;
-}
+sub _validate_header_name  { PAGI::Server::EventValidator::check_header_name($_[0]) }
 
 # RFC 6455 Section 11.3.4: Subprotocol must be a token (no whitespace, separators)
 sub _validate_subprotocol {

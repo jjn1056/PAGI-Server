@@ -24,6 +24,40 @@ sub _is_nonneg_number {
     return defined $v && !ref $v && $v =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
 }
 
+# --- Shared header validation (byte safety per PAGI Www.pod "Header byte safety") ---
+# Names: no CR/LF/NUL and no other control characters. Values: no CR/LF/NUL.
+
+sub check_header_value {
+    my ($value) = @_;
+    die "Invalid header value: contains CR, LF, or null byte\n"
+        if $value =~ /[\r\n\0]/;
+    return $value;
+}
+
+sub check_header_name {
+    my ($name) = @_;
+    die "Invalid header name: contains CR, LF, or null byte\n"
+        if $name =~ /[\r\n\0]/;
+    die "Invalid header name: contains control characters\n"
+        if $name =~ /[[:cntrl:]]/;
+    return $name;
+}
+
+sub validate_headers {
+    my ($headers, $event_type) = @_;
+    croak "$event_type 'headers' must be an array reference"
+        unless ref $headers eq 'ARRAY';
+    for my $h (@$headers) {
+        croak "$event_type headers: each header must be a 2-element array reference"
+            unless ref $h eq 'ARRAY' && @$h == 2;
+        croak "$event_type headers: header name and value must be defined strings"
+            if !defined $h->[0] || !defined $h->[1] || ref $h->[0] || ref $h->[1];
+        check_header_name($h->[0]);
+        check_header_value($h->[1]);
+    }
+    return;
+}
+
 # =============================================================================
 # PAGI::Server::EventValidator - Dev-mode event field validation
 #
@@ -63,11 +97,9 @@ sub _validate_http_response_start {
     croak "http.response.start 'status' must be a non-negative integer"
         unless _is_nonneg_int($event->{status});
 
-    # headers must be ArrayRef if present
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "http.response.start 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    # headers must be a valid tuple list if present
+    validate_headers($event->{headers}, 'http.response.start')
+        if exists $event->{headers} && defined $event->{headers};
 
     # trailers must be 0 or 1 if present
     if (exists $event->{trailers} && defined $event->{trailers}) {
@@ -110,11 +142,9 @@ sub _validate_http_response_body {
 sub _validate_http_response_trailers {
     my ($event) = @_;
 
-    # headers must be ArrayRef if present
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "http.response.trailers 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    # headers must be a valid tuple list if present
+    validate_headers($event->{headers}, 'http.response.trailers')
+        if exists $event->{headers} && defined $event->{headers};
 }
 
 # =============================================================================
@@ -148,11 +178,9 @@ sub validate_websocket_send {
 sub _validate_websocket_accept {
     my ($event) = @_;
 
-    # headers must be ArrayRef if present
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "websocket.accept 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    # headers must be a valid tuple list if present
+    validate_headers($event->{headers}, 'websocket.accept')
+        if exists $event->{headers} && defined $event->{headers};
 }
 
 sub _validate_websocket_send_event {
@@ -200,11 +228,9 @@ sub _validate_ws_denial_start {
     croak "websocket.http.response.start 'status' must be a non-negative integer"
         unless _is_nonneg_int($event->{status});
 
-    # headers must be ArrayRef if present
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "websocket.http.response.start 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    # headers must be a valid tuple list if present
+    validate_headers($event->{headers}, 'websocket.http.response.start')
+        if exists $event->{headers} && defined $event->{headers};
 }
 
 sub _validate_ws_denial_body {
@@ -256,10 +282,8 @@ sub _validate_sse_decline_start {
         unless exists $event->{status} && defined $event->{status};
     croak "sse.http.response.start 'status' must be a non-negative integer"
         unless _is_nonneg_int($event->{status});
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "sse.http.response.start 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    validate_headers($event->{headers}, 'sse.http.response.start')
+        if exists $event->{headers} && defined $event->{headers};
 }
 
 sub _validate_sse_decline_body {
@@ -290,11 +314,9 @@ sub _validate_sse_start {
             unless _is_nonneg_int($event->{status});
     }
 
-    # headers must be ArrayRef if present
-    if (exists $event->{headers} && defined $event->{headers}) {
-        croak "sse.start 'headers' must be an array reference"
-            unless ref $event->{headers} eq 'ARRAY';
-    }
+    # headers must be a valid tuple list if present
+    validate_headers($event->{headers}, 'sse.start')
+        if exists $event->{headers} && defined $event->{headers};
 }
 
 sub _validate_sse_send_event {
