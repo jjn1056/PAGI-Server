@@ -47,6 +47,7 @@ use POSIX ();
 
 use PAGI::Server::AppNormalizer ();
 use PAGI::Server::Connection;
+use PAGI::Server::EventValidator;
 use PAGI::Server::Protocol::HTTP1;
 
 
@@ -4081,6 +4082,8 @@ async sub _run_lifespan_startup {
     my $receive_pending;
     my $startup_complete = Future->new;
 
+    $self->{lifespan_phase} = 'startup_pending';
+
     # $receive for the app - returns events from the server
     my $receive = sub {
         if (@send_queue) {
@@ -4094,6 +4097,10 @@ async sub _run_lifespan_startup {
     my $send = async sub  {
         my ($event) = @_;
         my $type = $event->{type} // '';
+
+        PAGI::Server::EventValidator::validate_lifespan_send($event);
+        $self->{lifespan_phase} = PAGI::Server::EventValidator::advance_lifespan(
+            $self->{lifespan_phase}, $event);
 
         if ($type eq 'lifespan.startup.complete') {
             $startup_complete->done({ success => 1 });
@@ -4224,6 +4231,7 @@ async sub _run_lifespan_shutdown {
     my $send_queue = $self->{lifespan_send_queue};
     my $receive_pending_ref = $self->{lifespan_receive_pending};
 
+    $self->{lifespan_phase} = 'shutdown_pending';
     push @$send_queue, { type => 'lifespan.shutdown' };
 
     # Trigger pending receive if waiting
