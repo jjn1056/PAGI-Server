@@ -2688,6 +2688,7 @@ sub _create_send {
         # Order per spec: transport-closed no-op check above runs first.
         PAGI::Server::EventValidator::validate_http_send(
             $event, { extensions => $weak_self->{extensions} });
+        my $seq_before_advance = $seq;
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {
@@ -2774,16 +2775,39 @@ sub _create_send {
 
             if (defined $file) {
                 # File path response - stream from file (async, non-blocking)
-                # File responses are implicitly complete (more is ignored)
+                # File responses are implicitly complete (more is ignored) on
+                # success. A failed file/fh send must NOT mark the response
+                # complete: advance_http already advanced $seq to a terminal
+                # state before we got here (it can't know the read will fail),
+                # so on failure we roll $seq back to its pre-event value. That
+                # lets a conforming app recover with a normal error body
+                # instead of being permanently locked out by "response already
+                # complete" for a body that was never actually sent.
                 $weak_self->_flush_pending_headers;   # headers before the file body
-                await $weak_self->_send_file_response($file, $offset, $length, $chunked);
+                eval {
+                    await $weak_self->_send_file_response($file, $offset, $length, $chunked);
+                    1;
+                } or do {
+                    my $error = $@;
+                    $seq = $seq_before_advance;
+                    die $error;
+                };
                 $body_complete = 1;
             }
             elsif (defined $fh) {
                 # Filehandle response - stream from handle (async, non-blocking)
                 # Filehandle responses are implicitly complete (more is ignored)
+                # on success; see the file-path comment above for why a failed
+                # send must roll $seq back instead of leaving it 'complete'.
                 $weak_self->_flush_pending_headers;   # headers before the fh body
-                await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
+                eval {
+                    await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
+                    1;
+                } or do {
+                    my $error = $@;
+                    $seq = $seq_before_advance;
+                    die $error;
+                };
                 $body_complete = 1;
             }
             else {
