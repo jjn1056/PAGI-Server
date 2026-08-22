@@ -198,12 +198,12 @@ Update the method's POD paragraph accordingly.
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. ConnectionState §9.2 | not started | — | — | — |
-| 2. h1 incomplete | not started | — | — | — |
-| 3. h2 stream state | not started | — | — | — |
-| 4. h2 incomplete/RST | not started | — | — | — |
-| 5. Docs | not started | — | — | — |
-| 6. Phase gate | not started | — | — | — |
+| 1. ConnectionState §9.2 | complete (review clean, zero findings) | 7b43a10 | +1 subtest / 25 tests, 3 files | /tmp/phase3-task1-pass.out; podchecker OK |
+| 2. h1 incomplete | complete (review clean; VERIFY-NOTE resolved: no adjustment needed) | 4d38e5a | /half,/half-cl,+t/53 update / 93/93, 6 files | /tmp/phase3-task2-pass.out; mirror inventory reviewer-re-derived |
+| 3. h2 stream state | complete (review clean; RST-during-delivery edge verified conservative-correct) | c081762 | t/http2/30 new / 29/29, 5 files | /tmp/phase3-task3-pass.out |
+| 4. h2 incomplete/RST | complete (review clean; 2 judgment calls confirmed: carve-out-first, $cs gate) | 69113af | t/http2/24 extended / 39 tests, 5 files + full t/http2 169/169 | /tmp/phase3-task4-pass.out |
+| 5. Docs | complete (review clean; all facts code-verified) | e70f179 | podchecker ×2; smoke 9/9 | task-5-report.md |
+| 6. Phase gate | complete | (this commit) | full suite 118 files / 680 tests PASS | /tmp/phase3-full-suite.out; whitespace/POD/syntax clean; spec drift: none (56bf730) |
 
 ## Deferred (carried, not this phase)
 
