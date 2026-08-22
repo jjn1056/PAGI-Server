@@ -223,12 +223,14 @@ Then in the body branch, replace the file/fh stub with dispatch to a new path (t
 
 NOTE on placement: this dispatch must run where the removed stub ran — after validation/HEAD, BEFORE the generic `advance_http` line — because it does its own snapshot/advance. Restructure minimally: hoist the generic `$seq = advance_http(...)` line into the non-file/fh paths (start, plain body, fullflush) or guard it with `unless file/fh`. Keep the diff small and commented.
 
-- [ ] **Step 4: Run to verify pass, plus neighbors** — `prove -l t/http2/28-file-fh.t t/http2/27-head.t t/http2/11-streaming.t t/http2/18-transport-leak.t t/http2/19-transport-callbacks.t` (tee `/tmp/phase2-task2-pass.out`, read). Expected: PASS.
+- [ ] **Step 4: Update the t/http2/26 fixture in this task** — removing the `file` stub breaks t/http2/26-mandatory-validation.t's `/file-body` assertion (it expects the stub message). Update that path's fixture NOW so no commit carries a failing test: the app path streams a small known temp file and the assertion becomes a positive content check (`like(... qr/file:/ ...)` replaced by the file's content or a `file-ok:` marker the app emits after the send resolves). The `/trailers` stub assertion stays untouched (trailers remain stubbed until Phase 2b).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run to verify pass, plus neighbors** — `prove -l t/http2/28-file-fh.t t/http2/26-mandatory-validation.t t/http2/27-head.t t/http2/11-streaming.t t/http2/18-transport-leak.t t/http2/19-transport-callbacks.t` (tee `/tmp/phase2-task2-pass.out`, read). Expected: PASS.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add lib/PAGI/Server/Connection.pm t/http2/28-file-fh.t
+git add lib/PAGI/Server/Connection.pm t/http2/28-file-fh.t t/http2/26-mandatory-validation.t
 git commit -m "feat(h2): stream file bodies through the per-stream send queue"
 ```
 
@@ -290,12 +292,12 @@ like( get_h2('/fh-closed')->{body}, qr/err=.+/, 'closed fh fails the Future; app
 
 The initial-read failure (closed handle) happens before any chunk is emitted, so the restore leaves the response recoverable, matching h1. Delete the last stub line; update the Phase-1 stub comment to cover only trailers/fullflush (fullflush goes in Task 4).
 
-- [ ] **Step 4: Run to verify pass, plus neighbors** — `prove -l t/http2/28-file-fh.t t/http2/27-head.t t/42-file-response.t t/http2/26-mandatory-validation.t` — t/http2/26's `/file-body` stub test WILL now fail; per the neighbor policy this is an expected fixture update: replace that path's assertion (and `/trailers`'s remains untouched) with a positive assertion that a file body now streams (e.g. expect the file's content instead of the stub message). Explain in the report. Tee `/tmp/phase2-task3-pass.out`, read. Expected: PASS after the t/http2/26 update.
+- [ ] **Step 4: Run to verify pass, plus neighbors** — `prove -l t/http2/28-file-fh.t t/http2/27-head.t t/42-file-response.t t/http2/26-mandatory-validation.t` (the `/file-body` fixture was already updated in Task 2; nothing in 26 references the fh stub, but verify). Tee `/tmp/phase2-task3-pass.out`, read. Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/PAGI/Server/Connection.pm t/http2/28-file-fh.t t/http2/26-mandatory-validation.t
+git add lib/PAGI/Server/Connection.pm t/http2/28-file-fh.t
 git commit -m "feat(h2): stream application-owned filehandle bodies"
 ```
 
