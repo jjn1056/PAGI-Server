@@ -120,11 +120,11 @@ sub _h2_ws_enqueue_disconnect {
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. Exactly-one disconnect | not started | — | — | — |
-| 2. Per-stream keepalive | not started | — | — | — |
-| 2b. Server-caused-end log parity | not started | — | — | — |
-| 3. Docs | not started | — | — | — |
-| 4. Phase gate | not started | — | — | — |
+| 1. Exactly-one disconnect | complete (review clean; +UTF-8-text gap fix verified) | 9fe6a1c | t/http2/31 new / 16 tests, 4 files | /tmp/phase4-task1-pass.out; inventory reviewer-re-derived |
+| 2. Per-stream keepalive | complete (review clean; reviewer re-ran set; 5 stop sites traced) | 4652bdc, ab5778e | +4 subtests, h1 parity in t/04 / 26 tests | /tmp/phase4-task2-pass.out |
+| 2b. Server-caused-end log parity | complete (review clean; reviewer reproduced RED) | bac0718 | +1 subtest, exact-count warns / 27 tests, 3 files | /tmp/phase4-task2b-pass.out |
+| 3. Docs | complete (review clean; non-overclaim verified) | e58a3db | podchecker OK; smoke 9/9 | task-3-report.md |
+| 4. Phase gate | complete | (this commit) | full suite 119 files / 696 tests PASS | /tmp/phase4-full-suite.out; hygiene clean; drift none (f04c029) |
 
 ## Notes
 
