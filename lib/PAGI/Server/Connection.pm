@@ -457,6 +457,7 @@ sub _h2_on_request {
         body_pending  => undef,   # Future for body availability
         receive_queue => [],
         response_started => 0,
+        seq_state => 'initial',
         is_websocket => $is_websocket,
         is_sse       => $is_sse,
         ws_accepted  => 0,
@@ -566,6 +567,21 @@ sub _h2_on_close {
 
     my $stream = $self->{h2_streams}{$stream_id};
     return unless $stream;
+
+    # Drive this stream's own connection_state to its terminal state exactly
+    # once: a fully-sent response (seq_state reached 'complete') with no h2
+    # error is a clean completion; anything else (early close, nonzero error
+    # code) is an abnormal disconnect. Both are idempotent, so a stream a
+    # wrapper already marked (e.g. server_error) keeps that first reason.
+    if (my $cs = $stream->{connection_state}) {
+        if (($stream->{seq_state} // '') eq 'complete' && !$error_code) {
+            $cs->_mark_complete;
+        } else {
+            # Close before the response finished, or a nonzero error code.
+            # NGHTTP2_CANCEL(8)/NO_ERROR-early = the client went away.
+            $cs->_mark_disconnected('client_closed');
+        }
+    }
 
     # Mark body complete to unblock any pending receive
     $stream->{body_complete} = 1;
@@ -927,6 +943,7 @@ sub _h2_create_send {
         # advances so the lifecycle (completion, post-complete raises) matches GET.
         if ($is_head && ($type eq 'http.response.body' || $type eq 'http.response.trailers')) {
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+            $ss->{seq_state} = $seq if $ss;
             if ($seq eq 'complete' && !$ss->{h2_head_finished}) {
                 $ss->{h2_head_finished} = 1;
                 $weak_self->{h2_session}->submit_response($stream_id,
@@ -963,6 +980,7 @@ sub _h2_create_send {
             # $seq_before exactly as the h1 twin in _create_send does.
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+            $ss->{seq_state} = $seq if $ss;
 
             my $ok = eval {
                 die "File not found: $file\n"  unless -f $file;
@@ -1017,6 +1035,7 @@ sub _h2_create_send {
                 my $err = $@;
                 return if $err eq $STREAM_GONE;   # client reset: quiet no-op
                 $seq = $seq_before;               # recoverable, per contract
+                $ss->{seq_state} = $seq if $ss;
                 die $err;
             }
             $finish_body_stream->();
@@ -1034,6 +1053,7 @@ sub _h2_create_send {
 
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+            $ss->{seq_state} = $seq if $ss;
 
             my $ok = eval {
                 if (!$streaming_started) {
@@ -1075,6 +1095,7 @@ sub _h2_create_send {
                 my $err = $@;
                 return if $err eq $STREAM_GONE;   # client reset: quiet no-op
                 $seq = $seq_before;               # recoverable, per contract
+                $ss->{seq_state} = $seq if $ss;
                 die $err;
             }
             $finish_body_stream->();
@@ -1086,6 +1107,7 @@ sub _h2_create_send {
         # block above, the file arm, the fh arm, and here — each has
         # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+        $ss->{seq_state} = $seq if $ss;
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -3299,6 +3321,21 @@ sub _handle_disconnect {
     if ($self->{current_connection_state} && !$self->{websocket_mode} && !$self->{sse_mode}) {
         $self->{current_connection_state}->_mark_disconnected($reason)
             unless $is_completion;
+    }
+
+    # HTTP/2: connection-level teardown (server shutdown, socket error, ...)
+    # sweeps every open stream's own connection_state with this reason, so a
+    # stream still mid-response when the whole connection dies still reports
+    # why. _mark_disconnected is idempotent -- a stream _h2_on_close already
+    # took to a terminal state (complete, or its own client_closed/server_error)
+    # keeps that first reason; only still-open streams pick this one up.
+    # WebSocket/SSE streams never attach a connection_state (N/A per spec),
+    # so the guard on $stream->{connection_state} skips them naturally.
+    if ($self->{is_h2} && $self->{h2_streams} && !$is_completion) {
+        for my $stream (values %{$self->{h2_streams}}) {
+            $stream->{connection_state}->_mark_disconnected($reason)
+                if $stream->{connection_state};
+        }
     }
 
     # Record the abnormal reason so the WebSocket disconnect event reports it
