@@ -77,9 +77,25 @@ sub create_client {
             on_header          => $overrides{on_header}          // sub { 0 },
             on_frame_recv      => sub { 0 },
             on_data_chunk_recv => $overrides{on_data_chunk_recv} // sub { 0 },
-            on_stream_close    => sub { 0 },
+            on_stream_close    => $overrides{on_stream_close}    // sub { 0 },
         },
     );
+}
+
+# Bidirectional pump (unlike read_response, which only drains server->client):
+# needed once a test submits more than one request over the same connection,
+# since later requests must flush the client's own queued frames too.
+sub exchange_frames {
+    my ($client, $client_sock, $rounds) = @_;
+    $rounds //= 20;
+    for (1 .. $rounds) {
+        $loop->loop_once(0.025);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+    }
 }
 
 sub complete_h2_handshake {
@@ -117,8 +133,11 @@ sub read_response {
 # --- the test ----------------------------------------------------------------
 
 subtest 'h2: app returning without a response yields 500' => sub {
+    my $disconnect_reason;   # undef unless on_disconnect fires
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_disconnect(sub { $disconnect_reason = $_[0] });
         await $receive->();   # consume the request
         return;               # no http.response.start -> incomplete
     };
@@ -143,6 +162,178 @@ subtest 'h2: app returning without a response yields 500' => sub {
 
     is($headers{':status'}, '500',
         'an h2 app that starts no response gets a 500 backstop');
+    is($disconnect_reason, 'server_error',
+        'on_disconnect fired with server_error for the no-response path');
+
+    $stream->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# /incomplete and /throw-after-start: a response started but never finished
+# (app returned early, or threw after starting) must reset the stream --
+# never synthesize END_STREAM over a body the app didn't actually finish
+# sending. Both apps route on path so a plain "/ok" request on the SAME
+# connection, submitted after the reset, exercises "sibling streams
+# untouched" / "the connection stays healthy".
+# =============================================================================
+
+package Incomplete;
+our $CS;              # connection_state captured by the /incomplete app
+our $COMPLETE = 0;     # flips true if on_complete ever fires (it must not)
+our $DISCONNECT;       # reason string once on_disconnect fires
+our $STARTED = 0;
+
+our $THROW_CS;
+our $THROW_COMPLETE = 0;
+our $THROW_DISCONNECT;
+our $THROW_STARTED = 0;
+
+package main;
+
+use constant H2_INTERNAL_ERROR_CODE => 2;   # NGHTTP2_INTERNAL_ERROR (RFC 9113 section 7)
+
+my $lifecycle_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    my $path = $scope->{path};
+
+    while (1) {
+        my $e = await $receive->();
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+
+    if ($path eq '/incomplete') {
+        my $cs = $scope->{'pagi.connection'};
+        $Incomplete::CS = $cs;
+        $cs->on_complete(sub { $Incomplete::COMPLETE = 1 });
+        $cs->on_disconnect(sub { $Incomplete::DISCONNECT = $_[0] });
+
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type', 'text/plain']] });
+        $Incomplete::STARTED = 1;
+        await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+        return;   # never sends the terminal body -- incomplete
+    }
+    elsif ($path eq '/throw-after-start') {
+        my $cs = $scope->{'pagi.connection'};
+        $Incomplete::THROW_CS = $cs;
+        $cs->on_complete(sub { $Incomplete::THROW_COMPLETE = 1 });
+        $cs->on_disconnect(sub { $Incomplete::THROW_DISCONNECT = $_[0] });
+
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type', 'text/plain']] });
+        $Incomplete::THROW_STARTED = 1;
+        await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+        die "boom\n";
+    }
+    else {
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+        return;
+    }
+};
+
+subtest 'h2: response started but never finished resets the stream' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $lifecycle_app);
+
+    my (%headers, %closed);
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{$sid}{$n} = $v; return 0 },
+        on_stream_close => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/incomplete',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 30);
+
+    ok($Incomplete::STARTED, 'app reached http.response.start before returning');
+    is($headers{$stream_id}{':status'}, '200', 'response.start (200) was delivered before the reset');
+    ok(exists $closed{$stream_id}, 'client observed the stream close');
+    ok($closed{$stream_id}, 'stream closed with a nonzero error code (RST, not a clean END_STREAM)');
+    is($closed{$stream_id}, H2_INTERNAL_ERROR_CODE,
+        'RST error code is NGHTTP2_INTERNAL_ERROR (or its literal fallback)');
+
+    ok($Incomplete::CS, 'app captured a connection_state');
+    is($Incomplete::COMPLETE, 0, 'on_complete never fired');
+    is($Incomplete::DISCONNECT, 'server_error', "on_disconnect fired with 'server_error'");
+
+    ok((grep { /PAGI application returned with an incomplete response \(HTTP\/2 stream $stream_id\)/ } @warnings),
+        'incomplete-response warning was logged');
+
+    # A second stream on the SAME connection still serves.
+    my $stream_id2 = $client->submit_request(
+        method    => 'GET',
+        path      => '/ok',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($headers{$stream_id2}{':status'}, '200',
+        'a second stream on the same connection still serves after the reset');
+
+    $stream->close_now;
+    $loop->remove($server);
+};
+
+subtest 'h2: app throwing after response started resets the stream' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $lifecycle_app);
+
+    my (%headers, %closed);
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{$sid}{$n} = $v; return 0 },
+        on_stream_close => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/throw-after-start',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 30);
+
+    ok($Incomplete::THROW_STARTED, 'app reached http.response.start before throwing');
+    is($headers{$stream_id}{':status'}, '200', 'response.start (200) was delivered before the reset');
+    ok(exists $closed{$stream_id}, 'client observed the stream close');
+    is($closed{$stream_id}, H2_INTERNAL_ERROR_CODE,
+        'RST error code is NGHTTP2_INTERNAL_ERROR (or its literal fallback)');
+
+    ok($Incomplete::THROW_CS, 'app captured a connection_state');
+    is($Incomplete::THROW_COMPLETE, 0, 'on_complete never fired');
+    is($Incomplete::THROW_DISCONNECT, 'server_error', "on_disconnect fired with 'server_error'");
+
+    ok((grep { /PAGI application error after response started \(HTTP\/2 stream $stream_id\): boom/ } @warnings),
+        'existing post-start-error warning text was retained');
+
+    # A second stream on the SAME connection still serves.
+    my $stream_id2 = $client->submit_request(
+        method    => 'GET',
+        path      => '/ok',
+        scheme    => 'https',
+        authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($headers{$stream_id2}{':status'}, '200',
+        'a second stream on the same connection still serves after the reset');
 
     $stream->close_now;
     $loop->remove($server);

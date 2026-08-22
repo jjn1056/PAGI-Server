@@ -656,28 +656,79 @@ sub _h2_dispatch_stream {
         };
         my $error = $@;
 
-        # If the application failed, OR returned without starting a response,
-        # synthesize a 500 (only possible while no response has begun). A clean
-        # return that produced no response is a protocol error, same as a throw.
-        if ($weak_self && !$stream_state->{response_started}) {
-            warn $error
-                ? "PAGI application error (HTTP/2 stream $stream_id): $error\n"
-                : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)\n";
-            eval {
-                $weak_self->{h2_session}->submit_response($stream_id,
-                    status  => 500,
-                    headers => [['content-type', 'text/plain']],
-                    body    => "Internal Server Error\n",
-                );
-                $weak_self->_h2_write_pending;
-            };
-            # The synthesized 500 is this stream's response — mark it started.
-            $stream_state->{connection_state}->_mark_response_started
-                if $stream_state->{connection_state};
-        }
-        elsif ($error) {
-            # Response already started; cannot send a 500. Log only.
-            warn "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n";
+        if ($weak_self) {
+            my $cs = $stream_state->{connection_state};
+
+            # Client-already-gone carve-out: if the client reset this stream
+            # (or the whole connection tore down) while the app's Future was
+            # still pending, _h2_on_close already ran -- it marked $cs
+            # terminal (or, for the h2_streams-deleted case below, ran and
+            # completed its deferred cleanup). Either way there is nothing
+            # left to report: no synthesized 500, no incomplete-response RST,
+            # no warning about a stream the client no longer cares about.
+            my $client_gone = !$weak_self->{h2_streams}{$stream_id}
+                || ($cs && !$cs->is_connected);
+
+            if ($client_gone) {
+                # Nothing to do.
+            }
+            elsif (!$stream_state->{response_started}) {
+                # If the application failed, OR returned without starting a
+                # response, synthesize a 500 (only possible while no response
+                # has begun). A clean return that produced no response is a
+                # protocol error, same as a throw.
+                warn $error
+                    ? "PAGI application error (HTTP/2 stream $stream_id): $error\n"
+                    : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)\n";
+                # Mark BEFORE the response settles: submitting it (below) can
+                # complete the stream synchronously once flushed, and
+                # _h2_on_close would then mark this same connection_state
+                # 'client_closed' if it got there first. _mark_disconnected
+                # is idempotent -- first mark wins -- so marking here first
+                # guarantees the app observes server_error. The synthesized
+                # 500 is this stream's response, so also mark it started.
+                $cs->_mark_disconnected('server_error') if $cs;
+                $cs->_mark_response_started if $cs;
+                eval {
+                    $weak_self->{h2_session}->submit_response($stream_id,
+                        status  => 500,
+                        headers => [['content-type', 'text/plain']],
+                        body    => "Internal Server Error\n",
+                    );
+                    $weak_self->_h2_write_pending;
+                };
+            }
+            elsif ($cs && (($stream_state->{seq_state} // 'complete') ne 'complete')) {
+                # Response started but never finished: the app either
+                # returned cleanly without sending the terminal body/file/fh
+                # (or trailers), or threw after starting. Either way the
+                # stream is framed but unterminated -- there is no way to
+                # synthesize END_STREAM without lying about the body, so
+                # reset the stream instead. (Only plain HTTP streams reach
+                # here: WebSocket/SSE never attach a connection_state, so
+                # $cs guards them out -- their seq_state is never tracked
+                # and would otherwise misread as permanently incomplete.)
+                warn $error
+                    ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n"
+                    : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)\n";
+                # Mark BEFORE the RST. _h2_on_close fires for our own RST
+                # too (as an abnormal close, since seq_state never reached
+                # 'complete') and would mark this same connection_state
+                # 'client_closed' if it got there first. _mark_disconnected
+                # is idempotent -- first mark wins -- so marking here first
+                # guarantees the app observes server_error.
+                $cs->_mark_disconnected('server_error');
+                eval {
+                    $weak_self->{h2_session}->submit_rst_stream(
+                        $stream_id, _h2_rst_error_code());
+                    $weak_self->_h2_write_pending;
+                };
+            }
+            elsif ($error) {
+                # Response already complete; cannot send a 500 or usefully
+                # reset a finished stream. Log only.
+                warn "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n";
+            }
         }
 
         # Notify server that request completed (for max_requests tracking)
@@ -685,6 +736,17 @@ sub _h2_dispatch_stream {
     })->();
 
     $self->{server}->adopt_future($future);
+}
+
+# HTTP/2 error code for the RST_STREAM sent when a response is left started
+# but incomplete (see _h2_dispatch_stream above). NGHTTP2_INTERNAL_ERROR
+# (RFC 9113 section 7, code 0x2) isn't exported by this XS binding
+# (Net::HTTP2::nghttp2 0.008) -- use it if a future binding adds it, else
+# fall back to the literal.
+sub _h2_rst_error_code {
+    return Net::HTTP2::nghttp2->can('NGHTTP2_INTERNAL_ERROR')
+        ? Net::HTTP2::nghttp2::NGHTTP2_INTERNAL_ERROR()
+        : 2;   # NGHTTP2_INTERNAL_ERROR per RFC 9113 section 7
 }
 
 sub _h2_create_scope {

@@ -483,6 +483,15 @@ sub terminate {
     return $self->{nghttp2}->terminate_session($error_code);
 }
 
+# Internal: reset a single stream with RST_STREAM. Used by Connection.pm's
+# h2 dispatch wrapper to abort a stream whose response was left started but
+# incomplete (app returned early or threw after http.response.start), and
+# by nothing else -- not part of the documented Session API above.
+sub submit_rst_stream {
+    my ($self, $stream_id, $error_code) = @_;
+    return $self->{nghttp2}->submit_rst_stream($stream_id, $error_code);
+}
+
 1;
 
 __END__
