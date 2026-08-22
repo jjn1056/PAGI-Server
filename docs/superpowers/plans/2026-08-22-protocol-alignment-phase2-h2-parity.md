@@ -485,15 +485,15 @@ git commit -m "docs: record h2 parity gains and the trailers dependency gate"
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. h2 HEAD | not started | — | — | — |
-| 2. h2 file streaming | not started | — | — | — |
-| 3. h2 fh streaming | not started | — | — | — |
-| 4. fullflush h2 http+sse | not started | — | — | — |
-| 5. Cancel safety | not started | — | — | — |
-| 6. h1 trailers framing | not started | — | — | — |
-| 7. Dead code + t/38 | not started | — | — | — |
-| 8. Docs | not started | — | — | — |
-| 9. Phase gate | not started | — | — | — |
+| 1. h2 HEAD | complete (review clean; plan test-omission fixed by implementer) | 4794ceb | t/http2/27 new / 32/32 across 4 files | /tmp/phase2-task1-pass.out |
+| 2. h2 file streaming | complete (review clean; t/http2/26 fixture in-commit) | d921f07 | t/http2/28 new / 35 tests, 6 files | /tmp/phase2-task2-pass.out |
+| 3. h2 fh streaming | complete (review clean; plan loop bug fixed by implementer) | d844ed8 | +3 paths / 48/48, 4 files | /tmp/phase2-task3-pass.out |
+| 4. fullflush h2 http+sse | complete (review clean; M4 closed) | f9e7a68 | t/http2/29 new / 25 tests, 4 files | /tmp/phase2-task4-pass.out |
+| 5. Cancel safety | complete (review clean; carried race measured harmless, test-only) | 61da0d0 | +cancel section / 4 files PASS ×5 runs | task-5-report.md |
+| 6. h1 trailers framing | complete (review clean; deviation D1 ruled: advance-then-rollback) | 09a06ab | t/53 new / 66/66, 4 files | /tmp/phase2-task6-pass.out |
+| 7. Dead code + t/38 | complete (review clean, zero findings; "six" corrected to five) | 856422a | t/38 behavioral / 58/58 + perl -c | /tmp/phase2-task7-pass.out |
+| 8. Docs | complete (review clean, zero findings) | 1b5440d | podchecker OK; smoke 9/9 | task-8-report.md |
+| 9. Phase gate | complete | (this commit) | full suite 117 files / 664 tests PASS | /tmp/phase2-full-suite.out; whitespace/POD/syntax clean; spec drift: none (a7ed9cc) |
 
 ## Deferred (tracked for after the first pass)
 
