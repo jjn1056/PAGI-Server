@@ -1461,7 +1461,8 @@ sub _h2_create_sse_send {
         $weak_self->_reset_sse_idle_timer unless $already_closed;
 
         # Mandatory event validation and sequencing (PAGI spec compliance).
-        PAGI::Server::EventValidator::validate_sse_send($event);
+        PAGI::Server::EventValidator::validate_sse_send(
+            $event, { extensions => $weak_self->{extensions} });
         $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
 
         if ($type eq 'sse.start') {
@@ -3664,7 +3665,8 @@ sub _create_sse_send {
 
         # Mandatory event validation and sequencing (PAGI spec compliance).
         # Order per spec: transport-closed no-op check above runs first.
-        PAGI::Server::EventValidator::validate_sse_send($event);
+        PAGI::Server::EventValidator::validate_sse_send(
+            $event, { extensions => $weak_self->{extensions} });
         $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
 
         if ($type eq 'sse.start') {

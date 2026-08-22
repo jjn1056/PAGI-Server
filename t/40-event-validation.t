@@ -427,6 +427,10 @@ subtest 'extension-gated event types' => sub {
         qr/Extension not enabled: websocket\.http\.response/, 'ws denial without extension throws');
     ok( lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }, { extensions => { 'websocket.http.response' => {} } }) },
         'ws denial with extension ok');
+    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.fullflush' }) },
+        qr/Extension not enabled: fullflush/, 'sse fullflush without extension throws');
+    ok( lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.fullflush' }, { extensions => { fullflush => {} } }) },
+        'sse fullflush with extension ok');
 };
 
 subtest 'lifespan send validation' => sub {
@@ -474,6 +478,8 @@ subtest 'advance_sse close is idempotent, streams stay exclusive' => sub {
     is( $adv->('streaming', { type => 'sse.send', data => 'x' }), 'streaming', 'send keeps streaming');
     is( $adv->('streaming', { type => 'sse.comment', comment => 'x' }), 'streaming', 'comment keeps streaming');
     is( $adv->('streaming', { type => 'sse.keepalive', interval => 15 }), 'streaming', 'keepalive keeps streaming');
+    is( $adv->('streaming', { type => 'http.fullflush' }), 'streaming', 'fullflush leaves streaming unchanged');
+    like( dies { $adv->('initial', { type => 'http.fullflush' }) }, qr/before sse\.start/, 'fullflush before start');
     is( $adv->('streaming', { type => 'sse.close' }), 'closed', 'close -> closed');
     is( $adv->('closed', { type => 'sse.close' }), 'closed', 'second close idempotent');
     is( $adv->('declining', { type => 'sse.http.response.body', more => 1 }), 'declining', 'decline body chunk keeps declining');

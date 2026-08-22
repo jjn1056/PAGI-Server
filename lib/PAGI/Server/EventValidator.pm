@@ -268,7 +268,8 @@ sub _validate_ws_denial_body {
 # =============================================================================
 
 sub validate_sse_send {
-    my ($event) = @_;
+    my ($event, $opts) = @_;
+    my $ext = ($opts && $opts->{extensions}) || {};
     my $type = $event->{type} // '';
 
     if ($type eq 'sse.start') {
@@ -291,6 +292,10 @@ sub validate_sse_send {
     }
     elsif ($type eq 'sse.http.response.body') {
         _validate_sse_decline_body($event);
+    }
+    elsif ($type eq 'http.fullflush') {
+        croak "Extension not enabled: fullflush"
+            unless exists $ext->{fullflush};
     }
     else {
         croak "Unrecognized event type '$type' for sse protocol";
@@ -511,7 +516,7 @@ sub advance_sse {
     }
 
     if ($state eq 'streaming') {
-        return 'streaming' if $type eq 'sse.send' || $type eq 'sse.comment' || $type eq 'sse.keepalive';
+        return 'streaming' if $type eq 'sse.send' || $type eq 'sse.comment' || $type eq 'sse.keepalive' || $type eq 'http.fullflush';
         return 'closed' if $type eq 'sse.close';
         croak "cannot decline with sse.http.response.start after sse.start"
             if $type eq 'sse.http.response.start';
@@ -615,12 +620,15 @@ C<"Extension not enabled: websocket.http.response"> unless
 C<$opts-E<gt>{extensions}{'websocket.http.response'}> exists. Any other
 event type croaks with C<"Unrecognized event type '$type' for websocket protocol">.
 
-=head2 validate_sse_send($event)
+=head2 validate_sse_send($event, $opts)
 
 Validates SSE send events: C<sse.start>, C<sse.send>, C<sse.comment>,
 C<sse.keepalive>, C<sse.close>, C<sse.http.response.start>,
-C<sse.http.response.body>. Any other event type croaks with
-C<"Unrecognized event type '$type' for sse protocol">.
+C<sse.http.response.body>, C<http.fullflush>. C<$opts> is an optional hash
+reference of the form C<< { extensions => \%scope_extensions } >>;
+C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
+C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
+with C<"Unrecognized event type '$type' for sse protocol">.
 
 =head2 validate_lifespan_send($event)
 
@@ -689,8 +697,9 @@ Starting state is C<initial>.
 
 From C<initial>: C<sse.start> advances to C<streaming>;
 C<sse.http.response.start> (a decline) advances to C<declining>. From
-C<streaming>: C<sse.send>, C<sse.comment>, and C<sse.keepalive> keep
-C<streaming>; C<sse.close> advances to C<closed>. From C<declining>:
+C<streaming>: C<sse.send>, C<sse.comment>, C<sse.keepalive>, and
+C<http.fullflush> keep C<streaming>; C<sse.close> advances to C<closed>.
+From C<declining>:
 C<sse.http.response.body> with a true C<more> field keeps C<declining>; a
 terminal body chunk advances to C<decline_complete>. From C<closed>,
 C<sse.close> is idempotent and stays C<closed>.
