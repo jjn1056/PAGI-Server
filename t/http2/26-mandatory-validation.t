@@ -7,6 +7,7 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 use Socket qw(AF_UNIX SOCK_STREAM);
+use File::Temp qw(tempfile);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -22,9 +23,11 @@ BEGIN {
 # websocket, sse) validates and sequences unconditionally, even with
 # validate_events => 0. Two h2-specific wrinkles covered here that t/52
 # doesn't need to:
-#  - Phase-1 stubs (trailers / file-fh body / fullflush) fail BEFORE the
+#  - Phase-1 stubs (trailers / fh body / fullflush) fail BEFORE the
 #    sequence machine advances, so a conforming app that probes them can
-#    still finish its response normally instead of being stranded.
+#    still finish its response normally instead of being stranded. (file
+#    bodies stream for real as of Task 2 -- /file-body below is now a
+#    positive control, not a stub probe.)
 #  - Once a stream's terminal state is reached (http 'complete', sse
 #    'closed'/'decline_complete'), the h2_streams entry for that stream is
 #    reclaimed asynchronously; a further send must still raise through the
@@ -170,6 +173,12 @@ sub get_h2 {
 # the test observes validation through real server behavior, never source
 # inspection.
 
+# Small known fixture for the /file-body positive control below.
+my $FILE_BODY_CONTENT = "file-ok:mandatory-validation\n";
+my ($fbfh, $FILE_BODY_FIXTURE) = tempfile(UNLINK => 1);
+print $fbfh $FILE_BODY_CONTENT;
+close $fbfh;
+
 my $after_complete_err;
 
 my $http_app = async sub {
@@ -210,13 +219,12 @@ my $http_app = async sub {
         return;
     }
     if ($path eq '/file-body') {
-        # Probe the file/fh stub, then respond normally. The stub dies BEFORE
-        # advance_http runs, so the sequence machine never advanced past
-        # 'started' -- the app can still finish its response.
+        # Positive control (Task 2): file bodies stream for real now, so this
+        # sends a known fixture and the response completes on its own -- a
+        # file body is terminal per advance_http, so there is no follow-up
+        # body event to send (unlike the other probes on this path).
         await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
-        my $err = do { local $@; eval { await $send->({ type => 'http.response.body', file => '/etc/hosts' }) }; $@ };
-        $err =~ s/\n/ /g;
-        await $send->({ type => 'http.response.body', body => "file:$err", more => 0 });
+        await $send->({ type => 'http.response.body', file => $FILE_BODY_FIXTURE });
         return;
     }
     if ($path eq '/trailers') {
@@ -262,8 +270,8 @@ like( $body, qr/dup:.*duplicate http\.response\.start/,
     'duplicate start fails without disturbing the real response' );
 
 (undef, $body) = get_h2('/file-body', app => $http_app);
-like( $body, qr/file:.*not yet implemented on HTTP\/2/,
-    'file body on h2 fails loudly instead of sending an empty body' );
+is( $body, $FILE_BODY_CONTENT,
+    'file body on h2 streams the real file content (Task 2)' );
 
 (undef, $body) = get_h2('/trailers', app => $http_app);
 like( $body, qr/trailers:.*not yet implemented on HTTP\/2/,

@@ -871,6 +871,31 @@ sub _h2_create_send {
         return undef;
     };
 
+    # Shared file/fh chunk pump: pushes produced chunks into this stream's
+    # send queue under the per-stream watermark, then marks EOF. The producer
+    # is an async sub that receives an async "emit" callback and must await it
+    # per chunk; emit dies with the sentinel below if the stream vanishes
+    # (client reset) so the pump stops reading without treating it as an error.
+    my $STREAM_GONE = "PAGI::h2 stream gone\n";
+    my $emit_chunk = async sub {
+        my ($chunk) = @_;
+        my $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
+        die $STREAM_GONE unless $ss && !$weak_self->{closed};
+        if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
+            await $weak_self->_h2_wait_for_stream_drain($stream_id);
+            $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
+            die $STREAM_GONE unless $ss && !$weak_self->{closed};
+        }
+        if (length $chunk) {
+            push @{$ss->{send_queue}}, $chunk;
+            $ss->{send_queue_bytes} += length $chunk;
+        }
+        $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+        $weak_self->{h2_session}->resume_stream($stream_id);
+        $weak_self->_h2_write_pending;
+        return;
+    };
+
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
@@ -919,11 +944,63 @@ sub _h2_create_send {
             if $type eq 'http.response.trailers';
         die "http.fullflush is not yet implemented on HTTP/2\n"
             if $type eq 'http.fullflush';
-        die "http.response.body 'file'/'fh' is not yet implemented on HTTP/2\n"
+        die "http.response.body 'fh' is not yet implemented on HTTP/2\n"
             if $type eq 'http.response.body'
-            && (defined $event->{file} || defined $event->{fh});
+            && defined $event->{fh};
 
-        # 4. Sequence enforcement
+        # 4. file body: streamed through the send queue via $emit_chunk, one
+        # chunk at a time, under this stream's own backpressure.
+        if (defined $event->{file}) {
+            my $file   = $event->{file};
+            my $offset = $event->{offset} // 0;
+            my $length = $event->{length};
+
+            # Fail BEFORE submitting headers or advancing state so the app
+            # can recover (a failed file/fh send must NOT mark the
+            # response complete — see the h1 twin in _create_send).
+            die "File not found: $file\n"  unless -f $file;
+            die "Cannot read file: $file\n" unless -r $file;
+
+            my $seq_before = $seq;
+            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+
+            my $ok = eval {
+                if (!$streaming_started) {
+                    $streaming_started = 1;
+                    $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
+                    $weak_self->{h2_session}->submit_response_streaming(
+                        $stream_id,
+                        status => $status, headers => \@response_headers,
+                        data_callback => $data_callback,
+                    );
+                    $weak_self->_h2_write_pending;
+                }
+                my $loop = $weak_self->{server}->loop;
+                await PAGI::Server::AsyncFile->read_file_chunked(
+                    $loop, $file, $emit_chunk,
+                    offset => $offset,
+                    (defined $length ? (length => $length) : ()),
+                    chunk_size => FILE_CHUNK_SIZE,
+                );
+                1;
+            };
+            if (!$ok) {
+                my $err = $@;
+                return if $err eq $STREAM_GONE;   # client reset: quiet no-op
+                $seq = $seq_before;               # recoverable, per contract
+                die $err;
+            }
+            $eof_pending = 1;
+            my $live = $weak_self->{h2_streams}{$stream_id} or return;
+            $weak_self->{h2_session}->resume_stream($stream_id);
+            $weak_self->_h2_write_pending;
+            return;
+        }
+
+        # 5. Sequence enforcement (start / plain body / fullflush). advance_http
+        # is deliberately called from three places in this sub — the HEAD
+        # block above, the file arm above, and here — each has different
+        # pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
 
         if ($type eq 'http.response.start') {
