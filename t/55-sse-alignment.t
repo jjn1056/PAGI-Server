@@ -697,12 +697,21 @@ sub sse_socket {
         PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
     ) or return;
     my $version = $opt{http_version} // '1.1';
-    my $req = "GET / HTTP/$version\r\nHost: 127.0.0.1:$port\r\nAccept: text/event-stream\r\n";
+    my $path    = $opt{path} // '/';
+    my $req = "GET $path HTTP/$version\r\nHost: 127.0.0.1:$port\r\nAccept: text/event-stream\r\n";
     $req .= "Connection: $opt{connection}\r\n" if $opt{connection};
     $req .= "\r\n";
     print $sock $req;
     $sock->blocking(0);
     return $sock;
+}
+
+# A further SSE request issued on an already-used socket, read to its terminator.
+sub sse_request_on {
+    my ($sock, $port, $path) = @_;
+    print $sock "GET $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n"
+              . "Accept: text/event-stream\r\n\r\n";
+    return read_until($sock, qr/\r\n0\r\n\r\n/);
 }
 
 # The terminating zero-length chunk of the SSE response body.
@@ -892,6 +901,102 @@ subtest 'HTTP/1.0 still closes after a clean SSE end (control)' => sub {
 
         my (undef, $eof) = read_until($sock, undef);
         ok($eof, 'HTTP/1.0 still closes the connection after the stream ends');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+# Keep-alive must never be handed to a client that received NO response. The
+# http path treats "the application returned without starting a response" as a
+# protocol error (500 + close); an SSE application that returns without
+# sse.start and without declining has to get the same treatment, or the client
+# sits on a silent socket until the idle timeout -- forever with timeout => 0.
+subtest 'SSE app that returns without any response: 500 and close, never a silent kept-alive socket' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        return;   # no sse.start, no decline -- nothing at all
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 3 unless $sock;
+
+        my ($wire, $eof) = read_until($sock, undef, 3);
+        like($wire, qr{^HTTP/1\.1 500}, 'server synthesized a 500, matching the http path');
+        ok($eof, 'connection closed promptly instead of being kept alive with zero bytes written');
+        ok((scalar grep { /without starting an SSE stream or a response/i } @warnings),
+            'the protocol error was warned') or diag("warnings: @warnings");
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'SSE decline that starts but never sends its terminal body: closes, does not hang' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
+        return;   # the terminal sse.http.response.body never comes
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 2 unless $sock;
+
+        my ($wire, $eof) = read_until($sock, undef, 3);
+        ok($eof, 'an unfinished decline closes the connection rather than hanging');
+        like($wire, qr{^HTTP/1\.1 500}, 'and reports the incomplete response as a 500');
+        unlike($wire, qr/204/, 'the never-completed decline status was not sent');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+# The riskiest property of the reset block: a reused connection must be able to
+# run a WHOLE second SSE stream, with its own keepalive, and still come back.
+subtest 'a reused connection serves a SECOND SSE stream, then a plain request' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        my ($n) = (($scope->{query_string} // '') =~ /n=(\d+)/);
+        $n //= 0;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.keepalive', interval => 0.1, comment => "ka$n" });
+        await $send->({ type => 'sse.send', event => 'tick', data => "stream$n" });
+        await $loop->delay_future(after => 0.25);
+        await $send->({ type => 'sse.close' });
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port, path => '/?n=1');
+    SKIP: {
+        skip "Cannot connect", 7 unless $sock;
+
+        my ($first, $eof1) = read_until($sock, $TERMINATOR);
+        like($first, qr/data: stream1\n/, 'first stream delivered its event');
+        like($first, qr/:ka1\n/,          'first stream keepalive ran');
+        ok(!$eof1,                        'connection survived the first stream');
+
+        my ($second, $eof2) = sse_request_on($sock, $port, '/?n=2');
+        like($second, qr{^HTTP/1\.1 200}, 'second SSE stream started on the SAME socket');
+        like($second, qr/data: stream2\n/, 'second stream delivered its own event');
+        like($second, qr/:ka2\n/,          'keepalive re-armed for the second stream');
+        unlike($second, qr/:ka1\n/,        'the first stream keepalive did not survive the reset');
+        like($second, $TERMINATOR,         'second stream framed off with its own terminator');
+        ok(!$eof2,                         'connection survived the second stream too');
+
+        my ($third) = plain_request_on($sock, $port);
+        like($third, qr/PLAIN-OK/, 'ordinary request served after two SSE streams');
         close $sock;
     }
 

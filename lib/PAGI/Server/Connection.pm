@@ -4216,6 +4216,25 @@ async sub _handle_sse_request {
     # End the stream (no-op if an explicit sse.close already finished it).
     $self->_finish_sse_stream('stream_complete');
 
+    # The application produced no response at all: no sse.start, and no
+    # completed decline. That is the same protocol error the plain HTTP path
+    # reports, and it must never reach the keep-alive branch below -- the
+    # client is still waiting for a response, so handing it back a connection
+    # with zero bytes written would hang it until the idle timeout, or forever
+    # when timeout => 0. A COMPLETED decline set response_started and closed
+    # the connection itself, so it never lands here; a decline that started
+    # but never sent its terminal body does, and its buffered headers are
+    # about to be discarded, so it is equally unanswerable.
+    if (!$self->{sse_started} && !$self->{response_started}) {
+        unless ($self->{closed}) {
+            warn "PAGI application returned without starting an SSE stream or a response\n";
+            $self->_send_error_response(500, "Internal Server Error");
+        }
+        $self->_write_access_log;
+        $self->_handle_disconnect_and_close('server_error');
+        return;
+    }
+
     # Write access log entry (logs at stream end with total duration). Must
     # precede the reset below, which clears the request it logs.
     $self->_write_access_log;
@@ -4278,6 +4297,10 @@ sub _finish_sse_stream {
 #
 # The send closure's own $seq is per-request by construction (a new closure is
 # built per request), so the post-sse.close raise contract survives untouched.
+#
+# _disconnect_handled is deliberately NOT reset: every _handle_disconnect pairs
+# with _close (and so with {closed}), which the keep-alive branch excludes, so
+# reaching here means no disconnect was ever handled and the flag is still 0.
 sub _reset_after_sse_stream {
     my ($self) = @_;
 
