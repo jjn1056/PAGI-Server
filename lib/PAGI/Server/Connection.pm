@@ -1869,8 +1869,13 @@ sub _h2_create_sse_send {
                 return unless $weak_self;
                 return if $weak_self->{closed};
                 my $ss = $weak_self->{h2_streams}{$stream_id} or return;
-                push @{$ss->{send_queue} ||= []}, $text;
-                $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $text;
+                # PAGI Www.pod "Send SSE": encode to UTF-8 exactly once, at
+                # the wire boundary — all queue-length math below is on the
+                # resulting BYTE string.
+                my $bytes = eval { Encode::encode('UTF-8', $text, Encode::FB_CROAK) };
+                die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
+                push @{$ss->{send_queue} ||= []}, $bytes;
+                $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
                 $weak_self->{h2_session}->resume_stream($stream_id);
                 $weak_self->_h2_write_pending;
             };
@@ -1891,8 +1896,12 @@ sub _h2_create_sse_send {
             }
 
             my $sse_data = _format_sse_event($event);
-            push @{$ss->{send_queue} ||= []}, $sse_data;
-            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $sse_data;
+            # PAGI Www.pod "Send SSE": encode to UTF-8 exactly once, at the
+            # wire boundary — a failed encode fails this send's Future.
+            my $bytes = eval { Encode::encode('UTF-8', $sse_data, Encode::FB_CROAK) };
+            die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
+            push @{$ss->{send_queue} ||= []}, $bytes;
+            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
             $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
@@ -1903,8 +1912,10 @@ sub _h2_create_sse_send {
             return unless $ss->{response_started};
 
             my $comment = _format_sse_comment($event);
-            push @{$ss->{send_queue} ||= []}, $comment;
-            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $comment;
+            my $bytes = eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK) };
+            die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
+            push @{$ss->{send_queue} ||= []}, $bytes;
+            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
             $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
@@ -4256,8 +4267,13 @@ sub _create_sse_send {
                 my ($text) = @_;
                 return unless $weak_self;
                 return if $weak_self->{closed};
-                my $len = sprintf("%x", length($text));
-                $weak_self->{stream}->write("$len\r\n$text\r\n");
+                # PAGI Www.pod "Send SSE": encode to UTF-8 exactly once, at
+                # the wire boundary — the chunk-size prefix below is on the
+                # resulting BYTE string.
+                my $bytes = eval { Encode::encode('UTF-8', $text, Encode::FB_CROAK) };
+                die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
+                my $len = sprintf("%x", length($bytes));
+                $weak_self->{stream}->write("$len\r\n$bytes\r\n");
             };
         }
         elsif ($type eq 'sse.send') {
@@ -4272,19 +4288,25 @@ sub _create_sse_send {
             # --- END BACKPRESSURE CHECK ---
 
             my $sse_data = _format_sse_event($event);
+            # PAGI Www.pod "Send SSE": encode to UTF-8 exactly once, at the
+            # wire boundary — a failed encode fails this send's Future.
+            my $bytes = eval { Encode::encode('UTF-8', $sse_data, Encode::FB_CROAK) };
+            die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
 
             # Send as chunked data
-            my $len = sprintf("%x", length($sse_data));
-            $weak_self->{stream}->write("$len\r\n$sse_data\r\n");
+            my $len = sprintf("%x", length($bytes));
+            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'sse.comment') {
             return unless $weak_self->{sse_started};
 
             my $comment = _format_sse_comment($event);
+            my $bytes = eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK) };
+            die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
 
-            my $len = sprintf("%x", length($comment));
-            $weak_self->{stream}->write("$len\r\n$comment\r\n");
+            my $len = sprintf("%x", length($bytes));
+            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
