@@ -53,6 +53,15 @@ subtest "lifespan_mode 'off' is rejected (Lifespan spec: no off switch)" => sub 
     like($err, qr/nonconforming/, 'error explains why');
 };
 
+subtest "configure(lifespan_mode => 'off') is rejected with the same message" => sub {
+    my $server = PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                                    quiet => 1);
+
+    my $err = dies { $server->configure(lifespan_mode => 'off') };
+    like($err, qr/Invalid lifespan_mode 'off'/, 'configure() rejects off');
+    like($err, qr/nonconforming/, 'error explains why');
+};
+
 subtest 'an invalid lifespan_mode is rejected at construction' => sub {
     my $err = dies {
         PAGI::Server->new(app => sub { }, lifespan_mode => 'bogus');
@@ -60,6 +69,18 @@ subtest 'an invalid lifespan_mode is rejected at construction' => sub {
     ok($err, 'construction failed');
     like($err, qr/lifespan_mode/, 'error names the offending option');
     like($err, qr/auto.*on/, "error names the two valid modes");
+};
+
+subtest "bin/pagi-server --lifespan off exits nonzero with the spec-forbids message" => sub {
+    my $pagi_server = "$FindBin::Bin/../bin/pagi-server";
+    local $ENV{PAGI_ENV} = 'production';   # deterministic mode, no Lint wrap
+    my $out = `$^X -I$FindBin::Bin/../lib $pagi_server --lifespan off --port 0 -e "sub { }" 2>&1`;
+    my $exit_code = $? >> 8;
+
+    is($exit_code, 255, '--lifespan off exits with code 255');
+    like($out, qr/Invalid lifespan_mode 'off'/, 'stderr carries the same rejection message');
+    like($out, qr/the PAGI Lifespan spec forbids skipping the protocol/,
+        'stderr explains why per the Lifespan spec');
 };
 
 done_testing;
