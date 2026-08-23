@@ -65,13 +65,14 @@ sub create_h2c_connection {
     );
 
     my $conn = PAGI::Server::Connection->new(
-        stream        => $stream,
-        app           => $app,
-        protocol      => $protocol,
-        server        => $server,
-        h2_protocol   => $server->{http2_protocol},
-        h2c_enabled   => $server->{h2c_enabled},
-        max_body_size => $server->{max_body_size},
+        stream           => $stream,
+        app              => $app,
+        protocol         => $protocol,
+        server           => $server,
+        h2_protocol      => $server->{http2_protocol},
+        h2c_enabled      => $server->{h2c_enabled},
+        max_body_size    => $server->{max_body_size},
+        sse_idle_timeout => $server->{sse_idle_timeout},
     );
 
     $server->add_child($stream);
@@ -387,6 +388,73 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
         'stream entry reclaimed after max_body_size 413');
     ok(!$timer->is_running,
         'the stream keepalive timer was stopped, not leaked, by the 413 teardown');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Server-initiated SSE idle timeout -> sse.disconnect reason=idle_timeout
+# ============================================================
+# Distinguishes a server-initiated teardown from a client one: the client
+# never sends or closes anything here, so the ONLY thing that can end the
+# stream is the server's own per-stream idle timer. The stream ends via a
+# clean END_STREAM (design section 11.3's "end THIS stream only"), which
+# _h2_on_close's error-code-0 arms were, before this fix, misattributing to
+# 'client_closed'.
+subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
+    my $sse_started = 0;
+    my $disconnect_event;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+
+        await $send->({ type => 'sse.start', status => 200 });
+        $sse_started = 1;
+
+        # Never send again -- the per-stream idle timer, not the client,
+        # ends this stream.
+        my $event = await $receive->();
+        $disconnect_event = $event;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app              => $app,
+        sse_idle_timeout => 0.3,
+    );
+
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    for (1..20) {
+        $loop->loop_once(0.1);
+        last if $sse_started;
+    }
+    ok($sse_started, 'SSE stream started before the idle timer can expire');
+
+    # Idle timeout is 0.3s; each exchange_frames round is ~0.1s, so ~3
+    # rounds are expected. 30 rounds (~3s) is a 10x margin.
+    for (1..30) {
+        exchange_frames($client, $client_sock, 1);
+        last if $disconnect_event;
+    }
+
+    ok($disconnect_event, 'sse.disconnect delivered within the bounded window');
+    is($disconnect_event->{type}, 'sse.disconnect', 'Got sse.disconnect event')
+        if $disconnect_event;
+    is($disconnect_event->{reason}, 'idle_timeout',
+        "Reason is 'idle_timeout', not misattributed to 'client_closed'")
+        if $disconnect_event;
 
     $stream_io->close_now;
     $loop->remove($server);

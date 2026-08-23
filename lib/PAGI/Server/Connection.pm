@@ -684,13 +684,23 @@ sub _h2_on_close {
     #
     # Both marks are idempotent, so a stream the dispatch wrapper already
     # marked (e.g. server_error before its own RST) keeps that first reason.
+    #
+    # server_close_reason: a server-initiated per-stream teardown (idle
+    # timeout, keepalive timeout, ...) records its own token here BEFORE
+    # driving the close, so it takes precedence over the generic
+    # 'client_closed' fallback below -- both in the nonzero-error-code $cs
+    # mark and in the queued disconnect events pushed further down. The
+    # zero-error-code arms above are untouched: they distinguish a clean
+    # completion from an incomplete response, not a server-initiated
+    # abnormal close, so they never consult this token.
+    my $reason = $stream->{server_close_reason};
     if (my $cs = $stream->{connection_state}) {
         if (($stream->{seq_state} // '') eq 'complete' && !$error_code) {
             $cs->_mark_complete;
         } elsif (!$error_code) {
             $cs->_mark_disconnected('server_error');
         } else {
-            $cs->_mark_disconnected('client_closed');
+            $cs->_mark_disconnected($reason // 'client_closed');
         }
     }
 
@@ -702,11 +712,11 @@ sub _h2_on_close {
         # Close without a WebSocket close handshake (RST_STREAM, timeout, ...):
         # abnormal closure per RFC 6455. Deduped -- a no-op if the close-frame
         # or bare-END_STREAM path already delivered the scope's one disconnect.
-        $self->_h2_ws_enqueue_disconnect($stream, 1006, 'client_closed');
+        $self->_h2_ws_enqueue_disconnect($stream, 1006, $reason // 'client_closed');
     } elsif ($stream->{is_sse}) {
         push @{$stream->{receive_queue}}, {
             type   => 'sse.disconnect',
-            reason => 'client_closed',
+            reason => $reason // 'client_closed',
         };
     } else {
         push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
@@ -1493,22 +1503,38 @@ sub _h2_create_websocket_receive {
 
     weaken(my $weak_self = $self);
 
+    # Fallback disconnect for a receive() that resolves after this stream is
+    # gone or the connection is closed: 1006/'' by default (RFC 6455
+    # abnormal closure, no reason available), but prefers the per-stream
+    # server_close_reason token when the stream's own state is still
+    # reachable in h2_streams -- a server-initiated teardown (idle timeout,
+    # keepalive timeout, ...) records that token there before tearing the
+    # stream down, so a receive() racing that teardown still reports why.
+    my $fallback_disconnect = sub {
+        my $ss = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        return {
+            type   => 'websocket.disconnect',
+            code   => 1006,
+            reason => ($ss && $ss->{server_close_reason}) // '',
+        };
+    };
+
     return sub {
-        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => '' })
+        return Future->done($fallback_disconnect->())
             unless $weak_self;
-        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => '' })
+        return Future->done($fallback_disconnect->())
             if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => '' })
+        return Future->done($fallback_disconnect->())
             unless $ss;
 
         my $future = (async sub {
-            return { type => 'websocket.disconnect', code => 1006, reason => '' }
+            return $fallback_disconnect->()
                 unless $weak_self;
 
             my $ss = $weak_self->{h2_streams}{$stream_id};
-            return { type => 'websocket.disconnect', code => 1006, reason => '' }
+            return $fallback_disconnect->()
                 unless $ss;
 
             # Check queue first
@@ -1528,7 +1554,7 @@ sub _h2_create_websocket_receive {
                     return shift @{$ss->{receive_queue}};
                 }
 
-                return { type => 'websocket.disconnect', code => 1006, reason => '' }
+                return $fallback_disconnect->()
                     if $weak_self->{closed};
 
                 if (!$ss->{body_pending}) {
@@ -1537,7 +1563,7 @@ sub _h2_create_websocket_receive {
                 await $ss->{body_pending};
 
                 $ss = $weak_self->{h2_streams}{$stream_id};
-                return { type => 'websocket.disconnect', code => 1006, reason => '' }
+                return $fallback_disconnect->()
                     unless $ss;
             }
         })->();
@@ -2341,6 +2367,14 @@ sub _h2_start_ws_pong_timeout {
 
                 $weak_self->_h2_stop_ws_keepalive($weak_ss);
 
+                # Record why this stream is ending BEFORE the teardown: this
+                # is a server-initiated close, not the client going away, and
+                # _h2_on_close prefers this token over its hardcoded fallback
+                # for the $cs marking (the queued disconnect event below is
+                # already correct via the first-wins dedup, but the $cs mark
+                # only happens in _h2_on_close, downstream of this RST).
+                $weak_ss->{server_close_reason} = 'keepalive_timeout';
+
                 # RFC 6455 section 7.4.1: 1006 MUST NOT be set as the status
                 # code of a Close control frame -- it means "the connection
                 # dropped with no close handshake". So a keepalive timeout
@@ -2490,6 +2524,12 @@ sub _h2_start_sse_idle_timer {
 
             $weak_self->_h2_stop_sse_keepalive($weak_ss);
             $weak_self->_h2_stop_sse_idle_timer($weak_ss);
+
+            # Record why this stream is ending BEFORE the teardown: this is a
+            # server-initiated close, not the client going away, and
+            # _h2_on_close prefers this token over its hardcoded fallback for
+            # both the $cs marking and the queued sse.disconnect event.
+            $weak_ss->{server_close_reason} = 'idle_timeout';
 
             # End THIS stream only, the same way an app-initiated sse.close
             # does: mark it closing so the data_callback emits the final
@@ -4965,7 +5005,10 @@ sub _create_websocket_receive {
             return Future->done(shift @{$weak_self->{receive_queue}});
         }
 
-        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => '' })
+        # $weak_self is known live here, so the fallback can report the
+        # abnormal reason a server-initiated close recorded (idle timeout,
+        # queue overflow, ...) instead of an always-empty ''.
+        return Future->done($weak_self->_ws_disconnect_event)
             if $weak_self->{closed};
 
         my $future = (async sub {
@@ -4977,7 +5020,7 @@ sub _create_websocket_receive {
                 return shift @{$weak_self->{receive_queue}};
             }
 
-            return { type => 'websocket.disconnect', code => 1006, reason => '' }
+            return $weak_self->_ws_disconnect_event
                 if $weak_self->{closed};
 
             # First call returns websocket.connect
@@ -4999,7 +5042,7 @@ sub _create_websocket_receive {
                 }
             }
 
-            return { type => 'websocket.disconnect', code => 1006, reason => '' }
+            return $weak_self->_ws_disconnect_event
                 if $weak_self->{closed};
 
             # Wait for events from frame processing
@@ -5008,7 +5051,7 @@ sub _create_websocket_receive {
                     return shift @{$weak_self->{receive_queue}};
                 }
 
-                return { type => 'websocket.disconnect', code => 1006, reason => '' }
+                return $weak_self->_ws_disconnect_event
                     if $weak_self->{closed};
 
                 if (!$weak_self->{receive_pending}) {

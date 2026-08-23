@@ -1067,4 +1067,49 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
     $loop->remove($server);
 };
 
+# ============================================================
+# receive() fallback prefers a recorded server_close_reason over ''
+# (design section 6.1's transport-neutral disconnect reasons)
+# ============================================================
+# White-box: exercises _h2_create_websocket_receive's OWN fallback branch
+# directly -- the code path a receive() call takes when it resolves after
+# $weak_self->{closed} is already true (e.g. a whole-connection teardown,
+# such as a server shutdown, racing an already-pending receive()), rather
+# than through the primary enqueue+dedup path the subtests above already
+# cover. Before this fix that fallback always returned 1006/''; it must now
+# report whatever server_close_reason a server-initiated per-stream
+# teardown recorded, as long as the stream's own state (its h2_streams
+# entry) is still reachable -- and fall back to '' when it is not.
+subtest 'receive() fallback after connection close reports the recorded server_close_reason, not empty' => sub {
+    my $conn = PAGI::Server::Connection->new(
+        app      => sub { },
+        protocol => $protocol,
+    );
+    $conn->{h2_streams}{7} = { server_close_reason => 'keepalive_timeout' };
+    $conn->{closed} = 1;
+
+    my $receive = $conn->_h2_create_websocket_receive(7, $conn->{h2_streams}{7});
+    my $event = $receive->()->get;
+
+    is($event->{type}, 'websocket.disconnect', 'fallback event type is websocket.disconnect');
+    is($event->{code}, 1006, 'fallback code is still 1006 (abnormal closure)');
+    is($event->{reason}, 'keepalive_timeout',
+        "fallback reason is the recorded token, not ''");
+};
+
+subtest 'receive() fallback with no reachable stream state still falls back to empty reason' => sub {
+    my $conn = PAGI::Server::Connection->new(
+        app      => sub { },
+        protocol => $protocol,
+    );
+    $conn->{closed} = 1;
+    # Deliberately no h2_streams entry for stream 7 -- its state is gone.
+
+    my $receive = $conn->_h2_create_websocket_receive(7, undef);
+    my $event = $receive->()->get;
+
+    is($event->{code}, 1006, 'fallback code is still 1006');
+    is($event->{reason}, '', "fallback reason is '' when no stream state is reachable");
+};
+
 done_testing;
