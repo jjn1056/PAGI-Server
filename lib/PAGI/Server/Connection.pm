@@ -36,6 +36,31 @@ sub _validate_header_value { PAGI::Server::EventValidator::check_header_value($_
 
 sub _validate_header_name  { PAGI::Server::EventValidator::check_header_name($_[0]) }
 
+# SSE client-signal check (PAGI Www.pod "SSE Connection Detection"): the
+# exact media range text/event-stream, case-insensitively, with q > 0.
+# A boolean signal test, not content negotiation: wildcards never signal
+# SSE, and q=0 is an explicit refusal.
+sub _accept_signals_sse {
+    my ($headers) = @_;
+    my @values;
+    for my $h (@$headers) {
+        push @values, $h->[1] if $h->[0] eq 'accept';
+    }
+    return 0 unless @values;
+    for my $range (split /,/, join(',', @values)) {
+        my ($type, @params) = split /;/, $range;
+        $type =~ s/\A\s+|\s+\z//g;
+        next unless lc($type) eq 'text/event-stream';
+        my $q = 1;
+        for my $p (@params) {
+            $p =~ s/\A\s+|\s+\z//g;
+            $q = $1 if $p =~ /\Aq\s*=\s*([0-9.]+)\z/i;
+        }
+        return 1 if $q > 0;
+    }
+    return 0;
+}
+
 # RFC 6455 Section 11.3.4: Subprotocol must be a token (no whitespace, separators)
 sub _validate_subprotocol {
     my ($value) = @_;
@@ -439,12 +464,7 @@ sub _h2_on_request {
     # Detect SSE (Accept: text/event-stream)
     my $is_sse = 0;
     if (!$is_websocket) {
-        for my $h (@$headers) {
-            if ($h->[0] eq 'accept' && $h->[1] =~ m{text/event-stream}) {
-                $is_sse = 1;
-                last;
-            }
-        }
+        $is_sse = _accept_signals_sse($headers);
     }
 
     # Initialize per-stream state
@@ -2792,21 +2812,12 @@ sub _is_websocket_upgrade {
 sub _is_sse_request {
     my ($self, $request) = @_;
 
-    # SSE detection per spec:
-    # - Accept header includes text/event-stream
-    # - Request has not been upgraded to WebSocket (already checked)
+    # SSE detection per spec (see _accept_signals_sse above).
+    # Request has not been upgraded to WebSocket (already checked).
     # Note: SSE works with any HTTP method (GET, POST, etc.) to support
     # modern patterns like htmx 4 and datastar using fetch-event-source
 
-    for my $header (@{$request->{headers}}) {
-        my ($name, $value) = @$header;
-        if ($name eq 'accept') {
-            # Check if Accept header includes text/event-stream
-            return 1 if $value =~ m{text/event-stream};
-        }
-    }
-
-    return 0;
+    return _accept_signals_sse($request->{headers});
 }
 
 async sub _handle_request {
