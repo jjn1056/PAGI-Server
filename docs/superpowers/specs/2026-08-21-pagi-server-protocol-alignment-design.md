@@ -387,6 +387,49 @@ floor bump here; until then the limitation is documented in the compliance
 POD. Phase 2b is tracked as deferred work to revisit after the first pass
 over all phases.
 
+**Dependency gap resolved (2026-08-23):** `Net::HTTP2::nghttp2` 0.009 is on
+CPAN and adds `submit_trailer` plus the three-value
+(`$chunk, $eof, $no_end_stream`) data-callback return this section needs.
+Phase 2b (`fix/pagi-0.4-alignment`, commits `66cbdc2..ce405ff`) implemented
+this section against it: the cpanfile and `Protocol::HTTP2`'s own version
+floor were both raised to 0.009 (`66cbdc2`); a received-HEADERS
+classification bug that let request trailers corrupt the in-flight request
+was fixed (`0a9668f`); and the send-side implementation — the trailers arm,
+the data-provider's reserved `END_STREAM`, the flow-control-aware deferral
+of `submit_trailer` until the data provider's own terminal delivery, and
+`_close` releasing a parked trailers send on whole-connection teardown —
+landed in `7cd734f`, `974e48b`, and `ada781c`. The Phase 1 stub and its
+Compliance POD limitation are removed.
+
+**PAGI specification follow-up (recorded, not applied to the PAGI spec by
+this branch):** working this section against a real binding surfaced several
+places where the PAGI specification (RFC 9110 section 6.5 governs trailer
+fields generally) leaves a server's exact behavior underspecified. These are
+proposals for the PAGI specification itself, carried here as a record for
+whoever next revises it — PAGI-Server's own scope guard forbids editing the
+spec repository from this branch:
+
+1. Distinguish content completion from response completion when trailers
+   are promised: a terminal body event finishes the message content but not
+   the response while a trailers event is still owed, and the spec should
+   say so explicitly rather than leaving it to be inferred.
+2. Specify that a response may deliver exactly one terminal trailers event,
+   with an empty field list an explicitly valid, still-terminal case.
+3. Document the HTTP/2 DATA/HEADERS mapping for trailers: which frame end
+   carries `END_STREAM` and why a terminal body event must not itself close
+   the stream when trailers were declared.
+4. Specify stronger trailer-field validation (beyond the existing header
+   name/value byte rules) and require duplicate trailer fields be preserved
+   in order rather than merged or last-write-wins.
+5. Specify the unsupported cases explicitly: trailers over HTTP/1.0 (no
+   chunked transfer coding to carry them) and trailers declared alongside a
+   fixed Content-Length (no framing slot for them either) should both be
+   named as errors a server must reject, not left to server discretion.
+6. Add a versioned request-trailer receive event in a future spec revision,
+   so an application can observe trailers a client sent instead of every
+   server being left to validate-and-discard them by convention, as
+   PAGI::Server does today.
+
 ### 8.4 Fullflush capability
 
 If the `fullflush` extension is advertised on an HTTP/2 HTTP scope,

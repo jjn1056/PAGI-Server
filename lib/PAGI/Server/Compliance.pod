@@ -382,6 +382,46 @@ C<receive()> after its disconnect event therefore keeps getting that
 fallback rather than hanging. The queued disconnect (the one carrying the
 real code and reason from the table above) is still delivered exactly once.
 
+=head2 HTTP/2 Trailers (http.response.trailers)
+
+When an HTTP/2 response start declares C<trailers =E<gt> 1>, a terminal body
+event does not end the stream: the final C<DATA> frame carries no
+C<END_STREAM>. A following C<http.response.trailers> event submits a
+trailing C<HEADERS> block that carries C<END_STREAM>, completing the
+response; an empty or absent C<headers> list is valid and still terminates
+the stream. On a HEAD request the trailers event is validated and discarded
+rather than transmitted -- HEAD sends no body, so nothing needs to reach the
+wire, but the response still completes normally.
+
+Because the trailing C<HEADERS> must not be submitted ahead of body data the
+peer hasn't yet received, a C<send()> carrying C<http.response.trailers> can
+remain pending for as long as the peer withholds HTTP/2 flow-control window
+on the still-draining body: trailers participate in the same per-stream
+backpressure as ordinary body sends. The Future still resolves once nghttp2
+accepts the trailing C<HEADERS> submission, the same "accepted, not
+necessarily delivered" semantics every other HTTP/2 send Future uses.
+
+A response that declares C<trailers =E<gt> 1> and then returns, or throws,
+without ever sending C<http.response.trailers> is an incomplete response
+under the same rule that governs an unsent terminal body chunk (see
+"Application Left a Response Incomplete" below): the stream is reset
+(C<RST_STREAM>, C<INTERNAL_ERROR>) rather than left open or closed as if
+nothing were missing, so the incompleteness is observable to the client.
+
+PAGI::Server also accepts request trailers from the client -- a C<HEADERS>
+block following the request's initial headers and any C<DATA> frames (RFC
+9113 section 8.1). The fields are validated with the same name/value byte
+rules as any other header block and then discarded: PAGI defines no
+request-trailer receive event yet, so an application never sees them. If
+C<END_STREAM> rides the trailer C<HEADERS> instead of a C<DATA> frame, the
+request body still completes normally for the application. A pseudo-header
+field in a trailer block is malformed under RFC 9113 section 8.1;
+PAGI::Server's own callback layer rejects it as a defense-in-depth check,
+though in practice a conforming client cannot construct one and get it as
+far as PAGI's code: nghttp2's own HTTP-messaging validation catches a
+pseudo-header in a trailer block first, at the C library layer, and tears
+down the whole connection (C<GOAWAY>) rather than only the offending stream.
+
 =head2 Connection State (pagi.connection)
 
 PAGI exposes connection-lifecycle introspection to applications through the
@@ -427,24 +467,6 @@ already disconnected first, in which case there is nothing new to report.
 C<pagi.connection> is provided for C<http> scopes on both HTTP/1.1 and
 HTTP/2. WebSocket and SSE scopes do not receive C<pagi.connection> on either
 transport -- they use their own dedicated disconnect events instead.
-
-=head2 Known Limitations
-
-=over 4
-
-=item * B<Trailers (C<http.response.trailers>)>
-
-Not yet implemented over HTTP/2. The installed L<Net::HTTP2::nghttp2>
-exposes no trailer API, so C<http.response.trailers> fails the send Future
-with C<"http.response.trailers is not yet implemented on HTTP/2"> instead of
-transmitting anything -- an application declaring C<trailers =E<gt> 1> and
-sending trailers over HTTP/2 sees that failure where HTTP/1.1 would succeed.
-On a HEAD request the event is accepted and discarded rather than failing,
-since HEAD sends no body and nothing needs to reach the wire. Full support
-is gated on a L<Net::HTTP2::nghttp2> release adding an
-C<nghttp2_submit_trailer()> binding.
-
-=back
 
 =head2 Enabling HTTP/2
 

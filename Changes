@@ -54,10 +54,18 @@
     the client had already disconnected. On HTTP/2, a request that resolves
     without ever starting a response also now marks the stream's connection
     state server_error before the 500 backstop is synthesized.
-  - HTTP/2 trailers remain unimplemented: http.response.trailers still fails
-    the send Future ("not yet implemented on HTTP/2") pending a
-    Net::HTTP2::nghttp2 release adding a submit_trailer binding, tracked as
-    Phase 2b.
+  - HTTP/2 now implements http.response.trailers: a response that declares
+    trailers => 1 holds its final DATA frame without END_STREAM, and the
+    trailers event submits a trailing HEADERS block carrying END_STREAM
+    (an empty or absent headers list still submits and still terminates the
+    stream); on HEAD the event is validated and discarded rather than
+    transmitted. A trailers send() can block for as long as the peer
+    withholds flow-control window on a still-draining body, since trailers
+    now participate in the same per-stream backpressure as ordinary body
+    sends. Declaring trailers and never sending them is an incomplete
+    response, reported the same way an unsent terminal body chunk is
+    (RST_STREAM INTERNAL_ERROR). Requires Net::HTTP2::nghttp2 0.009 or
+    later.
   - websocket.keepalive is now implemented over HTTP/2: per-stream ping/pong
     timers (the h2 multiplexing analogue of the HTTP/1.1 connection-wide
     keepalive), with pings delivered as h2 DATA-framed RFC 6455 ping frames.
@@ -88,6 +96,14 @@
   - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping
     the lifespan protocol entirely, so the constructor and setter now reject
     it. auto remains the default; on remains strict mode.
+  - The Net::HTTP2::nghttp2 floor is raised from 0.008 to 0.009 (needed for
+    trailers support: submit_trailer and the three-value data-callback
+    return). The floor is enforced at load time regardless of the cpanfile's
+    "recommends" phrasing: on a host with 0.008 still installed, HTTP/2
+    support silently reports unavailable (has_http2 false) rather than
+    running against the older API, so a deployment using --http2 loses
+    HTTP/2 entirely until Net::HTTP2::nghttp2 is upgraded. HTTP/1.1-only
+    deployments are unaffected.
 
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
@@ -226,6 +242,28 @@
     application that previously trusted the advertisement got
     "Unrecognized event type" instead of a working extension; http and
     sse scopes are unaffected.
+  - A client sending legal HTTP/2 request trailers (a HEADERS block after
+    the request's initial headers and any DATA frames, RFC 9113 section
+    8.1) no longer corrupts the in-flight request. Every HEADERS block on a
+    stream used to reinitialize the request accumulator, so the trailer
+    block wiped the already-committed request state and triggered a second,
+    spurious application dispatch with an empty pseudo-header set; the
+    original request's body also never reached completion, since its
+    END_STREAM arrived on the trailer HEADERS rather than a DATA frame.
+    HEADERS blocks are now classified by nghttp2's own headers_category: a
+    later block on an established stream accumulates separately, is
+    validated and discarded (PAGI defines no request-trailer receive event
+    yet), and its END_STREAM still completes the original request's body.
+
+  Maintenance
+  - Test coverage added for previously-untested but already-correct
+    behavior: HTTP/1.1 and HTTP/2 HEAD requests against a filehandle body,
+    a filehandle body opened past EOF, a seek failure on a non-seekable
+    filehandle (e.g. a pipe), and an application send() issued after the
+    peer has already reset an HTTP/2 stream resolving as a silent no-op.
+    The duplicated preamble and rollback tail shared by HTTP/2's file and
+    filehandle response arms was extracted into one helper; the file-only
+    and filehandle-only logic in between is unchanged.
 
 0.002006 - 2026-07-04
 
