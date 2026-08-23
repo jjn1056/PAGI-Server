@@ -1405,6 +1405,12 @@ the protocol entirely ("Skipping the lifespan protocol entirely is not a
 conforming option. ... A server must not offer an 'off' switch for this
 protocol."). Passing C<< lifespan_mode => 'off' >> is rejected at construction.
 
+B<Multi-worker mode:> each worker forked under C<workers> runs its own
+lifespan handshake against its own copy of the application and inherits both
+C<lifespan_mode> and C<lifespan_startup_timeout> from the master's
+configuration -- a worker never silently falls back to the C<auto> default
+when the master was configured with C<on>.
+
 =item request_timeout => $seconds
 
 Maximum time in seconds a request can stall without any I/O activity before
@@ -3721,6 +3727,8 @@ sub _run_as_worker {
         max_ws_frame_size   => $self->{max_ws_frame_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
+        lifespan_mode            => $self->{lifespan_mode},
+        lifespan_startup_timeout => $self->{lifespan_startup_timeout},
         workers          => 0,  # Single-worker mode in worker process
     );
     $worker_server->{is_worker} = 1;
