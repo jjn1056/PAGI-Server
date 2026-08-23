@@ -23,11 +23,14 @@ BEGIN {
 # websocket, sse) validates and sequences unconditionally, even with
 # validate_events => 0. Two h2-specific wrinkles covered here that t/52
 # doesn't need to:
-#  - Phase-1 stubs (trailers / fh body / fullflush) fail BEFORE the
-#    sequence machine advances, so a conforming app that probes them can
-#    still finish its response normally instead of being stranded. (file
-#    bodies stream for real as of Task 2 -- /file-body below is now a
-#    positive control, not a stub probe.)
+#  - Phase-1 stubs (fh body / fullflush) fail BEFORE the sequence machine
+#    advances, so a conforming app that probes them can still finish its
+#    response normally instead of being stranded. (file bodies stream for
+#    real as of Task 2 -- /file-body below is now a positive control, not
+#    a stub probe. Trailers stream for real as of Phase 2b Task 4 --
+#    /trailers below now probes the real sequence guard: sending trailers
+#    before the body is terminal still fails, via advance_http's own
+#    'awaiting_trailers' precondition rather than a stub.)
 #  - Once a stream's terminal state is reached (http 'complete', sse
 #    'closed'/'decline_complete'), the h2_streams entry for that stream is
 #    reclaimed asynchronously; a further send must still raise through the
@@ -228,9 +231,12 @@ my $http_app = async sub {
         return;
     }
     if ($path eq '/trailers') {
-        # Declare trailers, stream one chunk, probe the trailers stub, then
-        # finish with a terminal body (legal: the failed stub never advanced
-        # the machine, so state is still 'started_t').
+        # Declare trailers, stream one chunk (not yet terminal), then probe
+        # http.response.trailers too early: advance_http's own
+        # 'awaiting_trailers' precondition rejects it (state is still
+        # 'started_t', the body isn't complete yet) and, being a pure
+        # sequence check, never advances $seq -- so the machine is still
+        # 'started_t' afterward, and the terminal body below is legal.
         await $send->({ type => 'http.response.start', status => 200, trailers => 1, headers => [['content-type','text/plain']] });
         await $send->({ type => 'http.response.body', body => 'x', more => 1 });
         my $err = do { local $@; eval { await $send->({ type => 'http.response.trailers', headers => [['x-t','1']] }) }; $@ };
@@ -274,8 +280,8 @@ is( $body, $FILE_BODY_CONTENT,
     'file body on h2 streams the real file content (Task 2)' );
 
 (undef, $body) = get_h2('/trailers', app => $http_app);
-like( $body, qr/trailers:.*not yet implemented on HTTP\/2/,
-    'declared trailers on h2 fail loudly at the trailers event' );
+like( $body, qr/trailers:.*trailers were not declared or body is not complete/,
+    'trailers sent before the body is terminal fail loudly (Phase 2b Task 4: real trailers, not a stub)' );
 
 get_h2('/after-complete', app => $http_app);
 like( $after_complete_err // '', qr/response already complete/,

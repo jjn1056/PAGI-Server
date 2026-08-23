@@ -517,6 +517,26 @@ sub resume_stream {
     return $self->{nghttp2}->resume_stream($stream_id);
 }
 
+=head2 submit_trailer
+
+    $session->submit_trailer($stream_id, headers => [['x-checksum', 'abc']]);
+
+Submit the trailing HEADERS block for a response (design section 8.3):
+queues C<NGHTTP2_FLAG_END_STREAM> on a HEADERS frame after any already-queued
+DATA, completing a response whose data provider reserved END_STREAM for the
+trailers (a three-value C<($chunk, $eof, $no_end_stream)> data-callback
+return). C<headers> defaults to C<[]> for a declared-but-empty trailer
+block. Throws (via the underlying C<Net::HTTP2::nghttp2::Session>) on a
+malformed tuple, a pseudo-header name, or immediate nghttp2-level rejection
+(for example, the stream is already gone).
+
+=cut
+
+sub submit_trailer {
+    my ($self, $stream_id, %args) = @_;
+    return $self->{nghttp2}->submit_trailer($stream_id, headers => $args{headers} // []);
+}
+
 =head2 submit_data
 
     $session->submit_data($stream_id, $data, $eof);

@@ -442,17 +442,30 @@ subtest 'h2: app throwing after a COMPLETE response still logs the error' => sub
 # /promised-trailers: trailers declared, terminal body sent, trailers event
 # never sent (design section 15.3's promised-but-unsent trailers row).
 #
-# h2 puts END_STREAM on the terminal body, so the stream closes cleanly with
-# error code 0 while the response sequence is still 'awaiting_trailers' --
-# an early END_STREAM the SERVER originated. The client did nothing wrong and
-# must not be blamed for it: the reason is 'server_error' (deviation D3), not
-# 'client_closed'. This is an attribution fix only -- the bytes on the wire
-# are unchanged.
+# Phase 2b Task 4 changed the wire behavior this subtest pins: design §8.3
+# forbids a terminal body event from ending the HTTP/2 stream once trailers
+# are declared, so a single-shot terminal body with 'trailers' declared now
+# routes through the streaming path and reserves END_STREAM for the
+# trailing HEADERS block (same as a chunked body). Since the app never
+# sends that trailing HEADERS block, the stream never gets a clean
+# END_STREAM at all -- the response sequence is stuck at 'awaiting_trailers'
+# when the app returns, so the dispatch wrapper's incomplete-response arm
+# resets the stream with NGHTTP2_INTERNAL_ERROR, exactly as it would for a
+# chunked body that never sent its promised trailers. (Before Task 4, a
+# single-shot terminal body always carried END_STREAM regardless of
+# declared trailers, so this same scenario closed "cleanly" with error code
+# 0 -- an early END_STREAM the server originated. That bug is what Task 4
+# fixes; this subtest now pins the corrected behavior.)
 #
-# The dispatch wrapper's client-gone carve-out must not swallow this case:
-# the spec's log carve-out exists only for "the client had already
-# disconnected" -- a server_error reason means the SERVER caused the abnormal
-# end, so the incomplete-response warning must still fire.
+# The attribution below is unchanged either way: the client did nothing
+# wrong and must not be blamed for it, so the reason is 'server_error'
+# (deviation D3), not 'client_closed' -- the dispatch wrapper's
+# incomplete-response arm marks this BEFORE issuing the RST (see
+# Connection.pm's _h2_dispatch_stream), so the client-gone carve-out must
+# not swallow this case: the spec's log carve-out exists only for "the
+# client had already disconnected" -- a server_error reason means the
+# SERVER caused the abnormal end, so the incomplete-response warning must
+# still fire.
 # =============================================================================
 
 subtest 'h2: promised-but-unsent trailers report server_error, not client_closed' => sub {
@@ -480,10 +493,12 @@ subtest 'h2: promised-but-unsent trailers report server_error, not client_closed
 
     ok($Incomplete::TRAILERS_SENT, 'app sent the terminal body and returned');
 
-    # Wire behavior is unchanged by this fix.
+    # The body still reaches the client byte-exact; only the stream's
+    # closing frame differs post-Task-4 (see the header comment above).
     is($headers{$stream_id}{':status'}, '200', 'client still receives status 200');
     is($body{$stream_id}, 'body-only', 'client still receives the full body');
-    is($closed{$stream_id}, 0, 'stream still closed with error code 0');
+    is($closed{$stream_id}, H2_INTERNAL_ERROR_CODE,
+        'stream now resets with NGHTTP2_INTERNAL_ERROR instead of a false-clean END_STREAM (Task 4)');
 
     ok($Incomplete::TRAILERS_CS, 'app captured a connection_state');
     is($Incomplete::TRAILERS_CS->disconnect_reason, 'server_error',

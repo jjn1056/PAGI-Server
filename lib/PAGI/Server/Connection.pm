@@ -1189,12 +1189,17 @@ sub _h2_create_send {
             }
 
             my $eof = (!@$q && $eof_pending) ? 1 : 0;
-            return ($chunk, $eof);
+            # Trailers declared and the body just went terminal: reserve
+            # END_STREAM for the trailing HEADERS block (design §8.3)
+            # instead of letting it land on this DATA frame.
+            my $no_end = (($ss->{seq_state} // '') eq 'awaiting_trailers') ? 1 : 0;
+            return ($chunk, $eof, $no_end);
         }
 
         # Queue empty but EOF pending — signal end of stream
         if ($eof_pending) {
-            return ('', 1);
+            my $no_end = (($ss->{seq_state} // '') eq 'awaiting_trailers') ? 1 : 0;
+            return ('', 1, $no_end);
         }
 
         # Queue empty, more data expected — defer (NGHTTP2_ERR_DEFERRED in C layer)
@@ -1283,11 +1288,50 @@ sub _h2_create_send {
             return;
         }
 
-        # 3. Phase-1 stub: trailers behavior lands in Phase 2b. This fails
-        #    BEFORE the sequence machine advances, so a conforming app that
-        #    probes it can still finish its response.
-        die "http.response.trailers is not yet implemented on HTTP/2\n"
-            if $type eq 'http.response.trailers';
+        # 3. http.response.trailers (design §8.3): submits the trailing
+        # HEADERS block with END_STREAM, completing a response that declared
+        # trailers at start. advance-then-rollback (h1 D1 pattern, mirrored
+        # from _create_send's chunked-framing check): the sequence machine
+        # and its $ss mirror advance FIRST, then the native submit is
+        # attempted. advance_http itself may croak here (trailers undeclared
+        # or body not yet complete) -- that propagates unrolled-back, same as
+        # validate_http_send's shape check above, since $seq was never
+        # reassigned in that case. If submit_trailer throws, both are rolled
+        # back to their pre-event value and the error propagates: the app's
+        # return then lands in the existing incomplete-response arm (RST
+        # NGHTTP2_INTERNAL_ERROR) -- the same machinery a dropped body chunk
+        # already relies on, not duplicated here.
+        if ($type eq 'http.response.trailers') {
+            my $seq_before = $seq;
+            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+            $ss->{seq_state} = $seq if $ss;
+
+            # Empty/absent headers still calls submit_trailer with [] --
+            # trailers were declared and must still terminate the response.
+            my $trailer_headers = [
+                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
+                    @{ $event->{headers} // [] }
+            ];
+
+            my $ok = eval {
+                $weak_self->{h2_session}->submit_trailer(
+                    $stream_id, headers => $trailer_headers);
+                1;
+            };
+            if (!$ok) {
+                my $err = $@;
+                $seq = $seq_before;
+                $ss->{seq_state} = $seq if $ss;
+                die $err;
+            }
+
+            # Flush any still-queued DATA before the trailing HEADERS --
+            # nghttp2 orders trailers after queued data on its own, but the
+            # stream must be resumed if the data callback had deferred.
+            $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
+            $weak_self->_h2_write_pending;
+            return;
+        }
 
         # 4. file body: streamed through the send queue via $emit_chunk, one
         # chunk at a time, under this stream's own backpressure. The type
@@ -1516,6 +1560,32 @@ sub _h2_create_send {
                     # Synchronous — app send path, not nghttp2 extract.
                     $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->resume_stream($stream_id);
+                    $weak_self->_h2_write_pending;
+                } elsif ($seq eq 'awaiting_trailers') {
+                    # Trailers were declared and this is the (single-shot)
+                    # terminal body event: a plain submit_response would set
+                    # END_STREAM immediately, ending the stream before the
+                    # trailers arrive -- design §8.3 forbids that. Route
+                    # through the streaming path instead, mirroring the
+                    # file/fh arms' $streaming_started idiom; the data
+                    # callback above already reserves END_STREAM for the
+                    # trailing HEADERS block once it observes
+                    # 'awaiting_trailers'.
+                    $streaming_started = 1;
+                    $ss->{send_queue}       //= [];
+                    $ss->{send_queue_bytes} //= 0;
+                    $eof_pending = 1;
+                    if (length $body) {
+                        push @{$ss->{send_queue}}, $body;
+                        $ss->{send_queue_bytes} += length $body;
+                    }
+                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->{h2_session}->submit_response_streaming(
+                        $stream_id,
+                        status        => $status,
+                        headers       => \@response_headers,
+                        data_callback => $data_callback,
+                    );
                     $weak_self->_h2_write_pending;
                 } else {
                     # Non-streaming: single response (unchanged one-shot path)
