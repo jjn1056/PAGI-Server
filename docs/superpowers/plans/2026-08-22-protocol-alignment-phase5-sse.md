@@ -164,13 +164,13 @@ die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. Media-range detection | not started | — | — | — |
-| 2. UTF-8 encoding | not started | — | — | — |
-| 3. Request bodies | not started | — | — | — |
-| 4. h2 per-stream timers | not started | — | — | — |
-| 5. Keep-alive clean end | not started | — | — | — |
-| 6. Docs + §11.4 | not started | — | — | — |
-| 7. Phase gate | not started | — | — | — |
+| 1. Media-range detection | complete | 89e5d7b | RED 3+3 (incl. third live bug: missing /i), GREEN 48/48 across 5 files | Review clean; reviewer re-derived RED against pre-diff code |
+| 2. UTF-8 encoding | complete | bdc01eb | 29 tests pristine | Review clean; 6-site encode inventory re-derived, no double-encode |
+| 3. Request bodies | complete | 0c02724, 199f128, 2398aa5 | 43 tests / 6 files | All three §11.1 bugs live+fixed; Critical queue-recheck fix + `_read_chunked_body` extraction in round 1; re-review clean |
+| 4. h2 per-stream timers | complete | fd68dbd, 55dae82 | 9 tests / 5 files; 6× flake runs + RELEASE_TESTING t/33 | Review clean after round 1 (stale POD rewrite); 5 stop sites re-derived |
+| 5. Keep-alive clean end | complete | 96388eb, 6dce357, f8ef6c2, 5ece8b4 | t/55 keep-alive matrix; t/05+t/sse-close inversions (§11.6 ratified); t/52 reuse assertion | Opus review; Critical no-response guard fixed round 1; re-review clean; §11.6 authorization linkage double-verified |
+| 6. Docs + §11.4 | complete | 0c00349, 5d23bf0 | Pins in t/05-sse.t + t/http2/14 (21/21) | Approved first pass; reviewer independently reproduced RED/GREEN with pre-fix Connection.pm; two real header-duplication bugs fixed supply-when-absent |
+| 7. Phase gate | complete | 5a7c06d | full recursive suite 121 files / 750 tests PASS | hygiene clean (`git diff be05e8e --check`, podchecker ×5, `perl -c`); PAGI main still f04c029 (no drift); 3 initial failures triaged: t/http2/29 environmental (session RLIMIT_NOFILE=1048576 → ~4.2s/worker-fork FD sweep in IO::Async::OS; passes 0.030s at nofile=10240, fails identically at base be05e8e — not a regression), t/integration/sse-close-end-to-end.t stale pre-§11.6 EOF pin inverted under the Task 5 ruling (5a7c06d), t/sse-close.t host-sleep flake (passes on re-run) |
 
 ## Deviations
 
