@@ -282,6 +282,35 @@ subtest 'sse.keepalive validation' => sub {
     );
 };
 
+subtest 'sse.keepalive comment validation' => sub {
+    # An unpaired UTF-16 surrogate has no UTF-8 representation -- must be
+    # rejected at arm time, not later inside the timer tick.
+    like(
+        dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 15, comment => "\x{D800}" }) },
+        qr/sse\.keepalive 'comment' must be a UTF-8-encodable string/,
+        'unencodable surrogate comment throws'
+    );
+
+    # A reference is never a string.
+    like(
+        dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 15, comment => {} }) },
+        qr/sse\.keepalive 'comment' must be a UTF-8-encodable string/,
+        'ref comment throws'
+    );
+
+    # A valid non-ASCII comment round-trips fine.
+    ok(
+        lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 15, comment => 'håndtering' }) },
+        'UTF-8-encodable non-ASCII comment is valid'
+    );
+
+    # comment is optional; absent stays valid (defaults to '').
+    ok(
+        lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.keepalive', interval => 15 }) },
+        'absent comment is valid'
+    );
+};
+
 # =============================================================================
 # Server Integration Test (behavioral)
 # =============================================================================

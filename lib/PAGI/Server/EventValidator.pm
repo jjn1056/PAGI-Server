@@ -6,6 +6,7 @@ use warnings;
 our $VERSION = '0.002006';
 
 use Carp qw(croak);
+use Encode ();
 
 # --- Primitive shape checks (anchored; undef and refs are always false) ---
 
@@ -386,6 +387,18 @@ sub _validate_sse_keepalive {
         unless exists $event->{interval};
     croak "sse.keepalive 'interval' must be a non-negative number"
         unless _is_nonneg_number($event->{interval});
+
+    # comment is optional (String); when present it must be encodable as
+    # UTF-8 -- validated here, at arm time, so an unencodable comment fails
+    # THIS send's Future instead of dying later inside the keepalive timer
+    # tick (which would escape uncaught and unwind the event loop).
+    if (exists $event->{comment} && defined $event->{comment}) {
+        my $comment = $event->{comment};
+        my $ok = !ref($comment)
+            && eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK); 1 };
+        croak "sse.keepalive 'comment' must be a UTF-8-encodable string"
+            unless $ok;
+    }
 }
 
 # =============================================================================
@@ -629,6 +642,14 @@ reference of the form C<< { extensions => \%scope_extensions } >>;
 C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
 C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
 with C<"Unrecognized event type '$type' for sse protocol">.
+
+C<sse.keepalive>'s C<comment> field is optional (defaults to C<''>), but
+when present it is validated here, at arm time: it must be a defined
+non-reference string that round-trips
+C<Encode::encode('UTF-8', $comment, Encode::FB_CROAK)>, or this call croaks
+with C<"sse.keepalive 'comment' must be a UTF-8-encodable string">. This
+keeps an unencodable comment from surfacing later as an uncaught die inside
+the keepalive timer tick.
 
 =head2 validate_lifespan_send($event)
 

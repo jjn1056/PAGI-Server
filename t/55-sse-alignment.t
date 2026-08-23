@@ -332,6 +332,83 @@ subtest 'SSE UTF-8 wire encoding: keepalive comment is UTF-8-encoded on the wire
     $server->shutdown->get;
 };
 
+subtest 'SSE keepalive: unencodable comment fails the send Future at arm time, not later inside the timer tick' => sub {
+    my $invalid_err;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+
+        # A lone UTF-16 surrogate has no UTF-8 representation. Before this
+        # task this armed a timer that died on its first tick; now it must
+        # fail THIS send's Future immediately, and no timer is ever armed.
+        eval { await $send->({ type => 'sse.keepalive', interval => 0.1, comment => "bad \x{D800}" }) };
+        $invalid_err = $@;
+
+        await $send->({ type => 'sse.send', data => 'start' });
+
+        # Bounded wait spanning several would-be keepalive intervals -- long
+        # enough that a wrongly-armed timer would have ticked at least once.
+        await $loop->delay_future(after => 0.5);
+
+        await $send->({ type => 'sse.send', data => 'end' });
+    };
+
+    my $server = create_server($test_app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 1 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Accept: text/event-stream\r\n";
+        print $sock "\r\n";
+
+        $sock->blocking(0);
+        my $response = '';
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            $response .= $buf if defined $n && $n > 0;
+            $loop->loop_once(0.1);
+            last if $response =~ /data: end\n/;
+        }
+        $loop->loop_once(0.1) for 1 .. 3;
+        while (1) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            last unless defined $n && $n > 0;
+            $response .= $buf;
+        }
+        close $sock;
+
+        like($invalid_err, qr/sse\.keepalive 'comment' must be a UTF-8-encodable string/,
+            'unencodable keepalive comment fails the send Future at arm time');
+
+        my ($header, $body) = split /\r\n\r\n/, $response, 2;
+        my @chunks = parse_chunks($body // '');
+        my @pings = grep { $_->[1] =~ /^:/ } @chunks;
+        is(scalar(@pings), 0, 'no keepalive tick ever fired -- no comment bytes on the wire');
+
+        like($response, qr/data: start\n/, 'stream stayed usable: send before the failed arm still landed');
+        like($response, qr/data: end\n/,   'stream stayed usable: send after the failed arm still landed');
+    }
+
+    $server->shutdown->get;
+};
+
 my @matrix = (
     ['text/event-stream',                             'sse',  'exact match'],
     ['TEXT/EVENT-STREAM',                             'sse',  'case-insensitive match'],
