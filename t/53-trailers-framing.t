@@ -31,6 +31,17 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 #   /head-trailers     HEAD request against the same trailers-declaring app:
 #                      accept-and-discard, per PAGI Www.pod's HEAD rule --
 #                      empty body, no error, connection stays usable.
+#   /empty-trailers    chunked framing + trailers=>1, terminal body, then
+#                      http.response.trailers with headers=>[] (explicit
+#                      empty list): the terminator on the wire must be a
+#                      bare "0\r\n\r\n" -- identical to the no-trailers
+#                      chunked end -- on_complete must fire, and the
+#                      connection must stay keep-alive-usable.
+#   /absent-trailers   same as /empty-trailers but the trailers event omits
+#                      the 'headers' key entirely. _validate_http_response_trailers
+#                      treats headers as OPTIONAL and the h1 writer defaults
+#                      via `$event->{headers} // []`, so this must produce
+#                      byte-identical wire output to /empty-trailers.
 my $app = async sub {
     my ($scope, $receive, $send) = @_;
     die "unsupported scope" if $scope->{type} ne 'http';
@@ -70,6 +81,22 @@ my $app = async sub {
                          headers => [['content-type', 'text/plain']] });
         await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
         await $send->({ type => 'http.response.trailers', headers => [['x-t', '1']] });
+        return;
+    }
+
+    if ($path eq '/empty-trailers' || $path eq '/absent-trailers') {
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_complete(sub { $T::EMPTY_TRAILERS_COMPLETED++ });
+        await $send->({ type => 'http.response.start', status => 200,
+                         trailers => 1,
+                         headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+        if ($path eq '/empty-trailers') {
+            await $send->({ type => 'http.response.trailers', headers => [] });
+        }
+        else {
+            await $send->({ type => 'http.response.trailers' });
+        }
         return;
     }
 
@@ -193,6 +220,19 @@ like( $chunked_raw, qr/\r\n2\r\nok\r\n/,
 like( $chunked_raw, qr/0\r\nx-t: 1\r\n\r\n/,
     '/chunked-trailers trailer header actually transmitted after the final chunk (control, unchanged)' );
 
+# --- /empty-trailers, /absent-trailers: empty/absent trailer headers yield --
+# the same bare "0\r\n\r\n" terminator as the no-trailers chunked end
+# (validator: headers OPTIONAL, empty list validates via a zero-iteration
+# loop; h1 writer: `$event->{headers} // []` makes absent and explicit-empty
+# byte-identical on the wire).
+for my $path (qw(/empty-trailers /absent-trailers)) {
+    my $raw = $raw_request->($port, 'GET', $path);
+    ok( defined $raw, "$path: connected" ) or diag('connection failed');
+    like( $raw, qr/Transfer-Encoding:\s*chunked/i, "$path uses chunked framing" );
+    like( $raw, qr/\r\n2\r\nok\r\n0\r\n\r\n\z/,
+        "$path terminates with a bare 0\\r\\n\\r\\n (no trailer header lines) immediately after the final chunk" );
+}
+
 # --- /head-trailers: HEAD accept-and-discard --------------------------------
 
 my $head_res = $http->HEAD("http://127.0.0.1:$port/head-trailers")->get;
@@ -202,6 +242,20 @@ is( $head_res->content, '', '/head-trailers HEAD response body is empty' );
 # Connection sane: the pooled client can still make a normal request after.
 my $sane_res = $http->GET("http://127.0.0.1:$port/still-sane")->get;
 is( $sane_res->content, 'sane', 'connection remains usable after HEAD+trailers' );
+
+# --- /empty-trailers: keep-alive policy + on_complete, via the pooled client
+# (the raw-socket checks above use "Connection: close" to observe exact
+# bytes, so the keep-alive path needs a separate pooled-client round trip).
+
+$T::EMPTY_TRAILERS_COMPLETED = 0;
+my $empty_res = $http->GET("http://127.0.0.1:$port/empty-trailers")->get;
+is( $empty_res->content, 'ok', '/empty-trailers via pooled client: body delivered' );
+
+my $sane_res2 = $http->GET("http://127.0.0.1:$port/still-sane")->get;
+is( $sane_res2->content, 'sane',
+    'connection remains usable after empty-trailers (keep-alive honored, not treated as an error)' );
+
+is( $T::EMPTY_TRAILERS_COMPLETED, 1, '/empty-trailers: on_complete fired exactly once' );
 
 $server->shutdown->get;
 
