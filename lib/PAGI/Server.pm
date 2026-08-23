@@ -3949,6 +3949,7 @@ sub _send_503_and_close {
         "Content-Length: " . length($body),
         "Connection: close",
         "Retry-After: 5",
+        "Date: " . $self->{protocol}->format_date,
         "",
         $body
     );
