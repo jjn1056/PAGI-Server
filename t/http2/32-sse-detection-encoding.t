@@ -432,4 +432,108 @@ subtest 'h2 POST-SSE: body delivered complete with truthful more when END_STREAM
     $loop->remove($server);
 };
 
+subtest 'h2 POST-SSE: body already complete before the first receive() call (pin)' => sub {
+    my $received_body;
+    my $received_more;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $event = await $receive->();
+        $received_body = $event->{body};
+        $received_more = $event->{more};
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'ack' });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $client = create_client();
+
+    h2c_handshake($client, $client_sock);
+
+    # Whole body handed to submit_request as a static string: HEADERS +
+    # DATA(END_STREAM) all go out together, ahead of the server's deferred
+    # dispatch, so body_complete is already true before the app's first
+    # receive() call ever runs.
+    $client->submit_request(
+        method    => 'POST',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+        body      => 'already-here',
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    exchange_frames($client, $client_sock, 10);
+
+    is($received_body, 'already-here', 'full body delivered on the first receive() call');
+    is($received_more, 0, 'more=>0 on the terminal sse.request event');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'h2 POST-SSE: RST_STREAM while first receive() is pending delivers sse.disconnect, not a truncated sse.request' => sub {
+    my $received_event;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $received_event = await $receive->();
+
+        # Respond regardless of what came back, like a real app would --
+        # this is what this subtest is pinned on, not the (separate,
+        # pre-existing) dispatcher behavior for an app that returns having
+        # never started a response.
+        eval { await $send->({ type => 'sse.start', status => 200 }) };
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $client = create_client();
+
+    h2c_handshake($client, $client_sock);
+
+    # Streaming request body under our control (see the subtest above):
+    # the callback defers forever, so no END_STREAM ever goes out on its
+    # own -- only the RST_STREAM below ends the stream.
+    my @queue = ('partial-chunk');
+    my $data_cb = sub {
+        my ($sid, $max_len) = @_;
+        return (shift(@queue), 0) if @queue;
+        return undef;   # defer -- never sends END_STREAM
+    };
+
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+        body      => $data_cb,
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Let the server dispatch and reach the app's first pending receive() --
+    # only the partial chunk has gone out, so the body is not complete.
+    exchange_frames($client, $client_sock, 10);
+    ok(!defined $received_event, 'first receive() has not returned yet -- still awaiting the full body');
+
+    # Abnormally terminate the stream while the app is still waiting for
+    # the rest of the body. _h2_on_close sets body_complete=1 AND queues
+    # sse.disconnect in the same call, before waking body_pending -- the
+    # queued disconnect must win over falling through to a truncated
+    # terminal sse.request.
+    $client->submit_rst_stream($stream_id, 8);   # CANCEL
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+
+    is($received_event->{type}, 'sse.disconnect',
+        'app got sse.disconnect, not a truncated sse.request, when the stream was reset mid-body')
+        or diag "received_event: " . (defined $received_event ? "type=$received_event->{type} body=" . ($received_event->{body} // '(undef)') : '(undef)');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

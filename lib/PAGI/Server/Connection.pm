@@ -1702,6 +1702,10 @@ sub _h2_create_sse_receive {
             # bug (design section 11.1) without touching the event shape.
             if (!$ss->{sse_request_sent}) {
                 while (!$ss->{body_complete}) {
+                    if (@{$ss->{receive_queue}}) {
+                        return shift @{$ss->{receive_queue}};
+                    }
+
                     return $sse_disconnect->() if $weak_self->{closed};
 
                     if (!$ss->{body_pending}) {
@@ -1711,6 +1715,18 @@ sub _h2_create_sse_receive {
 
                     $ss = $weak_self->{h2_streams}{$stream_id};
                     return $sse_disconnect->() unless $ss;
+                }
+
+                # body_complete can flip true on the very wake that also
+                # queued a terminal event -- e.g. _h2_on_close sets
+                # body_complete AND pushes sse.disconnect before waking
+                # body_pending. That queued event must win over delivering
+                # a (possibly truncated) body: the loop's own queue check
+                # only runs at the top of an iteration, so a queue entry
+                # that arrives on the wake that also satisfies the while
+                # condition is never seen there.
+                if (@{$ss->{receive_queue}}) {
+                    return shift @{$ss->{receive_queue}};
                 }
 
                 $ss->{sse_request_sent} = 1;
