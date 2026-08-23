@@ -4420,8 +4420,8 @@ sub _create_sse_receive {
     };
 
     # The stream is over -- either the transport is gone, or the application
-    # ended it with sse.close and is still running (the connection now stays
-    # open for keep-alive, design section 11.6). Nothing more will ever arrive
+    # ended it with sse.close and is still running (the connection stays open
+    # for keep-alive, design section 11.6). Nothing more will ever arrive
     # on this scope, so answer immediately instead of blocking forever. This
     # answers a receive() the application chose to make; it is not a disconnect
     # fired at the application because the stream ended.
@@ -5503,11 +5503,12 @@ curl) can therefore reuse the same socket for its next request, which matters
 for the short POST-SSE-exchange pattern used by fetch-event-source and
 datastar.
 
-Keep-alive yields to the usual overrides, all of which close the connection as
-before: a client C<Connection: close>, HTTP/1.0 semantics, server shutdown, an
-application exception, and any B<abnormal> end (client disconnect, idle
-timeout, write error). An abnormal end is also the only thing that delivers
-C<sse.disconnect> to the application; a clean end never does.
+Keep-alive yields to the usual overrides, each of which closes the connection
+the same way it does outside SSE: a client C<Connection: close>, HTTP/1.0
+semantics, server shutdown, an application exception, and any B<abnormal> end
+(client disconnect, idle timeout, write error). An abnormal end is also the
+only thing that delivers C<sse.disconnect> to the application; a clean end
+never does.
 
 Ending the stream is decoupled from the application returning. After
 C<sse.close> the application keeps running against a live transport, and any

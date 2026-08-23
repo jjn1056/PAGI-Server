@@ -699,12 +699,13 @@ same way.
 
 =head2 UTF-8 Wire Encoding
 
-C<sse.send> string fields and C<sse.comment> text, plus server-generated
-keepalive comments, are formatted as characters and then encoded to UTF-8
+C<sse.send> string fields, C<sse.comment> text, and server-generated
+keepalive comments are formatted as characters and then encoded to UTF-8
 exactly once, at the wire boundary, before queueing or HTTP/1.1 chunk
-framing. A Perl string that cannot be encoded fails that send's Future
-instead of writing corrupted bytes to the socket. Chunk lengths, per-stream
-send-queue byte counts, and transport watermarks are all measured on the
+framing. For an application-initiated send (C<sse.send> or C<sse.comment>),
+a Perl string that cannot be encoded fails that send's Future instead of
+writing corrupted bytes to the socket. Chunk lengths, per-stream send-queue
+byte counts, and transport watermarks are all measured on the
 already-encoded byte string.
 
 =head2 Request Bodies
@@ -773,12 +774,12 @@ C<Net::Async::HTTP>, curl) can therefore reuse the same socket for its next
 request, which matters for the short POST-SSE-exchange pattern used by
 fetch-event-source and datastar.
 
-Keep-alive yields to the usual overrides, all of which close the connection
-as before: a client C<Connection: close>, HTTP/1.0 semantics, server
-shutdown, an application exception, and any B<abnormal> end (client
-disconnect, idle timeout, write error). An abnormal end is also the only
-thing that delivers C<sse.disconnect> to the application; a clean end never
-does.
+Keep-alive yields to the usual overrides, each of which closes the
+connection the same way it does outside SSE: a client C<Connection: close>,
+HTTP/1.0 semantics, server shutdown, an application exception, and any
+B<abnormal> end (client disconnect, idle timeout, write error). An abnormal
+end is also the only thing that delivers C<sse.disconnect> to the
+application; a clean end never does.
 
 An application that returns without ever answering the request at all --
 no C<sse.start>, and no completed decline via

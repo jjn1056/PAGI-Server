@@ -132,9 +132,10 @@
     ranges (*/*, text/*) never signal SSE.
   - sse.send string fields, sse.comment text, and generated keepalive
     comments are now encoded to UTF-8 exactly once at the wire boundary
-    (chunk framing on HTTP/1.1, the per-stream send queue on HTTP/2). A
-    string that fails to encode now fails that send's Future instead of
-    writing corrupted bytes to the socket.
+    (chunk framing on HTTP/1.1, the per-stream send queue on HTTP/2). For an
+    application-initiated send (sse.send or sse.comment), a string that
+    fails to encode now fails that send's Future instead of writing
+    corrupted bytes to the socket.
   - SSE request bodies (sse.request) are now delivered completely and with
     truthful more flags on both transports. HTTP/2: the first receive
     previously returned sse.request as soon as it was called, gated only on
