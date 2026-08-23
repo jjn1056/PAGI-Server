@@ -1554,7 +1554,13 @@ sub _h2_create_websocket_scope {
         server       => [$self->{server_host}, $self->{server_port}],
         subprotocols => \@subprotocols,
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
-        extensions   => { %{$self->_get_extensions_for_scope}, 'websocket.http.response' => {} },
+        extensions   => do {
+            my %ext = (%{$self->_get_extensions_for_scope}, 'websocket.http.response' => {});
+            # fullflush has no validate_websocket_send arm; advertising it here
+            # would lie to the app (design 13.2).
+            delete $ext{fullflush};
+            \%ext;
+        },
     };
 }
 
@@ -3898,12 +3904,10 @@ sub _create_send {
             $weak_self->{stream}->write($trailers);
         }
         elsif ($type eq 'http.fullflush') {
-            # Fullflush extension - force immediate TCP buffer flush
-            # Per spec: servers that don't advertise the extension must reject
-            unless (exists $weak_self->{extensions}{fullflush}) {
-                warn "PAGI: http.fullflush event rejected - extension not enabled\n";
-                die "Extension not enabled: fullflush\n";
-            }
+            # Fullflush extension - force immediate TCP buffer flush.
+            # validate_http_send (called above, unconditionally) already
+            # croaks "Extension not enabled: fullflush" when the extension
+            # isn't advertised, so no re-check is needed here.
 
             # Force flush by ensuring TCP_NODELAY and flushing any pending writes
             my $handle = $weak_self->{stream}->write_handle;
@@ -4975,12 +4979,10 @@ sub _create_sse_send {
             $weak_self->_handle_disconnect_and_close('client_closed');
         }
         elsif ($type eq 'http.fullflush') {
-            # Fullflush extension - force immediate TCP buffer flush
-            # Per spec: servers that don't advertise the extension must reject
-            unless (exists $weak_self->{extensions}{fullflush}) {
-                warn "PAGI: http.fullflush event rejected - extension not enabled\n";
-                die "Extension not enabled: fullflush\n";
-            }
+            # Fullflush extension - force immediate TCP buffer flush.
+            # validate_sse_send (called above, unconditionally) already
+            # croaks "Extension not enabled: fullflush" when the extension
+            # isn't advertised, so no re-check is needed here.
 
             # Force flush by ensuring TCP_NODELAY
             my $handle = $weak_self->{stream}->write_handle;
@@ -5075,7 +5077,13 @@ sub _create_websocket_scope {
         subprotocols => \@subprotocols,
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
-        extensions   => { %{$self->_get_extensions_for_scope}, 'websocket.http.response' => {} },
+        extensions   => do {
+            my %ext = (%{$self->_get_extensions_for_scope}, 'websocket.http.response' => {});
+            # fullflush has no validate_websocket_send arm; advertising it here
+            # would lie to the app (design 13.2).
+            delete $ext{fullflush};
+            \%ext;
+        },
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.

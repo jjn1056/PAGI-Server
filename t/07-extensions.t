@@ -357,4 +357,70 @@ subtest 'Fullflush extension works with SSE' => sub {
     $loop->remove($http);
 };
 
+# Test 6: WebSocket scopes must not advertise fullflush (design 13.2) --
+# validate_websocket_send has no fullflush arm, so a ws app that trusts the
+# advertisement gets "Unrecognized event type" instead of a working
+# extension. Exercised via the scope builders directly (same idiom as
+# t/http2/17-h2-ws-sse-no-connection-state.t) since fullflush is a
+# scope-truthfulness property, not a wire-level behavior.
+subtest 'WebSocket scopes do not advertise fullflush even when configured' => sub {
+    subtest 'HTTP/1.1 websocket scope' => sub {
+        my $conn = bless {
+            tls_enabled          => 0,
+            extensions           => { fullflush => {} },
+            client_host          => '127.0.0.1',
+            client_port          => 54321,
+            server_host          => '127.0.0.1',
+            server_port          => 8080,
+            state                => {},
+            write_high_watermark => 65536,
+            write_low_watermark  => 16384,
+        }, 'PAGI::Server::Connection';
+
+        my $request = {
+            http_version => '1.1',
+            path         => '/ws',
+            raw_path     => '/ws',
+            query_string => '',
+            headers      => [],
+        };
+
+        my $scope = $conn->_create_websocket_scope($request);
+        is($scope->{type}, 'websocket', 'built a websocket scope');
+        ok(exists $scope->{extensions}{'websocket.http.response'},
+            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{fullflush},
+            'websocket scope must NOT advertise fullflush (no validator arm for it)');
+    };
+
+    subtest 'HTTP/2 websocket scope' => sub {
+        my $conn = bless {
+            tls_enabled => 0,
+            extensions  => { fullflush => {} },
+            client_host => '127.0.0.1',
+            client_port => 54321,
+            server_host => '127.0.0.1',
+            server_port => 8080,
+            state       => {},
+        }, 'PAGI::Server::Connection';
+
+        my $stream_state = {
+            pseudo => {
+                ':path'      => '/ws',
+                ':method'    => 'CONNECT',
+                ':scheme'    => 'http',
+                ':authority' => 'localhost',
+            },
+            headers => [],
+        };
+
+        my $scope = $conn->_h2_create_websocket_scope(1, $stream_state);
+        is($scope->{type}, 'websocket', 'built a websocket scope');
+        ok(exists $scope->{extensions}{'websocket.http.response'},
+            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{fullflush},
+            'websocket scope must NOT advertise fullflush (no validator arm for it)');
+    };
+};
+
 done_testing;
