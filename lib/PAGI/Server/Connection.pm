@@ -4366,6 +4366,8 @@ async sub _handle_sse_request {
             $self->_send_error_response(500, "Internal Server Error");
         }
         $self->_write_access_log;
+        # Notify server that request completed (for max_requests tracking)
+        $self->{server}->_on_request_complete if $self->{server};
         $self->_handle_disconnect_and_close('server_error');
         return;
     }
@@ -4373,6 +4375,11 @@ async sub _handle_sse_request {
     # Write access log entry (logs at stream end with total duration). Must
     # precede the reset below, which clears the request it logs.
     $self->_write_access_log;
+
+    # Notify server that request completed (for max_requests tracking). One
+    # call site covers both fates below (keep-alive and close) -- the SSE
+    # "request" completes here, when the stream ends, not at sse.start.
+    $self->{server}->_on_request_complete if $self->{server};
 
     # Design section 11.6: a CLEAN end (the application returned, or it sent
     # sse.close) honors the "Connection: keep-alive" header the server itself
@@ -4933,6 +4940,9 @@ async sub _handle_websocket_request {
 
     # Write access log entry (logs at connection close with total duration)
     $self->_write_access_log;
+
+    # Notify server that request completed (for max_requests tracking)
+    $self->{server}->_on_request_complete if $self->{server};
 
     # Close connection after WebSocket session ends
     $self->_handle_disconnect_and_close('session_complete');
