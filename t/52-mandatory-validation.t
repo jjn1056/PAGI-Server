@@ -162,6 +162,14 @@ my $sse_app = async sub {
             return;
         }
     }
+    if ($scope->{type} eq 'http') {
+        # Ordinary request, used to prove a connection survives an SSE exchange.
+        await $receive->();
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type','text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'PLAIN-OK', more => 0 });
+        return;
+    }
     die "unsupported scope $scope->{type}";
 };
 
@@ -170,18 +178,15 @@ $loop->add($sse_server);
 $sse_server->listen->get;
 my $sse_port = $sse_server->port;
 
+# One pooled client for every SSE call: a cleanly ended SSE stream honors the
+# "Connection: keep-alive" it advertised on sse.start (design section 11.6), so
+# the pool's socket stays usable for the next request.
+my $sse_client = Net::Async::HTTP->new;
+$loop->add($sse_client);
+
 my $sse_get = sub {
-    # A fresh client per call, deliberately not pooled through $http: a
-    # completed SSE stream always closes the connection server-side (see
-    # _finish_sse_stream), but the sse.start response still advertises
-    # "Connection: keep-alive" (pre-existing, out of this task's scope to
-    # change). A pooled client would try to reuse that dead socket for the
-    # next request and fail with "Connection closed while awaiting header".
-    my $client = Net::Async::HTTP->new;
-    $loop->add($client);
-    my $res = $client->GET("http://127.0.0.1:$sse_port$_[0]", headers => { Accept => 'text/event-stream' })->get;
-    $loop->remove($client);
-    return $res;
+    return $sse_client->GET("http://127.0.0.1:$sse_port$_[0]",
+        headers => { Accept => 'text/event-stream' })->get;
 };
 
 like( $sse_get->('/sse-send-before-start')->content, qr/before sse\.start/,
@@ -194,6 +199,44 @@ like( $SseAfterClose::ERR // '', qr/after sse\.close/,
 $sse_get->('/sse-send-after-decline-complete');
 like( $SseAfterDeclineComplete::ERR // '', qr/decline response already complete/,
     'sse.http.response.body after a completed decline fails, not silently swallowed' );
+
+# The positive assertion behind dropping the fresh-client workaround: one raw
+# socket -- literally one file descriptor -- performs an SSE exchange and then
+# an ordinary request (design section 11.6).
+{
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $sse_port, Proto => 'tcp', Timeout => 5,
+    );
+    ok($sock, 'raw socket connected') or last;
+    $sock->blocking(0);
+
+    my $read_until = sub {
+        my ($stop) = @_;
+        my $buf = '';
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $chunk;
+            my $n = sysread($sock, $chunk, 4096);
+            if (defined $n && $n > 0) { $buf .= $chunk }
+            elsif (defined $n && $n == 0) { last }   # EOF
+            last if $buf =~ $stop;
+            $loop->loop_once(0.02);
+        }
+        return $buf;
+    };
+
+    print $sock "GET /sse-newline-event HTTP/1.1\r\nHost: 127.0.0.1:$sse_port\r\n"
+              . "Accept: text/event-stream\r\n\r\n";
+    my $stream = $read_until->(qr/\r\n0\r\n\r\n/);
+    like($stream, qr/must not contain newline/, 'SSE exchange completed on the raw socket');
+    like($stream, qr/\r\n0\r\n\r\n/, 'SSE stream ended with the chunked terminator');
+
+    print $sock "GET /plain HTTP/1.1\r\nHost: 127.0.0.1:$sse_port\r\n\r\n";
+    like($read_until->(qr/PLAIN-OK/), qr/^HTTP\/1\.1 200.*PLAIN-OK/s,
+        'ordinary request served on the SAME socket after the SSE stream');
+    close $sock;
+}
+
 $sse_server->shutdown->get;
 
 # --- WebSocket: shape and mis-sequencing errors on the send path ---
