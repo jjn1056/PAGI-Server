@@ -47,6 +47,7 @@ use PAGI::Server::Connection;
 use PAGI::Server;
 use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
+use Net::HTTP2::nghttp2 ();
 
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -253,17 +254,16 @@ is( scalar keys %{ $result_a->{conn}{h2_streams} }, 0,
 #     one through the public API. A raw, hand-crafted HEADERS frame on
 #     the wire is the only way to reach the server's own rejection path.
 #
-# Verified by direct instrumentation of the fix during development: with
-# the raw frame on the wire, nghttp2's OWN default HTTP-messaging
-# validation (independent of PAGI's pseudo-header check added to
-# on_frame_recv) rejects the pseudo-header field BEFORE PAGI's on_header
-# callback ever sees it, and tears down the WHOLE CONNECTION (GOAWAY)
-# rather than issuing a per-stream RST_STREAM. PAGI's own
-# TEMPORAL_CALLBACK_FAILURE check is legitimate defense-in-depth (it
-# would fire if nghttp2's own validation were ever bypassed, disabled, or
-# changed in a future version) but is unreachable via nghttp2's normal
-# request path today -- this test pins the actually-observable behavior,
-# not the defense-in-depth code path.
+# nghttp2's OWN default HTTP-messaging validation (independent of PAGI's
+# pseudo-header check added to on_frame_recv) rejects the pseudo-header
+# field BEFORE PAGI's on_header callback ever sees it, and tears down the
+# WHOLE CONNECTION (GOAWAY, frame type 7) rather than issuing a per-stream
+# RST_STREAM (frame type 3) -- the client's own on_frame_recv is pinned on
+# the wire below. PAGI's own TEMPORAL_CALLBACK_FAILURE check is legitimate
+# defense-in-depth (it would fire if nghttp2's own validation were ever
+# bypassed, disabled, or changed in a future version) but is unreachable
+# via nghttp2's normal request path today -- this test pins the
+# actually-observable behavior, not the defense-in-depth code path.
 # ============================================================
 
 sub hpack_literal_new_name {
@@ -299,7 +299,7 @@ my $pseudo_trailer_app = async sub {
     return;
 };
 
-my (@warnings_b, $conn_b, $status_b);
+my (@warnings_b, $conn_b, $status_b, @frames_b);
 {
     local $SIG{__WARN__} = sub { push @warnings_b, $_[0] };
 
@@ -308,7 +308,8 @@ my (@warnings_b, $conn_b, $status_b);
 
     my %headers_b;
     my $client = create_client(
-        on_header => sub { my ($sid, $n, $v) = @_; $headers_b{$n} = $v; return 0 },
+        on_header     => sub { my ($sid, $n, $v) = @_; $headers_b{$n} = $v; return 0 },
+        on_frame_recv => sub { push @frames_b, { %{$_[0]} }; return 0 },
     );
     h2c_handshake($client, $client_sock);
 
@@ -356,6 +357,15 @@ ok( !(grep { /PAGI application error/ } @warnings_b),
     'no app-error log -- the malformed trailer is a protocol-level teardown, not an app fault' );
 is( scalar keys %{ $conn_b->{h2_streams} }, 0,
     'stream state is not leaked after a malformed (pseudo-header) trailer block' );
+
+# Wire-level pin for the comment above: nghttp2's own HTTP-messaging
+# validation, not PAGI's TEMPORAL_CALLBACK_FAILURE check, is what actually
+# tears the connection down for this malformed trailer -- a whole-connection
+# GOAWAY, not a per-stream RST_STREAM.
+ok( (grep { $_->{type} == Net::HTTP2::nghttp2::NGHTTP2_GOAWAY() } @frames_b),
+    'client observes a GOAWAY frame (whole-connection teardown)' );
+ok( !(grep { $_->{type} == 3 } @frames_b),   # RFC 9113 section 6.4: RST_STREAM = 0x3
+    'client does not observe an RST_STREAM frame (not a per-stream reset)' );
 
 # ============================================================
 # (c) normal request without trailers: zero behavior change (regression).

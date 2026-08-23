@@ -99,10 +99,13 @@
   - The Net::HTTP2::nghttp2 floor is raised from 0.008 to 0.009 (needed for
     trailers support: submit_trailer and the three-value data-callback
     return). The floor is enforced at load time regardless of the cpanfile's
-    "recommends" phrasing: on a host with 0.008 still installed, HTTP/2
-    support silently reports unavailable (has_http2 false) rather than
-    running against the older API, so a deployment using --http2 loses
-    HTTP/2 entirely until Net::HTTP2::nghttp2 is upgraded. HTTP/1.1-only
+    "recommends" phrasing: constructing a PAGI::Server with http2 => 1 (or
+    --http2 on the command line) against an installed Net::HTTP2::nghttp2
+    below 0.009 now dies immediately with an explicit
+    "HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed"
+    error and install instructions, instead of starting. A deployment on
+    0.008 requesting HTTP/2 must upgrade Net::HTTP2::nghttp2 (or drop
+    http2 => 1) before the server will start at all. HTTP/1.1-only
     deployments are unaffected.
 
   Bug Fixes
