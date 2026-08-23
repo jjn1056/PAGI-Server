@@ -656,6 +656,17 @@ sub _h2_on_body {
             }
             $stream->{connection_state}->_mark_disconnected('body_too_large')
                 if $stream->{connection_state};
+            # Mark death BEFORE the wake, mirroring _h2_on_close's own
+            # h2_closed marker (see its comment): the wake below can resume
+            # the app's async sub synchronously, and a resumed app may call
+            # $send before this function reaches its own delete further
+            # down -- $ss would still be a live h2_streams entry at that
+            # point (STREAM_GONE / already-closed carve-outs key off entry
+            # existence). h2_closed lets every send closure recognize a
+            # doomed-but-still-present entry and no-op on it, same as an
+            # absent one, per the post-close contract (design §6.2 / §21
+            # item 1).
+            $stream->{h2_closed} = 1;
             $self->_h2_wake_pending($stream);
 
             delete $self->{h2_streams}{$stream_id};
@@ -1184,11 +1195,11 @@ sub _h2_create_send {
     my $emit_chunk = async sub {
         my ($chunk) = @_;
         my $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
-        die $STREAM_GONE unless $ss && !$weak_self->{closed};
+        die $STREAM_GONE unless $ss && !$ss->{h2_closed} && !$weak_self->{closed};
         if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
             await $weak_self->_h2_wait_for_stream_drain($stream_id);
             $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
-            die $STREAM_GONE unless $ss && !$weak_self->{closed};
+            die $STREAM_GONE unless $ss && !$ss->{h2_closed} && !$weak_self->{closed};
         }
         if (length $chunk) {
             push @{$ss->{send_queue}}, $chunk;
@@ -1226,7 +1237,11 @@ sub _h2_create_send {
         my $already_closed = ($seq eq 'complete');
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return if !$ss && !$already_closed;
+        # A doomed-but-still-present entry (h2_closed set but not yet
+        # deleted -- see the 413-overrun branch in _h2_on_body) is treated
+        # the same as an absent one: both are post-close sends and must
+        # silently no-op, not reach nghttp2 a second time on this stream id.
+        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
 
         return if $weak_self->{closed} && !$already_closed;
 
@@ -1661,7 +1676,11 @@ sub _h2_create_websocket_send {
         my $already_closed = ($seq eq 'closed' || $seq eq 'denial_complete');
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return if !$ss && !$already_closed;
+        # A doomed-but-still-present entry (h2_closed set but not yet
+        # deleted -- see the 413-overrun branch in _h2_on_body) is treated
+        # the same as an absent one: both are post-close sends and must
+        # silently no-op, not reach nghttp2 a second time on this stream id.
+        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
 
         return if $weak_self->{closed} && !$already_closed;
 
@@ -2035,7 +2054,11 @@ sub _h2_create_sse_send {
         my $already_closed = ($seq eq 'closed' || $seq eq 'decline_complete');
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return if !$ss && !$already_closed;
+        # A doomed-but-still-present entry (h2_closed set but not yet
+        # deleted -- see the 413-overrun branch in _h2_on_body) is treated
+        # the same as an absent one: both are post-close sends and must
+        # silently no-op, not reach nghttp2 a second time on this stream id.
+        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
 
         return if $weak_self->{closed} && !$already_closed;
 

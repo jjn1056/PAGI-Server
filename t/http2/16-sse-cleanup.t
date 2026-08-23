@@ -394,14 +394,112 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
 };
 
 # ============================================================
+# max_body_size 413 with an SSE app parked on receive() BEFORE any send:
+# no spurious synthesized-500 warning
+# ============================================================
+# SSE (like WebSocket) never attaches a connection_state, so the dispatch
+# wrapper's client-already-gone carve-out for these scopes keys off a
+# liveness fact (entry-exists-AND-not-h2_closed), not $cs->disconnect_reason.
+# Regression: the 413 overrun branch in _h2_on_body used to wake a parked
+# receive() (and, transitively, let the app's async sub resume synchronously
+# and return) before marking the stream h2_closed -- so by the time the
+# dispatch wrapper's liveness check ran (nested inside that very wake), it
+# still saw a "live" entry and, since this app never called send() (so
+# response_started is false), warned "returned without starting a response"
+# and tried to synthesize a 500 over a stream the client already lost via
+# 413.
+subtest 'max_body_size 413 with SSE app parked on receive() before any send: no spurious 500 warn' => sub {
+    my ($receive_resolved, $receive_event);
+    my @app_warnings;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        # Calls receive() first, with no prior send() -- response_started
+        # stays false, which is what exercises the dispatch wrapper's
+        # synthesize-a-500 branch if client_gone is computed wrong.
+        $receive_event = await $receive->();
+        $receive_resolved = 1;
+        # Returns without ever calling send().
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app           => $app,
+        max_body_size => 40,
+    );
+
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/events-early-receive',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+        body      => sub { return undef },  # streaming: keep open, fed manually below
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    local $SIG{__WARN__} = sub { push @app_warnings, $_[0] };
+
+    # Poll (bounded) until the app is dispatched and parked on receive()
+    # (body_pending armed but not yet resolved).
+    my $dispatched = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        my $ss = $conn->{h2_streams}{$stream_id};
+        if ($ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app dispatched and parked on receive() before the overrun')
+        or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
+
+    # Push body data past max_body_size (40 bytes).
+    $client->submit_data($stream_id, ('X' x 100), 0);
+    $client_sock->syswrite($client->mem_send);
+
+    # Bounded wait for the parked receive() to resolve.
+    my $settled = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        if ($receive_resolved) {
+            $settled = 1;
+            last;
+        }
+    }
+    ok($settled, 'pending receive() resolved within the bounded wait')
+        or diag('receive_resolved=' . ($receive_resolved // 0));
+
+    is($receive_event->{type}, 'sse.disconnect', 'receive resolved to sse.disconnect');
+    ok(!(grep { /returned without starting a response/ } @app_warnings),
+        'dispatch wrapper did not synthesize a spurious 500 warning for this client-gone (413) SSE stream')
+        or diag(join('', @app_warnings));
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
 # Server-initiated SSE idle timeout -> sse.disconnect reason=idle_timeout
 # ============================================================
 # Distinguishes a server-initiated teardown from a client one: the client
 # never sends or closes anything here, so the ONLY thing that can end the
 # stream is the server's own per-stream idle timer. The stream ends via a
 # clean END_STREAM (design section 11.3's "end THIS stream only"), which
-# _h2_on_close's error-code-0 arms were, before this fix, misattributing to
-# 'client_closed'.
+# _h2_on_close's error-code-0 arms must attribute to 'idle_timeout' via
+# server_close_reason, not the generic 'client_closed' fallback.
 subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
     my $sse_started = 0;
     my $disconnect_event;
