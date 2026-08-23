@@ -1162,13 +1162,25 @@ sub _h2_create_send {
     # any DATA nghttp2 has not yet pulled through $data_callback (observed
     # under real per-stream flow control -- the still-queued tail of a
     # file/fh body never reached the wire, yet the stream closed "cleanly"
-    # with the trailer). nghttp2_submit_trailer()'s own contract says it
-    # "can be called inside" the data-provider callback -- so the trailers
-    # arm below submits directly ONLY once $data_eof_delivered is already
-    # true (no further callback invocation will occur for this stream);
-    # otherwise it stages the headers here and the callback's own terminal
-    # invocation submits them, exactly mirroring Net::HTTP2::nghttp2's
-    # documented pattern.
+    # with the trailer -- a DEFERRED data-provider item is detached from
+    # nghttp2's own outbound queue, so an early trailing HEADERS orphans
+    # it). The Net::HTTP2::nghttp2 binding's own POD says submit_trailer()
+    # "can be called inside" the data-provider callback OR after it
+    # returns -- it does not say "at any later, unrelated time" -- so the
+    # invariant this handshake actually enforces is narrower and stricter:
+    # never BEFORE the provider has delivered its terminal EOF. The
+    # trailers arm below submits directly ONLY once $data_eof_delivered is
+    # already true (no further callback invocation will occur for this
+    # stream); otherwise it stages the headers here and PARKS the send()
+    # until the callback's own terminal invocation submits them.
+    #
+    # Contract note (flag for Task 6 / Compliance.pod): this means a
+    # trailers send() can now block for as long as the peer withholds
+    # flow-control window on a still-draining body -- new, unbounded-in-
+    # the-app's-view blocking that a pre-Task-4 (stub) reading of the spec
+    # would not have anticipated. This is arguably MORE correct, not a
+    # regression: trailers now participate in the same backpressure body
+    # sends already do, rather than racing ahead of undelivered DATA.
     my $data_eof_delivered = 0;
     my $pending_trailer_headers;
 
@@ -1184,12 +1196,21 @@ sub _h2_create_send {
         return unless defined $pending_trailer_headers;
         my $headers = $pending_trailer_headers;
         $pending_trailer_headers = undef;
+        my $ss2 = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        # Dead-stream invariant, kept local here rather than inferred from
+        # the doomed-but-still-present carve-out pattern used across this
+        # file (h2_closed set, entry not yet reclaimed): don't reach
+        # nghttp2 a second time on a stream id it may already be tearing
+        # down. Whichever close path set h2_closed (_h2_on_close / the 413
+        # early-close branch / _close) already releases -- or is about to
+        # release -- trailer_wait itself, so there's nothing left to do
+        # here.
+        return if $ss2 && $ss2->{h2_closed};
         my $ok = eval {
             $weak_self->{h2_session}->submit_trailer($stream_id, headers => $headers);
             1;
         };
         my $err = $@;
-        my $ss2 = $weak_self && $weak_self->{h2_streams}{$stream_id};
         my $f = $ss2 && delete $ss2->{trailer_wait};
         return unless $f;
         $weak_self->{server}->loop->later(sub {
@@ -1394,13 +1415,31 @@ sub _h2_create_send {
                 # to submit from inside the callback's own terminal
                 # invocation, and await that -- resolving this send() any
                 # earlier would let submit_trailer race ahead of not-yet-
-                # extracted DATA (see the closure-top comment).
+                # extracted DATA (see the closure-top comment). This PARKS
+                # the send() until the body actually finishes draining --
+                # e.g. until the peer grants enough flow-control window --
+                # which can be a real, unbounded wait from the app's point
+                # of view (closure-top comment has the full contract note).
                 $pending_trailer_headers = $trailer_headers;
                 my $f = $weak_self->{server}->loop->new_future;
                 $ss->{trailer_wait} = $f;
                 $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
                 $weak_self->_h2_write_pending;
+                # eval wraps the await (not just a plain assignment) so a
+                # failed $f (native rejection, via $deliver_trailer_eof's
+                # own $f->fail) is caught into $@ and folds into the same
+                # $ok/rollback handling the direct branch above uses.
                 $ok = eval { await $f; 1 };
+                # $f resolves DONE (not fail) on a whole-connection teardown
+                # too (_close's own sweep releases trailer_wait -- see
+                # _h2_resolve_stream_trailer_wait) -- the h2_closed carve-
+                # out's "successful no-op" contract, same discipline as the
+                # body arms' own post-drain-wait liveness re-check
+                # (:1616-1619 / :1635-1638 above). Without this, a
+                # connection that died while we awaited would leave
+                # $weak_self->{h2_session} undef and the shared tail below
+                # would call a method on it.
+                return unless $weak_self && !$weak_self->{closed} && $weak_self->{h2_session};
             }
             if (!$ok) {
                 my $err = $@;
@@ -4381,6 +4420,12 @@ sub _close {
             # Release producers blocked on per-stream backpressure so they
             # don't hang on a connection that is going away.
             $self->_h2_resolve_stream_drain_waiters($stream);
+            # Same for a send() parked in the deferred trailers branch --
+            # without this, a peer that just drops the TCP connection (FIN,
+            # idle timeout, shutdown) never fires on_stream_close (no h2
+            # protocol event at all), so _h2_on_close's own release never
+            # runs, and the parked send hangs forever.
+            $self->_h2_resolve_stream_trailer_wait($stream);
             # Drop (don't fire) the app's on_drain fires: the connection is going
             # away, not draining. Also break the $stream <-> transport_state cycle
             # so the stream state is freed when h2_streams is deleted below.
