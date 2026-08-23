@@ -83,8 +83,8 @@ Modes">).
 
 =back
 
-In development mode the server validates outbound events against the spec and
-rejects malformed ones.
+The server validates outbound events against the spec and rejects malformed
+ones unconditionally, on every send path, in every environment.
 
 =head2 Lifespan Modes
 
@@ -130,7 +130,9 @@ C<"Unrecognized event type"> instead of a working extension; C<http> and
 C<sse> scopes are unaffected and still advertise C<fullflush> when
 configured. Any other custom extension key an operator configures passes
 through to every scope, including WebSocket, unchanged -- the truthfulness
-rule removes only C<fullflush>, the one extension WebSocket cannot honor.
+rule removes only C<fullflush>, the one extension WebSocket cannot honor --
+except a key named C<tls>, which the server itself injects on TLS
+connections and removes on non-TLS ones regardless of what was configured.
 
 =head1 HTTP/1.1 COMPLIANCE
 
