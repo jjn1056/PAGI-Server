@@ -493,6 +493,20 @@ sub _h2_write_pending {
 sub _h2_on_request {
     my ($self, $stream_id, $pseudo, $headers, $has_body) = @_;
 
+    # Defensive second layer (belt under the protocol layer's own
+    # suspenders, PAGI::Server::Protocol::HTTP2's HEADERS-block
+    # classification): a live in-flight stream must never be overwritten
+    # by a duplicate dispatch. This should be unreachable now that the
+    # protocol layer classifies received HEADERS blocks by category and
+    # only calls on_request for NGHTTP2_HCAT_REQUEST -- it exists so a
+    # future protocol-layer regression can't silently destroy an
+    # in-flight request's accumulated state (body, receive_queue,
+    # connection_state, seq_state).
+    if ($self->{h2_streams}{$stream_id}) {
+        warn "PAGI::Server::Connection: ignoring duplicate HTTP/2 request dispatch for stream $stream_id (existing in-flight request would have been destroyed)\n";
+        return;
+    }
+
     # Detect CONNECT method
     my $is_websocket = 0;
     if (($pseudo->{':method'} // '') eq 'CONNECT') {

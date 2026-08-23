@@ -191,13 +191,28 @@ sub _init_nghttp2_session {
                 my ($stream_id, $type, $flags) = @_;
                 return 0 unless $weak_self;
 
-                # HEADERS frame starts a new request
+                # HEADERS frame: the first block on a stream establishes the
+                # request accumulator (as before). A LATER HEADERS block on
+                # an already-established stream (request trailers, RFC 9113
+                # section 8.1) must never reinitialize the committed
+                # request -- it accumulates into a separate {pending}
+                # sub-block instead, which on_frame_recv classifies by
+                # $frame->{headers_category} once the block is complete.
                 if (!defined $type || $type == Net::HTTP2::nghttp2::NGHTTP2_HEADERS()) {
-                    $weak_self->{streams}{$stream_id} = {
-                        headers          => [],
-                        pseudo           => {},
-                        header_list_size => 0,
-                    };
+                    my $existing = $weak_self->{streams}{$stream_id};
+                    if ($existing) {
+                        $existing->{pending} = {
+                            headers          => [],
+                            pseudo           => {},
+                            header_list_size => 0,
+                        };
+                    } else {
+                        $weak_self->{streams}{$stream_id} = {
+                            headers          => [],
+                            pseudo           => {},
+                            header_list_size => 0,
+                        };
+                    }
                 }
                 return 0;
             },
@@ -209,18 +224,26 @@ sub _init_nghttp2_session {
                 my $stream = $weak_self->{streams}{$stream_id};
                 return 0 unless $stream;
 
+                # Accumulate into the pending (trailer) block when one is
+                # in progress; otherwise into the main (request) block.
+                my $block = $stream->{pending} || $stream;
+
                 # RFC 7541: header entry size = name_len + value_len + 32
-                $stream->{header_list_size} += length($name) + length($value) + 32;
-                if ($stream->{header_list_size} > $weak_self->{settings}{max_header_list_size}) {
-                    delete $weak_self->{streams}{$stream_id};
+                $block->{header_list_size} += length($name) + length($value) + 32;
+                if ($block->{header_list_size} > $weak_self->{settings}{max_header_list_size}) {
+                    if ($stream->{pending}) {
+                        delete $stream->{pending};
+                    } else {
+                        delete $weak_self->{streams}{$stream_id};
+                    }
                     return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
                 }
 
                 # Pseudo-headers start with ':'
                 if ($name =~ /^:/) {
-                    $stream->{pseudo}{$name} = $value;
+                    $block->{pseudo}{$name} = $value;
                 } else {
-                    push @{$stream->{headers}}, [$name, $value];
+                    push @{$block->{headers}}, [$name, $value];
                 }
                 return 0;
             },
@@ -233,13 +256,52 @@ sub _init_nghttp2_session {
                 my $type = $frame->{type};
                 my $flags = $frame->{flags};
 
-                # HEADERS frame = request headers complete
+                # HEADERS frame = a request headers block completed
                 if ($type == Net::HTTP2::nghttp2::NGHTTP2_HEADERS()) {
                     my $stream = $weak_self->{streams}{$stream_id};
 
                     # Reject HEADERS on a stream where client already sent END_STREAM
                     if ($stream && $stream->{client_end_stream}) {
+                        delete $stream->{pending};
                         return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                    }
+
+                    my $category = $frame->{headers_category};
+
+                    # NGHTTP2_HCAT_HEADERS on an already-established stream
+                    # is a later ordinary HEADERS block -- request trailers.
+                    # The initial request is already committed on $stream;
+                    # this block was accumulated into {pending} by
+                    # on_begin_headers/on_header above.
+                    if ($stream
+                        && defined $category
+                        && $category == Net::HTTP2::nghttp2::NGHTTP2_HCAT_HEADERS()) {
+
+                        my $trailer = delete $stream->{pending};
+                        $trailer //= { headers => [], pseudo => {}, header_list_size => 0 };
+
+                        # RFC 9113 section 8.1: pseudo-header fields are
+                        # forbidden in trailers -- malformed, close the stream.
+                        if (%{$trailer->{pseudo}}) {
+                            return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                        }
+
+                        # PAGI defines no request-trailer receive event yet
+                        # (tracked separately) -- discard the fields.
+
+                        my $end_stream = $flags & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM();
+                        if ($end_stream) {
+                            $stream->{client_end_stream} = 1;
+                            # Deliver body completion exactly as the
+                            # DATA+END_STREAM arm below does: END_STREAM rode
+                            # the trailer HEADERS, not DATA, so the original
+                            # request's body_complete must still fire.
+                            if ($weak_self->{on_body}) {
+                                $weak_self->{on_body}->($stream_id, '', 1);
+                            }
+                        }
+
+                        return 0;
                     }
 
                     if ($stream && $weak_self->{on_request}) {
