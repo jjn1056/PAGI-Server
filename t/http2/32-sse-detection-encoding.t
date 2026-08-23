@@ -298,4 +298,138 @@ subtest 'SSE UTF-8 wire encoding: keepalive comment arrives as UTF-8 octets' => 
     $loop->remove($server);
 };
 
+# ============================================================
+# Design section 11.1: truthful SSE request bodies (h2)
+# ============================================================
+# The h2 SSE receive closure's first call must not return a POST body still
+# in flight behind a truthful more=>0. Wait for body_complete (set on
+# END_STREAM or stream close) and deliver the whole body in one terminal
+# event -- the smaller change relative to reworking the one-shot sse.request
+# shape into a truthful multi-chunk stream.
+
+subtest 'h2 GET-SSE: single empty terminal sse.request event (unchanged)' => sub {
+    my $first_event;
+    my $second_event;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $first_event = await $receive->();
+        await $send->({ type => 'sse.start', status => 200 });
+        $second_event = await $receive->();
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $response_body = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $response_body .= $data;
+            return 0;
+        },
+    );
+
+    h2c_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    exchange_frames($client, $client_sock, 10);
+
+    is($first_event->{type}, 'sse.request', 'first event is sse.request');
+    is($first_event->{body}, '', 'GET body is empty');
+    is($first_event->{more}, 0, 'GET terminal event has more=>0');
+
+    # Close the client side to simulate disconnect and let the server
+    # process it.
+    close($client_sock);
+    for (1 .. 10) {
+        $loop->loop_once(0.1);
+    }
+
+    is($second_event->{type}, 'sse.disconnect',
+        'second receive() is sse.disconnect, not a second sse.request');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'h2 POST-SSE: body delivered complete with truthful more when END_STREAM is delayed past the first pending receive()' => sub {
+    my $received_body;
+    my $received_more;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $event = await $receive->();
+        $received_body = $event->{body};
+        $received_more = $event->{more};
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'ack' });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $response_body = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $response_body .= $data;
+            return 0;
+        },
+    );
+
+    h2c_handshake($client, $client_sock);
+
+    # Streaming request body under our control: the callback defers (returns
+    # undef) whenever the queue is empty, so no more DATA -- and no
+    # END_STREAM -- goes out until we explicitly push and resume_stream.
+    my @queue = ('first-chunk-');
+    my $eof_ready = 0;
+    my $data_cb = sub {
+        my ($sid, $max_len) = @_;
+        return (shift(@queue), 0) if @queue;
+        return ('', 1) if $eof_ready;
+        return undef;   # defer
+    };
+
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+        body      => $data_cb,
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Let the server dispatch the stream and reach the app's first
+    # receive() call. Nothing else is queued to send, so with the fix that
+    # call must now be blocked awaiting body_pending -- not yet returned.
+    exchange_frames($client, $client_sock, 10);
+    ok(!defined $received_body, 'first receive() has not returned yet -- still awaiting the full body')
+        or diag "received_body so far: " . (defined $received_body ? $received_body : '(undef)');
+
+    push @queue, 'second-chunk';
+    $client->resume_stream($stream_id);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 5);
+
+    $eof_ready = 1;
+    $client->resume_stream($stream_id);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+
+    is($received_body, 'first-chunk-second-chunk', 'full body delivered across both DATA frames');
+    is($received_more, 0, 'more flag is truthfully 0 on the terminal sse.request event');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

@@ -358,4 +358,302 @@ subtest 'two Accept headers, only the second carries the range -> sse' => sub {
     $server->shutdown->get;
 };
 
+# Design section 11.1: truthful SSE request bodies. The h1 SSE receive
+# closure must deliver GET requests as a single empty terminal sse.request,
+# and POST/PUT bodies -- whether framed with Content-Length, chunked
+# Transfer-Encoding, or gated behind Expect: 100-continue -- completely and
+# with truthful `more` flags, exactly like the plain-http receive path.
+
+subtest 'GET SSE: single empty terminal sse.request event (design section 11.1)' => sub {
+    my $first_event;
+    my $second_event;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        $first_event = await $receive->();
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+
+        # The scope's sse.request event fires exactly once; a second
+        # receive() call must not deliver another one -- it waits for the
+        # client to disconnect.
+        $second_event = await $receive->();
+    };
+
+    my $server = create_server($test_app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Accept: text/event-stream\r\n";
+        print $sock "\r\n";
+
+        $sock->blocking(0);
+        my $deadline = time + 3;
+        while (time < $deadline && !$first_event) {
+            $loop->loop_once(0.1);
+        }
+
+        is($first_event->{type}, 'sse.request', 'first event is sse.request');
+        is($first_event->{body}, '', 'GET body is empty');
+        is($first_event->{more}, 0, 'GET terminal event has more=>0');
+
+        close $sock;
+
+        $deadline = time + 3;
+        while (time < $deadline && !$second_event) {
+            $loop->loop_once(0.1);
+        }
+
+        is($second_event->{type}, 'sse.disconnect',
+            'second receive() is sse.disconnect, not a second sse.request');
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'POST SSE with Content-Length body delivered truthfully across multiple reads (h1, pin)' => sub {
+    my @events;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        while (1) {
+            my $event = await $receive->();
+            push @events, $event;
+            last if $event->{type} ne 'sse.request' || !$event->{more};
+        }
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+        my $body = join('', map { $_->{body} // '' } @events);
+        await $send->({ type => 'sse.send', data => $body });
+
+        # Wait for the client to disconnect rather than returning
+        # immediately -- returning here would tear the connection down
+        # synchronously from inside the same read callback that just
+        # completed the body, which is an unrelated connection-teardown
+        # timing concern this test isn't exercising.
+        await $receive->();
+    };
+
+    my $server = create_server($test_app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        my $body = 'Hello World';
+        my $head = "POST / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nAccept: text/event-stream\r\n"
+                 . "Content-Length: " . length($body) . "\r\n\r\n";
+        print $sock $head;
+
+        $sock->blocking(0);
+        $loop->loop_once(0.1) for 1 .. 3;
+
+        # Send the body in two separate writes so the server must read it
+        # across at least two buffer fills.
+        print $sock substr($body, 0, 5);
+        $loop->loop_once(0.1) for 1 .. 3;
+        print $sock substr($body, 5);
+
+        my $response = '';
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            $response .= $buf if defined $n && $n > 0;
+            $loop->loop_once(0.1);
+            last if $response =~ /data: Hello World/;
+        }
+        close $sock;
+        $loop->loop_once(0.1) for 1 .. 5;
+
+        ok(scalar(@events) >= 2, "body arrived across multiple sse.request events (got " . scalar(@events) . ")")
+            or diag "events: " . join(',', map { "$_->{type}:more=" . ($_->{more} // 'undef') . ":'" . ($_->{body} // '') . "'" } @events);
+        my $joined = join('', map { $_->{body} // '' } @events);
+        is($joined, $body, 'concatenated body matches what was sent');
+        is($events[-1]{more}, 0, 'final event has more=>0');
+        like($response, qr/data: Hello World/, 'app observed the full body');
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'POST SSE with chunked Transfer-Encoding body reaches sse.request (h1)' => sub {
+    my @events;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        while (1) {
+            my $event = await $receive->();
+            push @events, $event;
+            last if $event->{type} ne 'sse.request' || !$event->{more};
+        }
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+        my $body = join('', map { $_->{body} // '' } @events);
+        await $send->({ type => 'sse.send', data => $body });
+
+        # Wait for the client to disconnect rather than returning
+        # immediately -- returning here would tear the connection down
+        # synchronously from inside the same read callback that just
+        # completed the body, which is an unrelated connection-teardown
+        # timing concern this test isn't exercising.
+        await $receive->();
+    };
+
+    my $server = create_server($test_app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 3 unless $sock;
+
+        my $request = "POST / HTTP/1.1\r\n";
+        $request .= "Host: 127.0.0.1:$port\r\n";
+        $request .= "Accept: text/event-stream\r\n";
+        $request .= "Transfer-Encoding: chunked\r\n";
+        $request .= "\r\n";
+        $request .= "5\r\nHello\r\n";
+        $request .= "6\r\n World\r\n";
+        $request .= "0\r\n\r\n";
+        print $sock $request;
+
+        $sock->blocking(0);
+        my $response = '';
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            $response .= $buf if defined $n && $n > 0;
+            $loop->loop_once(0.1);
+            last if $response =~ /data: Hello World/;
+        }
+        close $sock;
+        $loop->loop_once(0.1) for 1 .. 5;
+
+        my $joined = join('', map { $_->{body} // '' } @events);
+        is($joined, 'Hello World', 'chunked-encoded body reassembled and delivered via sse.request')
+            or diag "events: " . join(',', map { "$_->{type}:more=" . ($_->{more} // 'undef') . ":'" . ($_->{body} // '') . "'" } @events);
+        ok(@events && $events[-1]{more} == 0, 'final event has more=>0');
+        like($response, qr/data: Hello World/, 'app observed the full chunked body');
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'POST SSE with Expect: 100-continue: server sends 100 Continue before body arrives (h1)' => sub {
+    my @events;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        while (1) {
+            my $event = await $receive->();
+            push @events, $event;
+            last if $event->{type} ne 'sse.request' || !$event->{more};
+        }
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [ [ 'content-type', 'text/event-stream' ] ],
+        });
+        my $body = join('', map { $_->{body} // '' } @events);
+        await $send->({ type => 'sse.send', data => $body });
+
+        # Wait for the client to disconnect rather than returning
+        # immediately -- returning here would tear the connection down
+        # synchronously from inside the same read callback that just
+        # completed the body, which is an unrelated connection-teardown
+        # timing concern this test isn't exercising.
+        await $receive->();
+    };
+
+    my $server = create_server($test_app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 2 unless $sock;
+
+        my $body = 'Hello Continue';
+        my $head = "POST / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nAccept: text/event-stream\r\n"
+                 . "Content-Length: " . length($body) . "\r\nExpect: 100-continue\r\n\r\n";
+        print $sock $head;
+
+        $sock->blocking(0);
+
+        # A raw client following RFC 9110 SS10.1.1 waits for "100 Continue"
+        # before sending the body -- verify the server produces it without
+        # having received any body bytes yet.
+        my $interim = '';
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            $interim .= $buf if defined $n && $n > 0;
+            $loop->loop_once(0.1);
+            last if $interim =~ /\r\n\r\n/;
+        }
+        like($interim, qr/^HTTP\/1\.1 100 Continue\r\n/,
+            'server sent 100 Continue before the client sent the body');
+
+        print $sock $body;
+
+        my $response = '';
+        $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            $response .= $buf if defined $n && $n > 0;
+            $loop->loop_once(0.1);
+            last if $response =~ /data: Hello Continue/;
+        }
+        close $sock;
+        $loop->loop_once(0.1) for 1 .. 5;
+
+        my $joined = join('', map { $_->{body} // '' } @events);
+        is($joined, $body, 'body delivered after the 100-continue handshake');
+        like($response, qr/data: Hello Continue/, 'app observed the full body');
+    }
+
+    $server->shutdown->get;
+};
+
 done_testing;

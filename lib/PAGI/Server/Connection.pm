@@ -1691,8 +1691,28 @@ sub _h2_create_sse_receive {
                 return shift @{$ss->{receive_queue}};
             }
 
-            # First call returns sse.request with body
+            # First call returns sse.request once the full body has arrived.
+            # A POST body still streaming across DATA frames must not be
+            # truncated behind a truthful more=>0 -- wait for body_complete
+            # (set on END_STREAM or stream close, see _h2_on_body/_h2_on_close)
+            # before delivering it as a single terminal event. This is the
+            # smaller change relative to reworking sse.request into a
+            # truthful multi-chunk stream: the wire shape here was already
+            # one-shot, so completing that contract fixes the dispatch-timing
+            # bug (design section 11.1) without touching the event shape.
             if (!$ss->{sse_request_sent}) {
+                while (!$ss->{body_complete}) {
+                    return $sse_disconnect->() if $weak_self->{closed};
+
+                    if (!$ss->{body_pending}) {
+                        $ss->{body_pending} = Future->new;
+                    }
+                    await $ss->{body_pending};
+
+                    $ss = $weak_self->{h2_streams}{$stream_id};
+                    return $sse_disconnect->() unless $ss;
+                }
+
                 $ss->{sse_request_sent} = 1;
                 return {
                     type => 'sse.request',
@@ -4046,7 +4066,10 @@ sub _create_sse_receive {
     my ($self, $request) = @_;
 
     my $content_length = $request->{content_length};
-    my $has_body = defined($content_length) && $content_length > 0;
+    my $is_chunked = $request->{chunked} // 0;
+    my $expect_continue = $request->{expect_continue} // 0;
+    my $continue_sent = 0;
+    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
     my $body_complete = 0;
     my $bytes_read = 0;
 
@@ -4079,6 +4102,73 @@ sub _create_sse_receive {
 
             # Handle request body for POST/PUT SSE requests
             if ($has_body && !$body_complete) {
+                # Send 100 Continue if client expects it (before reading body)
+                if ($expect_continue && !$continue_sent) {
+                    $continue_sent = 1;
+                    $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+                }
+
+                if ($is_chunked) {
+                    # Wait for data if buffer is empty
+                    while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
+                        if (!$weak_self->{receive_pending}) {
+                            $weak_self->{receive_pending} = Future->new;
+                        }
+                        await $weak_self->{receive_pending};
+                        $weak_self->{receive_pending} = undef;
+
+                        if (@{$weak_self->{receive_queue}}) {
+                            return shift @{$weak_self->{receive_queue}};
+                        }
+                    }
+
+                    return $sse_disconnect->()
+                        if $weak_self->{closed} && length($weak_self->{buffer}) == 0;
+
+                    my ($data, $consumed, $complete) =
+                        $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
+
+                    # Check for parse error (invalid chunk size)
+                    if (ref($data) eq 'HASH' && $data->{error}) {
+                        $weak_self->_handle_disconnect('protocol_error');
+                        $weak_self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
+                        $weak_self->_close;
+                        return $sse_disconnect->();
+                    }
+
+                    if ($consumed > 0) {
+                        substr($weak_self->{buffer}, 0, $consumed) = '';
+                        $bytes_read += length($data // '');
+
+                        # Check max_body_size for chunked requests (0 = unlimited)
+                        if ($weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
+                            $weak_self->_send_error_response(413, 'Payload Too Large');
+                            $weak_self->_handle_disconnect('body_too_large');
+                            $weak_self->_close;
+                            return $sse_disconnect->();
+                        }
+
+                        $body_complete = 1 if $complete;
+
+                        return {
+                            type => 'sse.request',
+                            body => $data // '',
+                            more => $complete ? 0 : 1,
+                        };
+                    }
+
+                    # Need more data -- wait and let the next receive() call
+                    # re-drive parsing (mirrors _create_receive's chunked path).
+                    if (!$weak_self->{receive_pending}) {
+                        $weak_self->{receive_pending} = Future->new;
+                    }
+                    await $weak_self->{receive_pending};
+                    $weak_self->{receive_pending} = undef;
+
+                    return $sse_disconnect->() if $weak_self->{closed};
+                    return { type => 'sse.request', body => '', more => 1 };
+                }
+
                 my $remaining = $content_length - $bytes_read;
 
                 # Wait for data if buffer is empty
