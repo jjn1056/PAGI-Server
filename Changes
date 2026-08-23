@@ -165,6 +165,67 @@
     Content-Type behavior. An application-supplied Cache-Control or Date
     was previously duplicated on the wire alongside the server's own value
     instead of being honored.
+  - lifespan_mode and lifespan_startup_timeout now propagate to worker
+    processes spawned under workers => N. Previously each worker's
+    PAGI::Server->new call omitted both, so a worker silently ran under the
+    auto/30s defaults regardless of the master's configuration -- a master
+    configured lifespan_mode => 'on' had no effect on its workers.
+  - An HTTP/1.1 application exception raised after the response completed
+    now fires on_complete instead of on_disconnect, leaving
+    disconnect_reason() undef, matching HTTP/2's existing post-completion
+    handling. The started-but-incomplete-response warning (both
+    transports) now names trailers specifically when the response was
+    awaiting declared trailers that never arrived.
+  - An HTTP/2 request whose body exceeds max_body_size now wakes any
+    receive() the application is blocked on with the scope's disconnect
+    event (reason body_too_large) instead of leaving it pending forever;
+    the stream's pagi.connection state (http scopes) is marked
+    disconnected too.
+  - Closed a window where an HTTP/2 stream that died at the nghttp2 level
+    (e.g. a client RST_STREAM) before its deferred cleanup ran could still
+    accept a submit_response/submit_rst_stream call from the dispatch
+    fallback -- undefined behavior at the C level, observed as both
+    SIGABRT and SIGSEGV.
+  - HTTP/2 server-initiated stream teardowns (SSE idle timeout, WebSocket
+    keepalive pong-timeout) now report their real reason (idle_timeout,
+    keepalive_timeout) instead of the generic client_closed, in both the
+    connection_state mark and the queued disconnect event. WebSocket
+    receive() fallbacks (HTTP/1.1 and HTTP/2) now report a recorded
+    server-initiated close reason instead of always returning code 1006
+    with an empty reason.
+  - max_requests now counts HTTP/1.1 SSE and WebSocket requests toward a
+    worker's recycle threshold. Previously only plain HTTP/1.1 requests
+    and HTTP/2 streams were counted, so a worker serving only SSE or
+    WebSocket traffic on HTTP/1.1 never hit its recycle point.
+  - The server now supplies a Date header exactly when the application
+    didn't already supply one, consistently across ten response paths
+    that previously disagreed: three HTTP/1.1 paths (normal
+    http.response.start, SSE decline, WebSocket denial) stopped
+    duplicating an application-supplied Date, and seven HTTP/2 paths (the
+    413 Content-Length precheck, the 413 body-size overrun, the
+    synthesized 500, WebSocket denial, the bare WebSocket 403, SSE
+    decline, and the plain-CONNECT 501) now supply Date where they
+    previously supplied none.
+  - HTTP/2 now strips six connection-specific header names (connection,
+    keep-alive, proxy-connection, transfer-encoding, upgrade, and te
+    unless its value is exactly 'trailers') from application-supplied
+    response headers on all five paths that map them
+    (http.response.start, including the HEAD-reuse path; sse.start;
+    WebSocket denial; SSE decline; and websocket.accept), warning once
+    per stripped occurrence. Previously an application-supplied
+    connection or transfer-encoding header on any of these paths
+    destroyed the response at the framing layer (the client saw only
+    :status, no body), per RFC 9113 section 8.2.2. HTTP/1.1 is
+    unaffected.
+  - sse.keepalive's optional comment field is now validated at arm time
+    (must be a UTF-8-encodable string), so an unencodable comment fails
+    the send Future that armed the keepalive instead of dying uncaught
+    inside the keepalive timer's first tick.
+  - WebSocket scopes no longer advertise the fullflush extension, since
+    validate_websocket_send has no http.fullflush arm. A WebSocket
+    application that previously trusted the advertisement got
+    "Unrecognized event type" instead of a working extension; http and
+    sse scopes are unaffected.
 
 0.002006 - 2026-07-04
 

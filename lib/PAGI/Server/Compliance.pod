@@ -77,10 +77,60 @@ version, and cipher suite. The server negotiates TLS 1.3 by default
 =item * B<Server-Sent Events> over all HTTP methods, with keepalive (see
 L</"SERVER-SENT EVENTS (SSE)">).
 
+=item * B<Lifespan> -- the per-process startup/shutdown protocol, in C<auto>
+(decline-tolerant, default) and C<on> (strict) modes (see L</"Lifespan
+Modes">).
+
 =back
 
 In development mode the server validates outbound events against the spec and
 rejects malformed ones.
+
+=head2 Lifespan Modes
+
+C<lifespan_mode> controls how the server treats the PAGI lifespan protocol --
+the C<lifespan> scope an application may use to run startup/shutdown logic
+once per process.
+
+=over 4
+
+=item * B<auto> (default) -- decline-tolerant. If the application does not
+implement lifespan, or declines it (raises on the C<lifespan> scope, or
+returns without signalling C<lifespan.startup.complete>/
+C<lifespan.startup.failed>), the server continues startup without it. An
+explicit C<lifespan.startup.failed> still aborts startup in this mode too.
+
+=item * B<on> -- strict. A decline at startup is a fatal startup failure: the
+server refuses to start rather than serve traffic without the initialization
+the application depended on.
+
+=back
+
+There is no C<off> mode. The PAGI Lifespan spec forbids a server from
+skipping the protocol entirely: "A server must not offer an 'off' switch for
+this protocol." Passing C<lifespan_mode =E<gt> 'off'> to the constructor or
+to the C<configure> setter dies immediately, naming the rejected value.
+
+In multi-worker mode (C<workers =E<gt> N>), each forked worker inherits
+C<lifespan_mode> and C<lifespan_startup_timeout> from the master's
+configuration and runs its own lifespan handshake against its own copy of
+the application -- a worker never silently reverts to the C<auto> default
+when the master was configured C<on>.
+
+=head2 Extension Advertisement
+
+PAGI::Server's rule for the C<extensions> key in a scope is truthfulness: it
+names only extensions the connection can actually honor for that scope type.
+Extensions configured on the server (C<extensions =E<gt> \%extensions>, e.g.
+C<{ fullflush =E<gt> {} }>) pass through to every scope's C<extensions> hash
+unchanged, with one exception -- WebSocket scopes never advertise
+C<fullflush>. C<validate_websocket_send> has no C<http.fullflush> arm, so a
+WebSocket application that trusted the advertisement would get
+C<"Unrecognized event type"> instead of a working extension; C<http> and
+C<sse> scopes are unaffected and still advertise C<fullflush> when
+configured. Any other custom extension key an operator configures passes
+through to every scope, including WebSocket, unchanged -- the truthfulness
+rule removes only C<fullflush>, the one extension WebSocket cannot honor.
 
 =head1 HTTP/1.1 COMPLIANCE
 
@@ -708,6 +758,16 @@ writing corrupted bytes to the socket. Chunk lengths, per-stream send-queue
 byte counts, and transport watermarks are all measured on the
 already-encoded byte string.
 
+An C<sse.keepalive> event's optional C<comment> field is checked for the
+same encodability, but at arm time -- when the C<sse.keepalive> event
+itself is sent, not deferred to the keepalive timer's first tick.
+C<EventValidator> requires a present C<comment> to be a defined,
+non-reference string that round-trips
+C<Encode::encode('UTF-8', $comment, Encode::FB_CROAK)>, croaking
+C<"sse.keepalive 'comment' must be a UTF-8-encodable string"> otherwise. An
+unencodable comment therefore fails the send Future that armed the
+keepalive, rather than escaping as an uncaught die inside the timer tick.
+
 =head2 Request Bodies
 
 C<sse.request> (the event an application receives when it reads the body of
@@ -761,6 +821,60 @@ sent. HTTP/2 never emits an HTTP/1-only C<Connection> header or a
 C<Transfer-Encoding> (chunked-framing) header -- an HTTP/2 SSE stream is
 framed as DATA frames via C<submit_response_streaming>, which carries no
 such headers.
+
+The C<Date>-only-when-absent rule above holds server-wide, not only for
+C<sse.start>: on every response path, the server supplies a plain C<Date>
+header only when a C<Date> is not already present; where the application
+supplies its own header list, an application-supplied C<Date> is always
+honored as-is instead of being duplicated. This spans both transports and
+every response shape the server can emit:
+
+=over 4
+
+=item * B<Normal application responses> -- C<http.response.start> on
+HTTP/1.1 and HTTP/2 (including the HTTP/2 HEAD-request path, which reuses
+the same header list), and C<sse.start> on both transports (above).
+
+=item * B<Application declines> -- the C<websocket.http.response>
+extension's custom denial response and the C<sse.http.response.*> decline
+response, on both transports.
+
+=item * B<Server-generated responses, which carry no application header
+list to check> -- the HTTP/1.1 synthesized error response (e.g. the
+unanswered-request C<500> backstop and the bare WebSocket-handshake
+rejection, which both share that same path); and, HTTP/2 only, the bare
+WebSocket-handshake-rejection C<403>, the C<413> request-precheck
+rejection, the C<413> body-size-overrun rejection, the synthesized
+C<500>, and the plain (non-Extended-CONNECT) C<CONNECT> method's C<501>
+rejection.
+
+=back
+
+=head2 HTTP/2 Connection-Specific Header Stripping
+
+RFC 9113 section 8.2.2 forbids connection-specific header fields on
+HTTP/2: an application-supplied C<Connection>, C<Keep-Alive>,
+C<Proxy-Connection>, C<Transfer-Encoding>, or C<Upgrade> header -- or a
+C<TE> header carrying anything but the exact token C<trailers> -- corrupts
+the response at the framing layer (nghttp2 rejects the header list; the
+client receives only the C<:status> pseudo-header, with no body).
+PAGI::Server strips these six header names, case-insensitively, from
+application-supplied response headers before they reach nghttp2, on every
+HTTP/2 response path that maps application headers: C<http.response.start>
+(including the HEAD-request path, which reuses the same header list),
+C<sse.start>, the C<websocket.http.response> denial, the
+C<sse.http.response.*> decline, and C<websocket.accept>.
+
+C<TE> is the one carve-out: a C<TE> header whose value -- after trimming
+leading/trailing optional whitespace (OWS) -- is exactly the token
+C<trailers> is kept; any other C<TE> value, including a compound value like
+C<trailers, gzip>, is stripped. Each stripped occurrence, not deduplicated
+by name, logs C<PAGI: connection-specific header '$name' stripped from
+HTTP/2 response (RFC 9113)>.
+
+HTTP/1.1 is unaffected: C<Connection> and C<Transfer-Encoding> are
+ordinary, meaningful HTTP/1.1 response headers there, so no HTTP/1.1
+response path performs this strip.
 
 =head2 Connection Reuse after a Clean Stream End (HTTP/1.1)
 

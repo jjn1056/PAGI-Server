@@ -116,10 +116,10 @@ subtest 'queue overflow delivers reason=queue_overflow, code=1008' => sub {
 # {closed} is already true (a server-initiated close, e.g. idle timeout,
 # racing an already-pending receive()), rather than through the primary
 # _handle_disconnect push+resolve path the queue_overflow subtest above
-# already covers. Before this fix that fallback always returned 1006/'';
-# it must now report whatever ws_disconnect_reason a server-initiated close
-# recorded (_handle_disconnect sets it before closing), via
-# _ws_disconnect_event, and still default to '' when nothing was recorded.
+# already covers. The fallback must report whatever ws_disconnect_reason a
+# server-initiated close recorded (_handle_disconnect sets it before
+# closing), via _ws_disconnect_event, defaulting to '' only when nothing
+# was recorded.
 subtest 'receive() fallback after close reports the recorded ws_disconnect_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(app => sub { });
     $conn->{closed} = 1;

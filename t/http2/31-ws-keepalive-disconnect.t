@@ -1076,10 +1076,10 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 # $weak_self->{closed} is already true (e.g. a whole-connection teardown,
 # such as a server shutdown, racing an already-pending receive()), rather
 # than through the primary enqueue+dedup path the subtests above already
-# cover. Before this fix that fallback always returned 1006/''; it must now
-# report whatever server_close_reason a server-initiated per-stream
-# teardown recorded, as long as the stream's own state (its h2_streams
-# entry) is still reachable -- and fall back to '' when it is not.
+# cover. The fallback must report whatever server_close_reason a
+# server-initiated per-stream teardown recorded, as long as the stream's
+# own state (its h2_streams entry) is still reachable, defaulting to ''
+# when it is not.
 subtest 'receive() fallback after connection close reports the recorded server_close_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
