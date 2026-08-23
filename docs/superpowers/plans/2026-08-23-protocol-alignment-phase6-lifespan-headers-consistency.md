@@ -230,19 +230,19 @@ Untruthful case from recon: WebSocket scopes (h1 `Connection.pm:4865`, h2 `:1429
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. lifespan off removal | not started | — | — | — |
-| 2. Worker propagation | not started | — | — | — |
-| 3. h1 outcome alignment | not started | — | — | — |
-| 4. h2 413 body_too_large | not started | — | — | — |
-| 5. h2 dead-stream guard | not started | — | — | — |
-| 6. Teardown reasons | not started | — | — | — |
-| 7. max_requests SSE/WS | not started | — | — | — |
-| 8. Date consistency | not started | — | — | — |
-| 9. h2 header stripping | not started | — | — | — |
-| 10. keepalive comment validation | not started | — | — | — |
-| 11. Extension truthfulness | not started | — | — | — |
-| 12. Docs sweep | not started | — | — | — |
-| 13. Phase gate | not started | — | — | — |
+| 1. lifespan off removal | complete | adc2db8 | RED 1-fail → 4 files/18 | Approved first pass; live-tree sweep found no remaining 'off' acceptance path |
+| 2. Worker propagation | complete | ef0ae7d | behavioral RED (workers stayed up on 'on'+decline) → 4/4 + 6/6 regression | Approved; reviewer traced fatal-vs-swallowed decline paths; setpgid harness verified safe |
+| 3. h1 outcome alignment | complete | 30196a1 | new t/56; 5 files/29 | Approved; on_complete-not-on_disconnect per ratified rule; no-hang proven via _close receive_futures sweep; trailers parentheticals keep pinned regexes |
+| 4. h2 413 body_too_large | complete | 51d3505 | bounded RED → 3 files/27 + full t/http2 33/206 | Approved; delete-after-wake ordering traced incl. sync-resume subtlety; pre-accept-ws gap ruled out of scope (John packet) |
+| 5. h2 dead-stream guard | complete | a3a10e4 | SIGABRT reproduced 5/5 standalone, 6/8 forked; 10/10 clean post-fix | Approved; both ruling claims verified by trace; $cs arm deliberately reason-based (server_error warn preserved) |
+| 6. Teardown reasons | complete | c862a91 | 5 files/27 (+5) + RELEASE_TESTING t/33 4/4 | Approved; wire pins provably untouched (0 deletions in t/31); idle_timeout/keepalive_timeout per spec vocabulary; 13 fallback literals → 0 h2 + 2 guarded h1 |
+| 7. max_requests SSE/WS | complete | 56da3ac | RED 2/6 → 3 files/22 | Approved; exactly-once proved by control-flow inspection; h2 not double-counted |
+| 8. Date consistency | complete | 47f3773, 8a1b50d | per-site RED table → 10 files/87; +21 after fix round | Approved after round 1 (reviewer sweep found 10th site: h2 plain-CONNECT 501; fixed + pinned; spy pin judged legitimate boundary observation) |
+| 9. h2 header stripping | complete | 0e90a0d, 78900d7, 107d1ac | t/http2/33: 9 subtests/54 asserts | Approved after round 1 (reviewer found 5th site websocket.accept + te OWS gap; fixed; design §13.3 enumerates five paths) |
+| 10. keepalive comment validation | complete | ce6d458 | RED reproduced loop_once-unwind cascade → 4 files pristine | Approved; encode-copy mechanism verified by standalone repro; validation boundary transport-shared, no bypass |
+| 11. Extension truthfulness | complete | 4ab73f7 | RED 2 subtests → 5 files pristine | Approved; all claims re-verified against live file; ws scopes filter fullflush only, custom mappings untouched |
+| 12. Docs sweep | complete | 238a9cf | podchecker ×3 + 3 files/27 | Approved; reviewer re-derived 14 Date sites, 5 strip sites, reason-token producers — no discrepancies; ConnectionState token-definition mismatch deferred to John packet |
+| 13. Phase gate | complete | (this commit) | full recursive suite 124 files / 783 tests PASS; RELEASE_TESTING t/33+t/31 6/6 PASS | hygiene clean (whitespace, podchecker ×6, perl -c ×2); PAGI main still f04c029 (no drift); 16 implementation commits |
 
 ## Deviations
 
