@@ -1325,6 +1325,67 @@ sub _h2_create_send {
         $weak_self->_h2_write_pending;
     };
 
+    # Shared preamble for the file/fh body arms below (extraction, not a
+    # redesign -- see the arms themselves for why each piece sits where it
+    # does). Split in two because the two pieces cross the arms' own
+    # eval boundary: the file arm must report an illegal-sequence error
+    # (from advance_http) ahead of a misleading "File not found" from its
+    # own -f/-r checks, but must NOT have submitted response headers to the
+    # client before those checks pass -- so the sequence advance runs
+    # BEFORE the arm's eval (a comment-preserving-only move: advance_http
+    # is a pure function, and a caught vs. uncaught throw here already
+    # behaved identically before this extraction, since $seq is simply
+    # never reassigned on a throw either way), while the streaming-start
+    # call must stay INSIDE the eval, at each arm's own correct position
+    # relative to its own pre-checks, so a failure there still rolls back
+    # via the shared tail below instead of leaking a submitted-but-broken
+    # response.
+
+    # Outside-eval half: snapshot+advance+mirror the sequence state ahead
+    # of either arm's own validity checks. Returns the pre-advance $seq so
+    # the tail helper below can roll back to it on failure.
+    my $advance_seq_for_body = sub {
+        my ($ss, $event) = @_;
+        my $seq_before = $seq;
+        $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
+        $ss->{seq_state} = $seq if $ss;
+        return $seq_before;
+    };
+
+    # Inside-eval half: submit the streaming response exactly once, the
+    # first time either arm actually has a chunk ready to send. Each arm
+    # calls this at its own correct point (after its own pre-checks, so a
+    # failed check never causes headers to reach the client for a response
+    # that goes on to fail).
+    my $ensure_h2_streaming_started = sub {
+        my ($ss) = @_;
+        return if $streaming_started;
+        $streaming_started = 1;
+        $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
+        $weak_self->{h2_session}->submit_response_streaming(
+            $stream_id,
+            status => $status, headers => \@response_headers,
+            data_callback => $data_callback,
+        );
+        $weak_self->_h2_write_pending;
+    };
+
+    # Shared failure-rollback-or-finish tail for the file/fh body arms:
+    # given the arm's own eval result, either rolls $seq back to its
+    # pre-event value and re-raises (recoverable per contract, unless the
+    # stream is simply gone -- a quiet no-op), or marks the body stream's
+    # EOF pending on success. Mirrors h1's D1 advance-then-rollback pattern.
+    my $finish_or_rollback_body_send = sub {
+        my ($ok, $err, $ss, $seq_before) = @_;
+        if (!$ok) {
+            return if $err eq $STREAM_GONE;   # client reset: quiet no-op
+            $seq = $seq_before;                # recoverable, per contract
+            $ss->{seq_state} = $seq if $ss;
+            die $err;
+        }
+        $finish_body_stream->();
+    };
+
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
@@ -1472,24 +1533,13 @@ sub _h2_create_send {
             # "File not found" -- h1 parity. A failed file send must NOT
             # mark the response complete, so on failure $seq rolls back to
             # $seq_before exactly as the h1 twin in _create_send does.
-            my $seq_before = $seq;
-            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-            $ss->{seq_state} = $seq if $ss;
+            my $seq_before = $advance_seq_for_body->($ss, $event);
 
             my $ok = eval {
                 die "File not found: $file\n"  unless -f $file;
                 die "Cannot read file: $file\n" unless -r $file;
 
-                if (!$streaming_started) {
-                    $streaming_started = 1;
-                    $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
-                    $weak_self->{h2_session}->submit_response_streaming(
-                        $stream_id,
-                        status => $status, headers => \@response_headers,
-                        data_callback => $data_callback,
-                    );
-                    $weak_self->_h2_write_pending;
-                }
+                $ensure_h2_streaming_started->($ss);
 
                 # Mirror h1's effective-length computation (_send_file_response)
                 # so the sync-vs-async choice below sees the same number h1
@@ -1525,14 +1575,7 @@ sub _h2_create_send {
                 }
                 1;
             };
-            if (!$ok) {
-                my $err = $@;
-                return if $err eq $STREAM_GONE;   # client reset: quiet no-op
-                $seq = $seq_before;               # recoverable, per contract
-                $ss->{seq_state} = $seq if $ss;
-                die $err;
-            }
-            $finish_body_stream->();
+            $finish_or_rollback_body_send->($ok, $@, $ss, $seq_before);
             return;
         }
 
@@ -1545,21 +1588,10 @@ sub _h2_create_send {
         if ($type eq 'http.response.body' && defined $event->{fh}) {
             my $fh = $event->{fh};
 
-            my $seq_before = $seq;
-            $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-            $ss->{seq_state} = $seq if $ss;
+            my $seq_before = $advance_seq_for_body->($ss, $event);
 
             my $ok = eval {
-                if (!$streaming_started) {
-                    $streaming_started = 1;
-                    $ss->{send_queue} //= []; $ss->{send_queue_bytes} //= 0;
-                    $weak_self->{h2_session}->submit_response_streaming(
-                        $stream_id,
-                        status => $status, headers => \@response_headers,
-                        data_callback => $data_callback,
-                    );
-                    $weak_self->_h2_write_pending;
-                }
+                $ensure_h2_streaming_started->($ss);
                 if (my $off = $event->{offset}) {
                     seek($fh, $off, 0) or die "Cannot seek: $!\n";
                 }
@@ -1585,14 +1617,7 @@ sub _h2_create_send {
                 }
                 1;
             };
-            if (!$ok) {
-                my $err = $@;
-                return if $err eq $STREAM_GONE;   # client reset: quiet no-op
-                $seq = $seq_before;               # recoverable, per contract
-                $ss->{seq_state} = $seq if $ss;
-                die $err;
-            }
-            $finish_body_stream->();
+            $finish_or_rollback_body_send->($ok, $@, $ss, $seq_before);
             return;
         }
 
