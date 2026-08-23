@@ -1379,7 +1379,7 @@ server logs an error and aborts startup rather than blocking forever.
 B<Default:> 30. Set to 0 to disable the timeout (the server will wait
 indefinitely for the startup signal).
 
-=item lifespan_mode => 'auto' | 'on' | 'off'
+=item lifespan_mode => 'auto' | 'on'
 
 Controls how the server treats the lifespan protocol.
 
@@ -1395,12 +1395,15 @@ runs.
 logs it and refuses to start. Use this for applications whose startup must
 succeed (for example, one that opens a database pool in lifespan).
 
-=item * B<off> -- skip the lifespan protocol entirely. The application is never
-invoked with a C<lifespan> scope.
-
 =back
 
 An explicit C<lifespan.startup.failed> aborts startup in all modes.
+
+There is no C<off> mode: the PAGI Lifespan spec requires every server instance
+or worker to send the lifespan events and forbids an "off" switch that skips
+the protocol entirely ("Skipping the lifespan protocol entirely is not a
+conforming option. ... A server must not offer an 'off' switch for this
+protocol."). Passing C<< lifespan_mode => 'off' >> is rejected at construction.
 
 =item request_timeout => $seconds
 
@@ -2316,9 +2319,9 @@ sub _init {
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
     $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal (0 = disabled)
-    $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal) | off (skip lifespan)
-    die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be one of: auto, on, off\n"
-        unless $self->{lifespan_mode} =~ /\A(?:auto|on|off)\z/;
+    $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal)
+    die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
+        unless $self->{lifespan_mode} =~ /\A(?:auto|on)\z/;
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
@@ -2465,8 +2468,8 @@ sub configure {
     }
     if (exists $params{lifespan_mode}) {
         my $mode = delete $params{lifespan_mode};
-        die "Invalid lifespan_mode '$mode' - must be one of: auto, on, off\n"
-            unless $mode =~ /\A(?:auto|on|off)\z/;
+        die "Invalid lifespan_mode '$mode' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
+            unless $mode =~ /\A(?:auto|on)\z/;
         $self->{lifespan_mode} = $mode;
     }
     if (exists $params{max_receive_queue}) {
@@ -4056,11 +4059,6 @@ sub _on_request_complete {
 
 async sub _run_lifespan_startup {
     my ($self) = @_;
-
-    # lifespan_mode 'off': skip the protocol entirely -- never invoke the app
-    # with a lifespan scope.
-    return { success => 1, lifespan_supported => 0 }
-        if ($self->{lifespan_mode} // 'auto') eq 'off';
 
     # Create lifespan scope
     my $scope = {

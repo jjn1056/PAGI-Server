@@ -84,6 +84,11 @@
     synthesizing a 500 if the client is still connected, and closing the
     connection, instead of handing back a socket with zero bytes written.
 
+  Breaking Changes
+  - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping
+    the lifespan protocol entirely, so the constructor and setter now reject
+    it. auto remains the default; on remains strict mode.
+
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
     read, instead of treating a read error as EOF. Applications may now safely

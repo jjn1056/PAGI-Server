@@ -2,7 +2,6 @@ use strict;
 use warnings;
 use Test2::V0;
 use IO::Async::Loop;
-use Net::Async::HTTP;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
@@ -45,37 +44,13 @@ subtest "lifespan_mode 'on' makes a startup decline fatal" => sub {
     $loop->remove($server);
 };
 
-subtest "lifespan_mode 'off' skips the lifespan scope entirely" => sub {
-    my $loop = IO::Async::Loop->new;
-
-    my %seen;
-    my $app = async sub {
-        my ($scope, $receive, $send) = @_;
-        $seen{ $scope->{type} }++;
-        return await respond_ok($scope, $receive, $send) if $scope->{type} eq 'http';
-        die "Unsupported scope type: $scope->{type}";
+subtest "lifespan_mode 'off' is rejected (Lifespan spec: no off switch)" => sub {
+    my $err = dies {
+        PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                          quiet => 1, lifespan_mode => 'off');
     };
-
-    my $server = PAGI::Server->new(
-        app => $app, host => '127.0.0.1', port => 0, quiet => 1,
-        lifespan_mode => 'off',
-    );
-    $loop->add($server);
-    $server->listen->get;
-
-    ok($server->is_running, 'server started with lifespan_mode=off');
-
-    my $http = Net::Async::HTTP->new;
-    $loop->add($http);
-    my $resp = $http->GET('http://127.0.0.1:' . $server->port . '/')->get;
-    is($resp->code, 200, 'HTTP still works with lifespan off');
-
-    ok(!$seen{lifespan}, 'the app was never invoked with a lifespan scope');
-    ok($seen{http},      'the app was invoked with an http scope');
-
-    $server->shutdown->get;
-    $loop->remove($http);
-    $loop->remove($server);
+    like($err, qr/Invalid lifespan_mode 'off'/, 'constructor rejects off');
+    like($err, qr/nonconforming/, 'error explains why');
 };
 
 subtest 'an invalid lifespan_mode is rejected at construction' => sub {
@@ -84,6 +59,7 @@ subtest 'an invalid lifespan_mode is rejected at construction' => sub {
     };
     ok($err, 'construction failed');
     like($err, qr/lifespan_mode/, 'error names the offending option');
+    like($err, qr/auto.*on/, "error names the two valid modes");
 };
 
 done_testing;

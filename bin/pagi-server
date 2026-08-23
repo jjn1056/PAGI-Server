@@ -385,12 +385,12 @@ Connection idle timeout in seconds (default: 60)
 
 Graceful shutdown timeout in seconds (default: 30)
 
-=item B<--lifespan> auto|on|off
+=item B<--lifespan> auto|on
 
 How to treat the lifespan protocol: C<auto> (default; run lifespan if the app
-supports it, otherwise continue without it), C<on> (require it -- a startup
-decline is fatal), or C<off> (skip it entirely). See
-L<PAGI::Server/"lifespan_mode">.
+supports it, otherwise continue without it), or C<on> (require it -- a startup
+decline is fatal). There is no C<off> mode: the PAGI Lifespan spec forbids
+skipping the protocol entirely. See L<PAGI::Server/"lifespan_mode">.
 
 =item B<--lifespan-startup-timeout> NUM
 
