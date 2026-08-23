@@ -9,7 +9,9 @@ use lib "$FindBin::Bin/../../lib";
 # Cross-repo smoke test: PAGI-Tools' PAGI::SSE->close(reason) must drive the real
 # PAGI::Server to end the SSE stream on the wire. Each repo is unit-tested in
 # isolation; this proves the whole chain (Tools close() -> sse.close event ->
-# server END_STREAM/terminator -> client EOF).
+# server chunked terminator on the wire). The connection itself stays open
+# afterward: a clean SSE stream end honors HTTP/1.1 keep-alive (design
+# section 11.6), so the client sees the zero-length chunk, not EOF.
 #
 # Skips unless PAGI-Tools is on @INC, so PAGI-Server's standalone suite stays
 # independent. Run it with:
@@ -77,7 +79,9 @@ subtest 'PAGI::SSE->close(reason) ends the stream over the real server' => sub {
     like($wire, qr/HTTP\/1\.1 200/,      '200 OK');
     like($wire, qr/event: tick\n/,        'event delivered');
     like($wire, qr/data: 1\n/,            'data delivered');
-    ok($eof, 'server closed the stream after PAGI::SSE->close');
+    like($wire, qr/\r\n0\r\n\r\n\z/,
+        'stream ended with the chunked terminator after PAGI::SSE->close');
+    ok(!$eof, 'connection stays open after the clean stream end (keep-alive honored)');
 
     $server->shutdown->get;
 };
