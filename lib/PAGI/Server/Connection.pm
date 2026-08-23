@@ -599,8 +599,13 @@ sub _h2_on_close {
     return unless $stream;
 
     # This stream is going away one way or another -- stop its keepalive
-    # timers so they don't fire (or leak) after the stream state is reclaimed.
+    # (and, for SSE, idle) timers so they don't fire (or leak) after the
+    # stream state is reclaimed.
     $self->_h2_stop_ws_keepalive($stream) if $stream->{is_websocket};
+    if ($stream->{is_sse}) {
+        $self->_h2_stop_sse_keepalive($stream);
+        $self->_h2_stop_sse_idle_timer($stream);
+    }
 
     # Drive this stream's own connection_state to its terminal state exactly
     # once. Three outcomes, and the h2 error code alone does not separate
@@ -1847,8 +1852,8 @@ sub _h2_create_sse_send {
 
         return if $weak_self->{closed} && !$already_closed;
 
-        # Reset SSE idle timer on send activity (skip once fully closed)
-        $weak_self->_reset_sse_idle_timer unless $already_closed;
+        # Reset THIS stream's SSE idle timer on send activity (skip once fully closed)
+        $weak_self->_h2_reset_sse_idle_timer($ss) unless $already_closed;
 
         # Mandatory event validation and sequencing (PAGI spec compliance).
         PAGI::Server::EventValidator::validate_sse_send(
@@ -1896,11 +1901,13 @@ sub _h2_create_sse_send {
             );
             $weak_self->_h2_write_pending;
 
-            # Protocol-specific keepalive writer (HTTP/2 DATA frames). Keepalive
-            # bytes are counted in the per-stream backlog so buffered_amount stays
+            # Protocol-specific keepalive writer (HTTP/2 DATA frames), scoped to
+            # THIS stream (design section 11.3): a second multiplexed SSE stream
+            # must not steal or replace this one's writer. Keepalive bytes are
+            # counted in the per-stream backlog so buffered_amount stays
             # accurate, but they do not poke the watermark callbacks — a server
             # heartbeat is not an application send.
-            $weak_self->{sse_keepalive_writer} = sub {
+            $ss->{sse_ka_writer} = sub {
                 my ($text) = @_;
                 return unless $weak_self;
                 return if $weak_self->{closed};
@@ -1916,8 +1923,8 @@ sub _h2_create_sse_send {
                 $weak_self->_h2_write_pending;
             };
 
-            # Start SSE idle timer if configured
-            $weak_self->_start_sse_idle_timer;
+            # Start THIS stream's SSE idle timer if configured
+            $weak_self->_h2_start_sse_idle_timer($stream_id, $ss);
         }
         elsif ($type eq 'sse.send') {
             return unless $ss->{response_started};
@@ -1961,10 +1968,10 @@ sub _h2_create_sse_send {
             my $comment = $event->{comment};
 
             if ($interval > 0) {
-                $weak_self->_start_sse_keepalive($interval, $comment);
+                $weak_self->_h2_start_sse_keepalive($stream_id, $ss, $interval, $comment);
             }
             else {
-                $weak_self->_stop_sse_keepalive;
+                $weak_self->_h2_stop_sse_keepalive($ss);
             }
         }
         elsif ($type eq 'sse.close') {
@@ -1973,6 +1980,11 @@ sub _h2_create_sse_send {
             # is the idempotent no-op advance_sse just allowed; nothing left
             # to do.
             return unless $ss;
+
+            # This stream is ending -- stop its keepalive and idle timers so
+            # neither fires (or leaks) after the stream is reclaimed.
+            $weak_self->_h2_stop_sse_keepalive($ss);
+            $weak_self->_h2_stop_sse_idle_timer($ss);
 
             # End THIS HTTP/2 stream now: flush remaining queued events, then the
             # data_callback emits a final END_STREAM frame. `reason` is
@@ -2000,6 +2012,13 @@ sub _h2_create_sse_send {
             return if $ss->{response_started};
             $ss->{sse_decline_body} .= $event->{body} // '';
             return if $event->{more};   # more chunks coming — keep buffering
+
+            # Defensive: the send-sequence state machine never permits
+            # sse.keepalive before sse.start, so neither timer can actually be
+            # armed here -- stopped anyway for the same every-closure-path
+            # discipline the other SSE/WS stop sites follow.
+            $weak_self->_h2_stop_sse_keepalive($ss);
+            $weak_self->_h2_stop_sse_idle_timer($ss);
 
             $ss->{response_started} = 1;
             $weak_self->{h2_session}->submit_response($stream_id,
@@ -2292,6 +2311,132 @@ sub _h2_stop_ws_keepalive {
     $ss->{ws_ka_timer}     = undef;
     $ss->{ws_ka_interval}  = 0;
     $ss->{ws_ka_timeout}   = 0;
+}
+
+# HTTP/2 per-stream SSE keepalive and idle timeout (design section 11.3 --
+# the h2 analogue of _start_sse_keepalive/_stop_sse_keepalive and
+# _start_sse_idle_timer/_reset_sse_idle_timer/_stop_sse_idle_timer). HTTP/1
+# carries only one long-lived scope per connection, so its keepalive/idle
+# state and timers stay on $self; HTTP/2 multiplexes many SSE streams per
+# connection, so this state and these timers live on the per-stream hash
+# ($ss, aka $self->{h2_streams}{$stream_id}) instead -- starting or updating
+# keepalive on one stream must never stop, replace, or redirect another
+# stream's timer or writer.
+sub _h2_start_sse_keepalive {
+    my ($self, $stream_id, $ss, $interval, $comment) = @_;
+
+    # Last event wins: stop whatever was running before applying new settings.
+    $self->_h2_stop_sse_keepalive($ss);
+
+    return unless $interval && $interval > 0;
+    return unless $self->{server};
+
+    $ss->{sse_ka_interval} = $interval;
+    $ss->{sse_ka_comment}  = $comment // '';
+
+    weaken(my $weak_self = $self);
+    weaken(my $weak_ss   = $ss);
+
+    my $timer = IO::Async::Timer::Periodic->new(
+        interval => $interval,
+        on_tick  => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            return unless $weak_ss;
+
+            my $text = $weak_ss->{sse_ka_comment};
+            $text = ":$text" unless $text =~ /^:/;
+            my $formatted = "$text\n\n";
+
+            if (my $writer = $weak_ss->{sse_ka_writer}) {
+                $writer->($formatted);
+            }
+        },
+    );
+
+    $ss->{sse_ka_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _h2_stop_sse_keepalive {
+    my ($self, $ss) = @_;
+    return unless $ss;
+
+    return unless $ss->{sse_ka_timer};
+    $ss->{sse_ka_timer}->stop if $ss->{sse_ka_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($ss->{sse_ka_timer});
+    }
+    $ss->{sse_ka_timer}    = undef;
+    $ss->{sse_ka_interval} = 0;
+    $ss->{sse_ka_comment}  = '';
+}
+
+# Per-stream SSE idle timeout: resets on send activity (design section
+# 11.3's "idle timer and activity reset"). On expiry, only THIS stream ends
+# -- mirroring an app-initiated sse.close server-side -- so a stalled SSE
+# stream cannot take down sibling streams multiplexed on the same h2
+# connection.
+sub _h2_start_sse_idle_timer {
+    my ($self, $stream_id, $ss) = @_;
+
+    return unless $self->{sse_idle_timeout} && $self->{sse_idle_timeout} > 0;
+    return unless $self->{server};
+    return if $ss->{sse_idle_timer};
+
+    weaken(my $weak_self = $self);
+    weaken(my $weak_ss   = $ss);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $self->{sse_idle_timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            return unless $weak_ss;
+            return if $weak_ss->{sse_closing};   # already ending some other way
+
+            if ($weak_self->{server} && $weak_self->{server}->can('_log')) {
+                $weak_self->{server}->_log(warn =>
+                    "HTTP/2 SSE stream $stream_id idle timeout ($weak_self->{sse_idle_timeout}s) - closing stream");
+            }
+
+            $weak_self->_h2_stop_sse_keepalive($weak_ss);
+            $weak_self->_h2_stop_sse_idle_timer($weak_ss);
+
+            # End THIS stream only, the same way an app-initiated sse.close
+            # does: mark it closing so the data_callback emits the final
+            # END_STREAM frame once the queue drains. _h2_on_close delivers
+            # the app-facing sse.disconnect once the h2 layer reports the
+            # stream fully closed -- sibling streams on this connection are
+            # unaffected.
+            $weak_ss->{sse_close_sent} = 1;
+            $weak_ss->{sse_closing}    = 1;
+            $weak_self->{h2_session}->resume_stream($stream_id);
+            $weak_self->_h2_write_pending;
+        },
+    );
+
+    $ss->{sse_idle_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
+}
+
+sub _h2_reset_sse_idle_timer {
+    my ($self, $ss) = @_;
+    return unless $ss && $ss->{sse_idle_timer};
+    $ss->{sse_idle_timer}->reset;
+    $ss->{sse_idle_timer}->start unless $ss->{sse_idle_timer}->is_running;
+}
+
+sub _h2_stop_sse_idle_timer {
+    my ($self, $ss) = @_;
+    return unless $ss && $ss->{sse_idle_timer};
+    $ss->{sse_idle_timer}->stop if $ss->{sse_idle_timer}->is_running;
+    if ($self->{server}) {
+        $self->{server}->remove_child($ss->{sse_idle_timer});
+    }
+    $ss->{sse_idle_timer} = undef;
 }
 
 # Request stall timeout - closes connection if no I/O activity during request processing
@@ -3772,9 +3917,14 @@ sub _close {
     # Clean up HTTP/2 per-stream state
     if ($self->{h2_streams}) {
         for my $stream (values %{$self->{h2_streams}}) {
-            # Whole connection is going away -- stop every WS stream's
-            # keepalive timers so none leak past this teardown sweep.
+            # Whole connection is going away -- stop every WS/SSE stream's
+            # keepalive (and SSE idle) timers so none leak past this teardown
+            # sweep.
             $self->_h2_stop_ws_keepalive($stream) if $stream->{is_websocket};
+            if ($stream->{is_sse}) {
+                $self->_h2_stop_sse_keepalive($stream);
+                $self->_h2_stop_sse_idle_timer($stream);
+            }
 
             if ($stream->{body_pending} && !$stream->{body_pending}->is_ready) {
                 my $event = $stream->{is_sse}
