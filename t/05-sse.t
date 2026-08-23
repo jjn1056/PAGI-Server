@@ -292,6 +292,18 @@ subtest 'SSE disconnect detection' => sub {
 subtest 'SSE chunked encoding properly terminated' => sub {
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
+
+        if ($scope->{type} eq 'http') {
+            # Serves the follow-up request that proves the connection survived.
+            await $receive->();
+            await $send->({
+                type    => 'http.response.start',
+                status  => 200,
+                headers => [ [ 'content-type', 'text/plain' ] ],
+            });
+            await $send->({ type => 'http.response.body', body => 'AFTER-SSE', more => 0 });
+            return;
+        }
         die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
 
         await $send->({
@@ -316,14 +328,16 @@ subtest 'SSE chunked encoding properly terminated' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 2 unless $sock;
+        skip "Cannot connect", 3 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
         print $sock "Accept: text/event-stream\r\n";
         print $sock "\r\n";
 
-        # Read until connection closes (server should close after sending terminator)
+        # Read to the chunked terminator. A clean stream end honors the
+        # "Connection: keep-alive" sse.start advertised (design 11.6), so the
+        # terminator -- not EOF -- is what ends the SSE response here.
         $sock->blocking(0);
         my $response = '';
         my $deadline = time + 5;
@@ -335,18 +349,35 @@ subtest 'SSE chunked encoding properly terminated' => sub {
                 $response .= $buf;
             }
             elsif (defined $n && $n == 0) {
-                # EOF - connection closed cleanly
+                # EOF - connection closed
                 $connection_closed = 1;
                 last;
             }
+            last if $response =~ /\r\n0\r\n\r\n/;
             $loop->loop_once(0.1);
         }
-        close $sock;
 
         # Verify chunked terminator is present (0\r\n\r\n)
         # The response uses chunked encoding, so final chunk should be "0\r\n\r\n"
         like($response, qr/0\r\n\r\n$/, 'Response ends with chunked terminator (0\\r\\n\\r\\n)');
-        ok($connection_closed, 'Connection closed cleanly after chunked terminator');
+        ok(!$connection_closed, 'Connection stays open after the chunked terminator');
+
+        # ...and is genuinely reusable: the same socket serves a plain request.
+        print $sock "GET /after HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n";
+        my $second = '';
+        $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) { $second .= $buf }
+            elsif (defined $n && $n == 0) { last }
+            last if $second =~ /AFTER-SSE/;
+            $loop->loop_once(0.1);
+        }
+        close $sock;
+
+        like($second, qr{^HTTP/1\.1 200.*AFTER-SSE}s,
+            'same socket serves an ordinary request after the terminated SSE stream');
     }
 
     $server->shutdown->get;
