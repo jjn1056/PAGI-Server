@@ -125,6 +125,7 @@ sub _h2_ws_enqueue_disconnect {
 | 2b. Server-caused-end log parity | complete (review clean; reviewer reproduced RED) | bac0718 | +1 subtest, exact-count warns / 27 tests, 3 files | /tmp/phase4-task2b-pass.out |
 | 3. Docs | complete (review clean; non-overclaim verified) | e58a3db | podchecker OK; smoke 9/9 | task-3-report.md |
 | 4. Phase gate | complete | (this commit) | full suite 119 files / 696 tests PASS | /tmp/phase4-full-suite.out; hygiene clean; drift none (f04c029) |
+| Final review (opus, ab110c0..39586ea) | With fixes → wave clean | b9a6d90, 5585ffd, 33acc9e, 221c0dd (+f150336 evidence fix) | post-wave full suite 119 files / 701 tests PASS | re-review: all addressed, no new breakage; C1 (RFC 6455 wire-1006) and I1 (timer leaks) fixed with wire/white-box pins; /tmp/phase4-full-suite2.out |
 
 ## Notes
 
