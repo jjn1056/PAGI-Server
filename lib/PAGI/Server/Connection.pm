@@ -36,6 +36,43 @@ sub _validate_header_value { PAGI::Server::EventValidator::check_header_value($_
 
 sub _validate_header_name  { PAGI::Server::EventValidator::check_header_name($_[0]) }
 
+# =============================================================================
+# HTTP/2 connection-specific header stripping (RFC 9113 section 8.2.2, design
+# doc section 13.3)
+# =============================================================================
+# HTTP/2 forbids connection-specific header fields. An app-supplied
+# connection, keep-alive, proxy-connection, transfer-encoding, or upgrade
+# header -- or a te header carrying anything but the token 'trailers' --
+# corrupts the response at the framing layer: the client receives only
+# :status, with no body. HTTP/1.1 has no such prohibition, so this strip
+# applies only to the HTTP/2 response paths that call it.
+my %H2_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 }
+    qw(connection keep-alive proxy-connection transfer-encoding upgrade te);
+
+# Returns a new arrayref with connection-specific header pairs removed,
+# warning once per stripped name. Does not mutate $headers.
+sub _h2_strip_connection_headers {
+    my ($headers) = @_;
+    my @kept;
+    for my $h (@$headers) {
+        my ($name, $value) = @$h;
+        my $lc_name = lc $name;
+        if ($H2_CONNECTION_SPECIFIC_HEADER{$lc_name}) {
+            # RFC 9113 permits 'te' only with the exact token 'trailers'; a
+            # case-insensitive VALUE compare (not a name/list match) is what
+            # the token grammar calls for.
+            if ($lc_name eq 'te' && lc($value) eq 'trailers') {
+                push @kept, $h;
+                next;
+            }
+            warn "PAGI: connection-specific header '$name' stripped from HTTP/2 response (RFC 9113)\n";
+            next;
+        }
+        push @kept, $h;
+    }
+    return \@kept;
+}
+
 # SSE client-signal check (PAGI Www.pod "SSE Connection Detection"): the
 # exact media range text/event-stream, case-insensitively, with q > 0.
 # A boolean signal test, not content negotiation: wildcards never signal
@@ -1370,6 +1407,10 @@ sub _h2_create_send {
             @response_headers = map {
                 [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
             } @{$event->{headers} // []};
+            # RFC 9113 8.2.2 / design 13.3 — strips app-supplied connection,
+            # transfer-encoding, etc. before this list reaches nghttp2 (also
+            # covers the HEAD path below, which submits this same array).
+            @response_headers = @{ _h2_strip_connection_headers(\@response_headers) };
             # Server-supplied Date header (HTTP/1.1 parity) — add if the app didn't.
             unless (grep { lc($_->[0]) eq 'date' } @response_headers) {
                 push @response_headers, ['date', $weak_self->{protocol}->format_date];
@@ -1688,6 +1729,9 @@ sub _h2_create_websocket_send {
                 map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
                     @{$event->{headers} // []}
             ];
+            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
+            # transfer-encoding, etc. before submission.
+            $ss->{ws_denial_headers} = _h2_strip_connection_headers($ss->{ws_denial_headers});
             $ss->{ws_denial_body} = '';
         }
         elsif ($type eq 'websocket.http.response.body') {
@@ -2007,6 +2051,9 @@ sub _h2_create_sse_send {
             for my $h (@$headers) {
                 push @final_headers, [_validate_header_name($h->[0]), _validate_header_value($h->[1])];
             }
+            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
+            # transfer-encoding, etc. before submission.
+            @final_headers = @{ _h2_strip_connection_headers(\@final_headers) };
             if (!$has_content_type) {
                 push @final_headers, ['content-type', 'text/event-stream'];
             }
@@ -2136,6 +2183,9 @@ sub _h2_create_sse_send {
                 map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
                     @{$event->{headers} // []}
             ];
+            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
+            # transfer-encoding, etc. before submission.
+            $ss->{sse_decline_headers} = _h2_strip_connection_headers($ss->{sse_decline_headers});
             $ss->{sse_decline_body} = '';
         }
         elsif ($type eq 'sse.http.response.body') {
