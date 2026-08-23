@@ -457,6 +457,123 @@ subtest 'client RST while the file pump is blocked on drain is quiet and leak-fr
     is( $Cancel::COMPLETE, 0, 'on_complete never fired' );
 };
 
+# ============================================================
+# Task 5: explicit post-RST no-op send -- distinct from the drain-blocked
+# race pinned above (RST landing mid-transfer, inside a blocked
+# emit_chunk await) and from t/http2/12's post-413-overrun case (RST is
+# never involved there; the wake comes from the server's own overrun
+# branch). Here the app is simply parked on receive() -- no response
+# started yet -- when a plain client RST_STREAM(CANCEL) arrives; the app's
+# SUBSEQUENT send() must resolve the Future successfully as a no-op (the
+# h2_closed/absent-entry carve-out, same discipline as t/http2/12's
+# post-413 case), not raise, and must never reach nghttp2's
+# submit_response for this stream.
+# ============================================================
+subtest 'send() after a plain client RST_STREAM is a silent no-op (no submit_response reaches nghttp2)' => sub {
+    my ($receive_resolved, $receive_event, $send_future_resolved, $send_error);
+    my @rst_warnings;
+    local $SIG{__WARN__} = sub { push @rst_warnings, $_[0] };
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $receive_event = await $receive->();
+        $receive_resolved = 1;
+        eval {
+            await $send->({
+                type    => 'http.response.start',
+                status  => 200,
+                headers => [],
+            });
+            1;
+        } or $send_error = $@;
+        $send_future_resolved = 1;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+
+    # Streaming body (no content-length header, body producer yields
+    # nothing) so the app gets dispatched and parked on receive() before
+    # any DATA/END_STREAM arrives -- same technique as t/http2/12's
+    # post-413 subtest.
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/plain-rst',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [],
+        body      => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Poll (bounded) until the app is dispatched and parked on receive().
+    my $dispatched = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        my $ss = $conn->{h2_streams}{$stream_id};
+        if ($ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app dispatched and parked on receive() before the RST')
+        or diag('app never reached the parked-receive state -- cannot exercise post-RST no-op send');
+
+    # Spy on submit_response the same way t/http2/12's post-413 subtest
+    # does: a local typeglob wrapper that calls through and records, scoped
+    # to this block so it stops intercepting once we leave it.
+    my $submit_response_calls = 0;
+    {
+        no warnings 'redefine';
+        local *PAGI::Server::Protocol::HTTP2::Session::submit_response = sub {
+            my ($session, $sid, %args) = @_;
+            $submit_response_calls++ if $sid == $stream_id;
+            return $session->{nghttp2}->submit_response($sid, %args);
+        };
+
+        # Plain RST_STREAM(CANCEL) -- not a 413 overrun, not a drain-block.
+        $client->submit_rst_stream($stream_id, H2_CANCEL_CODE);
+        $client_sock->syswrite($client->mem_send);
+
+        # Bounded wait for both the parked receive() to resolve AND the
+        # app's subsequent send() to settle.
+        my $settled = 0;
+        for (1..20) {
+            $loop->loop_once(0.1);
+            my $buf = '';
+            $client_sock->sysread($buf, 16384);
+            $client->mem_recv($buf) if length($buf);
+            my $out = $client->mem_send;
+            $client_sock->syswrite($out) if length($out);
+            if ($receive_resolved && $send_future_resolved) {
+                $settled = 1;
+                last;
+            }
+        }
+        ok($settled, 'parked receive() resolved and the post-RST send() settled within the bounded wait')
+            or diag('receive_resolved=' . ($receive_resolved // 0)
+                     . ' send_future_resolved=' . ($send_future_resolved // 0));
+    }
+
+    is($receive_event->{type}, 'http.disconnect', 'receive resolved to http.disconnect');
+    ok($send_future_resolved, "the app's post-RST send() resolved instead of hanging");
+    ok(!$send_error, "the app's post-RST send() resolved successfully (no-op), not a rejected Future")
+        or diag("send_error=$send_error");
+    is($submit_response_calls, 0,
+        'submit_response never reached nghttp2 for this stream -- the post-RST send() was a pure no-op');
+    ok(!(grep { /PAGI application error/ } @rst_warnings), 'no app-error log for the post-RST no-op send');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 # Server stays healthy: a fresh request on a brand-new h2 connection still
 # gets served normally after the mid-transfer reset above.
 is( get_h2('/ok', app => $cancel_ok_app)->{body}, 'ok',

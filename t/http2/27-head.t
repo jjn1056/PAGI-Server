@@ -174,6 +174,8 @@ sub get_response {
 package Head;
 our $FILE_SEND_ERROR;
 our $TRAILERS_ERROR;
+our $FH_SEND_ERROR;
+our $FH_TELL_AFTER;
 package main;
 
 $Head::app = async sub {
@@ -214,6 +216,20 @@ $Head::app = async sub {
         };
         return;
     }
+    if ($path eq '/fh') {
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','text/plain']] });
+        open my $fh, '<', \"hello" or die "Cannot open scalar handle: $!";
+        # Nonzero offset: if the server ever seeked/read this handle for a
+        # HEAD request, $fh's position would move off 0 below.
+        $Head::FH_SEND_ERROR = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', fh => $fh, offset => 3 }) };
+            $@;
+        };
+        $Head::FH_TELL_AFTER = tell($fh);
+        return;
+    }
     if ($path eq '/trailers') {
         await $send->({ type => 'http.response.start', status => 200, trailers => 1,
                          headers => [['content-type','text/plain']] });
@@ -238,6 +254,10 @@ is( head_response('/plain')->{headers}{'content-length'}, '5',
 is( head_response('/streaming')->{body}, '', 'HEAD streaming: all chunks discarded' );
 is( head_response('/file')->{body}, '', 'HEAD file: no body' );
 ok( !$Head::FILE_SEND_ERROR, 'file body event on HEAD resolves (file was never opened/statted)' );
+
+is( head_response('/fh')->{body}, '', 'HEAD fh: no body' );
+ok( !$Head::FH_SEND_ERROR, 'fh body event on HEAD resolves' );
+is( $Head::FH_TELL_AFTER, 0, 'fh was never seeked/read for a HEAD request' );
 
 is( head_response('/trailers')->{body}, '', 'HEAD trailers: no body' );
 ok( !$Head::TRAILERS_ERROR, 'trailers event on HEAD is accepted and discarded' );

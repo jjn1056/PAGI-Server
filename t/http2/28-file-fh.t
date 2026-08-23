@@ -287,6 +287,32 @@ $File::app = async sub {
         close $fh;
         return;
     }
+    if ($path eq '/fh-past-eof') {
+        open my $fh, '<:raw', $File::BIG or die "Cannot open: $!";
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','application/octet-stream']] });
+        await $send->({ type => 'http.response.body', fh => $fh,
+                         offset => 999_999_999 });
+        close $fh;
+        return;
+    }
+    if ($path eq '/fh-unseekable') {
+        # A pipe's read end is not seekable: a nonzero offset forces the
+        # fh arm's seek() call, which fails with ESPIPE ("Illegal seek").
+        pipe(my $read_fh, my $write_fh) or die "pipe: $!";
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','text/plain']] });
+        my $err = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', fh => $read_fh, offset => 1 }) };
+            $@;
+        };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.body', body => "err=$err", more => 0 });
+        close $read_fh;
+        close $write_fh;
+        return;
+    }
     if ($path eq '/fh-closed') {
         open my $fh, '<:raw', $File::BIG or die "Cannot open: $!";
         close $fh;
@@ -322,6 +348,9 @@ is( get_h2('/file-after-chunks')->{body}, 'x' . $pattern, 'file appended to an i
 is( get_h2('/fh-full')->{body}, $pattern, 'fh streamed byte-exact' );
 ok( $FhOwn::CLOSED_OK, 'application still owns the handle after the send resolves' );
 is( get_h2('/fh-range')->{body}, substr($pattern,1000,1000), 'fh offset+length honored' );
+is( get_h2('/fh-past-eof')->{body}, '', 'fh offset past EOF sends zero bytes, stream ends cleanly' );
+like( get_h2('/fh-unseekable')->{body}, qr/err=.*Cannot seek/,
+    'seek failure on an unseekable (pipe) fh fails the Future loudly; app recovered' );
 like( get_h2('/fh-closed')->{body}, qr/err=.*Failed to read filehandle/, 'closed fh fails the Future; app recovered' );
 
 done_testing;

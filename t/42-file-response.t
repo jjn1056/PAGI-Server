@@ -222,6 +222,72 @@ subtest 'file response with offset and length (Range request simulation)' => sub
     );
 };
 
+subtest 'HEAD request suppresses file body without opening the file' => sub {
+    with_server(
+        async sub  {
+        my ($scope, $receive, $send) = @_;
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', length($test_content)],
+                ],
+            });
+            # Nonexistent path: h1 has no -f/-r pre-check (it fails at
+            # open/stat -- see Task 5 report), so a clean resolve here
+            # proves the file arm was never entered for a HEAD request.
+            await $send->({
+                type => 'http.response.body',
+                file => '/nonexistent/head-file-probe.txt',
+            });
+        },
+        sub  {
+        my ($port, $server) = @_;
+            my $response = $http->HEAD("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'HEAD got 200');
+            is($response->content, '', 'HEAD file: no body');
+            is($response->header('Content-Length'), length($test_content),
+                'app Content-Length passes through untouched');
+        }
+    );
+};
+
+subtest 'HEAD request suppresses fh body without reading/seeking the handle' => sub {
+    my $tell_after;
+    with_server(
+        async sub  {
+        my ($scope, $receive, $send) = @_;
+            open my $fh, '<:raw', $test_file or die "Cannot open: $!";
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', length($test_content)],
+                ],
+            });
+            # Nonzero offset: if the server ever seeked/read this handle for
+            # a HEAD request, $fh's position would move off 0 below.
+            await $send->({
+                type => 'http.response.body',
+                fh => $fh,
+                offset => 3,
+            });
+            $tell_after = tell($fh);
+            close $fh;
+        },
+        sub  {
+        my ($port, $server) = @_;
+            my $response = $http->HEAD("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'HEAD got 200');
+            is($response->content, '', 'HEAD fh: no body');
+        }
+    );
+    is($tell_after, 0, 'fh was never seeked/read for a HEAD request');
+};
+
 subtest 'file response offset at end of file' => sub {
     my $offset = length($test_content) - 50;
     my $expected = substr($test_content, $offset);
@@ -505,6 +571,91 @@ subtest 'fh response with offset (seek)' => sub {
             my $response = $http->GET("http://127.0.0.1:$port/")->get;
             is($response->code, 200, 'got 200 response');
             is($response->content, $expected, 'fh with offset content matches');
+        }
+    );
+};
+
+subtest 'fh response offset past EOF sends zero bytes' => sub {
+    # PAGI spec (Www.pod, Response Body validation): an offset past the end
+    # of the file SHOULD send zero bytes, not fail the response. Mirrors
+    # the file-past-EOF subtests above, but for an application-owned fh --
+    # unlike the file arm, the fh arm never stats the source, so past-EOF
+    # is a plain zero-byte read() at the sought position, not a clamped
+    # length computation.
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            open my $fh, '<:raw', $test_file or die "Cannot open: $!";
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                ],
+            });
+            await $send->({
+                type => 'http.response.body',
+                fh => $fh,
+                offset => 999_999_999,
+            });
+            close $fh;
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for fh offset past EOF');
+            is($response->content, '', 'fh offset past EOF returns empty content');
+        }
+    );
+};
+
+subtest 'fh response with offset on an unseekable pipe fails the send Future loudly' => sub {
+    my $future_error = '';
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            # A pipe's read end is not seekable: a nonzero offset forces
+            # _send_fh_response's seek() call, which fails with ESPIPE
+            # ("Illegal seek").
+            pipe(my $read_fh, my $write_fh) or die "pipe: $!";
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                ],
+            });
+
+            eval {
+                await $send->({
+                    type   => 'http.response.body',
+                    fh     => $read_fh,
+                    offset => 1,
+                });
+                1;
+            } or $future_error = $@;
+            $future_error =~ s/\n/ /g;
+
+            # Recover with a normal body so the client side doesn't hang --
+            # mirrors the closed-fh recovery idiom above.
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+
+            close $read_fh;
+            close $write_fh;
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'got 200 response');
+            like($response->content, qr/err=.*Cannot seek/,
+                'seek failure on an unseekable fh fails the Future loudly; app recovered');
         }
     );
 };
