@@ -261,7 +261,7 @@ HTTP/1.1 or HTTP/2.
 =head2 WebSocket over HTTP/2 (RFC 8441)
 
 PAGI::Server accepts a WebSocket upgrade over HTTP/2 through RFC 8441
-Extended CONNECT (C<:protocol => 'websocket'>). Each accepted stream carries
+Extended CONNECT (C<:protocol =E<gt> 'websocket'>). Each accepted stream carries
 its own C<websocket.receive>/C<websocket.disconnect> event stream,
 multiplexed alongside every other stream on the connection.
 
@@ -278,16 +278,23 @@ supersedes any keepalive already running on it, and C<interval =E<gt> 0>
 stops it. When C<timeout> is given and no pong arrives
 within it, only that stream closes -- code C<1006>, reason
 C<keepalive_timeout> -- other streams multiplexed on the same connection
-are unaffected. An omitted C<timeout> means the server never checks for a
-missing pong.
+are unaffected. That C<1006> is the code the application sees; it never
+reaches the wire, because RFC 6455 section 7.4.1 forbids C<1006> as the
+status code of a Close frame. A keepalive timeout sends no Close frame at
+all: it resets the stream (C<RST_STREAM>, error code C<CANCEL>), the
+HTTP/2 analogue of HTTP/1.1 dropping the transport. An omitted C<timeout>
+means the server never checks for a missing pong.
 
 =head3 Disconnect
 
-Each HTTP/2 WebSocket stream's scope receives exactly one
-C<websocket.disconnect> event, whichever of the conditions below closes it
-first. C<code> and C<reason> pair up the same way as
-L<PAGI::Spec::Www/"Disconnect - receive event"> describes for the
-reference server:
+Each HTTP/2 WebSocket stream enqueues exactly one C<websocket.disconnect>
+event onto its scope's receive queue, whichever of the conditions below
+closes it first: the closure paths all funnel through one deduplicating
+enqueue, so no closure can queue a second disconnect and no two closure
+paths can race to queue conflicting ones. C<code> and C<reason> pair up the
+same way as
+L<the WebSocket "Disconnect - receive event" section of PAGI::Spec::Www|PAGI::Spec::Www>
+describes for the reference server:
 
 =over 4
 
@@ -311,6 +318,16 @@ sent the Close frame itself. C<code> is the RFC 6455 code for the fault
 C<reason> is C<protocol_error>.
 
 =back
+
+"Exactly one" above is a property of the receive queue, not a hard cap on
+what any number of C<receive()> calls can ever return. Once the stream's
+state has been torn down -- the connection is closed, or the stream's state
+has already been reclaimed -- a further C<receive()> has no queue left to
+read and falls back to synthesizing a generic C<websocket.disconnect> with
+code C<1006> and an empty C<reason>. An application that keeps calling
+C<receive()> after its disconnect event therefore keeps getting that
+fallback rather than hanging. The queued disconnect (the one carrying the
+real code and reason from the table above) is still delivered exactly once.
 
 =head2 Connection State (pagi.connection)
 
