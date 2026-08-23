@@ -57,7 +57,7 @@ subtest 'SSE broadcaster streams events' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 5 unless $sock;
+        skip "Cannot connect", 7 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
@@ -82,6 +82,8 @@ subtest 'SSE broadcaster streams events' => sub {
 
         like($response, qr/HTTP\/1\.1 200/, 'SSE response is 200 OK');
         like($response, qr/content-type:\s*text\/event-stream/i, 'Content-Type is text/event-stream');
+        like($response, qr/cache-control:\s*no-cache/i, 'Cache-Control defaults to no-cache (design 11.4)');
+        like($response, qr/^date:\s*\S/im, 'Date header present by default (design 11.4)');
         like($response, qr/event: tick.*data: 1/s, 'First tick event received');
         like($response, qr/event: tick.*data: 2/s, 'Second tick event received');
         like($response, qr/event: done.*data: finished/s, 'Done event received');
@@ -439,6 +441,76 @@ subtest 'SSE id and retry fields' => sub {
 
         like($response, qr/id: msg-123/, 'id field present');
         like($response, qr/retry: 5000/, 'retry field present');
+    }
+
+    $server->shutdown->get;
+};
+
+# Test 6b: app-supplied Cache-Control/Date are not overridden (design 11.4:
+# server supplies these only when the app didn't).
+subtest 'SSE app-supplied Cache-Control and Date are preserved' => sub {
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [
+                [ 'content-type',  'text/event-stream' ],
+                [ 'cache-control', 'private, max-age=30' ],
+                [ 'date',          'Tue, 01 Jan 2030 00:00:00 GMT' ],
+            ],
+        });
+
+        await $send->({ type => 'sse.send', data => 'hello' });
+    };
+
+    my $server = create_server($test_app);
+    my $port = $server->port;
+
+    use IO::Socket::INET;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Accept: text/event-stream\r\n";
+        print $sock "\r\n";
+
+        $sock->blocking(0);
+        my $response = '';
+        my $deadline = time + 3;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) {
+                $response .= $buf;
+            }
+            $loop->loop_once(0.1);
+            last if $response =~ /data: hello/;
+        }
+        close $sock;
+
+        # Header block only, so the SSE body can't skew the counts below.
+        my ($header_block) = $response =~ /\A(.*?)\r\n\r\n/s;
+        $header_block //= '';
+        my @cache_control_lines = $header_block =~ /^cache-control:.*$/mig;
+        my @date_lines          = $header_block =~ /^date:.*$/mig;
+
+        is(scalar(@cache_control_lines), 1, 'exactly one Cache-Control header on the wire');
+        like($cache_control_lines[0] // '', qr/private, max-age=30/,
+            'app-supplied Cache-Control is preserved, not overridden with no-cache');
+        is(scalar(@date_lines), 1, 'exactly one Date header on the wire');
+        like($date_lines[0] // '', qr/Tue, 01 Jan 2030 00:00:00 GMT/,
+            'app-supplied Date is preserved, not overridden with the server clock');
     }
 
     $server->shutdown->get;

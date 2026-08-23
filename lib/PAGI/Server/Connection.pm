@@ -1895,7 +1895,11 @@ sub _h2_create_sse_send {
             if (!$has_content_type) {
                 push @final_headers, ['content-type', 'text/event-stream'];
             }
-            push @final_headers, ['cache-control', 'no-cache'];
+            # Cache-Control and Date: server-supplied only when the app didn't
+            # supply them (design doc section 11.4).
+            unless (grep { lc($_->[0]) eq 'cache-control' } @final_headers) {
+                push @final_headers, ['cache-control', 'no-cache'];
+            }
             # Server-supplied Date header (HTTP/1.1 parity) — the h1 SSE path adds
             # this too; add it unless the app supplied one.
             unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
@@ -4614,10 +4618,17 @@ sub _create_sse_send {
                 push @final_headers, ['content-type', 'text/event-stream'];
             }
 
-            # Add Cache-Control and Connection headers for SSE
-            push @final_headers, ['cache-control', 'no-cache'];
+            # Cache-Control and Date: server-supplied only when the app didn't
+            # supply them (design doc section 11.4). Connection is a framing
+            # header the protocol requires the server to control, so it is
+            # always advertised regardless of what the app sent.
+            unless (grep { lc($_->[0]) eq 'cache-control' } @final_headers) {
+                push @final_headers, ['cache-control', 'no-cache'];
+            }
             push @final_headers, ['connection', 'keep-alive'];
-            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
+                push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            }
 
             # SSE uses chunked encoding implicitly (no Content-Length)
             my $response = $weak_self->{protocol}->serialize_response_start(
