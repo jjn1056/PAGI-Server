@@ -527,8 +527,9 @@ DATA, completing a response whose data provider reserved END_STREAM for the
 trailers (a three-value C<($chunk, $eof, $no_end_stream)> data-callback
 return). C<headers> defaults to C<[]> for a declared-but-empty trailer
 block. Throws (via the underlying C<Net::HTTP2::nghttp2::Session>) on a
-malformed tuple, a pseudo-header name, or immediate nghttp2-level rejection
-(for example, the stream is already gone).
+malformed tuple or a pseudo-header name. An unknown or already-gone stream
+id does not throw -- it returns a falsy nghttp2 status; C<stream_id == 0> is
+the one id nghttp2 rejects with an immediate croak (invalid argument).
 
 =cut
 

@@ -764,11 +764,15 @@ sub _h2_on_close {
     #      out and the stream ended cleanly: a completion, not a disconnect.
     #   2. no error code but the response never reached 'complete' -- the
     #      stream ended early with no h2-level error, which on this side only
-    #      the server can cause (h2 puts END_STREAM on the terminal body, so
-    #      an app that declared trailers and never sent them lands here).
-    #      An early end to an unfinished response is an incomplete response
-    #      per the PAGI spec, and the fault is the server's: the client did
-    #      nothing and must not be blamed with 'client_closed'.
+    #      the server can cause. (A declared-but-unsent-trailers response, or
+    #      any other response left started-but-incomplete, does NOT land
+    #      here today: the dispatch wrapper resets it with RST_STREAM
+    #      INTERNAL_ERROR -- a NONZERO code -- so that case falls into
+    #      outcome 3 below. This branch is kept for any other server-caused
+    #      clean end that leaves seq_state short of 'complete'.) An early
+    #      end to an unfinished response is an incomplete response per the
+    #      PAGI spec, and the fault is the server's: the client did nothing
+    #      and must not be blamed with 'client_closed'.
     #   3. a nonzero error code -- the peer reset the stream (CANCEL,
     #      INTERNAL_ERROR, ...): the client went away.
     #
@@ -901,12 +905,14 @@ sub _h2_dispatch_stream {
             # only if nghttp2 still owns the stream.
             #
             # A recorded reason of 'server_error' is NOT a client-gone signal:
-            # it means the SERVER caused the abnormal end (e.g. _h2_on_close's
-            # early-END_STREAM fork for a trailers-declared response that
-            # never sent its trailers). Per the PAGI spec's incomplete-
-            # response section, the log carve-out exists only for "the client
-            # had already disconnected" -- so server-caused ends must still
-            # warn.
+            # it means the SERVER caused the abnormal end (e.g. this very
+            # dispatch wrapper's own incomplete-response branch below marks
+            # server_error before resetting the stream with RST_STREAM
+            # INTERNAL_ERROR for a response left started-but-unfinished,
+            # including a trailers-declared response that never sent its
+            # trailers). Per the PAGI spec's incomplete-response section, the
+            # log carve-out exists only for "the client had already
+            # disconnected" -- so server-caused ends must still warn.
             #
             # $stream_alive is entry-exists-AND-not-yet-closed, not merely
             # entry-exists: _h2_on_close marks $stream->{h2_closed} the
@@ -1212,10 +1218,14 @@ sub _h2_create_send {
         # the doomed-but-still-present carve-out pattern used across this
         # file (h2_closed set, entry not yet reclaimed): don't reach
         # nghttp2 a second time on a stream id it may already be tearing
-        # down. Whichever close path set h2_closed (_h2_on_close / the 413
-        # early-close branch / _close) already releases -- or is about to
-        # release -- trailer_wait itself, so there's nothing left to do
-        # here.
+        # down. Two close paths, two mechanisms, same outcome -- there's
+        # nothing left to do here either way: _h2_on_close and the 413
+        # early-close branch set h2_closed on the still-present entry
+        # (caught by the check below), while a whole-connection _close
+        # deletes the h2_streams entry outright (so $ss2 comes back undef
+        # here) and releases trailer_wait itself via its own sweep. Either
+        # way, whichever close path is running has already released -- or
+        # is about to release -- trailer_wait.
         return if $ss2 && $ss2->{h2_closed};
         my $ok = eval {
             $weak_self->{h2_session}->submit_trailer($stream_id, headers => $headers);
@@ -1529,6 +1539,22 @@ sub _h2_create_send {
                 $ss->{seq_state} = $seq if $ss;
                 die $err;
             }
+
+            # Stream-existence re-check, same discipline as every sibling
+            # await site's own $ss re-fetch (e.g. $emit_chunk above): the
+            # connection-liveness check at :1524 only covers the deferred
+            # branch and only the connection, not this stream specifically.
+            # Placed AFTER the rollback above (not folded into :1524) so a
+            # deferred native failure still reaches its rollback+die even if
+            # the stream looks gone by the time we get here -- only the
+            # success-path tail below, which is about to call resume_stream/
+            # _h2_write_pending on this stream id again, needs the guard.
+            # A gone stream here is the h2_closed carve-out's ordinary
+            # "successful no-op" case: the trailers already landed (ok=1)
+            # before the stream went away, so returning quietly is correct,
+            # not a swallowed error.
+            $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
+            return if !$ss || $ss->{h2_closed};
 
             # Flush any still-queued DATA before the trailing HEADERS --
             # nghttp2 orders trailers after queued data on its own, but the

@@ -102,8 +102,9 @@
     "recommends" phrasing: constructing a PAGI::Server with http2 => 1 (or
     --http2 on the command line) against an installed Net::HTTP2::nghttp2
     below 0.009 now dies immediately with an explicit
-    "HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed"
-    error and install instructions, instead of starting. A deployment on
+    "HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed, or
+    is older than 0.009" error and install instructions, instead of
+    starting. A deployment on
     0.008 requesting HTTP/2 must upgrade Net::HTTP2::nghttp2 (or drop
     http2 => 1) before the server will start at all. HTTP/1.1-only
     deployments are unaffected.

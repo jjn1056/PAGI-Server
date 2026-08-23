@@ -420,8 +420,10 @@ nothing were missing, so the incompleteness is observable to the client.
 
 PAGI::Server also accepts request trailers from the client -- a C<HEADERS>
 block following the request's initial headers and any C<DATA> frames (RFC
-9113 section 8.1). The fields are validated with the same name/value byte
-rules as any other header block and then discarded: PAGI defines no
+9113 section 8.1). PAGI::Server accumulates the field list from nghttp2's own
+C<on_header> callback -- nghttp2 itself, not a PAGI-side check, is what
+enforces the field is well-formed at the HPACK/HTTP-messaging layer before
+that callback ever fires -- and then discards it: PAGI defines no
 request-trailer receive event yet, so an application never sees them. If
 C<END_STREAM> rides the trailer C<HEADERS> instead of a C<DATA> frame, the
 request body still completes normally for the application. A pseudo-header

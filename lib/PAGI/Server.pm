@@ -2383,7 +2383,8 @@ sub _init {
             }
         } else {
             die <<"END_HTTP2_ERROR";
-HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed.
+HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed, or is
+older than @{[ PAGI::Server::Protocol::HTTP2::MIN_NGHTTP2_VERSION() ]}.
 
 To install:
     cpanm Net::HTTP2::nghttp2
