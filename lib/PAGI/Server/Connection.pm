@@ -645,6 +645,17 @@ sub _h2_on_close {
     my $stream = $self->{h2_streams}{$stream_id};
     return unless $stream;
 
+    # Record death at the earliest possible moment -- before any of the
+    # deferred work below (including this function's own loop->later
+    # delete of the h2_streams entry further down). nghttp2 has already
+    # forgotten this stream by the time this callback fires, but the
+    # entry stays in h2_streams for one more tick so pending futures can
+    # resolve. The dispatch wrapper's liveness check may run nested
+    # inside this very call (a woken receive() future can resume an
+    # app's async sub synchronously), so it needs a fact that flips true
+    # HERE, not one that only becomes true once the deferred delete runs.
+    $stream->{h2_closed} = 1;
+
     # This stream is going away one way or another -- stop its keepalive
     # (and, for SSE, idle) timers so they don't fire (or leak) after the
     # stream state is reclaimed.
@@ -774,8 +785,8 @@ sub _h2_dispatch_stream {
             # fully-delivered response. An abnormal end has a
             # disconnect_reason; a clean completion leaves it undef.
             # Streams with no connection_state (WebSocket/SSE) fall back to
-            # the h2_streams entry, whose deferred delete is the only
-            # gone-signal they have.
+            # a liveness fact ($stream_alive below) that is true if and
+            # only if nghttp2 still owns the stream.
             #
             # A recorded reason of 'server_error' is NOT a client-gone signal:
             # it means the SERVER caused the abnormal end (e.g. _h2_on_close's
@@ -784,9 +795,27 @@ sub _h2_dispatch_stream {
             # response section, the log carve-out exists only for "the client
             # had already disconnected" -- so server-caused ends must still
             # warn.
+            #
+            # $stream_alive is entry-exists-AND-not-yet-closed, not merely
+            # entry-exists: _h2_on_close marks $stream->{h2_closed} the
+            # instant it runs, but its h2_streams delete is deferred one
+            # tick (loop->later) so pending futures can resolve. Waking
+            # this very Future is one of those pending resolutions -- a
+            # receive() blocked on body_pending can be woken by
+            # _h2_on_close and resume this app synchronously, landing here
+            # before that deferred delete has run. Keying liveness off
+            # entry-existence alone (as before) missed exactly that
+            # window: nghttp2 had already forgotten the stream, but
+            # h2_streams still had it, so the carve-out below saw a "live"
+            # stream and went on to call submit_response/submit_rst_stream
+            # on a stream id nghttp2 no longer tracks -- undefined
+            # behavior at the C level, not something the surrounding eval
+            # can catch.
+            my $stream_alive = $weak_self->{h2_streams}{$stream_id}
+                                && !$weak_self->{h2_streams}{$stream_id}{h2_closed};
             my $reason = $cs ? $cs->disconnect_reason : undef;
             my $client_gone = $cs ? (defined($reason) && $reason ne 'server_error')
-                                  : !$weak_self->{h2_streams}{$stream_id};
+                                  : !$stream_alive;
 
             if ($client_gone) {
                 # Nothing to do.
