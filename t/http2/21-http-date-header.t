@@ -45,13 +45,15 @@ sub create_h2c_connection {
     $sock_a->blocking(0);
     $sock_b->blocking(0);
     my $app = $overrides{app} // sub { };
-    my $server = $overrides{server} // create_test_server(app => $app);
+    my $server = $overrides{server} // create_test_server(app => $app, %overrides);
     my $stream = IO::Async::Stream->new(
         read_handle => $sock_a, write_handle => $sock_a, on_read => sub { 0 },
     );
     my $conn = PAGI::Server::Connection->new(
         stream => $stream, app => $app, protocol => $protocol, server => $server,
-        h2_protocol => $server->{http2_protocol}, h2c_enabled => $server->{h2c_enabled},
+        h2_protocol   => $server->{http2_protocol},
+        h2c_enabled   => $server->{h2c_enabled},
+        max_body_size => $overrides{max_body_size} // $server->{max_body_size},
     );
     $server->add_child($stream);
     $conn->start;
@@ -151,6 +153,237 @@ subtest 'HTTP/2 SSE response also includes a Date header (same as HTTP/1.1)' => 
     pump($client, $client_sock, sub { defined $headers{date} });
 
     ok(defined $headers{date}, 'HTTP/2 SSE response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Design 13.1: Date must be added on the server-generated response paths
+# too, not just the app-driven ones above -- 413 (both the content-length
+# precheck and the body-overrun enforcement), the synthesized 500, and the
+# WebSocket bare-403 fallback build their header lists entirely on the
+# server side.
+# ============================================================
+
+subtest 'HTTP/2 413 (content-length precheck) includes a Date header' => sub {
+    my $app_called = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $app_called = 1;
+        await $receive->();
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app => $app, max_body_size => 100,
+    );
+
+    my %headers;
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'POST', path => '/upload', scheme => 'http', authority => 'localhost',
+        headers => [['content-type', 'application/octet-stream'], ['content-length', '50000']],
+        body    => sub { return undef },  # streaming: keep open
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { $stream_closed });
+
+    is($headers{':status'}, '413', 'content-length precheck rejected with 413');
+    ok(!$app_called, 'app was never called');
+    ok(defined $headers{date}, 'HTTP/2 413 (precheck) response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 413 (body overrun) includes a Date header' => sub {
+    my $app_saw_body = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $event = await $receive->();
+        $app_saw_body = 1 if $event->{type} eq 'http.request';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app => $app, max_body_size => 100,
+    );
+
+    my %headers;
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'POST', path => '/upload', scheme => 'http', authority => 'localhost',
+        headers => [['content-type', 'application/octet-stream']],
+        body    => 'X' x 200,
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { $stream_closed });
+
+    is($headers{':status'}, '413', 'body-overrun rejected with 413');
+    ok(!$app_saw_body, 'app never saw the request body');
+    ok(defined $headers{date}, 'HTTP/2 413 (overrun) response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 synthesized 500 includes a Date header' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        die "app blew up\n";
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $stream_closed = 0;
+    local $SIG{__WARN__} = sub { };  # the app error is expected; keep test output pristine
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { $stream_closed });
+
+    is($headers{':status'}, '500', 'app exception synthesizes a 500');
+    ok(defined $headers{date}, 'HTTP/2 synthesized 500 response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 WebSocket denial response includes a Date header' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();  # websocket.connect
+        await $send->({
+            type => 'websocket.http.response.start', status => 401,
+            headers => [['x-deny', 'auth']],
+        });
+        await $send->({ type => 'websocket.http.response.body', body => 'nope' });
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'CONNECT', path => '/ws/test', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body    => sub { return undef },  # streaming: keep open
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { defined $headers{':status'} && $headers{':status'} eq '401' });
+
+    is($headers{':status'}, '401', 'custom denial status used');
+    ok(defined $headers{date}, 'HTTP/2 WebSocket denial response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 WebSocket bare-403 fallback includes a Date header' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();  # websocket.connect
+        await $send->({ type => 'websocket.close' });
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'CONNECT', path => '/ws/reject', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body    => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { defined $headers{':status'} && $headers{':status'} eq '403' });
+
+    is($headers{':status'}, '403', 'bare websocket.close still gives 403');
+    ok(defined $headers{date}, 'HTTP/2 WebSocket bare-403 response carries a Date header');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 SSE decline response includes a Date header' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({
+            type => 'sse.http.response.start', status => 404,
+            headers => [['content-type', 'text/plain']],
+        });
+        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
+        headers => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { defined $headers{':status'} });
+
+    is($headers{':status'}, '404', 'SSE decline uses the app-declared status');
+    ok(defined $headers{date}, 'HTTP/2 SSE decline response carries a Date header');
 
     $stream_io->close_now;
     $loop->remove($server);

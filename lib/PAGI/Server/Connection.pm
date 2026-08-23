@@ -511,7 +511,10 @@ sub _h2_on_request {
                         return if $ws->{closed};
                         $ws->{h2_session}->submit_response($stream_id,
                             status  => 413,
-                            headers => [['content-type', 'text/plain']],
+                            headers => [
+                                ['content-type', 'text/plain'],
+                                ['date', $ws->{protocol}->format_date],
+                            ],
                             body    => "Payload Too Large\n",
                         );
                         $ws->_h2_write_pending;
@@ -557,7 +560,10 @@ sub _h2_on_body {
         if ($self->{max_body_size} && length($stream->{body}) > $self->{max_body_size}) {
             $self->{h2_session}->submit_response($stream_id,
                 status  => 413,
-                headers => [['content-type', 'text/plain']],
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['date', $self->{protocol}->format_date],
+                ],
                 body    => 'Payload Too Large',
             );
             # No _h2_write_pending here — we're inside feed(); _h2_process_data
@@ -853,7 +859,10 @@ sub _h2_dispatch_stream {
                 eval {
                     $weak_self->{h2_session}->submit_response($stream_id,
                         status  => 500,
-                        headers => [['content-type', 'text/plain']],
+                        headers => [
+                            ['content-type', 'text/plain'],
+                            ['date', $weak_self->{protocol}->format_date],
+                        ],
                         body    => "Internal Server Error\n",
                     );
                     $weak_self->_h2_write_pending;
@@ -1685,6 +1694,9 @@ sub _h2_create_websocket_send {
             return if $event->{more};   # more chunks coming — keep buffering
 
             $ss->{response_started} = 1;
+            unless (grep { lc($_->[0]) eq 'date' } @{$ss->{ws_denial_headers}}) {
+                push @{$ss->{ws_denial_headers}}, ['date', $weak_self->{protocol}->format_date];
+            }
             $weak_self->{h2_session}->submit_response($stream_id,
                 status  => $ss->{ws_denial_status},
                 headers => $ss->{ws_denial_headers},
@@ -1697,7 +1709,10 @@ sub _h2_create_websocket_send {
                 # Reject: send 403
                 $weak_self->{h2_session}->submit_response($stream_id,
                     status  => 403,
-                    headers => [['content-type', 'text/plain']],
+                    headers => [
+                        ['content-type', 'text/plain'],
+                        ['date', $weak_self->{protocol}->format_date],
+                    ],
                     body    => 'Forbidden',
                 );
                 $weak_self->_h2_write_pending;
@@ -2134,6 +2149,9 @@ sub _h2_create_sse_send {
             $weak_self->_h2_stop_sse_idle_timer($ss);
 
             $ss->{response_started} = 1;
+            unless (grep { lc($_->[0]) eq 'date' } @{$ss->{sse_decline_headers}}) {
+                push @{$ss->{sse_decline_headers}}, ['date', $weak_self->{protocol}->format_date];
+            }
             $weak_self->{h2_session}->submit_response($stream_id,
                 status  => $ss->{sse_decline_status},
                 headers => $ss->{sse_decline_headers},
@@ -3638,9 +3656,11 @@ sub _create_send {
                 }
             }
 
-            # Add Date header
+            # Add Date header, but only if the app didn't already supply one.
             my @final_headers = @$headers;
-            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
+                push @final_headers, ['date', $weak_self->{protocol}->format_date];
+            }
 
             # For HEAD requests, don't use chunked encoding (no body will be sent)
             # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
@@ -4874,8 +4894,10 @@ sub _create_sse_send {
             my @headers = (
                 @{$weak_self->{sse_decline_headers}},
                 ['content-length', length $body],
-                ['date', $weak_self->{protocol}->format_date],
             );
+            unless (grep { lc($_->[0]) eq 'date' } @headers) {
+                push @headers, ['date', $weak_self->{protocol}->format_date];
+            }
             # This response is always followed by closing the connection; tell
             # a keep-alive-pooling client so it doesn't reuse a dead socket.
             unless (grep { lc($_->[0]) eq 'connection' } @headers) {
@@ -5233,8 +5255,10 @@ sub _create_websocket_send {
             my @headers = (
                 @{$weak_self->{ws_denial_headers}},
                 ['content-length', length $body],
-                ['date', $weak_self->{protocol}->format_date],
             );
+            unless (grep { lc($_->[0]) eq 'date' } @headers) {
+                push @headers, ['date', $weak_self->{protocol}->format_date];
+            }
             my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
             $response .= $body;
             $weak_self->{stream}->write($response);
