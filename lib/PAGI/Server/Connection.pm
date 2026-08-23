@@ -3056,6 +3056,91 @@ sub _create_scope {
     return $scope;
 }
 
+# Shared by _create_receive (http.request) and _create_sse_receive
+# (sse.request): parses one attempt's worth of a chunked Transfer-Encoding
+# request body out of $self->{buffer}, waiting for more bytes if none are
+# available yet. Returns the next event for the caller's receive() closure
+# to return directly -- a body event (event_type/body/more), the caller's
+# disconnect event (via $make_disconnect on a protocol error, an oversized
+# body, or the connection closing), or a truthful more=>1 placeholder when
+# a receive_pending wake produced no parseable chunk yet.
+#
+# $body_complete_ref/$bytes_read_ref are scalar refs into the caller's own
+# closure-local state so it persists across receive() calls; $event_type
+# is 'http.request' or 'sse.request'; $make_disconnect is a coderef
+# producing this scope's disconnect event ({type=>'http.disconnect'} or
+# the SSE closure's sse.disconnect constructor).
+async sub _read_chunked_body {
+    my ($self, $event_type, $make_disconnect, $body_complete_ref, $bytes_read_ref) = @_;
+
+    # Wait for data if buffer is empty
+    while (length($self->{buffer}) == 0 && !$self->{closed}) {
+        if (!$self->{receive_pending}) {
+            $self->{receive_pending} = Future->new;
+        }
+        await $self->{receive_pending};
+        $self->{receive_pending} = undef;
+
+        # Check queue after waiting
+        if (@{$self->{receive_queue}}) {
+            return shift @{$self->{receive_queue}};
+        }
+    }
+
+    return $make_disconnect->()
+        if $self->{closed} && length($self->{buffer}) == 0;
+
+    # Try to parse chunked data
+    my ($data, $consumed, $complete) = $self->{protocol}->parse_chunked_body($self->{buffer});
+
+    # Check for parse error (invalid chunk size)
+    if (ref($data) eq 'HASH' && $data->{error}) {
+        $self->_handle_disconnect('protocol_error');
+        $self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
+        $self->_close;
+        return $make_disconnect->();
+    }
+
+    if ($consumed > 0) {
+        substr($self->{buffer}, 0, $consumed) = '';
+
+        # Track total bytes read for max_body_size check
+        $$bytes_read_ref += length($data // '');
+
+        # Check max_body_size for chunked requests (0 = unlimited)
+        if ($self->{max_body_size} && $$bytes_read_ref > $self->{max_body_size}) {
+            # Body too large - close connection
+            $self->_send_error_response(413, 'Payload Too Large');
+            $self->_handle_disconnect('body_too_large');
+            $self->_close;
+            return $make_disconnect->();
+        }
+
+        if ($complete) {
+            $$body_complete_ref = 1;
+        }
+
+        return {
+            type => $event_type,
+            body => $data // '',
+            more => $complete ? 0 : 1,
+        };
+    }
+
+    # Need more data - wait for it
+    if (!$self->{receive_pending}) {
+        $self->{receive_pending} = Future->new;
+    }
+    await $self->{receive_pending};
+    $self->{receive_pending} = undef;
+
+    # Recursive call to re-process - but we can't use __SUB__ in nested async
+    # Just return disconnect if closed
+    return $make_disconnect->() if $self->{closed};
+    # This shouldn't happen often - caller should retry
+    return { type => $event_type, body => '', more => 1 };
+}
+
 sub _create_receive {
     my ($self, $request) = @_;
 
@@ -3127,69 +3212,12 @@ sub _create_receive {
 
             # Handle chunked Transfer-Encoding
             if ($is_chunked) {
-                # Wait for data if buffer is empty
-                while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-                    if (!$weak_self->{receive_pending}) {
-                        $weak_self->{receive_pending} = Future->new;
-                    }
-                    await $weak_self->{receive_pending};
-                    $weak_self->{receive_pending} = undef;
-
-                    # Check queue after waiting
-                    if (@{$weak_self->{receive_queue}}) {
-                        return shift @{$weak_self->{receive_queue}};
-                    }
-                }
-
-                # Try to parse chunked data
-                my ($data, $consumed, $complete) = $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
-
-                # Check for parse error (invalid chunk size)
-                if (ref($data) eq 'HASH' && $data->{error}) {
-                    $weak_self->_handle_disconnect('protocol_error');
-                    $weak_self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
-                    $weak_self->_close;
-                    return { type => 'http.disconnect' };
-                }
-
-                if ($consumed > 0) {
-                    substr($weak_self->{buffer}, 0, $consumed) = '';
-
-                    # Track total bytes read for max_body_size check
-                    $bytes_read += length($data // '');
-
-                    # Check max_body_size for chunked requests (0 = unlimited)
-                    if ($weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
-                        # Body too large - close connection
-                        $weak_self->_send_error_response(413, 'Payload Too Large');
-                        $weak_self->_handle_disconnect('body_too_large');
-                        $weak_self->_close;
-                        return { type => 'http.disconnect' };
-                    }
-
-                    if ($complete) {
-                        $body_complete = 1;
-                    }
-
-                    return {
-                        type => 'http.request',
-                        body => $data // '',
-                        more => $complete ? 0 : 1,
-                    };
-                }
-
-                # Need more data - wait for it
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-                await $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
-
-                # Recursive call to re-process - but we can't use __SUB__ in nested async
-                # Just return disconnect if closed
-                return { type => 'http.disconnect' } if $weak_self->{closed};
-                # This shouldn't happen often - caller should retry
-                return { type => 'http.request', body => '', more => 1 };
+                return await $weak_self->_read_chunked_body(
+                    'http.request',
+                    sub { { type => 'http.disconnect' } },
+                    \$body_complete,
+                    \$bytes_read,
+                );
             }
 
             # Handle Content-Length based body reading
@@ -4125,64 +4153,12 @@ sub _create_sse_receive {
                 }
 
                 if ($is_chunked) {
-                    # Wait for data if buffer is empty
-                    while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-                        if (!$weak_self->{receive_pending}) {
-                            $weak_self->{receive_pending} = Future->new;
-                        }
-                        await $weak_self->{receive_pending};
-                        $weak_self->{receive_pending} = undef;
-
-                        if (@{$weak_self->{receive_queue}}) {
-                            return shift @{$weak_self->{receive_queue}};
-                        }
-                    }
-
-                    return $sse_disconnect->()
-                        if $weak_self->{closed} && length($weak_self->{buffer}) == 0;
-
-                    my ($data, $consumed, $complete) =
-                        $weak_self->{protocol}->parse_chunked_body($weak_self->{buffer});
-
-                    # Check for parse error (invalid chunk size)
-                    if (ref($data) eq 'HASH' && $data->{error}) {
-                        $weak_self->_handle_disconnect('protocol_error');
-                        $weak_self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
-                        $weak_self->_close;
-                        return $sse_disconnect->();
-                    }
-
-                    if ($consumed > 0) {
-                        substr($weak_self->{buffer}, 0, $consumed) = '';
-                        $bytes_read += length($data // '');
-
-                        # Check max_body_size for chunked requests (0 = unlimited)
-                        if ($weak_self->{max_body_size} && $bytes_read > $weak_self->{max_body_size}) {
-                            $weak_self->_send_error_response(413, 'Payload Too Large');
-                            $weak_self->_handle_disconnect('body_too_large');
-                            $weak_self->_close;
-                            return $sse_disconnect->();
-                        }
-
-                        $body_complete = 1 if $complete;
-
-                        return {
-                            type => 'sse.request',
-                            body => $data // '',
-                            more => $complete ? 0 : 1,
-                        };
-                    }
-
-                    # Need more data -- wait and let the next receive() call
-                    # re-drive parsing (mirrors _create_receive's chunked path).
-                    if (!$weak_self->{receive_pending}) {
-                        $weak_self->{receive_pending} = Future->new;
-                    }
-                    await $weak_self->{receive_pending};
-                    $weak_self->{receive_pending} = undef;
-
-                    return $sse_disconnect->() if $weak_self->{closed};
-                    return { type => 'sse.request', body => '', more => 1 };
+                    return await $weak_self->_read_chunked_body(
+                        'sse.request',
+                        $sse_disconnect,
+                        \$body_complete,
+                        \$bytes_read,
+                    );
                 }
 
                 my $remaining = $content_length - $bytes_read;
