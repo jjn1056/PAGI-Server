@@ -583,6 +583,28 @@ sub _h2_on_body {
                 $self->_h2_stop_sse_keepalive($stream);
                 $self->_h2_stop_sse_idle_timer($stream);
             }
+
+            # Unblock a pending receive() instead of leaving it hanging
+            # forever: mark the body complete, queue this scope's disconnect
+            # event, drive connection_state (http scopes only -- sse/ws
+            # scopes never attach one, per spec), then wake body_pending.
+            # Order matters: the queued event must land BEFORE the wake so a
+            # parked receive() sees it (both h2 receive closures check the
+            # queue first on resume), and all of this must happen BEFORE the
+            # delete below, after which the stream state is unreachable.
+            $stream->{body_complete} = 1;
+            if ($stream->{is_sse}) {
+                push @{$stream->{receive_queue}}, {
+                    type   => 'sse.disconnect',
+                    reason => 'body_too_large',
+                };
+            } elsif (!$stream->{is_websocket}) {
+                push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
+            }
+            $stream->{connection_state}->_mark_disconnected('body_too_large')
+                if $stream->{connection_state};
+            $self->_h2_wake_pending($stream);
+
             delete $self->{h2_streams}{$stream_id};
             return;
         }

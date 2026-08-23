@@ -480,6 +480,117 @@ subtest 'content-length exceeding max_body_size rejected early with 413' => sub 
 };
 
 # ============================================================
+# max_body_size 413 overrun wakes a PENDING receive() (regression: today the
+# overrun branch in _h2_on_body submits the 413 and deletes the stream state
+# without ever setting body_complete, queueing a disconnect event, or waking
+# body_pending -- an app parked on receive() hangs forever and $cs never
+# leaves 'connected'.)
+# ============================================================
+subtest 'max_body_size 413 overrun wakes pending receive() with http.disconnect and marks body_too_large' => sub {
+    my ($receive_resolved, $receive_event, $disconnect_reason, $cs);
+    my @app_warnings;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $cs = $scope->{'pagi.connection'};
+        $cs->on_disconnect(sub { $disconnect_reason = $_[0] });
+        $receive_event = await $receive->();
+        $receive_resolved = 1;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app           => $app,
+        max_body_size => 40,
+    );
+
+    my %response_headers;
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+    );
+
+    h2c_handshake($client, $client_sock);
+
+    # Streaming body (no content-length header) so the early content-length
+    # rejection doesn't fire and the app gets dispatched and parked on
+    # receive() before any body data overruns max_body_size.
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/overrun',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['content-type', 'application/octet-stream']],
+        body      => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    local $SIG{__WARN__} = sub { push @app_warnings, $_[0] };
+
+    # Poll (bounded) until the app is dispatched and parked on receive()
+    # (body_pending armed but not yet resolved), so the overrun below is
+    # guaranteed to land on a PENDING receive, not a not-yet-dispatched one.
+    my $dispatched = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        my $ss = $conn->{h2_streams}{$stream_id};
+        if ($ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app dispatched and parked on receive() before the overrun')
+        or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
+
+    # Push body data past max_body_size (40 bytes).
+    $client->submit_data($stream_id, ('X' x 100), 0);
+    $client_sock->syswrite($client->mem_send);
+
+    # Bounded wait (never an unbounded hang) for both the app's parked
+    # receive() to resolve AND the 413 response headers to reach the client
+    # -- the response write is flushed on a later loop tick than the one
+    # that resolves receive_resolved, so waiting on receive_resolved alone
+    # can exit before the client has read the response.
+    my $settled = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        if ($receive_resolved && exists $response_headers{':status'}) {
+            $settled = 1;
+            last;
+        }
+    }
+    ok($settled, 'pending receive() resolved and the 413 reached the client within the bounded wait')
+        or diag('receive_resolved=' . ($receive_resolved // 0)
+                 . ' status=' . ($response_headers{':status'} // '<none>'));
+
+    is($response_headers{':status'}, '413', 'client still sees the 413');
+    ok($receive_resolved, 'pending receive() resolved instead of hanging forever');
+    is($receive_event->{type}, 'http.disconnect', 'receive resolved to http.disconnect');
+    is($disconnect_reason, 'body_too_large', 'on_disconnect fired with body_too_large');
+    ok($cs && !$cs->is_connected, 'connection_state left the connected state');
+    ok(!exists $conn->{h2_streams}{$stream_id},
+        'server-side stream state reclaimed after the overrun');
+    ok(!(grep { /returned without starting a response/ } @app_warnings),
+        'dispatch wrapper did not synthesize a second (500) response over the 413')
+        or diag(join('', @app_warnings));
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
 # RST_STREAM from client during streaming response
 # ============================================================
 subtest 'RST_STREAM from client does not crash server' => sub {
