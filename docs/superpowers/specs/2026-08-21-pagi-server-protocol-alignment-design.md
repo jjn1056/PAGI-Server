@@ -682,12 +682,15 @@ HTTP/2 response path destroys the response — the client receives only the
 `:status` pseudo-header, with no body.
 
 HTTP/2 therefore strips these six header names case-insensitively from every
-application-supplied response header list before submission, on all four
+application-supplied response header list before submission, on all five
 paths that map an application's headers onto an HTTP/2 response: HTTP
 (`http.response.start`, including the HEAD path, which reuses that same
-header list), SSE start, WebSocket denial, and SSE decline. `te` is stripped
-unless its value is `trailers` (case-insensitively compared, per the RFC 9113
-token). The server logs one warning per stripped header name:
+header list), WebSocket accept, WebSocket denial, SSE start, and SSE decline.
+`te` is stripped unless its value — trimmed of leading/trailing whitespace
+(OWS) and compared case-insensitively — is exactly the RFC 9113 token
+`trailers`; a compound value such as `trailers, gzip` is still stripped. The
+server logs one warning per stripped header (each occurrence, not
+deduplicated by name):
 
 ```
 PAGI: connection-specific header '<name>' stripped from HTTP/2 response (RFC 9113)

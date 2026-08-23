@@ -50,7 +50,8 @@ my %H2_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 }
     qw(connection keep-alive proxy-connection transfer-encoding upgrade te);
 
 # Returns a new arrayref with connection-specific header pairs removed,
-# warning once per stripped name. Does not mutate $headers.
+# warning once per stripped occurrence (not deduplicated by name -- two
+# 'keep-alive' headers warn twice). Does not mutate $headers.
 sub _h2_strip_connection_headers {
     my ($headers) = @_;
     my @kept;
@@ -60,10 +61,16 @@ sub _h2_strip_connection_headers {
         if ($H2_CONNECTION_SPECIFIC_HEADER{$lc_name}) {
             # RFC 9113 permits 'te' only with the exact token 'trailers'; a
             # case-insensitive VALUE compare (not a name/list match) is what
-            # the token grammar calls for.
-            if ($lc_name eq 'te' && lc($value) eq 'trailers') {
-                push @kept, $h;
-                next;
+            # the token grammar calls for. OWS (leading/trailing whitespace)
+            # around the token is trimmed before the compare, per RFC 9110's
+            # field-value grammar -- a compound value like 'trailers, gzip'
+            # is not the bare token and is still stripped.
+            if ($lc_name eq 'te') {
+                (my $v = lc $value) =~ s/^\s+|\s+\z//g;
+                if ($v eq 'trailers') {
+                    push @kept, $h;
+                    next;
+                }
             }
             warn "PAGI: connection-specific header '$name' stripped from HTTP/2 response (RFC 9113)\n";
             next;
@@ -1674,6 +1681,9 @@ sub _h2_create_websocket_send {
                     [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
                 } @$extra;
             }
+            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
+            # transfer-encoding, etc. before submission.
+            @headers = @{ _h2_strip_connection_headers(\@headers) };
 
             $ss->{ws_accepted} = 1;
             $ss->{response_started} = 1;

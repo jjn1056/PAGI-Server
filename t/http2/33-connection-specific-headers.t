@@ -202,6 +202,100 @@ subtest "te: 'trailers' is preserved, not stripped" => sub {
     $loop->remove($server);
 };
 
+subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({
+            type => 'http.response.start', status => 200,
+            headers => [['te', "  trailers  "], ['x-marker', 'ok']],
+        });
+        await $send->({ type => 'http.response.body', body => 'unharmed', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $body = '';
+    my $stream_closed = 0;
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+        on_data_chunk_recv => sub { my ($sid, $data) = @_; $body .= $data; return 0 },
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { $stream_closed });
+
+    ok($stream_closed, 'request completed');
+    is($headers{':status'}, '200', 'status arrived');
+    is($body, 'unharmed', 'response is not corrupted by an OWS-padded te: trailers');
+    is($headers{'x-marker'}, 'ok', 'a sibling app header still arrives intact');
+    ok(!(grep { /connection-specific header/ } @warnings),
+        "no strip warning for te with OWS around trailers -- the compare correctly recognizes the token");
+
+    # nghttp2 itself silently drops header field values carrying leading or
+    # trailing whitespace (RFC 9113 8.2.1 forbids OWS in field values) before
+    # the frame reaches the wire -- confirmed by direct inspection, this is
+    # independent of and unaffected by the connection-specific-header strip
+    # under test here, so the 'te' header itself is not observed by the
+    # client even though our code never flagged it as a violation.
+    ok(!exists $headers{'te'}, "the 'te' header itself does not survive nghttp2's own OWS field-value rule");
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest "te: a compound value ('trailers, gzip') is still stripped" => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({
+            type => 'http.response.start', status => 200,
+            headers => [['te', 'trailers, gzip'], ['content-type', 'text/plain']],
+        });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my $stream_closed = 0;
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { $stream_closed });
+
+    ok($stream_closed, 'request completed');
+    is($headers{':status'}, '200', 'status arrived');
+    ok(!exists $headers{'te'}, "compound te value is stripped, not just the bare token");
+    is(scalar(grep { /connection-specific header/ } @warnings), 1, 'one strip warning for the compound te value');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 subtest 'HTTP/2 sse.start strips connection-specific headers' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -239,6 +333,50 @@ subtest 'HTTP/2 sse.start strips connection-specific headers' => sub {
     like($body, qr/data: hello\n/, 'SSE event body arrived intact');
     ok(!exists $headers{'connection'}, "'connection' stripped from the SSE response");
     ok(!exists $headers{'transfer-encoding'}, "'transfer-encoding' stripped from the SSE response");
+
+    my @strip_warnings = grep { /connection-specific header/ } @warnings;
+    is(scalar(@strip_warnings), 2, 'one warning per stripped header name');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'HTTP/2 websocket.accept strips connection-specific headers' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();  # websocket.connect
+        await $send->({
+            type => 'websocket.accept',
+            headers => [['connection', 'keep-alive'], ['transfer-encoding', 'chunked'], ['x-custom', 'ok']],
+        });
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my %headers;
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{lc $n} = $v; return 0 },
+    );
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    $client->submit_request(
+        method => 'CONNECT', path => '/ws/accept-test', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body    => sub { return undef },  # streaming: keep open
+    );
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock, sub { defined $headers{':status'} });
+
+    is($headers{':status'}, '200', 'websocket.accept succeeds with a 200 response');
+    is($headers{'x-custom'}, 'ok', 'ordinary app header preserved on accept');
+    ok(!exists $headers{'connection'}, "'connection' stripped from the accept response");
+    ok(!exists $headers{'transfer-encoding'}, "'transfer-encoding' stripped from the accept response");
 
     my @strip_warnings = grep { /connection-specific header/ } @warnings;
     is(scalar(@strip_warnings), 2, 'one warning per stripped header name');
