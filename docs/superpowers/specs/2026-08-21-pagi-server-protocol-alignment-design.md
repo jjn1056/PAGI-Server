@@ -725,19 +725,28 @@ HTTP/2 response path destroys the response — the client receives only the
 `:status` pseudo-header, with no body.
 
 HTTP/2 therefore strips these six header names case-insensitively from every
-application-supplied response header list before submission, on all five
+application-supplied response header list before submission, on all six
 paths that map an application's headers onto an HTTP/2 response: HTTP
 (`http.response.start`, including the HEAD path, which reuses that same
-header list), WebSocket accept, WebSocket denial, SSE start, and SSE decline.
-`te` is stripped unless its value — trimmed of leading/trailing whitespace
-(OWS) and compared case-insensitively — is exactly the RFC 9113 token
-`trailers`; a compound value such as `trailers, gzip` is still stripped. The
-server logs one warning per stripped header (each occurrence, not
-deduplicated by name):
+header list), WebSocket accept, WebSocket denial, SSE start, SSE decline, and
+the trailing `HEADERS` block submitted by `http.response.trailers`. `te` is
+stripped unless its value — trimmed of leading/trailing whitespace (OWS) and
+compared case-insensitively — is exactly the RFC 9113 token `trailers`; a
+compound value such as `trailers, gzip` is still stripped. The server logs
+one warning per stripped header (each occurrence, not deduplicated by name):
 
 ```
 PAGI: connection-specific header '<name>' stripped from HTTP/2 response (RFC 9113)
 ```
+
+(the trailer path logs the same warning with `trailers` in place of `response`.)
+
+The `te`-with-`trailers` carve-out applies only to a response's own `HEADERS`
+block, where it advertises that trailers are coming — it does not extend
+inside a trailer block itself. RFC 9110 section 6.6.2 forbids every
+connection-specific field, `te` included, from a trailer section outright, so
+the trailer path strips a trailer-borne `te` tuple unconditionally, regardless
+of its value.
 
 HTTP/1.1 has no such prohibition — `Connection` and `Transfer-Encoding` are
 ordinary, meaningful HTTP/1.1 response headers — so the HTTP/1 response paths

@@ -393,6 +393,16 @@ the stream. On a HEAD request the trailers event is validated and discarded
 rather than transmitted -- HEAD sends no body, so nothing needs to reach the
 wire, but the response still completes normally.
 
+The trailer field list goes through the same connection-specific-header
+strip as every other HTTP/2 response path (see "HTTP/2 Connection-Specific
+Header Stripping" below): an application-supplied C<Connection>,
+C<Keep-Alive>, C<Proxy-Connection>, C<Transfer-Encoding>, C<Upgrade>, or
+C<TE> field is removed from the trailer block before submission, with a
+warning logged per stripped occurrence. Unlike a response's own C<HEADERS>,
+a trailer block carries no C<TE>-with-C<trailers> carve-out -- RFC 9110
+section 6.6.2 forbids every connection-specific field from a trailer section
+outright, so a trailer-borne C<TE> is stripped unconditionally.
+
 Because the trailing C<HEADERS> must not be submitted ahead of body data the
 peer hasn't yet received, a C<send()> carrying C<http.response.trailers> can
 remain pending for as long as the peer withholds HTTP/2 flow-control window
@@ -887,14 +897,23 @@ application-supplied response headers before they reach nghttp2, on every
 HTTP/2 response path that maps application headers: C<http.response.start>
 (including the HEAD-request path, which reuses the same header list),
 C<sse.start>, the C<websocket.http.response> denial, the
-C<sse.http.response.*> decline, and C<websocket.accept>.
+C<sse.http.response.*> decline, C<websocket.accept>, and the trailing
+C<HEADERS> block submitted by C<http.response.trailers> (see "HTTP/2
+Trailers" above).
 
-C<TE> is the one carve-out: a C<TE> header whose value -- after trimming
-leading/trailing optional whitespace (OWS) -- is exactly the token
-C<trailers> is kept; any other C<TE> value, including a compound value like
-C<trailers, gzip>, is stripped. Each stripped occurrence, not deduplicated
-by name, logs C<PAGI: connection-specific header '$name' stripped from
-HTTP/2 response (RFC 9113)>.
+C<TE> is the one carve-out, and it applies only to a response's own
+C<HEADERS> block, where it advertises that trailers are coming: a C<TE>
+header whose value -- after trimming leading/trailing optional whitespace
+(OWS) -- is exactly the token C<trailers> is kept there; any other C<TE>
+value, including a compound value like C<trailers, gzip>, is stripped. That
+carve-out does not extend inside a trailer block itself -- RFC 9110 section
+6.6.2 forbids every connection-specific field, C<TE> included, from a
+trailer section outright, so C<http.response.trailers> strips a
+trailer-borne C<TE> unconditionally, regardless of its value. Each stripped
+occurrence, not deduplicated by name, logs C<PAGI: connection-specific
+header '$name' stripped from HTTP/2 response (RFC 9113)> for a response
+header, or C<PAGI: connection-specific header '$name' stripped from HTTP/2
+trailers (RFC 9113)> for a trailer field.
 
 HTTP/1.1 is unaffected: C<Connection> and C<Transfer-Encoding> are
 ordinary, meaningful HTTP/1.1 response headers there, so no HTTP/1.1

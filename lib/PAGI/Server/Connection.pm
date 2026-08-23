@@ -52,27 +52,38 @@ my %H2_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 }
 # Returns a new arrayref with connection-specific header pairs removed,
 # warning once per stripped occurrence (not deduplicated by name -- two
 # 'keep-alive' headers warn twice). Does not mutate $headers.
+#
+# $in_trailers (optional, default false) selects the trailer-block variant
+# of this rule: RFC 9110 section 6.6.2 forbids every connection-specific
+# field from a trailer section outright, so unlike a response's HEADERS
+# block there is no 'te: trailers' carve-out inside a trailer block itself
+# -- that carve-out is what lets a response ADVERTISE trailers are coming,
+# not something a trailer block may then contain. A trailer-borne 'te'
+# tuple is therefore stripped regardless of its value.
 sub _h2_strip_connection_headers {
-    my ($headers) = @_;
+    my ($headers, $in_trailers) = @_;
+    my $context = $in_trailers ? 'trailers' : 'response';
     my @kept;
     for my $h (@$headers) {
         my ($name, $value) = @$h;
         my $lc_name = lc $name;
         if ($H2_CONNECTION_SPECIFIC_HEADER{$lc_name}) {
-            # RFC 9113 permits 'te' only with the exact token 'trailers'; a
-            # case-insensitive VALUE compare (not a name/list match) is what
-            # the token grammar calls for. OWS (leading/trailing whitespace)
-            # around the token is trimmed before the compare, per RFC 9110's
-            # field-value grammar -- a compound value like 'trailers, gzip'
-            # is not the bare token and is still stripped.
-            if ($lc_name eq 'te') {
+            # RFC 9113 permits a response 'te' only with the exact token
+            # 'trailers'; a case-insensitive VALUE compare (not a name/list
+            # match) is what the token grammar calls for. OWS
+            # (leading/trailing whitespace) around the token is trimmed
+            # before the compare, per RFC 9110's field-value grammar -- a
+            # compound value like 'trailers, gzip' is not the bare token and
+            # is still stripped. This carve-out does not apply in a trailer
+            # block (see $in_trailers above).
+            if (!$in_trailers && $lc_name eq 'te') {
                 (my $v = lc $value) =~ s/^\s+|\s+\z//g;
                 if ($v eq 'trailers') {
                     push @kept, $h;
                     next;
                 }
             }
-            warn "PAGI: connection-specific header '$name' stripped from HTTP/2 response (RFC 9113)\n";
+            warn "PAGI: connection-specific header '$name' stripped from HTTP/2 $context (RFC 9113)\n";
             next;
         }
         push @kept, $h;
@@ -1458,6 +1469,16 @@ sub _h2_create_send {
                 map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
                     @{ $event->{headers} // [] }
             ];
+            # RFC 9110 6.6.2 / design 13.3 -- an app-supplied connection,
+            # transfer-encoding, etc. in a trailer block corrupts it at the
+            # framing layer exactly like a response header: nghttp2 rejects
+            # the whole trailer HEADERS block, so the peer sees zero
+            # trailing HEADERS (on_stream_close never fires) even though
+            # submit_trailer below reports success. Strip before submission,
+            # same as every response-header path; $in_trailers=1 drops the
+            # response-only 'te: trailers' carve-out (RFC 9110 6.6.2 bans
+            # connection-specific fields from trailers outright).
+            $trailer_headers = _h2_strip_connection_headers($trailer_headers, 1);
 
             my $ok;
             if ($data_eof_delivered) {

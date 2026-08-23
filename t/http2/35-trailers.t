@@ -244,62 +244,155 @@ subtest 'acceptance: streamed body + trailers wire shape' => sub {
 };
 
 # ============================================================
-# Empty body + empty trailers
+# Connection-specific headers must be stripped from trailers too
 # ============================================================
-# start(trailers=>1) -> terminal EMPTY body -> EMPTY trailers. The
-# single-shot terminal body must still route through the streaming path
-# (the step-6 CRITICAL DESIGN POINT) even though there is no payload to
-# push, and an empty/absent trailers 'headers' list still submits a
-# (terminal) trailing HEADERS block per the Interfaces contract.
+# design 13.3 / RFC 9113 8.2.2 forbid connection-specific fields from an
+# HTTP/2 response; the strip already applied to http.response.start,
+# sse.start, websocket.accept, and the WebSocket/SSE decline paths, but not
+# to http.response.trailers. Reproduced live: nghttp2 rejects a trailer
+# HEADERS block containing a forbidden field by discarding the WHOLE block
+# -- the peer sees zero trailing HEADERS (on_stream_close never fires) even
+# though the server's own submit_trailer call and $send Future report
+# success. This pins the fix: the six forbidden names are stripped from the
+# trailer list exactly like the response-header paths, with one difference
+# -- 'te' has no 'trailers'-token carve-out inside a trailer block itself
+# (RFC 9110 6.6.2: connection-specific fields are banned from trailers
+# outright), so a trailer-borne 'te: trailers' is stripped too.
 
-my $empty_app = async sub {
+my ($strip_cs, $strip_complete, $strip_disconnect);
+my $strip_app = async sub {
     my ($scope, $receive, $send) = @_;
+    my $cs = $scope->{'pagi.connection'};
+    $strip_cs = $cs;
+    $cs->on_complete(sub { $strip_complete = 1 });
+    $cs->on_disconnect(sub { $strip_disconnect = $_[0] });
     while (1) {
         my $e = await $receive->();
         last if $e->{type} ne 'http.request' || !$e->{more};
     }
     await $send->({ type => 'http.response.start', status => 200, trailers => 1,
                      headers => [['content-type', 'text/plain']] });
-    await $send->({ type => 'http.response.body', body => '', more => 0 });
-    await $send->({ type => 'http.response.trailers', headers => [] });
+    await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    await $send->({ type => 'http.response.trailers',
+                     headers => [
+                         ['connection',        'close'],
+                         ['keep-alive',        'timeout=5'],
+                         ['proxy-connection',  'keep-alive'],
+                         ['transfer-encoding', 'chunked'],
+                         ['upgrade',           'h2c'],
+                         ['te',                'trailers'],
+                         ['x-checksum',        'abc'],
+                     ] });
     return;
 };
 
-subtest 'empty body + empty trailers' => sub {
-    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $empty_app);
+subtest 'connection-specific headers are stripped from trailers (RFC 9113), including a bare te: trailers' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my (%closed, $body);
-    $body = '';
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $strip_app);
+
+    my %closed;
     my ($client, $header_blocks, $data_frames) = create_tracking_client(
-        on_data_chunk_recv => sub { my ($sid, $d) = @_; $body .= $d; return 0 },
-        on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
+        on_stream_close => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
     );
     h2c_handshake($client, $client_sock);
 
     my $stream_id = $client->submit_request(
         method    => 'GET',
-        path      => '/empty',
+        path      => '/strip-trailers',
         scheme    => 'http',
         authority => 'localhost',
         headers   => [],
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock, 20);
+    exchange_frames($client, $client_sock, 30);
 
     $stream_io->close_now;
     $loop->remove($server);
 
-    is($body, '', 'no body bytes delivered');
-    for my $df (@$data_frames) {
-        ok(!($df->{flags} & NGHTTP2_FLAG_END_STREAM),
-            'no DATA frame (if any were sent) carries END_STREAM');
-    }
     my @trailer_blocks = grep { $_->{category} == NGHTTP2_HCAT_HEADERS() } @$header_blocks;
-    is(scalar(@trailer_blocks), 1, 'exactly one trailing HEADERS block received');
-    ok(($trailer_blocks[0]{flags} & NGHTTP2_FLAG_END_STREAM), 'trailing HEADERS carries END_STREAM');
-    is($trailer_blocks[0]{pairs}, [], 'trailer block is empty');
+    is(scalar(@trailer_blocks), 1,
+        'exactly one trailing HEADERS block received (not silently destroyed by the forbidden fields)');
+    is($trailer_blocks[0]{pairs}, [['x-checksum', 'abc']],
+        'the legitimate field survives; all six connection-specific fields (including te: trailers) are stripped');
+    ok(($trailer_blocks[0]{flags} & NGHTTP2_FLAG_END_STREAM),
+        'trailing HEADERS still carries END_STREAM');
+
+    my @strip_warnings = grep { /connection-specific header/ } @warnings;
+    is(scalar(@strip_warnings), 6, 'one warning per stripped trailer field, including te');
+
     is($closed{$stream_id}, 0, 'stream closes cleanly (error code 0)');
+    ok($strip_complete, 'on_complete fired');
+    is($strip_disconnect, undef, 'on_disconnect did not fire');
 };
+
+# ============================================================
+# Empty body + empty/absent trailers
+# ============================================================
+# start(trailers=>1) -> terminal EMPTY body -> EMPTY/ABSENT trailers. The
+# single-shot terminal body must still route through the streaming path
+# (the step-6 CRITICAL DESIGN POINT) even though there is no payload to
+# push, and an empty/absent trailers 'headers' list still submits a
+# (terminal) trailing HEADERS block per the Interfaces contract (Changes /
+# Compliance.pod both say "empty or absent" -- pin both shapes, not just the
+# empty-list one; the map/grep at :1468-1470 defaults a missing key to []
+# via `$event->{headers} // []`, but that default was previously untested).
+
+for my $headers_mode (qw(empty_list absent_key)) {
+    my $empty_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        while (1) {
+            my $e = await $receive->();
+            last if $e->{type} ne 'http.request' || !$e->{more};
+        }
+        await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                         headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => '', more => 0 });
+        if ($headers_mode eq 'empty_list') {
+            await $send->({ type => 'http.response.trailers', headers => [] });
+        } else {
+            await $send->({ type => 'http.response.trailers' });   # 'headers' key omitted entirely
+        }
+        return;
+    };
+
+    subtest "empty body + $headers_mode trailers" => sub {
+        my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $empty_app);
+
+        my (%closed, $body);
+        $body = '';
+        my ($client, $header_blocks, $data_frames) = create_tracking_client(
+            on_data_chunk_recv => sub { my ($sid, $d) = @_; $body .= $d; return 0 },
+            on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
+        );
+        h2c_handshake($client, $client_sock);
+
+        my $stream_id = $client->submit_request(
+            method    => 'GET',
+            path      => "/empty-$headers_mode",
+            scheme    => 'http',
+            authority => 'localhost',
+            headers   => [],
+        );
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 20);
+
+        $stream_io->close_now;
+        $loop->remove($server);
+
+        is($body, '', 'no body bytes delivered');
+        for my $df (@$data_frames) {
+            ok(!($df->{flags} & NGHTTP2_FLAG_END_STREAM),
+                'no DATA frame (if any were sent) carries END_STREAM');
+        }
+        my @trailer_blocks = grep { $_->{category} == NGHTTP2_HCAT_HEADERS() } @$header_blocks;
+        is(scalar(@trailer_blocks), 1, 'exactly one trailing HEADERS block received');
+        ok(($trailer_blocks[0]{flags} & NGHTTP2_FLAG_END_STREAM), 'trailing HEADERS carries END_STREAM');
+        is($trailer_blocks[0]{pairs}, [], 'trailer block is empty');
+        is($closed{$stream_id}, 0, 'stream closes cleanly (error code 0)');
+    };
+}
 
 # ============================================================
 # file-body / fh-body + trailers under withheld flow control
