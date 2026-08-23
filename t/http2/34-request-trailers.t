@@ -416,4 +416,114 @@ my (undef, $plain_body) = get_h2_plain('/plain', app => $plain_app);
 is( $invocations_c, 1, 'a normal request (no trailers) still dispatches exactly once' );
 is( $plain_body, 'plain-ok', 'a normal request (no trailers) still completes cleanly' );
 
+# ============================================================
+# (d) combined: client-sent request trailers AND a response that
+#     declares and sends its own trailers, on the same stream -- request
+#     and response trailers are independent features (received-HEADERS
+#     classification vs. outbound http.response.trailers) and must not
+#     interfere with each other: single dispatch, request body complete
+#     via the trailer-borne END_STREAM, response terminal DATA withholds
+#     END_STREAM, exactly one trailing HEADERS block carries it instead.
+# ============================================================
+
+my $combined_invocations = 0;
+my @combined_received;
+my $combined_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    $combined_invocations++;
+    while (1) {
+        my $e = await $receive->();
+        push @combined_received, $e;
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+    await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                     headers => [['content-type', 'text/plain']] });
+    await $send->({ type => 'http.response.body', body => 'combined-ok', more => 0 });
+    await $send->({ type => 'http.response.trailers',
+                     headers => [['x-resp-trailer', 'yes']] });
+    return;
+};
+
+subtest 'combined: request trailers AND response trailers on the same stream' => sub {
+    my ($conn, $stream_io, $client_sock, $server) =
+        create_h2c_connection(app => $combined_app);
+
+    my (@current, @header_blocks, %closed);
+    my $body = '';
+    my $client = create_client(
+        on_begin_headers => sub { @current = (); return 0 },
+        on_header        => sub {
+            my ($sid, $n, $v) = @_;
+            push @current, [$n, $v];
+            return 0;
+        },
+        on_frame_recv => sub {
+            my ($frame) = @_;
+            if ($frame->{type} == 1) {   # HEADERS
+                push @header_blocks, {
+                    category => $frame->{headers_category},
+                    flags    => $frame->{flags},
+                    pairs    => [@current],
+                };
+            }
+            return 0;
+        },
+        on_data_chunk_recv => sub { my ($sid, $d) = @_; $body .= $d; return 0 },
+        on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
+    );
+    h2c_handshake($client, $client_sock);
+
+    my @chunks = ('combined-request-body');
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/combined-trailers',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [],
+        body      => sub {
+            my ($sid, $max_length) = @_;
+            my $chunk = shift @chunks;
+            return undef unless defined $chunk;
+            $client->submit_trailer($sid, headers => [['x-req-trailer', 'sent']]);
+            # eof=1, no_end_stream=1: reserve END_STREAM for the client's
+            # own trailer HEADERS block instead of this DATA frame.
+            return ($chunk, 1, 1);
+        },
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 30);
+
+    $stream_io->close_now;
+    $loop->remove($server);
+
+    is( $combined_invocations, 1, 'single dispatch despite trailers on both directions' );
+
+    my $body_seen = join('', map { $_->{body} // '' }
+        grep { $_->{type} eq 'http.request' } @combined_received);
+    is( $body_seen, 'combined-request-body',
+        'request body delivered complete -- END_STREAM rode the client trailer HEADERS' );
+
+    my @request_events = grep { $_->{type} eq 'http.request' } @combined_received;
+    is( $request_events[-1]{more}, 0, 'final http.request event reports more => 0' );
+    ok( !(grep { $_->{type} =~ /trailer/i } @combined_received),
+        'no request-trailer receive event delivered (PAGI defines none yet)' );
+
+    is( $body, 'combined-ok', 'response body arrived in full' );
+
+    my @response_trailer_blocks = grep {
+        $_->{category} == Net::HTTP2::nghttp2::NGHTTP2_HCAT_HEADERS()
+    } @header_blocks;
+    is( scalar(@response_trailer_blocks), 1,
+        'exactly one trailing HEADERS block (the response trailers)' );
+    ok( ($response_trailer_blocks[0]{flags} & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM()),
+        'response trailing HEADERS carries END_STREAM' );
+    is( $response_trailer_blocks[0]{pairs}, [['x-resp-trailer', 'yes']],
+        'response trailer field arrives' );
+
+    is( $closed{$stream_id}, 0, 'stream closes cleanly (error code 0)' );
+
+    is( scalar keys %{ $conn->{h2_streams} }, 0,
+        'no leaked stream state after a combined request+response trailers exchange' );
+};
+
 done_testing;
