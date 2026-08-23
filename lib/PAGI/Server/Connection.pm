@@ -246,20 +246,7 @@ sub start {
     }
 
     # Set up idle timeout timer
-    if ($self->{timeout} && $self->{timeout} > 0 && $self->{server}) {
-        my $timer = IO::Async::Timer::Countdown->new(
-            delay => $self->{timeout},
-            on_expire => sub {
-                return unless $weak_self;
-                return if $weak_self->{closed};
-                # Close idle connection
-                $weak_self->_handle_disconnect_and_close('idle_timeout');
-            },
-        );
-        $self->{idle_timer} = $timer;
-        $self->{server}->add_child($timer);
-        $timer->start;
-    }
+    $self->_start_idle_timer;
 
     # Set up read handler
     $stream->configure(
@@ -336,6 +323,31 @@ sub start {
             $weak_self->_handle_disconnect_and_close('client_closed');
         },
     );
+}
+
+# Arm the between-requests idle timeout. Called once at connection setup and
+# again whenever a long-lived mode that removed the timer (SSE) hands the
+# connection back to ordinary keep-alive request handling.
+sub _start_idle_timer {
+    my ($self) = @_;
+
+    return if $self->{idle_timer};
+    return unless $self->{timeout} && $self->{timeout} > 0 && $self->{server};
+
+    weaken(my $weak_self = $self);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay => $self->{timeout},
+        on_expire => sub {
+            return unless $weak_self;
+            return if $weak_self->{closed};
+            # Close idle connection
+            $weak_self->_handle_disconnect_and_close('idle_timeout');
+        },
+    );
+    $self->{idle_timer} = $timer;
+    $self->{server}->add_child($timer);
+    $timer->start;
 }
 
 sub _reset_idle_timer {
@@ -4185,6 +4197,7 @@ async sub _handle_sse_request {
     my $receive = $self->_create_sse_receive($request);
     my $send = $self->_create_sse_send($request);
 
+    my $app_failed = 0;
     eval {
         await $self->{app}->($scope, $receive, $send);
     };
@@ -4195,31 +4208,120 @@ async sub _handle_sse_request {
             $self->_send_error_response(500, "Internal Server Error");
         }
         warn "PAGI application error (SSE): $error\n";
+        # An exception is not a clean end -- never keep the connection alive
+        # after one, exactly as the plain HTTP request path does.
+        $app_failed = 1;
     }
 
     # End the stream (no-op if an explicit sse.close already finished it).
     $self->_finish_sse_stream('stream_complete');
+
+    # Write access log entry (logs at stream end with total duration). Must
+    # precede the reset below, which clears the request it logs.
+    $self->_write_access_log;
+
+    # Design section 11.6: a CLEAN end (the application returned, or it sent
+    # sse.close) honors the "Connection: keep-alive" header the server itself
+    # emitted on sse.start -- the terminator is written above and the
+    # connection returns to ordinary request handling. Keep-alive still yields
+    # to the usual overrides: an application exception, a transport already
+    # gone (client disconnect, timeout, write error, server shutdown), a
+    # client "Connection: close", and HTTP/1.0 semantics.
+    if (!$app_failed && !$self->{closed} && $self->_should_keep_alive($request)) {
+        $self->_reset_after_sse_stream;
+        return;
+    }
+
+    $self->_handle_disconnect_and_close($self->{sse_finish_reason} // 'stream_complete');
 }
 
-# Idempotently end an SSE stream: write the chunked terminator (HTTP/1.1), write
-# the access log, and close the connection. Called both by the on-return path
-# above and by an explicit sse.close event, so it must run exactly once.
+# Idempotently end an SSE stream: write the chunked terminator (HTTP/1.1) and
+# release the stream's timers so nothing can write after the terminator.
+# Called both by the on-return path above and by an explicit sse.close event
+# (which ends the stream while the application is still running), so it must
+# run exactly once and must NOT decide the connection's fate -- that decision
+# belongs to _handle_sse_request, once the application has actually returned.
 sub _finish_sse_stream {
     my ($self, $reason) = @_;
     return if $self->{sse_finished};
     $self->{sse_finished} = 1;
+    $self->{sse_finish_reason} = $reason;
+
+    # Nothing may reach the wire after the terminating chunk.
+    $self->_stop_sse_keepalive;
+    $self->_stop_sse_idle_timer;
 
     # Send chunked terminator if SSE was started and the stream is still writable
     if ($self->{sse_started} && !$self->{closed} &&
         $self->{stream} && $self->{stream}->write_handle) {
         $self->{stream}->write("0\r\n\r\n");
     }
+}
 
-    # Write access log entry (logs at connection close with total duration)
-    $self->_write_access_log;
+# Per-request state that must not survive a kept-alive HTTP/1.1 SSE stream
+# (design section 11.6). The connection is about to serve an ordinary request
+# on the same socket, so every field the stream touched has to be back at its
+# constructor value. Inventory, as a constraint list:
+#
+#   SSE stream flags   sse_mode, sse_started, sse_finished, sse_finish_reason,
+#                      sse_close_sent, sse_disconnect_reason
+#   SSE decline state  sse_decline_started/status/headers/body
+#   SSE timers/writer  sse_keepalive_timer + comment, sse_idle_timer,
+#                      sse_keepalive_writer (closes over this stream's framing)
+#   Response state     handling_request, response_started, h1_seq,
+#                      _resp_pending, response_status, _response_size
+#   Request state      request_start, current_request, request_future,
+#                      current_connection_state, current_transport_state
+#   Receive state      receive_queue, receive_pending, receive_futures
+#   Idle timeout       the between-requests idle timer, removed when the
+#                      stream started, must be re-armed
+#
+# The send closure's own $seq is per-request by construction (a new closure is
+# built per request), so the post-sse.close raise contract survives untouched.
+sub _reset_after_sse_stream {
+    my ($self) = @_;
 
-    # Close connection after SSE stream ends
-    $self->_handle_disconnect_and_close($reason);
+    $self->_stop_sse_keepalive;
+    $self->_stop_sse_idle_timer;
+    delete $self->{sse_keepalive_writer};
+
+    $self->{sse_mode}              = 0;
+    $self->{sse_started}           = 0;
+    $self->{sse_finished}          = 0;
+    $self->{sse_finish_reason}     = undef;
+    $self->{sse_close_sent}        = 0;
+    $self->{sse_disconnect_reason} = undef;
+    delete @{$self}{qw(
+        sse_decline_started sse_decline_status sse_decline_headers sse_decline_body
+    )};
+
+    # Mirrors the keep-alive reset in _handle_request.
+    $self->{handling_request}         = 0;
+    $self->{response_started}         = 0;
+    $self->{h1_seq}                   = 'initial';
+    $self->{_resp_pending}            = undef;
+    $self->{response_status}          = undef;
+    $self->{_response_size}           = 0;
+    $self->{request_start}            = undef;
+    $self->{current_request}          = undef;
+    $self->{request_future}           = undef;
+    $self->{current_connection_state} = undef;
+    $self->{current_transport_state}  = undef;
+
+    # The finished stream's receive bookkeeping never belongs to the next
+    # request. The application has returned, so nothing is awaiting these.
+    $self->{receive_queue}   = [];
+    $self->{receive_pending} = undef;
+    $self->{receive_futures} = [];
+
+    # SSE removed the between-requests idle timer as a long-lived mode; an
+    # ordinary keep-alive connection must not sit open forever.
+    $self->_start_idle_timer;
+
+    # Check if there's more data in the buffer (pipelining)
+    if (length($self->{buffer}) > 0) {
+        $self->_try_handle_request;
+    }
 }
 
 sub _create_sse_scope {
@@ -4277,17 +4379,24 @@ sub _create_sse_receive {
         };
     };
 
+    # The stream is over -- either the transport is gone, or the application
+    # ended it with sse.close and is still running (the connection now stays
+    # open for keep-alive, design section 11.6). Nothing more will ever arrive
+    # on this scope, so answer immediately instead of blocking forever. This
+    # answers a receive() the application chose to make; it is not a disconnect
+    # fired at the application because the stream ended.
+    my $stream_over = sub {
+        return 1 unless $weak_self;
+        return $weak_self->{closed} || $weak_self->{sse_finished};
+    };
+
     return sub {
         return Future->done($sse_disconnect->())
-            unless $weak_self;
-        return Future->done($sse_disconnect->())
-            if $weak_self->{closed};
+            if $stream_over->();
 
         my $future = (async sub {
             return $sse_disconnect->()
-                unless $weak_self;
-            return $sse_disconnect->()
-                if $weak_self->{closed};
+                if $stream_over->();
 
             # Check queue first
             if (@{$weak_self->{receive_queue}}) {
@@ -4554,10 +4663,15 @@ sub _create_sse_send {
         }
         elsif ($type eq 'sse.close') {
             # Explicit application-initiated end of the SSE stream. End it now,
-            # decoupled from the application returning. `reason` is server-side
-            # metadata only and is never written to the wire. Idempotency for a
-            # repeat sse.close is handled by advance_sse (the 'closed' state
-            # accepts another sse.close as a no-op).
+            # decoupled from the application returning: the terminator goes out
+            # here, but the connection's fate is settled by _handle_sse_request
+            # once the application has actually returned (design section 11.6),
+            # so the application keeps running against a live transport and its
+            # further sends are rejected by the sequence machine, not by a
+            # closed check. `reason` is server-side metadata only and is never
+            # written to the wire. Idempotency for a repeat sse.close is handled
+            # by advance_sse (the 'closed' state accepts another sse.close as a
+            # no-op).
             $weak_self->{sse_close_sent} = 1;
             $weak_self->{sse_disconnect_reason} = $event->{reason}
                 if defined $event->{reason};
@@ -5325,6 +5439,29 @@ open.
 Over HTTP/1.1, each SSE stream already owns its own TCP connection, so
 C<sse_idle_timeout> is enforced at the connection level there -- expiry
 closes that connection, which only ever carries the one SSE stream.
+
+=head2 Connection Reuse after an SSE Stream (HTTP/1.1)
+
+C<sse.start> advertises C<Connection: keep-alive>, and the server honors it.
+When an HTTP/1.1 SSE stream ends B<cleanly> -- the application returns, or it
+sends C<sse.close> -- the server writes the chunked terminator, resets the
+per-request state the stream accumulated, and hands the connection back to
+ordinary keep-alive request handling, including serving any request already
+pipelined in the read buffer. A pooled client (browser, C<Net::Async::HTTP>,
+curl) can therefore reuse the same socket for its next request, which matters
+for the short POST-SSE-exchange pattern used by fetch-event-source and
+datastar.
+
+Keep-alive yields to the usual overrides, all of which close the connection as
+before: a client C<Connection: close>, HTTP/1.0 semantics, server shutdown, an
+application exception, and any B<abnormal> end (client disconnect, idle
+timeout, write error). An abnormal end is also the only thing that delivers
+C<sse.disconnect> to the application; a clean end never does.
+
+Ending the stream is decoupled from the application returning. After
+C<sse.close> the application keeps running against a live transport, and any
+further send on that scope fails through the event sequence machine (C<after
+sse.close>) rather than being silently swallowed by a closed transport.
 
 =head1 SEE ALSO
 

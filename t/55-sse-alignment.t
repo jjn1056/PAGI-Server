@@ -169,9 +169,12 @@ subtest 'SSE UTF-8 wire encoding: data/event/id/comment are UTF-8 octets, chunk-
             my $buf;
             my $n = sysread($sock, $buf, 4096);
             if (defined $n) {
-                last if $n == 0;   # EOF: server closed after sse.close
+                last if $n == 0;   # EOF (a client Connection: close would give one)
                 $response .= $buf;
             }
+            # A clean sse.close keeps the connection alive (design 11.6), so
+            # stop at the terminating zero-length chunk, not at EOF.
+            last if $response =~ /\r\n0\r\n\r\n/;
             $loop->loop_once(0.1);
         }
         close $sock;
@@ -243,9 +246,12 @@ subtest 'SSE UTF-8 wire encoding: invalid string fails the send Future; stream s
             my $buf;
             my $n = sysread($sock, $buf, 4096);
             if (defined $n) {
-                last if $n == 0;   # EOF: server closed after sse.close
+                last if $n == 0;   # EOF (a client Connection: close would give one)
                 $response .= $buf;
             }
+            # A clean sse.close keeps the connection alive (design 11.6), so
+            # stop at the terminating zero-length chunk, not at EOF.
+            last if $response =~ /\r\n0\r\n\r\n/;
             $loop->loop_once(0.1);
         }
         close $sock;
@@ -651,6 +657,275 @@ subtest 'POST SSE with Expect: 100-continue: server sends 100 Continue before bo
         my $joined = join('', map { $_->{body} // '' } @events);
         is($joined, $body, 'body delivered after the 100-continue handshake');
         like($response, qr/data: Hello Continue/, 'app observed the full body');
+    }
+
+    $server->shutdown->get;
+};
+
+# ---------------------------------------------------------------------------
+# Design section 11.6: connection reuse after an SSE stream ends (HTTP/1.1).
+#
+# sse.start advertises "Connection: keep-alive", so a clean stream end (the
+# application returning, or an explicit sse.close) must hand the connection
+# back to ordinary keep-alive request handling instead of closing it. These
+# tests drive raw sockets so that "the SAME connection" is literally the same
+# file descriptor, not a client library's pooling behavior.
+# ---------------------------------------------------------------------------
+
+# Reads from $sock, pumping the loop, until $stop matches what has been read,
+# EOF arrives, or $timeout seconds pass. Returns (bytes_read, saw_eof).
+sub read_until {
+    my ($sock, $stop, $timeout) = @_;
+    $timeout //= 5;
+    my $buf = '';
+    my $eof = 0;
+    my $deadline = time + $timeout;
+    while (time < $deadline) {
+        my $chunk;
+        my $n = sysread($sock, $chunk, 4096);
+        if (defined $n && $n > 0) { $buf .= $chunk }
+        elsif (defined $n && $n == 0) { $eof = 1; last }
+        last if defined $stop && $buf =~ $stop;
+        $loop->loop_once(0.02);
+    }
+    return ($buf, $eof);
+}
+
+sub sse_socket {
+    my ($port, %opt) = @_;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    ) or return;
+    my $version = $opt{http_version} // '1.1';
+    my $req = "GET / HTTP/$version\r\nHost: 127.0.0.1:$port\r\nAccept: text/event-stream\r\n";
+    $req .= "Connection: $opt{connection}\r\n" if $opt{connection};
+    $req .= "\r\n";
+    print $sock $req;
+    $sock->blocking(0);
+    return $sock;
+}
+
+# The terminating zero-length chunk of the SSE response body.
+my $TERMINATOR = qr/\r\n0\r\n\r\n/;
+
+# An ordinary (non-SSE) request issued on an already-used socket.
+sub plain_request_on {
+    my ($sock, $port) = @_;
+    print $sock "GET /plain HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n";
+    return read_until($sock, qr/PLAIN-OK/);
+}
+
+# Serves SSE for text/event-stream requests (behavior chosen by $sse_body) and
+# a fixed 'PLAIN-OK' response for everything else, so one server can answer
+# both halves of a reuse exchange.
+sub reuse_server {
+    my ($sse_body) = @_;
+    return create_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        if ($scope->{type} eq 'sse') {
+            return await $sse_body->($scope, $receive, $send);
+        }
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'PLAIN-OK', more => 0 });
+        return;
+    });
+}
+
+subtest 'clean SSE end by returning: connection stays open and serves the next request' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', event => 'tick', data => 'one' });
+        return;   # clean end by returning
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, $TERMINATOR);
+        like($stream, qr/^HTTP\/1\.1 200/,        'SSE response started');
+        like($stream, qr/data: one\n/,            'event delivered');
+        like($stream, $TERMINATOR,                'chunked terminator written on a clean end');
+        ok(!$eof,                                 'connection NOT closed after a clean end');
+
+        my ($second) = plain_request_on($sock, $port);
+        like($second, qr/^HTTP\/1\.1 200/,        'second request served on the SAME socket');
+        like($second, qr/PLAIN-OK/,               'second response body arrived');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'clean SSE end by sse.close: connection stays open and serves the next request' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', event => 'tick', data => 'two' });
+        await $send->({ type => 'sse.close' });
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, $TERMINATOR);
+        like($stream, qr/data: two\n/, 'event delivered');
+        like($stream, $TERMINATOR,     'chunked terminator written on sse.close');
+        ok(!$eof,                      'connection NOT closed after sse.close');
+
+        my ($second) = plain_request_on($sock, $port);
+        like($second, qr/PLAIN-OK/,    'second request served on the SAME socket after sse.close');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'post-sse.close send still raises, with the connection left open' => sub {
+    my $post_close_err;
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'three' });
+        await $send->({ type => 'sse.close' });
+        $post_close_err = do {
+            local $@;
+            eval { await $send->({ type => 'sse.send', data => 'LATE' }); undef } // $@;
+        };
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, $TERMINATOR);
+        like($stream, $TERMINATOR, 'chunked terminator written');
+        ok(!$eof,                  'connection still open');
+        like($post_close_err, qr/after sse\.close/,
+            'sse.send after sse.close still raises with the connection open');
+        unlike($stream, qr/LATE/,  'post-close payload never reached the wire');
+
+        my ($second) = plain_request_on($sock, $port);
+        like($second, qr/PLAIN-OK/, 'connection remained usable after the raised send');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'SSE keepalive from the finished stream does not leak into the next request' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.keepalive', interval => 0.1, comment => 'ka' });
+        await $send->({ type => 'sse.send', data => 'four' });
+        await $loop->delay_future(after => 0.35);
+        await $send->({ type => 'sse.close' });
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 3 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, $TERMINATOR);
+        like($stream, qr/:ka\n/,   'keepalive comments were flowing during the stream');
+        like($stream, $TERMINATOR, 'chunked terminator written');
+        ok(!$eof,                  'connection still open');
+
+        my ($second) = plain_request_on($sock, $port);
+        like($second, qr/PLAIN-OK/, 'second request served');
+
+        # Give the (now stopped) keepalive timer several intervals to misfire.
+        my ($trailing) = read_until($sock, undef, 0.6);
+        is($trailing, '', 'no keepalive bytes leaked onto the reused connection')
+            or diag "trailing bytes: " . unpack('H*', $trailing);
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'client Connection: close still closes after a clean SSE end (control)' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'five' });
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port, connection => 'close');
+    SKIP: {
+        skip "Cannot connect", 2 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, undef);
+        like($stream, $TERMINATOR, 'chunked terminator written');
+        ok($eof,                   'Connection: close still closes the connection');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'HTTP/1.0 still closes after a clean SSE end (control)' => sub {
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'six' });
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port, http_version => '1.0');
+    SKIP: {
+        skip "Cannot connect", 1 unless $sock;
+
+        my (undef, $eof) = read_until($sock, undef);
+        ok($eof, 'HTTP/1.0 still closes the connection after the stream ends');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'abnormal mid-stream client abort still tears the connection down (control)' => sub {
+    my @seen;
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'seven' });
+        while (1) {                       # drain the request body, then block
+            my $e = await $receive->();   # until the abort delivers sse.disconnect
+            push @seen, $e;
+            last if $e->{type} ne 'sse.request';
+        }
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 2 unless $sock;
+
+        my ($stream) = read_until($sock, qr/data: seven\n/);
+        like($stream, qr/data: seven\n/, 'stream was live before the abort');
+        close $sock;                     # abort mid-stream
+        $loop->loop_once(0.05) for 1 .. 20;
+
+        is($seen[-1]{type}, 'sse.disconnect',
+            'abnormal end delivers sse.disconnect to the application');
+        is(scalar(keys %{$server->{connections}}), 0,
+            'abnormal end still closes the connection');
     }
 
     $server->shutdown->get;
