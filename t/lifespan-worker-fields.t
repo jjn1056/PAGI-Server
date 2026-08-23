@@ -140,12 +140,12 @@ subtest 'workers inherit lifespan_mode strict enforcement from the master' => su
     die "Fork failed: $!" unless defined $master_pid;
 
     # Put the master in its own process group so that, if it must be
-    # force-killed below (e.g. today, pre-fix, when workers never fail and
-    # never exit), the whole group -- master and any worker children it
-    # forked -- can be reaped in one shot. Otherwise an orphaned worker
-    # keeps this test script's inherited STDOUT pipe open and `prove`
-    # hangs waiting for EOF that never comes. Set from both sides to avoid
-    # the fork/setpgid race.
+    # force-killed below (the safety net for a master that fails to honor
+    # strict lifespan enforcement and never exits on its own), the whole
+    # group -- master and any worker children it forked -- can be reaped in
+    # one shot. Otherwise an orphaned worker keeps this test script's
+    # inherited STDOUT pipe open and `prove` hangs waiting for EOF that
+    # never comes. Set from both sides to avoid the fork/setpgid race.
     if ($master_pid) {
         eval { POSIX::setpgid($master_pid, $master_pid) };
     }

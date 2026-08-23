@@ -752,11 +752,18 @@ sub _h2_on_close {
     # server_close_reason: a server-initiated per-stream teardown (idle
     # timeout, keepalive timeout, ...) records its own token here BEFORE
     # driving the close, so it takes precedence over the generic
-    # 'client_closed' fallback below -- both in the nonzero-error-code $cs
-    # mark and in the queued disconnect events pushed further down. The
-    # zero-error-code arms above are untouched: they distinguish a clean
-    # completion from an incomplete response, not a server-initiated
-    # abnormal close, so they never consult this token.
+    # 'client_closed' fallback below in the queued disconnect events pushed
+    # further down -- that part is operative today, since WebSocket
+    # keepalive timeout and SSE idle timeout are exactly the writers of this
+    # token and both stream types push a queued disconnect. The
+    # nonzero-error-code $cs mark below also consults $reason, but that arm
+    # is a forward guard, not yet operative: WebSocket/SSE streams (this
+    # token's only current writers) never attach a connection_state, so no
+    # $cs-bearing stream sets server_close_reason today -- this exists for
+    # when a server-initiated per-stream teardown reaches a stream that does
+    # carry one. The zero-error-code arms above are untouched either way:
+    # they distinguish a clean completion from an incomplete response, not
+    # a server-initiated abnormal close, so they never consult this token.
     my $reason = $stream->{server_close_reason};
     if (my $cs = $stream->{connection_state}) {
         if (($stream->{seq_state} // '') eq 'complete' && !$error_code) {
@@ -3265,9 +3272,10 @@ async sub _handle_request {
         # response event already went out, an exception thrown afterward is
         # not a disconnect. Fire on_complete (never on_disconnect), leave
         # disconnect_reason() undef, still warn (SHOULD log), and still
-        # close (MAY close) -- mirrors h2's log-only post-completion branch
-        # (Connection.pm:826-830, marked complete before the exception is
-        # even observed there).
+        # close (MAY close) -- mirrors _h2_dispatch_stream's own log-only
+        # branch for an error after the response is already complete: that
+        # stream's connection_state is likewise marked complete before the
+        # exception is even observed there.
         if ($self->{response_started} && (($self->{h1_seq} // '') eq 'complete')) {
             warn "PAGI application error (after response complete): $error\n";
             $self->_write_access_log;

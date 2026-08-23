@@ -393,6 +393,10 @@ sub _validate_sse_keepalive {
     # THIS send's Future instead of dying later inside the keepalive timer
     # tick (which would escape uncaught and unwind the event loop).
     if (exists $event->{comment} && defined $event->{comment}) {
+        # Copy into a lexical before encoding: Encode::encode consumes its
+        # input string in place, and encoding the caller's own $event->{comment}
+        # directly would leave it mutated (or emptied) out from under the
+        # caller after this validation-only check.
         my $comment = $event->{comment};
         my $ok = !ref($comment)
             && eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK); 1 };

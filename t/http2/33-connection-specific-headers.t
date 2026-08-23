@@ -93,8 +93,9 @@ sub pump {
 }
 
 # The six RFC 9113 section 8.2.2 forbidden names, each with a value that
-# would (pre-fix) corrupt the response if handed straight to nghttp2. 'te'
-# carries a non-'trailers' value here, so it is stripped like the rest.
+# would corrupt the response if handed straight to nghttp2 -- the server
+# must strip all of them before submission. 'te' carries a non-'trailers'
+# value here, so it is stripped like the rest.
 my @FORBIDDEN_HEADERS = (
     ['connection',       'keep-alive'],
     ['keep-alive',       'timeout=5'],
