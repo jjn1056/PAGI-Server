@@ -315,20 +315,42 @@ subtest 'plain CONNECT method rejected with 501' => sub {
     # malformed CONNECT frames at the protocol level before our
     # code ever sees them — this tests our defense-in-depth.
     my $fake_stream_id = 99;
-    $conn->_h2_on_request(
-        $fake_stream_id,
-        { ':method' => 'CONNECT', ':authority' => 'proxy.example.com:443' },
-        [],
-        0,
-    );
 
-    # Let the deferred response fire
-    exchange_frames($client, $client_sock, 10);
+    # The fake stream_id was never opened via the client's nghttp2
+    # session, so nghttp2 never invokes on_header for its response frames
+    # (confirmed empirically: %response_headers never gains an entry for
+    # it) -- the wire is not observable here. Spy on submit_response
+    # instead, capturing the headers argument at the call site; this
+    # matches the subtest's existing style of testing the defense-in-depth
+    # code directly rather than via a full client round-trip.
+    my $submitted_headers;
+    {
+        no warnings 'redefine';
+        local *PAGI::Server::Protocol::HTTP2::Session::submit_response = sub {
+            my ($session, $sid, %args) = @_;
+            $submitted_headers = $args{headers} if $sid == $fake_stream_id;
+            return $session->{nghttp2}->submit_response($sid, %args);
+        };
+
+        $conn->_h2_on_request(
+            $fake_stream_id,
+            { ':method' => 'CONNECT', ':authority' => 'proxy.example.com:443' },
+            [],
+            0,
+        );
+
+        # Let the deferred response fire (submit_response runs from the
+        # loop->later callback, so the override must still be in effect).
+        exchange_frames($client, $client_sock, 10);
+    }
 
     # The app should NOT have been called for the CONNECT stream
     # (it may have been called for the GET /normal request)
     ok(!exists $conn->{h2_streams}{$fake_stream_id},
        'No stream state created for plain CONNECT');
+
+    ok($submitted_headers && (grep { lc($_->[0]) eq 'date' } @$submitted_headers),
+       'plain CONNECT 501 response carries a Date header');
 
     $stream_io->close_now;
     $loop->remove($server);

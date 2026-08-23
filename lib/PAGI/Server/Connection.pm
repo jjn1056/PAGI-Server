@@ -464,7 +464,10 @@ sub _h2_on_request {
                 return if $ws->{closed};
                 $ws->{h2_session}->submit_response($stream_id,
                     status  => 501,
-                    headers => [['content-type', 'text/plain']],
+                    headers => [
+                        ['content-type', 'text/plain'],
+                        ['date', $ws->{protocol}->format_date],
+                    ],
                     body    => "CONNECT method not supported\n",
                 );
                 $ws->_h2_write_pending;
