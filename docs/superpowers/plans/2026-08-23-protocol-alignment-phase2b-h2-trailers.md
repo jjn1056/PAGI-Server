@@ -125,13 +125,13 @@ Straggler matrix from recon (add exactly these): HEAD×fh — missing both trans
 
 | Task | Status | Commit | Tests (added/passing) | Verification evidence |
 |------|--------|--------|-----------------------|-----------------------|
-| 1. 0.009 floor + constants | not started | — | — | — |
-| 2. Received-HEADERS classification | not started | — | — | — |
-| 3. State-machine audit | not started | — | — | — |
-| 4. h2 trailers output | not started | — | — | — |
-| 5. Stragglers + dedup | not started | — | — | — |
-| 6. Docs + spec-followup record | not started | — | — | — |
-| 7. Phase gate | not started | — | — | — |
+| 1. 0.009 floor + constants | complete | 66cbdc2 | 35 files/236 (h2 dir + load) | Approved first pass; version compare verified numeric (UNIVERSAL::VERSION live probe) |
+| 2. Received-HEADERS classification | complete | 0a9668f | RED reproduced live bug (2nd dispatch, empty pseudo, crash) → 5 files/47; new t/http2/34 | Approved first pass; normal path traced zero-change; HPACK repro frame verified real RFC 7541 encoding |
+| 3. State-machine audit | complete | 15ecf55 | 5 files/65; +9 empty/absent-trailers wire pins | Approved; all six evidence rows independently re-verified; no lib changes (audit constraint held) |
+| 4. h2 trailers output | complete | 7cd734f, 974e48b, ada781c | t/http2/35 (9 subtests); 5 files/51 scoped | Opus review: deferral deviation RATIFIED (byte-exact truncation evidence; DEFERRED-provider mechanism confirmed); fix round 1: _close trailer-wait release + post-await liveness guard + park-teardown/deferred-failure tests; re-review clean ×2 runs |
+| 5. Stragglers + dedup | complete | 4e437e6, ce405ff | 6 files/84; dedup before/after diff EMPTY | Approved first pass; seek-on-pipe discriminating power traced; three-closure split accepted (merging would emit headers before -f/-r checks); zero trailers lines moved |
+| 6. Docs + spec-followup record | complete | 5e68780, 9e617f4 | 29/29 + podchecker | Approved after round 1 (reviewer caught inverted Changes claim — sub-0.009 --http2 dies loudly, not silent; GOAWAY claim now wire-pinned type-7-and-no-type-3); design §8.3 marked resolved + six spec proposals recorded |
+| 7. Phase gate | complete | (this commit) | full recursive suite 126 files / 835 tests PASS | hygiene clean (whitespace, podchecker ×5, perl -c ×2); PAGI main f04c029 (no drift); installed dist verified = CPAN JJNAPIORK/Net-HTTP2-nghttp2-0.009.tar.gz; 11 implementation commits |
 
 ## Deviations
 
