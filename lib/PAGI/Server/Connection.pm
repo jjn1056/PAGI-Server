@@ -630,6 +630,7 @@ sub _h2_on_body {
             # No _h2_write_pending here — we're inside feed(); _h2_process_data
             # flushes after feed() returns
             $self->_h2_resolve_stream_drain_waiters($stream);
+            $self->_h2_resolve_stream_trailer_wait($stream);
             # Drop (don't fire) the app's on_drain fires: the stream is closing,
             # not draining, and the transport handle is going away. Also break
             # the $stream <-> transport_state cycle (the handle's measure/arm
@@ -813,6 +814,11 @@ sub _h2_on_close {
     # stream is closing, so it must not hang waiting for a queue that will
     # never drain.
     $self->_h2_resolve_stream_drain_waiters($stream);
+    # Same for a send() parked awaiting the data callback's own terminal
+    # invocation to submit its staged trailers (h2_closed carve-out: a
+    # trailers send racing a disconnect resolves as a successful no-op,
+    # same as every other post-close send).
+    $self->_h2_resolve_stream_trailer_wait($stream);
     # Drop (don't fire) the app's on_drain fires: this is a close, not a drain.
     # Also break the $stream <-> transport_state cycle so the stream state can be
     # collected once the deferred delete below drops h2_streams' external ref.
@@ -1141,6 +1147,56 @@ sub _h2_create_send {
     # 'initial' initializer in _h2_on_request); the two must stay in step.
     my $seq = 'initial';
     my $is_head = (($stream_state->{pseudo}{':method'} // '') eq 'HEAD');
+    # Set once, from http.response.start's own 'trailers' flag (section 6
+    # below), and never changed again. $data_callback's no_end computation
+    # MUST key off this rather than $ss->{seq_state}: the trailers arm
+    # advances that mirror to 'complete' as soon as the app's send() call
+    # is made, which can be BEFORE the data provider has actually drained
+    # (deferred submit, see below) -- keying off seq_state there raced the
+    # mirror update and let END_STREAM land back on the DATA frame.
+    my $trailers_declared = 0;
+
+    # Trailers-vs-data-provider handshake (design §8.3). Confirmed
+    # empirically: calling submit_trailer() BEFORE the data provider has
+    # actually handed nghttp2 its terminal (eof=1) chunk silently abandons
+    # any DATA nghttp2 has not yet pulled through $data_callback (observed
+    # under real per-stream flow control -- the still-queued tail of a
+    # file/fh body never reached the wire, yet the stream closed "cleanly"
+    # with the trailer). nghttp2_submit_trailer()'s own contract says it
+    # "can be called inside" the data-provider callback -- so the trailers
+    # arm below submits directly ONLY once $data_eof_delivered is already
+    # true (no further callback invocation will occur for this stream);
+    # otherwise it stages the headers here and the callback's own terminal
+    # invocation submits them, exactly mirroring Net::HTTP2::nghttp2's
+    # documented pattern.
+    my $data_eof_delivered = 0;
+    my $pending_trailer_headers;
+
+    # Called by $data_callback at the exact point it hands nghttp2 the
+    # terminal (eof=1) chunk. If a trailers send() is waiting on this
+    # (staged $pending_trailer_headers), submits it HERE -- synchronously,
+    # from inside the data-provider callback, per nghttp2's own sanctioned
+    # pattern -- then wakes the waiting send() on the next loop tick (never
+    # resolve an app Future from inside a native nghttp2 callback -- same
+    # discipline as the drain waiters above).
+    my $deliver_trailer_eof = sub {
+        $data_eof_delivered = 1;
+        return unless defined $pending_trailer_headers;
+        my $headers = $pending_trailer_headers;
+        $pending_trailer_headers = undef;
+        my $ok = eval {
+            $weak_self->{h2_session}->submit_trailer($stream_id, headers => $headers);
+            1;
+        };
+        my $err = $@;
+        my $ss2 = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        my $f = $ss2 && delete $ss2->{trailer_wait};
+        return unless $f;
+        $weak_self->{server}->loop->later(sub {
+            return if $f->is_ready;
+            if ($ok) { $f->done(1) } else { $f->fail($err) }
+        });
+    };
 
     # Data callback for nghttp2's streaming response.
     # Returns ($data, $eof) when data is available, or undef to defer.
@@ -1189,16 +1245,22 @@ sub _h2_create_send {
             }
 
             my $eof = (!@$q && $eof_pending) ? 1 : 0;
-            # Trailers declared and the body just went terminal: reserve
-            # END_STREAM for the trailing HEADERS block (design §8.3)
-            # instead of letting it land on this DATA frame.
-            my $no_end = (($ss->{seq_state} // '') eq 'awaiting_trailers') ? 1 : 0;
+            # Trailers declared: reserve END_STREAM for the trailing
+            # HEADERS block (design §8.3) instead of letting it land on
+            # this DATA frame. Has no effect unless $eof is also true
+            # (Net::HTTP2::nghttp2's own contract), so it is safe to key
+            # off $trailers_declared unconditionally here rather than the
+            # $ss->{seq_state} mirror, which the trailers arm may have
+            # already advanced past 'awaiting_trailers' by this point.
+            my $no_end = $trailers_declared ? 1 : 0;
+            $deliver_trailer_eof->() if $eof;
             return ($chunk, $eof, $no_end);
         }
 
         # Queue empty but EOF pending — signal end of stream
         if ($eof_pending) {
-            my $no_end = (($ss->{seq_state} // '') eq 'awaiting_trailers') ? 1 : 0;
+            my $no_end = $trailers_declared ? 1 : 0;
+            $deliver_trailer_eof->();
             return ('', 1, $no_end);
         }
 
@@ -1293,14 +1355,16 @@ sub _h2_create_send {
         # trailers at start. advance-then-rollback (h1 D1 pattern, mirrored
         # from _create_send's chunked-framing check): the sequence machine
         # and its $ss mirror advance FIRST, then the native submit is
-        # attempted. advance_http itself may croak here (trailers undeclared
-        # or body not yet complete) -- that propagates unrolled-back, same as
-        # validate_http_send's shape check above, since $seq was never
-        # reassigned in that case. If submit_trailer throws, both are rolled
-        # back to their pre-event value and the error propagates: the app's
-        # return then lands in the existing incomplete-response arm (RST
-        # NGHTTP2_INTERNAL_ERROR) -- the same machinery a dropped body chunk
-        # already relies on, not duplicated here.
+        # attempted (directly here, or via $deliver_trailer_eof above --
+        # see the closure-top comment for why). advance_http itself may
+        # croak here (trailers undeclared or body not yet complete) -- that
+        # propagates unrolled-back, same as validate_http_send's shape
+        # check above, since $seq was never reassigned in that case. If
+        # submit_trailer throws, both are rolled back to their pre-event
+        # value and the error propagates: the app's return then lands in
+        # the existing incomplete-response arm (RST NGHTTP2_INTERNAL_ERROR)
+        # -- the same machinery a dropped body chunk already relies on, not
+        # duplicated here.
         if ($type eq 'http.response.trailers') {
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
@@ -1313,11 +1377,31 @@ sub _h2_create_send {
                     @{ $event->{headers} // [] }
             ];
 
-            my $ok = eval {
-                $weak_self->{h2_session}->submit_trailer(
-                    $stream_id, headers => $trailer_headers);
-                1;
-            };
+            my $ok;
+            if ($data_eof_delivered) {
+                # The data provider already handed nghttp2 its terminal
+                # chunk -- no further $data_callback invocation will occur
+                # for this stream, so it is safe to submit directly here.
+                $ok = eval {
+                    $weak_self->{h2_session}->submit_trailer(
+                        $stream_id, headers => $trailer_headers);
+                    1;
+                };
+            } else {
+                # The data provider has not yet delivered EOF to nghttp2
+                # (still mid-transfer, possibly blocked on real per-stream
+                # flow control). Stage the headers for $deliver_trailer_eof
+                # to submit from inside the callback's own terminal
+                # invocation, and await that -- resolving this send() any
+                # earlier would let submit_trailer race ahead of not-yet-
+                # extracted DATA (see the closure-top comment).
+                $pending_trailer_headers = $trailer_headers;
+                my $f = $weak_self->{server}->loop->new_future;
+                $ss->{trailer_wait} = $f;
+                $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
+                $weak_self->_h2_write_pending;
+                $ok = eval { await $f; 1 };
+            }
             if (!$ok) {
                 my $err = $@;
                 $seq = $seq_before;
@@ -1483,6 +1567,7 @@ sub _h2_create_send {
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
             $ss->{connection_state}->_mark_response_started if $ss->{connection_state};
+            $trailers_declared = 1 if $event->{trailers};
 
             $status = $event->{status} // 200;
             @response_headers = map {
@@ -3084,6 +3169,24 @@ sub _h2_resolve_stream_drain_waiters {
     return unless @waiters;
     $self->{server}->loop->later(sub {
         $_->done for grep { !$_->is_ready } @waiters;
+    });
+}
+
+# Release a send() parked in the http.response.trailers arm awaiting
+# $deliver_trailer_eof (the data callback's own terminal invocation) for a
+# stream that is being torn down before that ever happens. Resolve, never
+# fail -- same h2_closed carve-out contract as every other post-close send
+# (design §6.2 / §21 item 1): a trailers send racing a disconnect is a
+# successful no-op, not an error the app must handle. Same re-entrancy
+# discipline as _h2_resolve_stream_drain_waiters above (deferred one loop
+# tick -- some teardown sites run inside nghttp2's feed()).
+sub _h2_resolve_stream_trailer_wait {
+    my ($self, $ss) = @_;
+    return unless $ss;
+    my $f = delete $ss->{trailer_wait};
+    return unless $f;
+    $self->{server}->loop->later(sub {
+        $f->done unless $f->is_ready;
     });
 }
 

@@ -3,6 +3,7 @@ use warnings;
 use Test2::V0;
 use IO::Async::Loop;
 use IO::Async::Stream;
+use Future;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
@@ -236,6 +237,330 @@ subtest 'acceptance: streamed body + trailers wire shape' => sub {
     is($closed{$stream_id}, 0, 'stream closes cleanly (error code 0)');
     ok($accept_complete, 'on_complete fired');
     is($accept_disconnect, undef, 'on_disconnect did not fire');
+};
+
+# ============================================================
+# Empty body + empty trailers
+# ============================================================
+# start(trailers=>1) -> terminal EMPTY body -> EMPTY trailers. The
+# single-shot terminal body must still route through the streaming path
+# (the step-6 CRITICAL DESIGN POINT) even though there is no payload to
+# push, and an empty/absent trailers 'headers' list still submits a
+# (terminal) trailing HEADERS block per the Interfaces contract.
+
+my $empty_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    while (1) {
+        my $e = await $receive->();
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+    await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                     headers => [['content-type', 'text/plain']] });
+    await $send->({ type => 'http.response.body', body => '', more => 0 });
+    await $send->({ type => 'http.response.trailers', headers => [] });
+    return;
+};
+
+subtest 'empty body + empty trailers' => sub {
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $empty_app);
+
+    my (%closed, $body);
+    $body = '';
+    my ($client, $header_blocks, $data_frames) = create_tracking_client(
+        on_data_chunk_recv => sub { my ($sid, $d) = @_; $body .= $d; return 0 },
+        on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
+    );
+    h2c_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/empty',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    $stream_io->close_now;
+    $loop->remove($server);
+
+    is($body, '', 'no body bytes delivered');
+    for my $df (@$data_frames) {
+        ok(!($df->{flags} & NGHTTP2_FLAG_END_STREAM),
+            'no DATA frame (if any were sent) carries END_STREAM');
+    }
+    my @trailer_blocks = grep { $_->{category} == NGHTTP2_HCAT_HEADERS() } @$header_blocks;
+    is(scalar(@trailer_blocks), 1, 'exactly one trailing HEADERS block received');
+    ok(($trailer_blocks[0]{flags} & NGHTTP2_FLAG_END_STREAM), 'trailing HEADERS carries END_STREAM');
+    is($trailer_blocks[0]{pairs}, [], 'trailer block is empty');
+    is($closed{$stream_id}, 0, 'stream closes cleanly (error code 0)');
+};
+
+# ============================================================
+# file-body / fh-body + trailers under withheld flow control
+# ============================================================
+# The provider path (submit_response_streaming + $data_callback), not the
+# single-shot arm, is what carries trailers for file/fh bodies -- and it
+# must hold the trailing HEADERS behind ALL queued DATA even when nghttp2
+# itself is deferred on an exhausted per-stream flow-control window, not
+# just when our own send_queue is momentarily empty.
+
+my $flow_unit = join('', map { chr(32 + ($_ % 95)) } 0..96);   # 97 printable bytes
+my $flow_pattern = $flow_unit x (int(200_000 / length($flow_unit)) + 1);
+$flow_pattern = substr($flow_pattern, 0, 200_000);
+my ($flow_fh, $flow_file) = tempfile(UNLINK => 1);
+binmode $flow_fh;
+print $flow_fh $flow_pattern;
+close $flow_fh;
+
+for my $mode (qw(file fh)) {
+    subtest "$mode-body + trailers under withheld flow control" => sub {
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            while (1) {
+                my $e = await $receive->();
+                last if $e->{type} ne 'http.request' || !$e->{more};
+            }
+            await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                             headers => [['content-type', 'application/octet-stream']] });
+            if ($mode eq 'file') {
+                await $send->({ type => 'http.response.body', file => $flow_file });
+            } else {
+                open my $fh, '<:raw', $flow_file or die "Cannot open: $!";
+                await $send->({ type => 'http.response.body', fh => $fh });
+                close $fh;
+            }
+            await $send->({ type => 'http.response.trailers',
+                             headers => [['x-checksum', 'abc']] });
+            return;
+        };
+
+        my $server = create_test_server(app => $app, h2_initial_window_size => 5000);
+        my ($conn, $stream_io, $client_sock, undef) =
+            create_h2c_connection(app => $app, server => $server);
+
+        my $body = '';
+        my ($client, $header_blocks, $data_frames) = create_tracking_client(
+            on_data_chunk_recv => sub { my ($sid, $d) = @_; $body .= $d; return 0 },
+        );
+        h2c_handshake($client, $client_sock);
+
+        my $stream_id = $client->submit_request(
+            method    => 'GET',
+            path      => "/$mode-flow",
+            scheme    => 'http',
+            authority => 'localhost',
+            headers   => [],
+        );
+        $client_sock->syswrite($client->mem_send);
+
+        # Withhold phase: drain server->client only, never forward the
+        # client's own generated bytes back -- that output would include
+        # the h2-level auto WINDOW_UPDATE nghttp2 generates on receipt of
+        # DATA, so withholding it keeps the server's per-stream send window
+        # exhausted after the initial window's worth of data (idiom from
+        # t/http2/29-fullflush-cancel.t).
+        for (1..30) {
+            $loop->loop_once(0.02);
+            my $buf = '';
+            $client_sock->sysread($buf, 16384);
+            $client->mem_recv($buf) if length($buf);
+        }
+
+        my $partial_len = length($body);
+        ok($partial_len > 0, "$mode: some DATA arrived before the window was exhausted");
+        ok($partial_len < length($flow_pattern),
+            "$mode: NOT all DATA arrived yet -- window withheld ($partial_len / " . length($flow_pattern) . ')')
+            or diag('received the full body already -- flow control was not provoked this run');
+        my @early_trailer_blocks = grep { $_->{category} == NGHTTP2_HCAT_HEADERS() } @$header_blocks;
+        is(scalar(@early_trailer_blocks), 0,
+            "$mode: no trailing HEADERS block received yet (still behind withheld DATA)");
+
+        # Release: resume normal bidirectional pumping (the client's
+        # WINDOW_UPDATE now flows) until the transfer settles.
+        exchange_frames($client, $client_sock, 150);
+
+        $stream_io->close_now;
+        $loop->remove($server);
+
+        is($body, $flow_pattern, "$mode: full body byte-exact after release");
+        my @trailer_blocks = grep { $_->{category} == NGHTTP2_HCAT_HEADERS() } @$header_blocks;
+        is(scalar(@trailer_blocks), 1, "$mode: exactly one trailing HEADERS block received");
+        ok(($trailer_blocks[0]{flags} & NGHTTP2_FLAG_END_STREAM),
+            "$mode: trailing HEADERS carries END_STREAM");
+    };
+}
+
+# ============================================================
+# Native-failure rollback: submit_trailer throws
+# ============================================================
+# The client-RST-before-h2_closed-processing race isn't deterministically
+# provokable from the outside, so spy-wrap submit_trailer (on the session
+# wrapper class, same pattern as t/http2/12-error-handling.t's
+# submit_response spy) to throw once, simulating an immediate nghttp2-level
+# rejection. Asserts: the app's send() Future fails; $seq/mirror rolled
+# back to 'awaiting_trailers' (observed indirectly -- the incomplete-
+# response arm only RSTs when seq_state is NOT 'complete', so an
+# INTERNAL_ERROR RST here IS the proof the rollback happened, not a
+# leftover 'complete' the wrapper silently ignored); the subsequent
+# incomplete-response RST uses NGHTTP2_INTERNAL_ERROR (the same machinery a
+# dropped body chunk already relies on -- not duplicated by the trailers
+# arm).
+
+my ($native_fail_err, $native_fail_returned);
+my $native_fail_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    while (1) {
+        my $e = await $receive->();
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+    await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                     headers => [['content-type', 'text/plain']] });
+    await $send->({ type => 'http.response.body', body => 'body', more => 0 });
+    $native_fail_err = do {
+        local $@;
+        eval { await $send->({ type => 'http.response.trailers', headers => [['x-t', '1']] }) };
+        $@;
+    };
+    $native_fail_returned = 1;
+    return;   # the trailers never actually landed -- the incomplete arm must fire
+};
+
+subtest 'native submit_trailer failure rolls back $seq and RSTs INTERNAL_ERROR' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $submit_trailer_calls = 0;
+    my ($conn, $stream_io, $client_sock, $server, $stream_id, %closed);
+    {
+        no warnings 'redefine';
+        local *PAGI::Server::Protocol::HTTP2::Session::submit_trailer = sub {
+            my ($self, $sid, %args) = @_;
+            $submit_trailer_calls++;
+            die "spy: simulated native submit_trailer rejection\n" if $submit_trailer_calls == 1;
+            return $self->{nghttp2}->submit_trailer($sid, headers => $args{headers} // []);
+        };
+
+        ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $native_fail_app);
+        my ($client) = create_tracking_client(
+            on_stream_close => sub { my ($sid, $c) = @_; $closed{$sid} = $c; return 0 },
+        );
+        h2c_handshake($client, $client_sock);
+
+        $stream_id = $client->submit_request(
+            method    => 'GET',
+            path      => '/native-fail',
+            scheme    => 'http',
+            authority => 'localhost',
+            headers   => [],
+        );
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 30);
+    }
+
+    ok($native_fail_returned, 'the app reached its return after the failed trailers send');
+    is($submit_trailer_calls, 1, 'the spy intercepted exactly one submit_trailer call');
+    like($native_fail_err, qr/spy: simulated native submit_trailer rejection/,
+        "the app's send() Future failed with the native rejection");
+
+    is($closed{$stream_id}, H2_INTERNAL_ERROR_CODE,
+        'the incomplete-response arm reset the stream with NGHTTP2_INTERNAL_ERROR '
+        . '(proof the rollback left seq_state at awaiting_trailers, not complete)');
+    ok((grep { /incomplete response.*trailers were declared but never sent/ } @warnings),
+        'the incomplete-response warning fired with the trailers-specific note')
+        or diag("warnings: @warnings");
+
+    $stream_io->close_now;
+    $loop->remove($server);
+
+    is(scalar keys %{ $conn->{h2_streams} }, 0, 'no leaked stream state after the native failure');
+};
+
+# ============================================================
+# Disconnect before trailers: send() resolves as a silent no-op
+# ============================================================
+# The h2_closed carve-out at the top of the send closure governs every
+# arm, including the new trailers one: a trailers send arriving after the
+# client has already reset the stream must resolve successfully instead
+# of reaching nghttp2 a second time on a stream id it no longer owns
+# (extends t/http2/12-error-handling.t's post-413 "send after close is a
+# silent no-op" idiom to the trailers arm).
+
+my $disconnect_pause;
+my ($disconnect_err, $disconnect_resolved);
+my $disconnect_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    while (1) {
+        my $e = await $receive->();
+        last if $e->{type} ne 'http.request' || !$e->{more};
+    }
+    await $send->({ type => 'http.response.start', status => 200, trailers => 1,
+                     headers => [['content-type', 'text/plain']] });
+    await $send->({ type => 'http.response.body', body => 'x', more => 0 });
+    await $disconnect_pause;   # released by the test once the reset has settled
+    $disconnect_err = do {
+        local $@;
+        eval { await $send->({ type => 'http.response.trailers', headers => [['x-t', '1']] }) };
+        $@;
+    };
+    $disconnect_resolved = 1;
+    return;
+};
+
+subtest 'disconnect before trailers: trailers send resolves as a silent no-op' => sub {
+    $disconnect_pause = Future->new;
+    $disconnect_err = undef;
+    $disconnect_resolved = 0;
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $disconnect_app);
+    my ($client) = create_tracking_client();
+    h2c_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/disconnect',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);   # body delivered, app now parked on $disconnect_pause
+
+    $client->submit_rst_stream($stream_id, H2_CANCEL_CODE);
+    $client_sock->syswrite($client->mem_send);
+
+    # Bounded wait for the connection to actually reclaim the stream state
+    # (the loop->later-deferred delete in _h2_on_close) before releasing
+    # the app -- the carve-out is exercised whether the entry is merely
+    # h2_closed or already gone, but waiting for the deferred delete
+    # exercises the harder (fully-reclaimed) case.
+    my $reclaimed = 0;
+    for (1..50) {
+        $loop->loop_once(0.02);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        if (!$conn->{h2_streams}{$stream_id}) { $reclaimed = 1; last; }
+    }
+    ok($reclaimed, 'stream state reclaimed after the client reset');
+
+    $disconnect_pause->done unless $disconnect_pause->is_ready;
+    for (1..20) { $loop->loop_once(0.02); }
+
+    ok($disconnect_resolved, "the app's post-disconnect trailers send resolved instead of hanging");
+    ok(!$disconnect_err, 'no error was raised by the post-disconnect trailers send')
+        or diag("error: $disconnect_err");
+    ok(!(grep { /PAGI application error/ } @warnings),
+        'no app-error log for the post-disconnect no-op');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+
+    is(scalar keys %{ $conn->{h2_streams} }, 0, 'no leaked stream state');
 };
 
 done_testing;
