@@ -982,22 +982,16 @@ sub _h2_dispatch_stream {
 
 # HTTP/2 error code for the RST_STREAM sent when a response is left started
 # but incomplete (see _h2_dispatch_stream above). NGHTTP2_INTERNAL_ERROR
-# (RFC 9113 section 7, code 0x2) isn't exported by this XS binding
-# (Net::HTTP2::nghttp2 0.008) -- use it if a future binding adds it, else
-# fall back to the literal.
+# (RFC 9113 section 7, code 0x2) is exported by Net::HTTP2::nghttp2.
 sub _h2_rst_error_code {
-    return Net::HTTP2::nghttp2->can('NGHTTP2_INTERNAL_ERROR')
-        ? Net::HTTP2::nghttp2::NGHTTP2_INTERNAL_ERROR()
-        : 2;   # NGHTTP2_INTERNAL_ERROR per RFC 9113 section 7
+    return Net::HTTP2::nghttp2::NGHTTP2_INTERNAL_ERROR();
 }
 
 # RST_STREAM error code for a stream the server no longer needs but that is
-# nobody's fault -- RFC 9113 section 7 CANCEL. Same binding-constant lookup
-# with a literal fallback as _h2_rst_error_code above.
+# nobody's fault -- RFC 9113 section 7 CANCEL. NGHTTP2_CANCEL is exported by
+# Net::HTTP2::nghttp2.
 sub _h2_rst_cancel_code {
-    return Net::HTTP2::nghttp2->can('NGHTTP2_CANCEL')
-        ? Net::HTTP2::nghttp2::NGHTTP2_CANCEL()
-        : 8;   # NGHTTP2_CANCEL per RFC 9113 section 7
+    return Net::HTTP2::nghttp2::NGHTTP2_CANCEL();
 }
 
 sub _h2_create_scope {

@@ -33,6 +33,8 @@ use PAGI::Server::Protocol::HTTP2;
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
 
+use constant H2_CANCEL => 8;   # RST_STREAM error code CANCEL (RFC 9113)
+
 # ============================================================
 # Helpers (same pattern as t/http2/14-sse-events.t / 15-sse-keepalive.t)
 # ============================================================
@@ -524,7 +526,7 @@ subtest 'h2 POST-SSE: RST_STREAM while first receive() is pending delivers sse.d
     # sse.disconnect in the same call, before waking body_pending -- the
     # queued disconnect must win over falling through to a truncated
     # terminal sse.request.
-    $client->submit_rst_stream($stream_id, 8);   # CANCEL
+    $client->submit_rst_stream($stream_id, H2_CANCEL);
     $client_sock->syswrite($client->mem_send);
     exchange_frames($client, $client_sock, 10);
 

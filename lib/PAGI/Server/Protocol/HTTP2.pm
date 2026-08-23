@@ -42,7 +42,7 @@ use constant H2_PREFACE_LENGTH => 24;
 
 # Check for nghttp2 availability
 our $AVAILABLE;
-use constant MIN_NGHTTP2_VERSION => '0.008';
+use constant MIN_NGHTTP2_VERSION => '0.009';
 BEGIN {
     $AVAILABLE = eval {
         require Net::HTTP2::nghttp2;
