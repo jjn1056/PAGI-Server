@@ -670,6 +670,34 @@ scope cannot advertise `fullflush` unless the HTTP/2 send path accepts it.
 Custom extension mappings are not rejected merely because PAGI::Server does
 not interpret their contents.
 
+### 13.3 HTTP/2 strips connection-specific response headers
+
+RFC 9113 section 8.2.2 forbids connection-specific header fields in HTTP/2:
+`Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`, and
+`Upgrade` must not appear, and `TE` must not appear with any value other than
+`trailers`. The Phase 5 final review live-reproduced the consequence of
+letting an application violate this: an app that sends
+`['connection', 'keep-alive']` or `['transfer-encoding', 'chunked']` on any
+HTTP/2 response path destroys the response — the client receives only the
+`:status` pseudo-header, with no body.
+
+HTTP/2 therefore strips these six header names case-insensitively from every
+application-supplied response header list before submission, on all four
+paths that map an application's headers onto an HTTP/2 response: HTTP
+(`http.response.start`, including the HEAD path, which reuses that same
+header list), SSE start, WebSocket denial, and SSE decline. `te` is stripped
+unless its value is `trailers` (case-insensitively compared, per the RFC 9113
+token). The server logs one warning per stripped header name:
+
+```
+PAGI: connection-specific header '<name>' stripped from HTTP/2 response (RFC 9113)
+```
+
+HTTP/1.1 has no such prohibition — `Connection` and `Transfer-Encoding` are
+ordinary, meaningful HTTP/1.1 response headers — so the HTTP/1 response paths
+continue to pass application-supplied headers through unchanged. This is an
+HTTP/2-only rule.
+
 ## 14. Internal structure
 
 The implementation should improve the touched boundaries without attempting a
