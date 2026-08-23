@@ -570,6 +570,19 @@ sub _h2_on_body {
             # life of the process once h2_streams drops its external ref.
             $stream->{transport_drain_fires} = [];
             delete $stream->{transport_state};
+            # This stream is going away here too -- stop its keepalive (and,
+            # for SSE, idle) timers before dropping the hash entry, the same
+            # as _h2_on_close does. Those timers are add_child'ed to the
+            # SERVER, not to this stream state, so without this the deleted
+            # entry below leaves them running for the life of the process:
+            # _h2_on_close never runs for this path (no h2-level stream close
+            # event fires here), and the connection's own close-time sweep
+            # only iterates h2_streams, which no longer lists this stream.
+            $self->_h2_stop_ws_keepalive($stream) if $stream->{is_websocket};
+            if ($stream->{is_sse}) {
+                $self->_h2_stop_sse_keepalive($stream);
+                $self->_h2_stop_sse_idle_timer($stream);
+            }
             delete $self->{h2_streams}{$stream_id};
             return;
         }

@@ -56,7 +56,7 @@ sub create_h2c_connection {
     $sock_b->blocking(0);
 
     my $app = $overrides{app} // sub { };
-    my $server = $overrides{server} // create_test_server(app => $app);
+    my $server = $overrides{server} // create_test_server(app => $app, %overrides);
 
     my $stream = IO::Async::Stream->new(
         read_handle  => $sock_a,
@@ -71,6 +71,7 @@ sub create_h2c_connection {
         server        => $server,
         h2_protocol   => $server->{http2_protocol},
         h2c_enabled   => $server->{h2c_enabled},
+        max_body_size => $server->{max_body_size},
     );
 
     $server->add_child($stream);
@@ -290,6 +291,102 @@ subtest 'keepalive timers cleaned up on disconnect' => sub {
 
     # If we got here without a crash, timers were cleaned up properly
     pass('No crash after disconnect with active keepalive timer');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# max_body_size 413 during active SSE: per-stream timers must not leak
+# ============================================================
+# Regression test: the h2 max_body_size (413) path in _h2_on_body deletes
+# $self->{h2_streams}{$stream_id} without first stopping the stream's SSE
+# keepalive (or idle) timers. Those timers are add_child'ed to the SERVER,
+# not to the per-stream state, so once the hash entry is gone nothing else
+# reclaims them: _h2_on_close never runs for this path (no h2-level stream
+# close event fires here), and the connection's own close-time sweep
+# iterates h2_streams, which by then no longer lists this stream. Left
+# unfixed, the timer keeps firing for the life of the process.
+subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' => sub {
+    my $sse_started = 0;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+
+        # Deliberately does NOT call receive() first: the h2 SSE receive()
+        # contract only resolves its first call once body_complete is true
+        # (see _h2_create_sse_receive), and this test's client body stays
+        # open (streamed via submit_data below, never EOF) so that the
+        # server is still accumulating body bytes when the overrun hits.
+        # Calling receive() first would block the app forever and the
+        # keepalive would never get armed.
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({
+            type     => 'sse.keepalive',
+            interval => 0.05,
+            comment  => 'ka',
+        });
+        $sse_started = 1;
+
+        # Nothing else to do: the client will overrun max_body_size and the
+        # server tears the stream down without this app ever calling
+        # receive() at all.
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app           => $app,
+        max_body_size => 40,
+    );
+
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+        body      => sub { return undef },  # streaming: keep open, fed manually below
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Wait for SSE to start with keepalive armed.
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        last if $sse_started;
+    }
+    ok($sse_started, 'SSE started with keepalive armed before body overruns max_body_size');
+
+    my $ss = $conn->{h2_streams}{$stream_id};
+    ok($ss, 'server holds per-stream state for the SSE stream');
+
+    my $timer = $ss->{sse_ka_timer};
+    ok($timer && $timer->is_running, 'per-stream keepalive timer is armed before the overrun');
+
+    # Push body data past max_body_size (40 bytes) while the SSE response is
+    # already active.
+    $client->submit_data($stream_id, ('X' x 100), 0);
+    $client_sock->syswrite($client->mem_send);
+
+    for (1..10) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+    }
+
+    ok(!exists $conn->{h2_streams}{$stream_id},
+        'stream entry reclaimed after max_body_size 413');
+    ok(!$timer->is_running,
+        'the stream keepalive timer was stopped, not leaked, by the 413 teardown');
 
     $stream_io->close_now;
     $loop->remove($server);
