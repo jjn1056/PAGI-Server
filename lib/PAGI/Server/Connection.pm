@@ -808,9 +808,16 @@ sub _h2_dispatch_stream {
                 # here: WebSocket/SSE never attach a connection_state, so
                 # $cs guards them out -- their seq_state is never tracked
                 # and would otherwise misread as permanently incomplete.)
+                # Trailers-specific parenthetical mirrors the h1 wording (see
+                # _handle_request's incomplete branch) -- appended after the
+                # stream-id parenthetical so t/http2/24-incomplete-response.t's
+                # "...incomplete response (HTTP/2 stream $stream_id)" pin
+                # still matches as a contiguous substring.
+                my $trailers_note = (($stream_state->{seq_state} // '') eq 'awaiting_trailers')
+                    ? ' (trailers were declared but never sent)' : '';
                 warn $error
                     ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n"
-                    : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)\n";
+                    : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)$trailers_note\n";
                 # Mark BEFORE the RST. _h2_on_close fires for our own RST
                 # too (as an abnormal close, since seq_state never reached
                 # 'complete') and would mark this same connection_state
@@ -3053,6 +3060,24 @@ async sub _handle_request {
     };
 
     if (my $error = $@) {
+        # Delivery defines completion (Www.pod:1156-1165): if the terminal
+        # response event already went out, an exception thrown afterward is
+        # not a disconnect. Fire on_complete (never on_disconnect), leave
+        # disconnect_reason() undef, still warn (SHOULD log), and still
+        # close (MAY close) -- mirrors h2's log-only post-completion branch
+        # (Connection.pm:826-830, marked complete before the exception is
+        # even observed there).
+        if ($self->{response_started} && (($self->{h1_seq} // '') eq 'complete')) {
+            warn "PAGI application error (after response complete): $error\n";
+            $self->_write_access_log;
+            $self->{server}->_on_request_complete if $self->{server};
+            if (my $conn_state = $self->{current_connection_state}) {
+                $conn_state->_mark_complete;
+            }
+            $self->_close;
+            return;
+        }
+
         # Handle application error - always close connection after exception
         # If response already started, we can't send error page (3.17)
         if ($self->{response_started}) {
@@ -3099,7 +3124,9 @@ async sub _handle_request {
     if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {
         $self->_flush_pending_headers;   # headers may still be buffered; no terminator follows
         unless ($self->{closed}) {
-            warn "PAGI application returned with an incomplete response\n";
+            warn(($self->{h1_seq} // '') eq 'awaiting_trailers'
+                ? "PAGI application returned with an incomplete response (trailers were declared but never sent)\n"
+                : "PAGI application returned with an incomplete response\n");
         }
         $self->_write_access_log;
         $self->{server}->_on_request_complete if $self->{server};
