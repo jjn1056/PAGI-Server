@@ -244,6 +244,8 @@ Untruthful case from recon: WebSocket scopes (h1 `Connection.pm:4865`, h2 `:1429
 | 12. Docs sweep | complete | 238a9cf | podchecker ×3 + 3 files/27 | Approved; reviewer re-derived 14 Date sites, 5 strip sites, reason-token producers — no discrepancies; ConnectionState token-definition mismatch deferred to John packet |
 | 13. Phase gate | complete | (this commit) | full recursive suite 124 files / 783 tests PASS; RELEASE_TESTING t/33+t/31 6/6 PASS | hygiene clean (whitespace, podchecker ×6, perl -c ×2); PAGI main still f04c029 (no drift); 16 implementation commits |
 
+| Final review + fix wave | complete | 3cafa76, ed15889, a4badf6, 988e17f, 8ac4789 | post-wave full suite 124 files / 787 tests PASS | Final whole-phase review (opus): Needs fixes → one wave → scoped re-review all addressed (I1 site sweep: 55 h2_streams/STREAM_GONE/h2_closed hits, every one extended or provably safe). Fixed: h2 post-413 sends now validated silent no-ops (h1 parity, spec §6.2); Compliance.pod unconditional-validation claim; configure()+CLI off-rejection tests; 503 Date; comment/doc minors. Cross-task matrix verified sound by the final reviewer (413/_h2_on_close double-disconnect impossible; P3/P4/P5 invariants intact by direct evidence) |
+
 ## Deviations
 
 None recorded. A deviation gets an ID, a rationale, and John's sign-off here BEFORE work builds on it.
