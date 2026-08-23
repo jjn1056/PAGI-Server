@@ -5311,50 +5311,20 @@ connections, allowing applications to distinguish if needed.
 
 =head2 SSE Idle Timeout over HTTP/2
 
-The C<sse_idle_timeout> setting applies at the B<connection level>,
-not per-stream. Over HTTP/1.1, this is a non-issue since each SSE
-stream occupies its own TCP connection. Over HTTP/2, where multiple
-streams share a single connection, an idle SSE stream timeout will
-close the B<entire connection>, terminating all active streams.
+The C<sse_idle_timeout> setting is enforced B<per stream> on HTTP/2: each
+SSE stream owns its own idle timer, armed when that stream's
+C<sse.start> is sent and reset by that stream's own send activity
+(C<sse.send>, C<sse.comment>, C<sse.keepalive>, C<sse.close>). When a
+stream's timer expires, only that stream ends -- the server marks the
+stream closing, lets it flush any already-queued data, and then emits
+the final HTTP/2 END_STREAM frame, the same path an application-initiated
+C<sse.close> takes. Sibling SSE (and other) streams multiplexed on the
+same HTTP/2 connection are unaffected, and the connection itself stays
+open.
 
-=head3 Trade-offs
-
-B<Pros:>
-
-=over 4
-
-=item * Simple, consistent behavior across protocols
-
-=item * Matches the approach used by Go (net/http2), Rust (hyper/Axum),
-Java (Netty/Reactor Netty/Vert.x), Python (Hypercorn), and gRPC
-
-=item * No additional complexity in stream lifecycle management
-
-=back
-
-B<Cons:>
-
-=over 4
-
-=item * Closing the connection affects all multiplexed HTTP/2 streams,
-not just the idle SSE stream
-
-=item * Clients multiplexing SSE + REST on one HTTP/2 connection may
-see unexpected disconnects on their REST requests
-
-=back
-
-B<Recommendation:> Use SSE keepalive comments (C<sse.keepalive> event)
-with an interval shorter than C<sse_idle_timeout> to prevent the timer
-from firing. This is the industry-standard approach used across all
-major frameworks. For production deployments behind reverse proxies
-(Envoy, Nginx, HAProxy), align your keepalive interval with the
-proxy's stream idle timeout.
-
-B<Note:> Per-stream idle timeout (using HTTP/2 RST_STREAM to close
-only the idle SSE stream) is a future enhancement. Only Node.js
-(http2stream.setTimeout) and Envoy (stream_idle_timeout) implement
-this among mainstream servers.
+Over HTTP/1.1, each SSE stream already owns its own TCP connection, so
+C<sse_idle_timeout> is enforced at the connection level there -- expiry
+closes that connection, which only ever carries the one SSE stream.
 
 =head1 SEE ALSO
 
