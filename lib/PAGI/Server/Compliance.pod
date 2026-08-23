@@ -2,13 +2,13 @@
 
 =head1 NAME
 
-PAGI::Server::Compliance - HTTP/1.1, HTTP/2, WebSocket, and Security Compliance Documentation
+PAGI::Server::Compliance - HTTP/1.1, HTTP/2, WebSocket, SSE, and Security Compliance Documentation
 
 =head1 DESCRIPTION
 
 This document details the compliance testing results for PAGI::Server against
-HTTP/1.1 (RFC 7230/7231), HTTP/2 (RFC 9113), WebSocket (RFC 6455), and common
-security attack vectors.
+HTTP/1.1 (RFC 7230/7231), HTTP/2 (RFC 9113), WebSocket (RFC 6455), Server-Sent
+Events, and common security attack vectors.
 
 PAGI::Server demonstrates full HTTP/1.1 compliance, 93.8% HTTP/2 conformance
 (matching the nghttp2 library ceiling), strong security posture, stable resource
@@ -74,7 +74,8 @@ per-stream C<websocket.keepalive> (see L</"WebSocket over HTTP/2 (RFC
 version, and cipher suite. The server negotiates TLS 1.3 by default
 (C<min_version> is a floor, not a pin).
 
-=item * B<Server-Sent Events> over all HTTP methods, with keepalive.
+=item * B<Server-Sent Events> over all HTTP methods, with keepalive (see
+L</"SERVER-SENT EVENTS (SSE)">).
 
 =back
 
@@ -664,6 +665,131 @@ PAGI does not implement WebSocket compression (permessage-deflate per RFC 7692).
 This is optional and intentionally not supported. 216 tests are marked
 UNIMPLEMENTED, which is the correct behavior.
 
+=head1 SERVER-SENT EVENTS (SSE)
+
+PAGI::Server implements Server-Sent Events per L<PAGI::Spec::Www> on both
+HTTP/1.1 and HTTP/2, sharing behavior across transports wherever the wire
+format allows it.
+
+=head2 Connection Detection
+
+A request is classified as an C<sse> scope by a boolean client-signal check
+on the combined values of all C<Accept> headers, parsed as a comma-separated
+list of media ranges (RFC 9110 Section 12.5.1):
+
+=over 4
+
+=item * the C<sse> scope is assigned iff the exact range
+C<text/event-stream> appears, case-insensitively, with an effective quality
+value greater than zero;
+
+=item * C<q=0> is an explicit refusal and never signals SSE;
+
+=item * wildcard ranges (C<*/*>, C<text/*>) never signal SSE;
+
+=item * media-type parameters other than C<q> are ignored for the test.
+
+=back
+
+This is a light parse shared identically by both transports -- not full
+content negotiation, which stays application/middleware territory. It
+applies regardless of HTTP method: a C<GET>, or a C<POST> from the
+fetch-event-source/datastar request-then-stream pattern, both classify the
+same way.
+
+=head2 UTF-8 Wire Encoding
+
+C<sse.send> string fields and C<sse.comment> text, plus server-generated
+keepalive comments, are formatted as characters and then encoded to UTF-8
+exactly once, at the wire boundary, before queueing or HTTP/1.1 chunk
+framing. A Perl string that cannot be encoded fails that send's Future
+instead of writing corrupted bytes to the socket. Chunk lengths, per-stream
+send-queue byte counts, and transport watermarks are all measured on the
+already-encoded byte string.
+
+=head2 Request Bodies
+
+C<sse.request> (the event an application receives when it reads the body of
+a POST/PUT SSE request) shares its body-reading semantics with ordinary HTTP
+requests rather than a separate partial parser:
+
+=over 4
+
+=item * HTTP/1.1 supports both C<Content-Length> and chunked
+C<Transfer-Encoding> bodies, through the same body reader C<http.request>
+uses;
+
+=item * C<Expect: 100-continue> is handled transparently -- the server sends
+C<100 Continue> before waiting for body data;
+
+=item * HTTP/2 waits for the stream's C<DATA> frames and C<END_STREAM>
+before delivering the (one-shot) C<sse.request> event, so a body still
+arriving across frames is never reported early behind a truthful-looking
+C<more =E<gt> 0>;
+
+=item * an empty-body request receives one empty terminal event, and
+disconnect stays observable once the body is complete.
+
+=back
+
+=head2 Per-Stream HTTP/2 Keepalive and Idle Timeout
+
+As with HTTP/2 WebSocket (see L</"Keepalive">), an HTTP/2 connection
+multiplexes many SSE streams, so C<sse.keepalive> and C<sse_idle_timeout>
+state -- timer, interval, comment, writer, and last-activity reset -- live
+on the individual stream, not the connection. Starting or updating
+keepalive on one stream cannot stop, replace, or redirect another stream's
+timer, and an idle-timeout expiry ends only that stream (the server marks
+it closing, flushes any already-queued data, then sends the final
+C<END_STREAM> frame -- the same path an application-initiated C<sse.close>
+takes). Sibling streams and the connection itself are unaffected.
+
+Over HTTP/1.1, one connection carries only one SSE stream at a time, so
+C<sse_idle_timeout> is enforced at the connection level there: expiry closes
+the connection outright.
+
+=head2 Response Headers
+
+On C<sse.start> the server supplies C<Content-Type>, C<Cache-Control>, and
+C<Date> only when the application did not already set them; an
+application-supplied value for any of these is sent as-is, not duplicated
+alongside a server default. C<Connection: keep-alive> on HTTP/1.1 is the
+exception: it is a framing header the protocol requires the server to
+control, so it is always advertised regardless of what the application
+sent. HTTP/2 never emits an HTTP/1-only C<Connection> header or a
+C<Transfer-Encoding> (chunked-framing) header -- an HTTP/2 SSE stream is
+framed as DATA frames via C<submit_response_streaming>, which carries no
+such headers.
+
+=head2 Connection Reuse after a Clean Stream End (HTTP/1.1)
+
+C<sse.start> advertises C<Connection: keep-alive>, and the server honors it.
+When an HTTP/1.1 SSE stream ends B<cleanly> -- the application returns, or
+it sends C<sse.close> -- the server writes the chunked terminator, resets
+the per-request state the stream accumulated, and hands the connection back
+to ordinary keep-alive request handling, including serving any request
+already pipelined in the read buffer. A pooled client (browser,
+C<Net::Async::HTTP>, curl) can therefore reuse the same socket for its next
+request, which matters for the short POST-SSE-exchange pattern used by
+fetch-event-source and datastar.
+
+Keep-alive yields to the usual overrides, all of which close the connection
+as before: a client C<Connection: close>, HTTP/1.0 semantics, server
+shutdown, an application exception, and any B<abnormal> end (client
+disconnect, idle timeout, write error). An abnormal end is also the only
+thing that delivers C<sse.disconnect> to the application; a clean end never
+does.
+
+An application that returns without ever answering the request at all --
+no C<sse.start>, and no completed decline via
+C<sse.http.response.start>/C<sse.http.response.body> -- does not reach the
+keep-alive path. That is the same protocol error the plain HTTP path
+reports: the server warns, synthesizes a C<500> response if the client is
+still connected, logs the access entry, and closes the connection. A
+decline that started (C<sse.http.response.start>) but never sent its
+terminal body has the same unanswerable shape -- its headers were only
+buffered -- and takes the same path.
+
 =head1 IMPLEMENTED PROTECTIONS
 
 =head2 Request Parsing
@@ -775,6 +901,8 @@ For optimal performance on macOS, set the EV backend to kqueue:
 =head1 SEE ALSO
 
 L<PAGI::Server> - The main server module
+
+L<PAGI::Spec::Www> - The PAGI HTTP/WebSocket/SSE wire specification
 
 L<PAGI::Middleware::SecurityHeaders> - Security headers middleware
 

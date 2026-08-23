@@ -65,6 +65,24 @@
     stream (code 1006, reason keepalive_timeout); other streams on the
     same connection are unaffected. interval => 0 stops keepalive; an
     omitted timeout means no dead-connection detection.
+  - SSE over HTTP/1.1 now honors the Connection: keep-alive it advertises on
+    sse.start. When a stream ends cleanly (application return, or
+    sse.close), the server writes the chunked terminator, resets the
+    per-request SSE state, and hands the connection back for ordinary
+    keep-alive request handling, including any request already pipelined in
+    the read buffer -- matching the reuse promise pooled clients
+    (Net::Async::HTTP, browsers, curl) expect from Connection: keep-alive,
+    and avoiding a TCP+TLS handshake per exchange for the short
+    POST-SSE-exchange pattern (fetch-event-source, datastar). The usual
+    overrides still close the connection as before: a client Connection:
+    close, HTTP/1.0 semantics, server shutdown, an application exception,
+    and any abnormal end (client disconnect, idle timeout, write error) --
+    an abnormal end remains the only thing that delivers sse.disconnect. An
+    application that returns without ever starting a response and without a
+    completed decline never reaches the keep-alive path: the server treats
+    it as the same protocol error the plain HTTP path reports, warning,
+    synthesizing a 500 if the client is still connected, and closing the
+    connection, instead of handing back a socket with zero bytes written.
 
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
@@ -103,6 +121,44 @@
     trailers-declared response that never sent its trailers). Per the PAGI
     spec, the carve-out applies only when the client had already
     disconnected; a server-caused end must still warn.
+  - SSE connection detection (HTTP/1.1 and HTTP/2) used a raw substring scan
+    of the Accept header, which misclassified an explicit refusal (Accept:
+    text/event-stream;q=0) as SSE, false-positived on any Accept token
+    merely containing the substring "text/event-stream", and matched
+    case-sensitively. Detection is now PAGI's media-range client-signal
+    check: the sse scope is assigned only when the combined Accept header
+    values contain the exact range text/event-stream, case-insensitively,
+    with an effective quality value greater than zero; q=0 and wildcard
+    ranges (*/*, text/*) never signal SSE.
+  - sse.send string fields, sse.comment text, and generated keepalive
+    comments are now encoded to UTF-8 exactly once at the wire boundary
+    (chunk framing on HTTP/1.1, the per-stream send queue on HTTP/2). A
+    string that fails to encode now fails that send's Future instead of
+    writing corrupted bytes to the socket.
+  - SSE request bodies (sse.request) are now delivered completely and with
+    truthful more flags on both transports. HTTP/2: the first receive
+    previously returned sse.request as soon as it was called, gated only on
+    a sent flag, so a POST body still arriving across DATA frames could be
+    delivered truncated behind a false more => 0; it now waits for the
+    stream's body to actually complete. HTTP/1.1: chunked Transfer-Encoding
+    and Expect: 100-continue were never handled for SSE requests (body
+    presence was inferred from Content-Length alone), so a chunked body was
+    silently dropped and a client waiting for the 100-continue interim
+    response would stall; both now work, sharing the same body reader as
+    plain HTTP requests.
+  - HTTP/2 SSE keepalive and idle-timeout state (writer, timer, interval,
+    comment) is now per-stream instead of connection-level: a second
+    multiplexed SSE stream's sse.start no longer hijacks the first stream's
+    keepalive writer, and an idle timeout now ends only the stream that
+    went idle instead of the whole connection. HTTP/1.1 is unaffected --
+    one connection carries only one long-lived SSE stream, so its
+    keepalive/idle state stays connection-level.
+  - On sse.start, the server-supplied Cache-Control header (both
+    transports) and Date header (HTTP/1.1) are now added only when the
+    application did not already supply one, matching the existing
+    Content-Type behavior. An application-supplied Cache-Control or Date
+    was previously duplicated on the wire alongside the server's own value
+    instead of being honored.
 
 0.002006 - 2026-07-04
 

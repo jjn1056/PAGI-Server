@@ -5448,11 +5448,15 @@ to change their SSE handling code based on protocol version.
 
 =head2 How It Works
 
-When a request arrives with C<Accept: text/event-stream>, the connection
-detects it as SSE regardless of HTTP version. Over HTTP/1.1, SSE data is
-sent using chunked Transfer-Encoding. Over HTTP/2, SSE data is sent as
-DATA frames via the C<submit_response_streaming>/C<data_callback> mechanism.
-This difference is transparent to the application.
+A request is detected as SSE when its combined C<Accept> header values
+contain the exact media range C<text/event-stream>, case-insensitively,
+with an effective quality value greater than zero (see L<PAGI::Spec::Www/
+"SSE Connection Detection">); a C<q=0> refusal or a wildcard range such as
+C<*/*> never signals SSE. Detection works identically regardless of HTTP
+version. Over HTTP/1.1, SSE data is sent using chunked Transfer-Encoding.
+Over HTTP/2, SSE data is sent as DATA frames via the
+C<submit_response_streaming>/C<data_callback> mechanism. This difference is
+transparent to the application.
 
 The C<http_version> field in the scope hash will be C<'2'> for HTTP/2
 connections, allowing applications to distinguish if needed.
