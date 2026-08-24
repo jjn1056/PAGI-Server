@@ -429,6 +429,14 @@ spec repository from this branch:
    so an application can observe trailers a client sent instead of every
    server being left to validate-and-discard them by convention, as
    PAGI::Server does today.
+7. Name the pre-accept WebSocket overrun case explicitly: when a server-side
+   limit (e.g. `max_body_size`) forces an abnormal close of a WebSocket
+   scope before `websocket.accept` is sent, `Www.pod`'s general
+   server-detected-abnormal-close clause (code 1006 plus the matching
+   Standard Disconnect Reasons token) already implies code 1006 / reason
+   `body_too_large` for this shape, but the spec never names the pre-accept
+   case by itself, leaving it to be inferred the same way this section's
+   trailer proposals above were.
 
 ### 8.4 Fullflush capability
 

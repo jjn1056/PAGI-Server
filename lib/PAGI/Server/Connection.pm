@@ -677,7 +677,27 @@ sub _h2_on_body {
                     type   => 'sse.disconnect',
                     reason => 'body_too_large',
                 };
-            } elsif (!$stream->{is_websocket}) {
+            } elsif ($stream->{is_websocket}) {
+                # An accepted ws stream returns early at the top of this sub
+                # (the ws_accepted guard above), so is_websocket true here
+                # always means pre-accept. Deliver the scope's single
+                # websocket.disconnect (Www.pod "Disconnect - receive
+                # event": server-detected abnormal close is code 1006 plus
+                # the matching Standard Disconnect Reasons token, and
+                # body_too_large is one). Pushed directly rather than
+                # through _h2_ws_enqueue_disconnect: that helper also calls
+                # _h2_wake_pending, but the wake here must wait until
+                # h2_closed is set below (same ordering the sse/http arms
+                # rely on -- see the comment above h2_closed). Still honor
+                # the single-delivery contract so a later delivery attempt
+                # for this (about-to-be-deleted) stream is a no-op.
+                $stream->{ws_disconnect_delivered}++;
+                push @{$stream->{receive_queue}}, {
+                    type   => 'websocket.disconnect',
+                    code   => 1006,
+                    reason => 'body_too_large',
+                };
+            } else {
                 push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
             }
             $stream->{connection_state}->_mark_disconnected('body_too_large')

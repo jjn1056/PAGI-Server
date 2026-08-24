@@ -85,6 +85,7 @@ sub create_h2_connection {
         server        => $server,
         h2_protocol   => $server->{http2_protocol},
         alpn_protocol => 'h2',
+        max_body_size => $server->{max_body_size},
     );
 
     $server->add_child($stream);
@@ -1110,6 +1111,115 @@ subtest 'receive() fallback with no reachable stream state still falls back to e
 
     is($event->{code}, 1006, 'fallback code is still 1006');
     is($event->{reason}, '', "fallback reason is '' when no stream state is reachable");
+};
+
+# ============================================================
+# max_body_size 413 overrun on a PRE-ACCEPT h2 WebSocket stream (Www.pod
+# "Disconnect - receive event" field definitions: code 1478-1480, reason
+# 1482 -- a server-detected abnormal close reports 1006 plus the matching
+# standard token, and 'body_too_large' is one of the Standard Disconnect
+# Reasons).
+# ============================================================
+# _h2_on_body's max_body_size overrun branch delivers a scope-appropriate
+# disconnect for the sse and http arms, but excluded pre-accept websocket
+# streams: an accepted ws stream returns early at the top of _h2_on_body
+# (the `$stream->{is_websocket} && $stream->{ws_accepted}` guard) before
+# ever reaching this size check, so `is_websocket` true at the overrun
+# branch always means pre-accept. Before this fix, that pre-accept case got
+# its 413 and stream-state deletion but no receive_queue event, so an app
+# parked on receive() -- having seen websocket.connect but not yet called
+# websocket.accept -- hung until connection teardown.
+# ============================================================
+subtest 'max_body_size 413 overrun on a pre-accept ws stream wakes pending receive() with websocket.disconnect' => sub {
+    my ($receive_resolved, $connect_event, $disconnect_event);
+    my @app_warnings;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        # Deliberately do NOT send websocket.accept -- the app awaits
+        # receive() twice (connect, then a second call that parks) without
+        # ever accepting, reproducing the pre-accept overrun scenario.
+        $connect_event = await $receive->();
+        $disconnect_event = await $receive->();
+        $receive_resolved = 1;
+    };
+
+    my $server = create_test_server(app => $app, max_body_size => 40);
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+
+    my %response_headers;
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+    local $SIG{__WARN__} = sub { push @app_warnings, $_[0] };
+
+    my $ws_stream_id = open_ws_stream($client, $client_sock);
+
+    # Poll (bounded) until the app has consumed websocket.connect and is
+    # parked on its second, pre-accept receive() (body_pending armed but not
+    # yet resolved), so the overrun below is guaranteed to land on a
+    # PENDING receive, not one the app hasn't reached yet.
+    my $dispatched = 0;
+    for (1..20) {
+        exchange_frames($client, $client_sock, 1);
+        my $ss = $conn->{h2_streams}{$ws_stream_id};
+        if ($connect_event && $ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app consumed websocket.connect and parked on a second, pre-accept receive()')
+        or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
+    ok(!$conn->{h2_streams}{$ws_stream_id}{ws_accepted}, 'stream is still pre-accept (ws_accepted false)');
+
+    # Push body data past max_body_size (40 bytes) as raw h2 DATA -- for a
+    # pre-accept ws stream this is accumulated as an ordinary request body
+    # (the ws-frame-parsing branch in _h2_on_body only runs once ws_accepted
+    # is true), so it drives the SAME max_body_size overrun branch the
+    # sse/http arms use.
+    send_stream_data($client, $client_sock, $ws_stream_id, ('X' x 100));
+
+    # Bounded wait (never an unbounded hang) for the parked receive() to
+    # resolve. TODAY (RED): this never becomes true and the loop exhausts.
+    my $settled = 0;
+    for (1..20) {
+        exchange_frames($client, $client_sock, 1);
+        if ($receive_resolved) {
+            $settled = 1;
+            last;
+        }
+    }
+    ok($settled, 'pending pre-accept receive() resolved within the bounded wait')
+        or diag('receive_resolved=' . ($receive_resolved // 0));
+
+    is($connect_event->{type}, 'websocket.connect', 'first receive() was the opening websocket.connect');
+    is($disconnect_event->{type}, 'websocket.disconnect', 'second receive() resolved to websocket.disconnect');
+    if ($disconnect_event && ($disconnect_event->{type} // '') eq 'websocket.disconnect') {
+        is($disconnect_event->{code}, 1006, 'code is 1006 (abnormal closure)');
+        is($disconnect_event->{reason}, 'body_too_large', "reason is 'body_too_large'");
+    }
+    ok(!exists $conn->{h2_streams}{$ws_stream_id},
+        'server-side stream state reclaimed after the overrun (no leaked h2_streams entry)');
+    ok(!(grep { /returned without starting a response/ } @app_warnings),
+        'dispatch wrapper did not synthesize a spurious 500 warning for this client-gone (413) stream')
+        or diag(join('', @app_warnings));
+
+    # 413 observed client-side if still observable pre-RST: give a few more
+    # settle rounds for the response headers nghttp2 already submitted to
+    # reach the client before asserting on them.
+    exchange_frames($client, $client_sock, 10);
+    is($response_headers{':status'}, '413', 'client still sees the 413');
+
+    $stream_io->close_now;
+    $loop->remove($server);
 };
 
 done_testing;
