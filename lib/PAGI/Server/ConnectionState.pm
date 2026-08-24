@@ -151,9 +151,9 @@ Standard reason strings:
 
 =item * C<client_timeout> - Client stopped responding (read timeout)
 
-=item * C<idle_timeout> - Connection idle too long before the request arrived
+=item * C<idle_timeout> - Connection or stream idle too long, before a request arrived or mid-stream on a quiet WebSocket or SSE session
 
-=item * C<keepalive_timeout> - Keep-alive connection idled out between requests
+=item * C<keepalive_timeout> - Keep-alive connection idled out between requests, or a WebSocket keepalive ping received no pong within its timeout
 
 =item * C<write_timeout> - Response write timed out
 

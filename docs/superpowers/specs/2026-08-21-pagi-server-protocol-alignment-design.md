@@ -82,6 +82,13 @@ are against the `main`-based worktree, not the perf branch.
   the 413 path gains _mark_disconnected('body_too_large') + receive wake
   in phase 6 (the spec's standard-reason table already provides the token;
   ratified as consistent with RFC 9110 15.5.14 practice).
+- **Baseline bump (2026-08-24):** `main` at `4bc54fe` widens the
+  `idle_timeout`/`keepalive_timeout` token definitions to the union of
+  senses in real use (mid-stream ws/sse idle; missed-pong keepalive) --
+  John-directed during the deferred-work packet walk; resolves the spec's
+  internal contradiction with its own `websocket.keepalive` section. The
+  server already ships these semantics; ConnectionState POD mirrored.
+  No behavioral work created.
 - **Owned changes:** none
 - **Deployment boundary:** none in this project
 - **Push target:** none
