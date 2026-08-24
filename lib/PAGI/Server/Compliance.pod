@@ -740,6 +740,23 @@ Validates close reason is valid UTF-8.
 
 =back
 
+=head2 Disconnect
+
+An HTTP/1.1 WebSocket connection enqueues exactly one C<websocket.disconnect>
+event onto its scope's receive queue -- the same "exactly once" guarantee
+described above for HTTP/2: whichever closure path fires
+first -- a peer Close frame (C<code>/C<reason> passed through unchanged, no
+PAGI token substitution), a TCP close with no close handshake (C<1006> /
+C<client_closed>), a keepalive pong timeout (C<1006> / C<keepalive_timeout>),
+or a server-initiated protocol close (C<1002>/C<1007>, reason
+C<protocol_error>) -- marks the connection's disconnect-handled state so no
+other path can queue a second, conflicting event. As with HTTP/2, this is a
+property of the receive queue, not a hard cap on what any number of
+C<receive()> calls can return: once the connection is closed, a further
+C<receive()> has no queue left to read and falls back to synthesizing a
+generic C<websocket.disconnect> (code C<1006>, empty C<reason>) rather than
+hanging.
+
 =head2 Known Limitations
 
 These limitations are in the Protocol::WebSocket library, not PAGI::Server:

@@ -319,6 +319,18 @@
     -- two Connection lines (or a stray Transfer-Encoding) on one handshake
     response. The server's own Connection: Upgrade line is untouched (RFC
     6455 requires it).
+  - HTTP/1.1 WebSocket connections now deliver exactly one
+    websocket.disconnect event per scope after a clean peer-initiated close.
+    Processing the peer's Close frame previously queued the app-facing
+    disconnect event without marking the connection's disconnect-handled
+    guard, so the TCP close that follows (or the application's own
+    session-complete teardown, if it returns without calling receive()
+    again) queued a second, ghost event -- 1006/client_closed -- that the
+    application never asked for and, since it had already stopped calling
+    receive() after the first (correct) event, never drained. The peer's
+    own code and reason are still passed through unchanged, as before; only
+    the spurious second delivery is gone. This mirrors the equivalent HTTP/2
+    fix described above.
 
   Maintenance
   - Test coverage added for previously-untested but already-correct

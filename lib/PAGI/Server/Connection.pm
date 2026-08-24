@@ -6063,6 +6063,16 @@ sub _process_websocket_frames {
                 code   => $code,
                 reason => $reason,
             };
+
+            # This is the scope's one and only websocket.disconnect: mark
+            # disconnect-handled now (the same guard _handle_disconnect
+            # checks) so a later TCP close (on_closed -> client_closed) or
+            # the app's own session-complete teardown finds the guard
+            # already set and delivers nothing further. Without this, either
+            # of those paths queues a second, ghost disconnect event that
+            # nobody asked for and nobody drains (h2's equivalent guard is
+            # ws_disconnect_delivered / _h2_ws_enqueue_disconnect).
+            $self->{_disconnect_handled} = 1;
         }
         elsif ($opcode == 9) {
             # Ping - respond with pong (transparent to app)
