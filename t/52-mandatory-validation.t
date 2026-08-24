@@ -2,6 +2,7 @@ use strict;
 use warnings;
 use Test2::V0;
 use IO::Async::Loop;
+use IO::Socket::INET;
 use Net::Async::HTTP;
 use Future::AsyncAwait;
 use FindBin;
@@ -60,9 +61,13 @@ my $app = async sub {
     if ($path eq '/post-close') {
         # Post-close no-op: complete the response, wait for the client to go
         # away, then send a malformed event. Spec order: closed-check runs
-        # BEFORE validation, so this must RESOLVE, not fail.
+        # BEFORE validation, so this must RESOLVE, not fail. The test client
+        # signals the disconnect itself (a raw-socket shutdown()) rather than
+        # this response asking for one via Connection: close -- HTTP/1.1
+        # strips an app-supplied Connection header (PAGI spec), so this app
+        # has no lever over the wire's framing/connection headers at all.
         await $send->({ type => 'http.response.start', status => 200,
-                        headers => [['content-type','text/plain'], ['connection','close']] });
+                        headers => [['content-type','text/plain']] });
         await $send->({ type => 'http.response.body', body => 'bye', more => 0 });
         while (1) {
             my $e = await $receive->();
@@ -103,11 +108,39 @@ like( $get->('/undeclared-trailers')->content, qr/trailers:.*not declared/,
     'undeclared trailers fail' );
 is( $get->('/ok')->content, 'NO-ERROR', 'a conforming app is unaffected' );
 
-# Post-close: malformed send after client disconnect resolves as a no-op
-is( $get->('/post-close')->content, 'bye', 'post-close response delivered' );
-$loop->loop_once(0.1) for 1..5;   # let the disconnect and probe land
-is( $PostClose::RESULT, 'resolved',
-    'malformed send after close resolves as a no-op (closed-check precedes validation)' );
+# Post-close: malformed send after client disconnect resolves as a no-op.
+# A raw socket, not the pooled Net::Async::HTTP client: the app's response no
+# longer carries a Connection header for the strip to remove (see above), so
+# the disconnect has to come from the client side actually going away --
+# shutdown() on the write half is this suite's existing idiom for that (see
+# t/http-incomplete-response.t's /cancel-before-start).
+{
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+    ok($sock, 'raw socket connected for /post-close') or last;
+    $sock->blocking(0);
+
+    print $sock "GET /post-close HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n";
+
+    my $wire = '';
+    my $deadline = time + 5;
+    while (time < $deadline) {
+        my $buf;
+        my $n = sysread($sock, $buf, 4096);
+        $wire .= $buf if defined $n && $n > 0;
+        $loop->loop_once(0.05);
+        last if $wire =~ /0\r\n\r\n\z/;   # chunked terminator (no Content-Length here)
+    }
+    like( $wire, qr/bye/, 'post-close response delivered' );
+
+    shutdown($sock, 1) or die "shutdown: $!";   # signal disconnect to the server
+    $loop->loop_once(0.1) for 1..5;   # let the disconnect and probe land
+    is( $PostClose::RESULT, 'resolved',
+        'malformed send after close resolves as a no-op (closed-check precedes validation)' );
+
+    close $sock;
+}
 
 # Dev-configuration parity: validate_events => 1 behaves identically
 my $dev_server = PAGI::Server->new(
