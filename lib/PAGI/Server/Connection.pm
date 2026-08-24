@@ -4664,9 +4664,6 @@ sub _handle_disconnect {
     return if $self->{_disconnect_handled};
     $self->{_disconnect_handled} = 1;
 
-    # Cancel any pending drain waiters (backpressure)
-    $self->_cancel_drain_waiters($reason);
-
     # Auto-detect server shutdown (PAGI spec compliance)
     # If no explicit reason and server is shutting down, use server_shutdown
     if (!$reason && $self->{server} && $self->{server}{shutting_down}) {
@@ -4700,6 +4697,14 @@ sub _handle_disconnect {
                 if $stream->{connection_state};
         }
     }
+
+    # Cancel any pending drain waiters (backpressure) AFTER connection state
+    # is marked above: resolving a parked waiter can synchronously resume an
+    # awaiting app coroutine (Future::AsyncAwait resumes inline off ->done),
+    # and that resumed app's first act may be to read is_connected() /
+    # disconnect_reason() -- those must already reflect this disconnect, not
+    # a stale "still connected" snapshot from before it was detected.
+    $self->_cancel_drain_waiters($reason);
 
     # Record the abnormal reason so the WebSocket disconnect event reports it
     # (instead of the old empty string). SSE tracks its own reason at the

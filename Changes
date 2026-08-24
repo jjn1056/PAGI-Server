@@ -155,6 +155,23 @@
     fetch-event-source) send the exact media type and are unaffected.
 
   Bug Fixes
+  - HTTP/1.1's on_drain no longer fires when a connection tears down with
+    the outbound buffer still above the high mark (client disconnect,
+    timeout, server shutdown, ...). arm_drain previously piggybacked
+    directly on the same Future queue a blocking $send await uses, so
+    teardown resolved both indiscriminately; a new, separate _drain_fires
+    list now holds the on_drain callback, fired only on a genuine drain and
+    dropped unfired on teardown, matching how HTTP/2 already kept
+    stream_drain_waiters and transport_drain_fires apart. A producer parked
+    on the blocking backpressure path still resumes on teardown either way.
+  - _handle_disconnect now marks the HTTP connection-state object (and, on
+    HTTP/2, every open stream's connection-state) as disconnected before
+    cancelling pending drain waiters, not after. Cancelling a drain waiter
+    can synchronously resume an awaiting app coroutine (a $send blocked on
+    backpressure), and that resumed code's first act may be to check
+    is_connected()/disconnect_reason() -- previously it could observe a
+    stale "still connected" snapshot for the instant between its own
+    resumption and the state being marked.
   - Fail the Future returned by $send when a file response's handle cannot be
     read, instead of treating a read error as EOF. Applications may now safely
     close a file resource only after the corresponding send Future resolves.

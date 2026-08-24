@@ -323,6 +323,15 @@ surface and semantics -- C<buffered_amount>, the high/low watermarks,
 C<on_high_water>/C<on_drain> -- whether the connection is HTTP/1.1 or
 HTTP/2.
 
+C<on_drain> fires only for a genuine drain -- the buffer actually falling
+back below the low mark -- on both transports. Tearing a connection down
+while the buffer is still above the high mark (client disconnect, timeout,
+server shutdown, ...) does not fire C<on_drain>: the connection is going
+away, not draining. A producer parked on the blocking backpressure path
+(a C<$send> awaiting the buffer to drain) still resumes on teardown, so no
+coroutine is left hanging; only the app-facing hysteresis callback is
+withheld.
+
 =head2 WebSocket over HTTP/2 (RFC 8441)
 
 PAGI::Server accepts a WebSocket upgrade over HTTP/2 through RFC 8441
