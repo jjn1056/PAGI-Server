@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002007 - UNRELEASED
+0.002007 - 2026-08-24
 
   Specification Alignment
   - Advertise PAGI core version 0.4 on HTTP, HTTP/2, WebSocket, SSE, and
@@ -443,6 +443,13 @@
     The duplicated preamble and rollback tail shared by HTTP/2's file and
     filehandle response arms was extracted into one helper; the file-only
     and filehandle-only logic in between is unchanged.
+  - t/40-connection-limiting.t now reads the over-capacity 503 and the
+    capacity warning under a polling deadline instead of a fixed
+    loop-turn budget with a zero-wait read, fixing a race observed as a
+    CPAN Testers FAIL on 0.002006 (FreeBSD 14.4: "second connection got
+    empty response"): the 503 needs two loop turns after the client
+    connects, which was exactly the budget the test granted, leaving no
+    margin for scheduling variance.
 
 0.002006 - 2026-07-04
 
