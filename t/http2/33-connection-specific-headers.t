@@ -244,13 +244,89 @@ subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => s
     ok(!(grep { /connection-specific header/ } @warnings),
         "no strip warning for te with OWS around trailers -- the compare correctly recognizes the token");
 
-    # nghttp2 itself silently drops header field values carrying leading or
-    # trailing whitespace (RFC 9113 8.2.1 forbids OWS in field values) before
-    # the frame reaches the wire -- confirmed by direct inspection, this is
-    # independent of and unaffected by the connection-specific-header strip
-    # under test here, so the 'te' header itself is not observed by the
-    # client even though our code never flagged it as a violation.
+    # nghttp2 itself rejects and omits header field values carrying leading
+    # or trailing whitespace (RFC 9113 8.2.1 forbids OWS in field values)
+    # rather than trimming them -- the field is absent, not present with the
+    # whitespace stripped. This is independent of and unaffected by the
+    # connection-specific-header strip under test here, so the 'te' header
+    # itself is not observed by the client even though our code never
+    # flagged it as a violation. See the request-direction subtest below for
+    # the symmetric proof on receipt (the app's scope->{headers} side).
     ok(!exists $headers{'te'}, "the 'te' header itself does not survive nghttp2's own OWS field-value rule");
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Request direction: nghttp2 rejects-and-omits an OWS-padded header value
+# on RECEIPT too, symmetric with the response-direction proof above. A raw,
+# hand-crafted HEADERS frame is required here: Net::HTTP2::nghttp2's own
+# client-side submit_request() applies the identical RFC 9113 8.2.1
+# validation, so a conforming client cannot be made to send a padded value
+# through the public API either -- the only way to reach the server's
+# receive-side validation is to bypass client-side submission entirely and
+# write the frame's bytes directly (same technique as the malformed-trailer
+# subtest in t/http2/34-request-trailers.t).
+# ============================================================
+
+sub hpack_literal_new_name {
+    my ($name, $value) = @_;
+    # RFC 7541 section 6.2.2: Literal Header Field without Indexing -- New
+    # Name. Fine for hand-built test fixtures (short ASCII strings, no
+    # huffman, no dynamic table).
+    return "\x00" . chr(length($name)) . $name . chr(length($value)) . $value;
+}
+
+sub raw_request_headers_frame {
+    my ($stream_id, $header_pairs, %opts) = @_;
+    my $payload = join('', map { hpack_literal_new_name(@$_) } @$header_pairs);
+    my $flags = 0x4;                       # END_HEADERS
+    $flags |= 0x1 if $opts{end_stream};    # END_STREAM
+    my $len24 = substr(pack('N', length($payload)), 1, 3);
+    return $len24 . chr(0x1) . chr($flags) . pack('N', $stream_id & 0x7fffffff) . $payload;
+}
+
+subtest "request direction: a padded header value never reaches the app's scope->{headers}" => sub {
+    my $captured_scope;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $captured_scope = $scope;
+        await $receive->();
+        await $send->({
+            type => 'http.response.start', status => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $client = create_client;
+
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    pump($client, $client_sock);
+
+    # Stream 1 is the first client-initiated stream id available on a fresh
+    # connection. Hand-crafted directly rather than via submit_request,
+    # which would apply the identical client-side OWS validation and refuse
+    # to send the padded value at all. (The client-side session never
+    # learns it "owns" this stream this way, so it cannot reliably parse a
+    # response on it -- irrelevant here: the assertion below is entirely
+    # about what the SERVER handed the app, not what the client received
+    # back.)
+    $client_sock->syswrite(raw_request_headers_frame(1, [
+        [':method', 'GET'], [':path', '/'], [':scheme', 'http'],
+        [':authority', 'localhost'], ['x-padded', '  padded-value  '],
+    ], end_stream => 1));
+    pump($client, $client_sock, sub { $captured_scope });
+
+    ok($captured_scope, 'app was dispatched for the hand-crafted request');
+    ok(!(grep { lc($_->[0]) eq 'x-padded' } @{$captured_scope->{headers} // []}),
+        "the app's scope->{headers} never observed the OWS-padded header -- "
+      . "nghttp2 dropped it on receipt, symmetric with the response-direction case above")
+        if $captured_scope;
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -1003,6 +1003,16 @@ This file carries many protocols and performance-sensitive paths. Extract only
 the helpers that establish shared correctness or per-stream ownership. No
 style-only rewrite is part of this project.
 
+Deferred candidate (packet item 10B code review, not actioned here): the
+per-stream queue-pull data_callback's drain-waiter release +
+transport-drain-fire block is now triplicated across the h2 http-streaming,
+WebSocket, and SSE send paths (`_h2_create_send`, `_h2_create_websocket_send`,
+`_h2_create_sse_send`). A shared `_h2_pull_chunk`-style helper (queue pull,
+max_len truncation, low-watermark waiter/fire release, eof handling
+parameterized per caller) is a plausible post-merge extraction once all three
+call sites are stable and covered -- not done as part of this packet item to
+keep its diff to the minimal change needed.
+
 ### 18.5 Specification drift during implementation
 
 The PAGI repository is under concurrent review. Pinning the audit snapshot and

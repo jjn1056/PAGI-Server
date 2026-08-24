@@ -2166,7 +2166,19 @@ sub _h2_create_websocket_send {
                 await $weak_self->_h2_wait_for_stream_drain($stream_id);
                 return unless $weak_self;
                 return if $weak_self->{closed};
-                return unless $weak_self->{h2_streams}{$stream_id};
+                # Refetch (same idiom as emit_chunk, :1374-1375): a stream
+                # can close while this send was parked.
+                $ss = $weak_self->{h2_streams}{$stream_id};
+                return unless $ss;
+                return if $ss->{h2_closed};
+                # This send can wake AFTER this stream's close frame was
+                # already queued (window opened below the low watermark
+                # while ws_eof_pending was set) -- pushing app data now would
+                # land it BEHIND the close frame: Close would ship without
+                # END_STREAM and a Text/Binary frame would follow it,
+                # violating RFC 6455 5.5.1. Same post-close no-op contract
+                # as the top-of-closure $already_closed check.
+                return if $ss->{ws_eof_pending};
             }
 
             push @{$ss->{send_queue}}, $bytes;

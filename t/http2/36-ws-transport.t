@@ -467,4 +467,204 @@ subtest 'app-initiated close: the close frame carries END_STREAM, same as before
     $loop->remove($server);
 };
 
+# ============================================================
+# A parked websocket.send() that wakes AFTER the close frame is already
+# queued must not push data behind it (RFC 6455 5.5.1: no frame may follow
+# Close, and Close itself must carry END_STREAM alone).
+# ============================================================
+# White-box on the wake trigger by necessity: the real trigger is a window
+# grant landing the per-stream queue below the low watermark, but that also
+# tends to deliver the close frame's own EOF pull in the SAME data_callback
+# invocation that releases the drain waiter -- racing the wake against
+# stream teardown in a way that isn't reliably provokable through real
+# pumping. _h2_resolve_stream_drain_waiters is the exact function the real
+# data_callback calls to release a parked send; invoking it directly still
+# exercises the real send()/_h2_ws_close code paths and the real guard,
+# just without gambling on which deferred callback the event loop runs
+# first.
+subtest 'a send() parked when close is queued does not push behind the close frame' => sub {
+    my @marks;
+    my $f2;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        await $send->({ type => 'websocket.accept' });
+        my $event = await $receive->();   # websocket.connect
+        while (1) {
+            $event = await $receive->();
+            if ($event->{type} eq 'websocket.receive'
+                    && ($event->{text} // '') eq 'go') {
+                # First send: queue starts empty, doesn't park.
+                await $send->({ type => 'websocket.send', text => ('x' x 10_000) });
+                push @marks, 'first-done';
+
+                # Second send: queue already at/above the high mark -> parks.
+                # Fire-and-forget (not awaited) so the app can go on to close
+                # while it is still parked.
+                $f2 = $send->({ type => 'websocket.send', text => ('y' x 10_000) });
+                $f2->on_ready(sub { push @marks, 'second-settled'; });
+
+                # Close while send#2 is still parked.
+                await $send->({ type => 'websocket.close', code => 1000, reason => 'bye' });
+                push @marks, 'closed';
+                next;
+            }
+            last if $event->{type} eq 'websocket.disconnect';
+        }
+    };
+
+    my $server = create_test_server(
+        app => $app, write_high_watermark => 2048, write_low_watermark => 512,
+    );
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+    my $ws_data = '';
+    my $client = create_client(
+        on_data_chunk_recv => sub { my ($sid, $data) = @_; $ws_data .= $data; return 0; },
+    );
+
+    complete_h2_handshake($client, $client_sock,
+        initial_window_size => 4096, max_concurrent_streams => 100);
+    my $ws_stream_id;
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+
+    send_ws_text($client, $client_sock, $ws_stream_id, 'go');
+
+    my $saw_closed = 0;
+    for (1 .. 10) {
+        exchange_frames($client, $client_sock, 1);
+        if (grep { $_ eq 'closed' } @marks) { $saw_closed = 1; last; }
+    }
+    ok($saw_closed, 'app reached websocket.close while the second send was still parked');
+
+    my $ss = $conn->{h2_streams}{$ws_stream_id};
+    ok($ss, 'server still holds stream state right after close');
+    ok($ss && $ss->{ws_eof_pending}, 'ws_eof_pending is set (close frame queued)');
+    ok($ss && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}},
+        'the second send is genuinely parked (a drain waiter is registered)');
+
+    my $queue_bytes_before_wake = $ss ? ($ss->{send_queue_bytes} // 0) : undef;
+
+    # Simulate the window opening enough to drain below the low watermark --
+    # the exact release the real data_callback performs.
+    $conn->_h2_resolve_stream_drain_waiters($ss) if $ss;
+
+    my $saw_settled = 0;
+    for (1 .. 20) {
+        $loop->loop_once(0.05);
+        if (grep { $_ eq 'second-settled' } @marks) { $saw_settled = 1; last; }
+    }
+    ok($saw_settled, 'the parked second send eventually settles (bounded)');
+
+    # The fix: waking must NOT push 'y' x 10_000 behind the already-queued
+    # close frame. $ss may since have been reclaimed by teardown (also a
+    # correct outcome -- either way, no bytes were added by the wake).
+    my $ss_after = $conn->{h2_streams}{$ws_stream_id};
+    if ($ss_after && defined $queue_bytes_before_wake) {
+        ok(($ss_after->{send_queue_bytes} // 0) <= $queue_bytes_before_wake,
+            'the parked send did not push new bytes onto the queue after close was queued')
+            or diag("before=$queue_bytes_before_wake after=$ss_after->{send_queue_bytes}");
+    }
+
+    # Wire assertion: drain everything and confirm no Text/Binary frame
+    # (opcode 1/2, i.e. the 'y' x 10_000 payload) ever reached the wire --
+    # only the Close frame (and whatever of send#1's 'x' payload made it out
+    # under the small window) may appear.
+    for (1 .. 20) {
+        exchange_frames($client, $client_sock, 1);
+    }
+    my @frames = extract_ws_frames($ws_data);
+    # send#1's 'x' x 10_000 payload legitimately reached the wire before the
+    # close (it completed and marked 'first-done' before send#2 ever
+    # parked) -- only a 'y'-payload frame (send#2's, which must never have
+    # been pushed) would indicate the bug.
+    my @leaked = grep { ($_->{opcode} == 1 || $_->{opcode} == 2) && $_->{bytes} =~ /^y/ } @frames;
+    is(scalar @leaked, 0,
+        "no Text/Binary frame carrying send#2's payload reached the wire")
+        or diag('leaked frames: ' . join(', ', map { "opcode=$_->{opcode} len=" . length($_->{bytes}) } @leaked));
+
+    my @closes = grep { $_->{opcode} == 8 } @frames;
+    is(scalar @closes, 1, 'exactly one Close frame reached the wire');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# A parked websocket.send() releases (bounded) on connection teardown
+# (M1: pin one of the drain-waiter release sweeps -- _h2_ws_enqueue_disconnect,
+# reached here via the peer RST_STREAM path -- so a parked producer never
+# hangs forever on a stream that is going away).
+# ============================================================
+subtest 'a parked websocket.send() releases (bounded) when the client RSTs the stream' => sub {
+    my @marks;
+    my $f2;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        await $send->({ type => 'websocket.accept' });
+        my $event = await $receive->();   # websocket.connect
+        while (1) {
+            $event = await $receive->();
+            if ($event->{type} eq 'websocket.receive'
+                    && ($event->{text} // '') eq 'go') {
+                # First send: queue starts empty, doesn't park.
+                await $send->({ type => 'websocket.send', text => ('x' x 10_000) });
+                push @marks, 'first-done';
+
+                # Second send: queue already at/above the high mark -> parks.
+                # Fire-and-forget so the test can RST the stream while it is
+                # still waiting.
+                $f2 = $send->({ type => 'websocket.send', text => ('y' x 10_000) });
+                $f2->on_ready(sub { push @marks, 'released'; });
+                next;
+            }
+            last if $event->{type} eq 'websocket.disconnect';
+        }
+    };
+
+    my $server = create_test_server(
+        app => $app, write_high_watermark => 2048, write_low_watermark => 512,
+    );
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+    my $client = create_client;
+
+    complete_h2_handshake($client, $client_sock,
+        initial_window_size => 4096, max_concurrent_streams => 100);
+    my $ws_stream_id;
+    open_ws_stream_tracked($client, $client_sock, '/ws', \$ws_stream_id);
+
+    send_ws_text($client, $client_sock, $ws_stream_id, 'go');
+
+    my $saw_first = 0;
+    for (1 .. 10) {
+        exchange_frames($client, $client_sock, 1);
+        if (grep { $_ eq 'first-done' } @marks) { $saw_first = 1; last; }
+    }
+    ok($saw_first, 'the first send completed');
+
+    my $ss = $conn->{h2_streams}{$ws_stream_id};
+    ok($ss && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}},
+        'the second send is genuinely parked (a drain waiter is registered)');
+
+    # Client resets the stream (RFC 9113 CANCEL, error code 8) instead of
+    # closing cleanly -- the abrupt teardown path.
+    $client->submit_rst_stream($ws_stream_id, 8);
+    $client_sock->syswrite($client->mem_send);
+
+    my $saw_released = 0;
+    for (1 .. 30) {
+        exchange_frames($client, $client_sock, 1);
+        if (grep { $_ eq 'released' } @marks) { $saw_released = 1; last; }
+    }
+    ok($saw_released,
+        'the parked send released (bounded), instead of hanging forever, once the stream was torn down');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

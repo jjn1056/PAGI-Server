@@ -1836,7 +1836,24 @@ keys in C<http.response.body> events:
 
 The server streams files in 64KB chunks to avoid memory bloat. Small files
 (under 64KB) are read synchronously for speed; larger files use async I/O
-via a worker pool to avoid blocking the event loop.
+via a worker pool (L<PAGI::Server::AsyncFile>, backed by
+L<IO::Async::Function>) to avoid blocking the event loop.
+
+B<Deploy note:> a very large C<RLIMIT_NOFILE> (soft file-descriptor limit) on
+the host -- around a million, the kind some container base images or systemd
+units set by default -- makes each worker in this async-file-I/O pool take
+over a second to start (measured: approximately 1.025s/worker at
+C<nofile=1048576>). The cost is C<IO::Async::Internals::ChildManager>'s
+post-fork file-descriptor-table sweep (it walks C<0 .. SC_OPEN_MAX>, the
+path C<IO::Async::Function> uses to spawn a worker via C<spawn_child>); the
+sweep's cost scales with the configured limit, not with how many descriptors
+are actually open. This is specific to this worker pool: C<workers> worker
+processes spawn via a bare C<fork> (no such sweep) and are unaffected
+(measured: approximately 0.026s at the same C<nofile> setting). If large
+files are served often enough that AsyncFile worker startup latency
+matters, cap C<RLIMIT_NOFILE> to a realistic value for the deployment (a few
+tens of thousands is enough for very high concurrency; see C<ulimit -n>
+under L</System Tuning>) before starting the server.
 
 =head2 Production Recommendations for Static Files
 
@@ -4688,20 +4705,6 @@ For high-concurrency production deployments, ensure adequate system limits:
 
 PAGI::Server defaults to a listen backlog of 2048, matching Uvicorn's
 default. This can be adjusted via the C<listener_backlog> option.
-
-B<Deploy note:> a very large C<RLIMIT_NOFILE> (soft file-descriptor limit) on
-the host -- around a million, the kind some container base images or systemd
-units set by default -- makes each C<workers> worker process take multiple
-seconds to (re)spawn (measured: approximately 4.2s). The cost is in
-L<IO::Async>'s own post-fork cleanup, which sweeps the process's file
-descriptor table; the sweep's cost scales with the configured limit, not with
-how many descriptors are actually open. This affects worker startup and
-respawn-after-crash, not steady-state request handling. If worker
-(re)spawns need to be fast (fast autoscaling, frequent restarts), either cap
-C<RLIMIT_NOFILE> to a realistic value for the deployment (a few tens of
-thousands is enough for very high concurrency; see C<ulimit -n> above) before
-starting the server, or pre-warm the worker pool so the cost is paid once at
-deploy time rather than on every restart.
 
 =head2 Event Loop Selection
 

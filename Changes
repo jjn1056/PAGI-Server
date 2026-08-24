@@ -91,19 +91,29 @@
     it as the same protocol error the plain HTTP path reports, warning,
     synthesizing a 500 if the client is still connected, and closing the
     connection, instead of handing back a socket with zero bytes written.
-  - WebSocket over HTTP/2 now provides pagi.transport (buffered_amount, the
-    high/low watermarks, and on_high_water/on_drain), matching HTTP/1.1
-    WebSocket and every other h2 streaming scope type: from the
-    application's perspective the transport is invisible, the same
-    pagi.transport surface and semantics apply whether a WebSocket app runs
-    over HTTP/1.1 or HTTP/2. The h2 WebSocket send path now frames
-    application messages, protocol replies (pong, the close-frame echo), and
-    its own keepalive ping through the same per-stream send queue and
+  - fix(h2): a concurrent or backlogged WebSocket-over-HTTP/2 send could
+    silently drop or truncate a frame. The previous send path wrote every
+    frame (app messages, pong, the close-frame echo, keepalive ping)
+    directly to nghttp2's submit_data, which registers only a single
+    pending-send slot per stream; submitting a second frame before nghttp2
+    had fully drained the first destroyed that slot's still-queued
+    remainder instead of queuing behind it. Any two h2 WebSocket frames
+    that landed close enough together for the first to still be in flight
+    -- a real, reachable condition, not just a theoretical one -- could
+    silently lose or truncate data with no error raised anywhere.
+  - feat(h2): as part of the fix above, the h2 WebSocket send path now
+    frames every send through the same per-stream send queue and
     pull-based data-provider model the h2 http-streaming and SSE send paths
-    already use, instead of writing each frame straight to nghttp2's
-    push-style submit_data (which kept no per-stream backlog for the handle
-    to measure). Close-frame + END_STREAM wire behavior is unchanged: the
-    close frame still carries END_STREAM on its own final DATA frame.
+    already use (FIFO, so wire ordering is unaffected), and now provides
+    pagi.transport (buffered_amount, the high/low watermarks, and
+    on_high_water/on_drain), matching HTTP/1.1 WebSocket and every other h2
+    streaming scope type: from the application's perspective the transport
+    is invisible, the same pagi.transport surface and semantics apply
+    whether a WebSocket app runs over HTTP/1.1 or HTTP/2. Close-frame +
+    END_STREAM wire behavior is unchanged: the close frame still carries
+    END_STREAM on its own final DATA frame, and a send() that wakes from
+    backpressure after the close frame is already queued now correctly
+    no-ops instead of risking a frame after Close (RFC 6455 5.5.1).
 
   Breaking Changes
   - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping

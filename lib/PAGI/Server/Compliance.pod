@@ -224,13 +224,17 @@ library for interoperability:
     +------------+----------------------------------------------------+
 
 Separately (not an h2spec failure, but the same category of nghttp2-library
-leniency): nghttp2's own HTTP-messaging validation drops header B<values>
-carrying leading or trailing whitespace (RFC 9113 section 8.2.1 forbids
-sending them) before the request or response ever reaches PAGI application
-code. An application inspecting C<scope-E<gt>{headers}> never observes a
-header value with leading/trailing whitespace on HTTP/2, even one a client
-actually sent -- nghttp2 has already stripped it at the C library layer.
-HTTP/1.1 performs no such stripping.
+leniency): nghttp2's own HTTP-messaging validation B<rejects and omits> a
+header field whose value carries leading or trailing whitespace (RFC 9113
+section 8.2.1 forbids sending it) before the request or response ever
+reaches PAGI application code -- the field is dropped entirely, not merely
+trimmed of its whitespace. This holds in both directions: a response header
+an application sends with a padded value never reaches the client
+(C<t/http2/33-connection-specific-headers.t>), and a request header a
+client sends with a padded value never reaches C<scope-E<gt>{headers}>
+(same file, request-direction subtest) -- in neither case does the
+C library layer, nor PAGI, silently rewrite the value. HTTP/1.1 performs no
+such rejection.
 
 =head2 Load Testing (h2load)
 
@@ -313,13 +317,11 @@ transports: C<http> (streaming responses), C<sse>, and C<websocket>, on both
 HTTP/1.1 and HTTP/2. The HTTP/2 WebSocket send path frames application
 messages, protocol replies (pong, the close-frame echo), and its own keepalive
 ping through the same per-stream send queue and pull-based data-provider model
-that HTTP/2 streaming and SSE already use, rather than writing each frame
-straight to nghttp2's push-style C<submit_data> entry point (which kept no
-per-stream backlog for the handle to measure). From the application's
-perspective the transport is invisible: a WebSocket app sees the same
-C<pagi.transport> surface and semantics -- C<buffered_amount>, the high/low
-watermarks, C<on_high_water>/C<on_drain> -- whether the connection is
-HTTP/1.1 or HTTP/2.
+that HTTP/2 streaming and SSE use. From the application's perspective the
+transport is invisible: a WebSocket app sees the same C<pagi.transport>
+surface and semantics -- C<buffered_amount>, the high/low watermarks,
+C<on_high_water>/C<on_drain> -- whether the connection is HTTP/1.1 or
+HTTP/2.
 
 =head2 WebSocket over HTTP/2 (RFC 8441)
 
