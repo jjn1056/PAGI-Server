@@ -5980,7 +5980,7 @@ async sub _send_fh_response {
             $bytes_read = read($fh, $chunk, $to_read);
         }
 
-        die "Failed to read filehandle: $!" unless defined $bytes_read;
+        die "Failed to read filehandle: $!\n" unless defined $bytes_read;
         last if $bytes_read == 0;      # EOF
 
         $self->{_response_size} += $bytes_read;

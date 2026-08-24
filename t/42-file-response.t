@@ -420,6 +420,10 @@ subtest 'closed fh fails the send Future' => sub {
         '$send returns a Future instead of throwing synchronously',
     );
     ok(length($future_error), 'closed fh fails the Future returned by $send');
+    like($future_error, qr/^Failed to read filehandle: /,
+        'error names the failure (mirrors the h2 fh-closed message, t/http2/28-file-fh.t)');
+    unlike($future_error, qr/ at .+ line \d+\.?\s*\z/,
+        'die message ends with a trailing newline, so Perl does not append " at FILE line N." (matches h2\'s twin die at Connection.pm ~1660)');
 };
 
 subtest 'fh response without length reads to EOF' => sub {
