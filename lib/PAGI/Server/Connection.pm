@@ -410,6 +410,28 @@ sub start {
             # Stream closed - handle disconnect and remove from connections hash
             $weak_self->_handle_disconnect_and_close('client_closed');
         },
+        # Without these, IO::Async::Stream's own contract applies: "If an
+        # error occurs when the corresponding error callback is not
+        # supplied, ... the close method is called instead" -- i.e. it would
+        # call close_now itself and (via on_closed above) report every
+        # socket error as client_closed, indistinguishable from an ordinary
+        # peer disconnect. Registering a handler here -- regardless of what
+        # it returns -- is sufficient by itself to suppress that close_now
+        # (maybe_invoke_event always returns a truthy value once any handler
+        # exists), so there is no double-teardown risk from IO::Async's
+        # side; _handle_disconnect_and_close's own _disconnect_handled guard
+        # covers the (harmless, pre-existing) case where on_closed also
+        # fires afterward once the socket actually finishes closing.
+        on_read_error => sub {
+            my ($s, $errno) = @_;
+            return unless $weak_self;
+            $weak_self->_handle_disconnect_and_close('read_error');
+        },
+        on_write_error => sub {
+            my ($s, $errno) = @_;
+            return unless $weak_self;
+            $weak_self->_handle_disconnect_and_close('write_error');
+        },
     );
 }
 

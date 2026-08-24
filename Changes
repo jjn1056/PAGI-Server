@@ -155,6 +155,14 @@
     fetch-event-source) send the exact media type and are unaffected.
 
   Bug Fixes
+  - Socket read/write errors on a connection now report the spec's
+    read_error/write_error disconnect reasons instead of client_closed.
+    IO::Async::Stream's default behavior when no on_read_error/on_write_error
+    handler is supplied is to call close (which this server's on_closed
+    handler reports as client_closed), making every socket error
+    indistinguishable from an ordinary clean peer disconnect. write_timeout
+    remains unproduced: this server has no mechanism that times a write's
+    completion independently of its other timeouts.
   - HTTP/1.1's on_drain no longer fires when a connection tears down with
     the outbound buffer still above the high mark (client disconnect,
     timeout, server shutdown, ...). arm_drain previously piggybacked

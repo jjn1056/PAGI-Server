@@ -506,6 +506,15 @@ resolved with the disconnect reason; after a clean completion it returns a
 Future that is deliberately left pending forever, since a clean completion
 has no disconnect reason to resolve it with.
 
+B<Socket errors:> a C<sysread>/C<syswrite> failure on the underlying socket
+(other than a clean EOF, which is C<client_closed>) reports C<read_error> /
+C<write_error> respectively, per
+L<PAGI::Spec::Www/"Standard Disconnect Reasons">. C<write_timeout> is
+B<not currently produced> -- PAGI::Server has no mechanism that times a
+write's completion independently of the connection's other timeouts
+(C<timeout>, C<request_timeout>), so a stalled write is only ever caught,
+if at all, by one of those.
+
 B<Application Left a Response Incomplete:> when C<http.response.start> has
 been sent but the response's terminal event never arrives -- the final body
 chunk (C<more =E<gt> 0>), a C<file>/C<fh> body, or (having declared
