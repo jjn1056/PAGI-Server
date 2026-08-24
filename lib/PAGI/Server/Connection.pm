@@ -2706,6 +2706,39 @@ sub _h2_process_ws_frames {
     while (defined(my $bytes = $frame->next_bytes)) {
         my $opcode = $frame->opcode;
 
+        # RFC 6455 Section 5.2: RSV1-3 MUST be 0 unless extension defines
+        # meaning. PAGI doesn't support compression extensions, so RSV must
+        # always be 0. Same enforcement as h1's _process_websocket_frames
+        # (Www.pod: transport-agnostic framing enforcement, and RFC 8441's
+        # "identical to HTTP/1.1" claim).
+        my $rsv = $frame->rsv;
+        if ($rsv && ref($rsv) eq 'ARRAY') {
+            if (grep { $_ } @$rsv) {
+                $self->_h2_ws_close($stream_id, 1002, 'RSV bits must be 0');
+                # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
+                return;
+            }
+        }
+
+        # RFC 6455 Section 5.2: Opcodes 3-7 and 11-15 (0xB-0xF) are reserved.
+        # Must fail connection with 1002 Protocol Error.
+        if (($opcode >= 3 && $opcode <= 7) || ($opcode >= 11 && $opcode <= 15)) {
+            $self->_h2_ws_close($stream_id, 1002, 'Reserved opcode');
+            # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+            $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
+            return;
+        }
+
+        # RFC 6455 Section 5.5: Control frames (close/ping/pong) MUST have
+        # payload length <= 125 bytes.
+        if (($opcode == 8 || $opcode == 9 || $opcode == 10) && length($bytes) > 125) {
+            $self->_h2_ws_close($stream_id, 1002, 'Control frame too large');
+            # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+            $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
+            return;
+        }
+
         if ($opcode == 1) {
             # Text frame
             my $text = eval { Encode::decode('UTF-8', $bytes, Encode::FB_CROAK) };

@@ -331,6 +331,17 @@
     own code and reason are still passed through unchanged, as before; only
     the spurious second delivery is gone. This mirrors the equivalent HTTP/2
     fix described above.
+  - HTTP/2 WebSocket streams now enforce the same RFC 6455 framing rules
+    HTTP/1.1 already did: a nonzero RSV1-3 bit, a reserved/unknown opcode
+    (3-7, 11-15), or an oversized control-frame payload (>125 bytes) now
+    closes the stream with code 1002 and delivers a single
+    websocket.disconnect (reason protocol_error), the same
+    server-initiated-protocol-close pairing the existing invalid-UTF-8
+    (1007) path already used. Previously none of these three checks
+    existed on HTTP/2 -- Protocol::WebSocket::Frame exposes rsv/opcode but
+    doesn't validate them itself -- so a client could send any of them over
+    an h2 WebSocket stream with no error raised anywhere, contrary to RFC
+    8441's requirement that h2 WebSocket framing be identical to HTTP/1.1.
 
   Maintenance
   - Test coverage added for previously-untested but already-correct

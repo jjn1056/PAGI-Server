@@ -330,6 +330,20 @@ Extended CONNECT (C<:protocol =E<gt> 'websocket'>). Each accepted stream carries
 its own C<websocket.receive>/C<websocket.disconnect> event stream,
 multiplexed alongside every other stream on the connection.
 
+=head3 Framing Enforcement
+
+RFC 8441 requires WebSocket-over-HTTP/2 framing to be "identical to
+HTTP/1.1" (section 4), so the same three RFC 6455 framing checks the
+HTTP/1.1 WebSocket compliance section above performs also apply here, per
+stream: nonzero RSV1-3 bits close with
+C<1002> (section 5.2; C<Protocol::WebSocket::Frame> exposes C<rsv> but
+does not itself validate it), reserved/unknown opcodes C<3-7> and
+C<11-15> close with C<1002> (section 5.2), and a control frame
+(close/ping/pong) payload over 125 bytes closes with C<1002> (section
+5.5). Each violation follows the same server-initiated-protocol-close path
+described below: one Close frame on the wire, one C<websocket.disconnect>
+(code C<1002>, reason C<protocol_error>) delivered to the application.
+
 =head3 Keepalive
 
 C<websocket.keepalive> is supported per stream. An HTTP/2 connection
@@ -376,11 +390,12 @@ Close frame. C<code> is C<1006> and C<reason> is C<client_closed>.
 C<keepalive_timeout>.
 
 =item * B<Server-initiated protocol close> -- the server detected a
-framing or protocol violation (an invalid close frame, an invalid close
-code, or invalid UTF-8 in a text frame or in a Close frame's reason) and
-sent the Close frame itself. C<code> is the RFC 6455 code for the fault
-(C<1002> for a framing/protocol error, C<1007> for invalid UTF-8) and
-C<reason> is C<protocol_error>.
+framing or protocol violation (a nonzero RSV bit, a reserved/unknown
+opcode, an oversized control-frame payload, an invalid close frame, an
+invalid close code, or invalid UTF-8 in a text frame or in a Close frame's
+reason) and sent the Close frame itself. C<code> is the RFC 6455 code for
+the fault (C<1002> for a framing/protocol error, C<1007> for invalid
+UTF-8) and C<reason> is C<protocol_error>.
 
 =back
 
