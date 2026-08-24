@@ -135,7 +135,11 @@ is( $get->('/ok')->content, 'NO-ERROR', 'a conforming app is unaffected' );
     like( $wire, qr/bye/, 'post-close response delivered' );
 
     shutdown($sock, 1) or die "shutdown: $!";   # signal disconnect to the server
-    $loop->loop_once(0.1) for 1..5;   # let the disconnect and probe land
+    my $probe_deadline = time + 5;
+    while (time < $probe_deadline) {
+        last if defined $PostClose::RESULT;
+        $loop->loop_once(0.1);
+    }
     is( $PostClose::RESULT, 'resolved',
         'malformed send after close resolves as a no-op (closed-check precedes validation)' );
 
@@ -156,6 +160,7 @@ like( $http->GET("http://127.0.0.1:$dev_port/bad-status")->get->content,
 $dev_server->shutdown->get;
 
 $server->shutdown->get;
+$loop->remove($http);
 
 # --- SSE: mis-sequencing and malformed fields fail the send Future ---
 my $sse_app = async sub {
@@ -271,6 +276,7 @@ like( $SseAfterDeclineComplete::ERR // '', qr/decline response already complete/
 }
 
 $sse_server->shutdown->get;
+$loop->remove($sse_client);
 
 # --- WebSocket: shape and mis-sequencing errors on the send path ---
 my $ws_app = async sub {
