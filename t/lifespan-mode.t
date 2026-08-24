@@ -71,6 +71,26 @@ subtest 'an invalid lifespan_mode is rejected at construction' => sub {
     like($err, qr/auto.*on/, "error names the two valid modes");
 };
 
+subtest "lifespan_startup_timeout => 0 is rejected (spec: must not block startup indefinitely)" => sub {
+    my $err = dies {
+        PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                          quiet => 1, lifespan_startup_timeout => 0);
+    };
+    ok($err, 'construction failed');
+    like($err, qr/lifespan_startup_timeout/, 'error names the offending option');
+    like($err, qr/block startup indefinitely/, 'error cites the spec constraint');
+};
+
+subtest "configure(lifespan_startup_timeout => 0) is rejected with the same message" => sub {
+    my $server = PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                                    quiet => 1);
+
+    my $err = dies { $server->configure(lifespan_startup_timeout => 0) };
+    ok($err, 'configure() failed');
+    like($err, qr/lifespan_startup_timeout/, 'error names the offending option');
+    like($err, qr/block startup indefinitely/, 'error cites the spec constraint');
+};
+
 subtest "bin/pagi-server --lifespan off exits nonzero with the spec-forbids message" => sub {
     my $pagi_server = "$FindBin::Bin/../bin/pagi-server";
     local $ENV{PAGI_ENV} = 'production';   # deterministic mode, no Lint wrap

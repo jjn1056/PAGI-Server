@@ -361,6 +361,12 @@
     it now no-ops once a Close frame is already queued for that stream,
     matching the single-delivery guarantee _h2_ws_enqueue_disconnect
     already provided for the app-facing event.
+  - lifespan_startup_timeout => 0 is now rejected at construction and by
+    configure(), the same way an invalid lifespan_mode already is. 0
+    previously disabled the startup timeout entirely, letting a hung
+    lifespan handler block server startup forever; the PAGI Lifespan spec
+    requires that a server must not block startup indefinitely waiting for
+    a lifespan signal.
   - PAGI::Server::ConnectionState now implements response_complete(), the
     spec's SHOULD-level synchronous companion to on_complete. It always
     returns undef (this server does not track response-body completion),

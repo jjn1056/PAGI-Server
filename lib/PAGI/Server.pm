@@ -1394,8 +1394,10 @@ Maximum time in seconds to wait for the lifespan application to signal startup
 lifespan handler neither signals startup nor returns within this window, the
 server logs an error and aborts startup rather than blocking forever.
 
-B<Default:> 30. Set to 0 to disable the timeout (the server will wait
-indefinitely for the startup signal).
+B<Default:> 30. C<< lifespan_startup_timeout => 0 >> is rejected at
+construction and by C<configure()>: the PAGI Lifespan spec requires that a
+server B<must not> block startup indefinitely waiting for a lifespan signal,
+so there is no way to disable this bound.
 
 =item lifespan_mode => 'auto' | 'on'
 
@@ -2374,7 +2376,9 @@ sub _init {
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
-    $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal (0 = disabled)
+    $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal
+    die "Invalid lifespan_startup_timeout '0' - the PAGI Lifespan spec requires that a server must not block startup indefinitely waiting for a lifespan signal\n"
+        if $self->{lifespan_startup_timeout} == 0;
     $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal)
     die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
         unless $self->{lifespan_mode} =~ /\A(?:auto|on)\z/;
@@ -2521,7 +2525,10 @@ sub configure {
         $self->{shutdown_timeout} = delete $params{shutdown_timeout};
     }
     if (exists $params{lifespan_startup_timeout}) {
-        $self->{lifespan_startup_timeout} = delete $params{lifespan_startup_timeout};
+        my $timeout = delete $params{lifespan_startup_timeout};
+        die "Invalid lifespan_startup_timeout '0' - the PAGI Lifespan spec requires that a server must not block startup indefinitely waiting for a lifespan signal\n"
+            if $timeout == 0;
+        $self->{lifespan_startup_timeout} = $timeout;
     }
     if (exists $params{lifespan_mode}) {
         my $mode = delete $params{lifespan_mode};
@@ -4258,22 +4265,19 @@ async sub _run_lifespan_startup {
 
     # Wait for startup complete, bounded by lifespan_startup_timeout so a hung
     # lifespan handler (one that neither signals startup nor returns) cannot
-    # block the server forever. 0 disables the bound. without_cancel keeps
-    # $startup_complete pending on timeout, so a late signal cannot croak.
+    # block the server forever. The constructor and configure() both reject a
+    # value of 0, so this bound always applies -- the PAGI Lifespan spec
+    # requires that a server must not block startup indefinitely.
+    # without_cancel keeps $startup_complete pending on timeout, so a late
+    # signal cannot croak.
     my $startup_timeout = $self->{lifespan_startup_timeout} // 30;
-    my $result;
-    if ($startup_timeout > 0) {
-        my $timeout_f = $self->loop->delay_future(after => $startup_timeout)
-            ->then(sub { Future->done(undef) });
-        $result = await Future->wait_any($startup_complete->without_cancel, $timeout_f);
-        if (!defined $result) {
-            my $message = "Lifespan startup timed out after ${startup_timeout}s";
-            $self->_log(error => $message);
-            return { success => 0, message => $message };
-        }
-    }
-    else {
-        $result = await $startup_complete;
+    my $timeout_f = $self->loop->delay_future(after => $startup_timeout)
+        ->then(sub { Future->done(undef) });
+    my $result = await Future->wait_any($startup_complete->without_cancel, $timeout_f);
+    if (!defined $result) {
+        my $message = "Lifespan startup timed out after ${startup_timeout}s";
+        $self->_log(error => $message);
+        return { success => 0, message => $message };
     }
 
     # Track if lifespan is supported
