@@ -19,6 +19,7 @@ our ($REASON, $COMPLETED, $CL_REASON, $CL_COMPLETED, $OK_COMPLETED);
 our ($THROW_REASON, $THROW_COMPLETED);
 our ($CANCEL_REASON, $CANCEL_COMPLETED, $CANCEL_WAITING, $CANCEL_RETURNED);
 our ($TR_REASON, $TR_COMPLETED, $TR_SENT);
+our ($GATE_REASON, $GATE_COMPLETED, $GATE_WAITING, $GATE_RETURNED);
 package main;
 
 # An http app that, for /none, RETURNS without ever sending a response. The
@@ -56,6 +57,28 @@ my $app = async sub {
     if ($path eq '/cancel-before-start') {
         $Inc::CANCEL_RETURNED = 1;
         return;   # no response ever started -- the client is already gone
+    }
+
+    # /gate-disconnect: unlike /cancel-before-start (which stalls mid-body-receipt,
+    # before the request itself is even fully read), this request is ordinary and
+    # complete -- the top receive() loop above has already consumed it. The app
+    # then makes a SECOND receive() call that explicitly parks on http.disconnect,
+    # and only returns (bare -- no send() at all) once that event arrives. Learning
+    # of the disconnect this way is itself the server's own machinery:
+    # _handle_disconnect_and_close sets {closed} = 1 *before* completing this
+    # pending receive() (see Connection.pm), so by the time the app resumes and
+    # returns, the closed-check has already been satisfied. No race is possible.
+    if ($path eq '/gate-disconnect') {
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $Inc::GATE_REASON = $_[0] });
+        $conn->on_complete(sub { $Inc::GATE_COMPLETED = 1 });
+        $Inc::GATE_WAITING = 1;
+        while (1) {
+            my $e = await $receive->();
+            last if $e->{type} eq 'http.disconnect';
+        }
+        $Inc::GATE_RETURNED = 1;
+        return;   # RETURNS BARE: no response events were ever sent
     }
 
     if ($path eq '/throw-none') {
@@ -355,6 +378,96 @@ subtest '/cancel-before-start: client gone before start synthesizes nothing' => 
     ok(!$Inc::CANCEL_COMPLETED, '/cancel-before-start: on_complete never fired');
 
     close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# Spec carve-out, again, but for the OTHER order: here the request is fully
+# received before the client goes away (unlike /cancel-before-start, which
+# stalls mid-body-receipt). Www.pod's "Application Produced No Response" /
+# "Application Left a Response Incomplete" sections both call this out as not
+# an application error once the client is already gone: no 500, no error log,
+# and the disconnect reason stays the client's own (client_closed), not
+# server_error.
+subtest '/gate-disconnect: client gone after a complete request, app returns bare -- no 500, no app-error log' => sub {
+    my $loop = IO::Async::Loop->new;
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    $loop->add($server);
+    $server->listen->get;
+    my $port = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    ) or die "connect failed: $!";
+    $sock->blocking(0);
+
+    # An ordinary, COMPLETE GET -- nothing is left outstanding on the read
+    # side, so the app's top receive() loop finishes on its own; the app then
+    # parks in a second receive() call explicitly awaiting http.disconnect.
+    print $sock "GET /gate-disconnect HTTP/1.1\r\n";
+    print $sock "Host: 127.0.0.1:$port\r\n";
+    print $sock "\r\n";
+
+    my $wait_deadline = time + 5;
+    while (time < $wait_deadline) {
+        last if $Inc::GATE_WAITING;
+        $loop->loop_once(0.05);
+    }
+    ok($Inc::GATE_WAITING, 'app is parked awaiting http.disconnect with no response ever started');
+
+    # Sanity check, taken before the socket is closed: nothing has been
+    # written to the client yet (the app hasn't called send() at all).
+    my $pre_close_bytes = '';
+    {
+        my $buf;
+        my $n = sysread($sock, $buf, 4096);
+        $pre_close_bytes = $buf if defined $n && $n > 0;
+    }
+    is($pre_close_bytes, '', 'nothing written to the client before it closes its socket');
+
+    # Full close: the client goes away for good. Nothing more can be read
+    # from this socket afterward, so what follows asserts server-side state
+    # (warnings / app-error log / connection state) rather than wire bytes.
+    close $sock;
+
+    # Gate the assertions on the disconnect actually having been PROCESSED --
+    # not a fixed sleep budget -- by polling connection state (the on_disconnect
+    # reason) until it lands or a deadline passes.
+    my $process_deadline = time + 5;
+    while (time < $process_deadline) {
+        last if defined $Inc::GATE_REASON;
+        $loop->loop_once(0.05);
+    }
+
+    ok($Inc::GATE_RETURNED, 'app observed the disconnect via receive() and returned bare');
+    is($Inc::GATE_REASON, 'client_closed',
+        'connection state reports the CLIENT\'s own disconnect reason, not server_error');
+    ok(!$Inc::GATE_COMPLETED, 'on_complete never fired');
+
+    ok(!(scalar grep { /without starting a response/i } @warnings),
+        'no "Application Produced No Response" warning for an already-disconnected client')
+        or diag("warnings: @warnings");
+    ok(!(scalar grep { /incomplete response/i } @warnings),
+        'no "Application Left a Response Incomplete" warning either')
+        or diag("warnings: @warnings");
+    ok(!(scalar grep { /PAGI application error/i } @warnings),
+        'no app-error log at all')
+        or diag("warnings: @warnings");
+
+    # The server survives: a fresh connection still gets served normally.
+    my $http = Net::Async::HTTP->new(fail_on_error => 0);
+    $loop->add($http);
+    my $ok = $http->GET("http://127.0.0.1:$port/ok")->get;
+    is($ok->code, 200, 'server survives -- next request on a fresh connection works');
+    $loop->remove($http);
+
     $server->shutdown->get;
     $loop->remove($server);
 };
