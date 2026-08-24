@@ -138,13 +138,19 @@ subtest 'returns 503 when at max_connections' => sub {
         # Now send the request
         print $sock2 "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
-        # Give it time to send the 503 response
-        $loop->loop_once(0.1);
-
+        # Read the 503 with a bounded deadline poll. The rejection needs two
+        # loop turns server-side (accept + queue the 503, then flush it), so a
+        # fixed turn budget with a zero-wait read has no timing margin -- the
+        # server closes after the response, so reading to EOF under a deadline
+        # is both faster and load-tolerant.
         my $response = '';
+        my $deadline = time + 5;
         $sock2->blocking(0);
-        while (my $line = <$sock2>) {
-            $response .= $line;
+        while (time < $deadline) {
+            $loop->loop_once(0.05);
+            my $n = sysread($sock2, my $chunk, 4096);
+            $response .= $chunk if defined $n && $n > 0;
+            last if defined $n && $n == 0;    # server closed; response complete
         }
 
         close($sock2);
@@ -245,7 +251,13 @@ subtest 'logs warning when approaching max_connections' => sub {
     my $sock3 = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp');
     if ($sock3) {
         print $sock3 "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        $loop->loop_once(0.1);
+        # Poll until the rejection warning lands rather than granting a fixed
+        # turn budget (same load-tolerance rationale as the 503 read above).
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            $loop->loop_once(0.05);
+            last if grep { /at capacity|rejected/i } @warnings;
+        }
         close($sock3);
     }
 
