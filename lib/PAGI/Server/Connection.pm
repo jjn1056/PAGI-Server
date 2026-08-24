@@ -224,7 +224,10 @@ sub new {
         # Defaults match Python asyncio: 64KB high, 16KB low (high/4)
         write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this
         write_low_watermark  => $args{write_low_watermark}  // 16384,   # 16KB - resume sending below this
-        _drain_waiters       => [],   # Pending Futures waiting for buffer drain
+        _drain_waiters       => [],   # Pending Futures for blocking backpressure (a producer awaiting buffer drain)
+        _drain_fires         => [],   # arm_drain callback fires (on_drain hysteresis) -- kept separate from
+                                       # _drain_waiters so teardown can resume the former without invoking the
+                                       # latter (mirrors h2's stream_drain_waiters vs transport_drain_fires split)
         _drain_check_active  => 0,    # Flag to prevent redundant on_outgoing_empty setup
         tls_info      => undef,  # Populated on first request if TLS
         buffer        => '',
@@ -3386,6 +3389,11 @@ sub _get_write_buffer_size {
 # HTTP/1.1: the transport handle reads the shared TCP write buffer. One
 # connection is one stream here, so the IO::Async write queue is the per-stream
 # backlog. The connection is held weakly so the handle never keeps it alive.
+# arm_drain parks the $fire callback in _drain_fires, deliberately separate
+# from _drain_waiters (blocking producer Futures, see _wait_for_drain) --
+# teardown (_cancel_drain_waiters) resumes the latter but drops the former
+# unfired, the same split h2 keeps between stream_drain_waiters and
+# transport_drain_fires: the connection going away is not a drain.
 sub _h1_transport_state {
     my ($self) = @_;
     weaken(my $w = $self);
@@ -3393,7 +3401,12 @@ sub _h1_transport_state {
         measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
-        arm_drain => sub { my $fire = shift; $w->_wait_for_drain->on_ready($fire) if $w },
+        arm_drain => sub {
+            my $fire = shift;
+            return unless $w;
+            push @{$w->{_drain_fires}}, $fire;
+            $w->_setup_drain_detection;
+        },
     );
 }
 
@@ -3428,17 +3441,21 @@ sub _notify_transport_write {
 sub _check_drain_waiters {
     my ($self) = @_;
 
-    return unless @{$self->{_drain_waiters}};
+    return unless @{$self->{_drain_waiters}} || @{$self->{_drain_fires}};
     return unless $self->{stream};
 
     my $buffered = $self->_get_write_buffer_size;
 
-    # Resolve all waiters if we've drained below low watermark
+    # Resolve/fire everyone once we've drained below low watermark: blocking
+    # producer Futures resolve, and arm_drain's on_drain hysteresis callbacks
+    # fire -- this IS an actual drain, unlike teardown (_cancel_drain_waiters).
     if ($buffered < $self->{write_low_watermark}) {
         my @waiters = splice @{$self->{_drain_waiters}};
         for my $f (@waiters) {
             $f->done unless $f->is_ready;
         }
+        my @fires = splice @{$self->{_drain_fires}};
+        $_->() for @fires;
         # Disable drain checking until next high watermark hit
         $self->{_drain_check_active} = 0;
     }
@@ -3496,6 +3513,12 @@ sub _cancel_drain_waiters {
         # Resolve (not fail) - app should check connection state after await
         $f->done unless $f->is_ready;
     }
+    # Drop (don't fire) the app's on_drain fires: the connection is going
+    # away, not draining -- matches h2's teardown handling of
+    # transport_drain_fires. The blocking waiters above still resume (so no
+    # coroutine leak), but on_drain is a hysteresis signal for a buffer that
+    # actually fell back below the low mark, which never happened here.
+    $self->{_drain_fires} = [];
     $self->{_drain_check_active} = 0;
 }
 

@@ -398,4 +398,98 @@ subtest 'Multiple connections with exceptions all cleaned up' => sub {
     eval { $loop->remove($server) };
 };
 
+# =============================================================================
+# Test: h1 teardown with the outbound buffer above the high mark must NOT
+# fire on_drain (the connection is going away, not draining -- h2 already
+# gets this right via its separate transport_drain_fires list; h1's arm_drain
+# used to piggyback directly on the same _drain_waiters Futures that
+# blocking producers await, so tearing down resolved both indiscriminately
+# and fired on_drain with the buffer nowhere near the low mark). A producer
+# genuinely parked on a blocking backpressure await must still resume (no
+# coroutine leak) -- only the app-facing on_drain callback must be dropped.
+#
+# Exercises the real Connection-level machinery (_h1_transport_state's
+# arm_drain, _wait_for_drain, _cancel_drain_waiters) directly against a
+# fake stream that reports a controlled, non-draining buffer size -- a
+# unit-level handler invocation, not a real socket, so the buffer-stays-full
+# precondition is exact rather than timing-dependent.
+# =============================================================================
+
+package Local::FakeWriter {
+    sub new { my ($c, $d) = @_; return bless { data => $d }, $c }
+    sub data { return $_[0]->{data} }
+}
+
+package Local::FakeStream {
+    sub new { return bless { writequeue => [] }, shift }
+    sub configure { my $self = shift; my %args = @_; %$self = (%$self, %args); return }
+}
+
+package Local::FakeServer {
+    sub new { my ($c, $loop) = @_; return bless { loop => $loop }, $c }
+    sub loop { return $_[0]->{loop} }
+}
+
+subtest 'h1 teardown with buffer above the high mark drops on_drain but resumes a parked wait' => sub {
+    my $fake_loop   = IO::Async::Loop->new;
+    my $fake_server = Local::FakeServer->new($fake_loop);
+    my $fake_stream = Local::FakeStream->new;
+
+    my $conn = PAGI::Server::Connection->new(
+        stream => $fake_stream, server => $fake_server, app => sub { },
+        write_high_watermark => 10, write_low_watermark => 2,
+    );
+
+    # Buffer is (and stays, for this test) well above the high mark.
+    $fake_stream->{writequeue} = [ Local::FakeWriter->new('x' x 100) ];
+
+    my $transport = $conn->_h1_transport_state;
+    my $drain_fired = 0;
+    $transport->on_drain(sub { $drain_fired++ });
+
+    # Crossing the high mark arms drain detection -- h1's arm_drain fires
+    # into $conn->{_drain_fires} (post-fix) rather than reusing the blocking
+    # producer queue.
+    $transport->_check_watermarks;
+
+    # A genuinely parked producer, awaiting the buffer to drain before its
+    # next write -- must still resume when the connection tears down.
+    my $parked = $conn->_wait_for_drain;
+    ok(!$parked->is_ready, 'parked wait is pending before teardown (buffer still above low mark)');
+
+    # Teardown: the buffer is still full (nothing has actually drained).
+    $conn->_cancel_drain_waiters('connection closing');
+
+    is($drain_fired, 0, 'on_drain did NOT fire on teardown (connection going away, not draining)');
+    ok($parked->is_ready, 'the parked blocking wait resumed anyway (no coroutine leak)');
+};
+
+subtest 'h1 on_drain still fires normally when the buffer genuinely drains (not torn down)' => sub {
+    my $fake_loop   = IO::Async::Loop->new;
+    my $fake_server = Local::FakeServer->new($fake_loop);
+    my $fake_stream = Local::FakeStream->new;
+
+    my $conn = PAGI::Server::Connection->new(
+        stream => $fake_stream, server => $fake_server, app => sub { },
+        write_high_watermark => 10, write_low_watermark => 2,
+    );
+
+    $fake_stream->{writequeue} = [ Local::FakeWriter->new('x' x 100) ];
+
+    my $transport = $conn->_h1_transport_state;
+    my $drain_fired = 0;
+    $transport->on_drain(sub { $drain_fired++ });
+    $transport->_check_watermarks;
+
+    my $parked = $conn->_wait_for_drain;
+
+    # The buffer actually falls back below the low mark -- a real drain, the
+    # same event on_outgoing_empty reports on a live stream.
+    $fake_stream->{writequeue} = [];
+    $conn->_check_drain_waiters;
+
+    is($drain_fired, 1, 'on_drain fired on a genuine drain');
+    ok($parked->is_ready, 'the parked blocking wait also resolved');
+};
+
 done_testing;
