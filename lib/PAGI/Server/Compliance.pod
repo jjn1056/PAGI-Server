@@ -397,6 +397,13 @@ reason) and sent the Close frame itself. C<code> is the RFC 6455 code for
 the fault (C<1002> for a framing/protocol error, C<1007> for invalid
 UTF-8) and C<reason> is C<protocol_error>.
 
+=item * B<Inbound receive-queue overflow> -- a text or binary message
+arrived while the stream's own receive queue already held
+C<max_receive_queue> undelivered events (default 1000; see
+L<PAGI::Server> for the C<max_receive_queue> constructor option), the same
+per-stream cap and enforcement point HTTP/1.1 uses. C<code> is C<1008> and
+C<reason> is C<queue_overflow>.
+
 =back
 
 "Exactly one" above is a property of the receive queue, not a hard cap on

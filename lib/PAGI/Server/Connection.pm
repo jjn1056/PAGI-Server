@@ -2748,6 +2748,13 @@ sub _h2_process_ws_frames {
                 $self->_h2_ws_enqueue_disconnect($stream, 1007, 'protocol_error');
                 return;
             }
+            # Check queue limit before adding (DoS protection) -- same cap
+            # and pairing h1 enforces (Www.pod pins 1008 <-> queue_overflow).
+            if (@{$stream->{receive_queue}} >= $self->{max_receive_queue}) {
+                $self->_h2_ws_close($stream_id, 1008, 'Message queue overflow');
+                $self->_h2_ws_enqueue_disconnect($stream, 1008, 'queue_overflow');
+                return;
+            }
             push @{$stream->{receive_queue}}, {
                 type => 'websocket.receive',
                 text => $text,
@@ -2755,6 +2762,13 @@ sub _h2_process_ws_frames {
         }
         elsif ($opcode == 2) {
             # Binary frame
+            # Check queue limit before adding (DoS protection) -- same cap
+            # and pairing h1 enforces (Www.pod pins 1008 <-> queue_overflow).
+            if (@{$stream->{receive_queue}} >= $self->{max_receive_queue}) {
+                $self->_h2_ws_close($stream_id, 1008, 'Message queue overflow');
+                $self->_h2_ws_enqueue_disconnect($stream, 1008, 'queue_overflow');
+                return;
+            }
             push @{$stream->{receive_queue}}, {
                 type  => 'websocket.receive',
                 bytes => $bytes,
@@ -2868,6 +2882,17 @@ sub _h2_ws_close {
 
     my $ss = $self->{h2_streams}{$stream_id};
     return unless $ss;
+
+    # Idempotency guard: a stream already closing (a Close frame already
+    # queued, ws_eof_pending true) must not queue a second one. Without
+    # this, a burst of several frames that each independently warrant
+    # closure -- e.g. more inbound messages than max_receive_queue allows,
+    # already buffered in the parser before the first violation's `return`
+    # unwinds -- re-enters this sub once per remaining buffered frame (each
+    # later call to _h2_process_ws_frames resumes parsing where the last
+    # one left off) and would otherwise queue one Close frame per frame
+    # instead of the one the wire is supposed to see.
+    return if $ss->{ws_eof_pending};
 
     $self->_h2_stop_ws_keepalive($ss);
 

@@ -342,6 +342,25 @@
     doesn't validate them itself -- so a client could send any of them over
     an h2 WebSocket stream with no error raised anywhere, contrary to RFC
     8441's requirement that h2 WebSocket framing be identical to HTTP/1.1.
+  - HTTP/2 WebSocket streams now enforce max_receive_queue on inbound
+    text/binary messages, the same per-stream cap and 1008/queue_overflow
+    close HTTP/1.1 already enforces: once a stream's own receive queue
+    already holds max_receive_queue undelivered events, the next message
+    closes the stream (code 1008) and delivers a single
+    websocket.disconnect (reason queue_overflow) instead of queueing
+    without bound. Previously _h2_process_ws_frames had no such check, so a
+    client sending messages faster than the application drained receive()
+    could grow a stream's receive_queue without limit -- an unbounded
+    per-connection memory DoS on a transport that otherwise mirrors
+    HTTP/1.1's WebSocket support exactly. Fixing this also closed a related
+    gap in the h2 WebSocket close funnel (_h2_ws_close): it queued one
+    Close frame per call with no idempotency guard, so a burst of several
+    already-buffered frames that each independently warranted closure (as
+    this overflow scenario naturally produces) could queue several Close
+    frames for one stream instead of the one the wire is supposed to see;
+    it now no-ops once a Close frame is already queued for that stream,
+    matching the single-delivery guarantee _h2_ws_enqueue_disconnect
+    already provided for the app-facing event.
 
   Maintenance
   - Test coverage added for previously-untested but already-correct
