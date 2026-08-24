@@ -1906,6 +1906,12 @@ sub _h2_create_websocket_scope {
             delete $ext{fullflush};
             \%ext;
         },
+        # Per-stream outbound flow-control handle. Like the h2 sse/streaming
+        # scopes, it measures THIS stream's send queue (h2 multiplexes many
+        # streams over one connection, so the shared TCP buffer is
+        # meaningless per stream). Gives WebSocket-over-h2 the same
+        # pagi.transport surface HTTP/1.1 WebSocket already provides.
+        'pagi.transport'  => ($stream_state->{transport_state} = $self->_h2_transport_state($stream_state)),
     };
 }
 
@@ -1989,6 +1995,72 @@ sub _h2_create_websocket_send {
     weaken(my $weak_self = $self);
     my $seq = 'connecting';
 
+    # Data callback for nghttp2's streaming response (the same pull-based
+    # data-provider model _h2_create_send/_h2_create_sse_send already use).
+    # Pulls raw WS frame bytes from the per-stream queue -- app messages,
+    # protocol replies (pong, close-echo), and this stream's own keepalive
+    # ping are all pushed there in call order, so FIFO ordering on the wire
+    # is preserved exactly as it was under direct submit_data calls.
+    #
+    # $ss->{ws_eof_pending} lives on the stream state (not a closure-local,
+    # unlike the http streaming callback's $eof_pending) because it is set
+    # from other subs entirely -- _h2_ws_close and the close-frame arm of
+    # _h2_process_ws_frames -- not just from this closure. When set, it
+    # merges END_STREAM onto the LAST queued chunk (the close frame itself)
+    # rather than emitting a separate empty terminal frame, matching the
+    # previous submit_data($id, $close_frame_bytes, 1) behavior exactly.
+    my $data_callback = sub {
+        my ($cb_stream_id, $max_len) = @_;
+
+        my $ss = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        return undef unless $ss;
+        my $q = $ss->{send_queue} ||= [];
+
+        if (@$q) {
+            my $chunk = shift @$q;
+            # Respect max_len — XS truncates without preserving remainder
+            if (length($chunk) > $max_len) {
+                unshift @$q, substr($chunk, $max_len);
+                $chunk = substr($chunk, 0, $max_len);
+            }
+            $ss->{send_queue_bytes} -= length($chunk);
+
+            # Per-stream backpressure: once this stream's queue falls below the
+            # low watermark, release any producer blocked in
+            # _h2_wait_for_stream_drain. This runs inside nghttp2's extract(), so
+            # resolve on the next loop tick — completing the Future resumes the
+            # awaiting producer synchronously, and it must not re-enter nghttp2.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}}) {
+                my @waiters = splice @{$ss->{stream_drain_waiters}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->done for grep { !$_->is_ready } @waiters;
+                });
+            }
+
+            # Fire the app's on_drain hysteresis callbacks once this stream's
+            # queue falls below the low watermark. Deferred for the same reason:
+            # an on_drain callback may call $send, which would re-enter nghttp2.
+            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+                    && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
+                my @fires = splice @{$ss->{transport_drain_fires}};
+                $weak_self->{server}->loop->later(sub {
+                    $_->() for @fires;
+                });
+            }
+
+            my $eof = (!@$q && $ss->{ws_eof_pending}) ? 1 : 0;
+            return ($chunk, $eof);
+        }
+
+        # Queue empty but EOF pending (a close frame already delivered as
+        # the terminal chunk above) — signal end of stream.
+        return ('', 1) if $ss->{ws_eof_pending};
+
+        # Queue empty, more data expected — defer (NGHTTP2_ERR_DEFERRED in C layer)
+        return undef;
+    };
+
     return async sub {
         my ($event) = @_;
         return unless $weak_self;
@@ -2046,11 +2118,16 @@ sub _h2_create_websocket_send {
                 max_payload_size => $weak_self->{max_ws_frame_size},
             );
 
-            # Submit 200 response with streaming body that defers
-            $weak_self->{h2_session}->submit_response($stream_id,
-                status  => 200,
-                headers => \@headers,
-                body    => sub { return undef },  # defer until submit_data
+            # Submit 200 response with a pull-based data provider (same
+            # model as h2 streaming/SSE): frames are pushed onto
+            # $ss->{send_queue} and pulled by $data_callback as nghttp2's
+            # per-stream flow-control window allows.
+            $ss->{send_queue}       //= [];
+            $ss->{send_queue_bytes} //= 0;
+            $weak_self->{h2_session}->submit_response_streaming($stream_id,
+                status        => 200,
+                headers       => \@headers,
+                data_callback => $data_callback,
             );
             $weak_self->_h2_write_pending;
 
@@ -2082,7 +2159,22 @@ sub _h2_create_websocket_send {
             }
 
             my $bytes = $frame->to_bytes;
-            $weak_self->{h2_session}->submit_data($stream_id, $bytes, 0);
+
+            # Per-stream backpressure: bound on THIS stream's queue, not the
+            # shared TCP buffer (meaningless across multiplexed h2 streams).
+            if (($ss->{send_queue_bytes} // 0) >= $weak_self->{write_high_watermark}) {
+                await $weak_self->_h2_wait_for_stream_drain($stream_id);
+                return unless $weak_self;
+                return if $weak_self->{closed};
+                return unless $weak_self->{h2_streams}{$stream_id};
+            }
+
+            push @{$ss->{send_queue}}, $bytes;
+            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+            # Synchronous — app send path, not nghttp2 extract — so on_high_water
+            # may fire here to tell the app to pause its source.
+            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'websocket.http.response.start') {
@@ -2674,12 +2766,19 @@ sub _h2_process_ws_frames {
                 }
             }
 
-            # Send close frame back + END_STREAM
+            # Send close frame back + END_STREAM. Queued (not submit_data)
+            # so the data_callback's own eof_pending merge puts END_STREAM on
+            # this exact chunk, same as the previous submit_data(..., 1) did.
+            # Not an application send — no transport_state->_check_watermarks.
             my $close_frame = Protocol::WebSocket::Frame->new(
                 type   => 'close',
                 buffer => pack('n', $code) . $reason,
             );
-            $self->{h2_session}->submit_data($stream_id, $close_frame->to_bytes, 1);
+            my $close_bytes = $close_frame->to_bytes;
+            push @{$stream->{send_queue} ||= []}, $close_bytes;
+            $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
+            $stream->{ws_eof_pending} = 1;
+            $self->{h2_session}->resume_stream($stream_id);
             # No _h2_write_pending — inside feed(); flushed by _h2_process_data
 
             # Peer's Close frame: its own code (1005 default when the frame
@@ -2687,12 +2786,15 @@ sub _h2_process_ws_frames {
             $self->_h2_ws_enqueue_disconnect($stream, $code, $reason);
         }
         elsif ($opcode == 9) {
-            # Ping — respond with pong
+            # Ping — respond with pong. Queued, not an application send.
             my $pong = Protocol::WebSocket::Frame->new(
                 type   => 'pong',
                 buffer => $bytes,
             );
-            $self->{h2_session}->submit_data($stream_id, $pong->to_bytes, 0);
+            my $pong_bytes = $pong->to_bytes;
+            push @{$stream->{send_queue} ||= []}, $pong_bytes;
+            $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $pong_bytes;
+            $self->{h2_session}->resume_stream($stream_id);
             # No _h2_write_pending — inside feed(); flushed by _h2_process_data
         }
         elsif ($opcode == 10) {
@@ -2719,15 +2821,23 @@ sub _h2_process_ws_frames {
 sub _h2_ws_close {
     my ($self, $stream_id, $code, $reason) = @_;
 
-    if (my $stream = $self->{h2_streams}{$stream_id}) {
-        $self->_h2_stop_ws_keepalive($stream);
-    }
+    my $ss = $self->{h2_streams}{$stream_id};
+    return unless $ss;
 
+    $self->_h2_stop_ws_keepalive($ss);
+
+    # Queued (not submit_data) so the data_callback's own eof_pending merge
+    # puts END_STREAM on this exact chunk, same as the previous
+    # submit_data(..., 1) did.
     my $frame = Protocol::WebSocket::Frame->new(
         type   => 'close',
         buffer => pack('n', $code) . ($reason // ''),
     );
-    $self->{h2_session}->submit_data($stream_id, $frame->to_bytes, 1);
+    my $bytes = $frame->to_bytes;
+    push @{$ss->{send_queue} ||= []}, $bytes;
+    $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+    $ss->{ws_eof_pending} = 1;
+    $self->{h2_session}->resume_stream($stream_id);
 }
 
 # HTTP/2 per-stream WebSocket keepalive (design section 10.2 -- the h2
@@ -2735,8 +2845,9 @@ sub _h2_ws_close {
 # stream per connection, so its keepalive state and timers live on $self;
 # h2 multiplexes many WebSocket streams per connection, so this state and
 # these timers live on the per-stream hash ($ss, aka $self->{h2_streams}
-# {$stream_id}) and the ping is delivered as an h2 DATA frame via
-# submit_data + _h2_write_pending rather than a raw stream write.
+# {$stream_id}) and the ping is delivered as an h2 DATA frame via the
+# stream's own send queue + data-provider callback, same as every other
+# ws frame on this stream, rather than a raw stream write.
 sub _h2_start_ws_keepalive {
     my ($self, $stream_id, $ss, $interval, $timeout) = @_;
 
@@ -2760,11 +2871,17 @@ sub _h2_start_ws_keepalive {
             return unless $weak_ss;
             return unless $weak_ss->{ws_accepted};
 
+            # Queued, not an application send (no transport_state watermark
+            # poke) -- this timer callback runs outside feed(), so resume
+            # AND flush explicitly, unlike the in-feed() queue pushes above.
             my $ping = Protocol::WebSocket::Frame->new(
                 type   => 'ping',
                 buffer => '',
             );
-            $weak_self->{h2_session}->submit_data($stream_id, $ping->to_bytes, 0);
+            my $ping_bytes = $ping->to_bytes;
+            push @{$weak_ss->{send_queue} ||= []}, $ping_bytes;
+            $weak_ss->{send_queue_bytes} = ($weak_ss->{send_queue_bytes} // 0) + length $ping_bytes;
+            $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
 
             # Start pong timeout if configured

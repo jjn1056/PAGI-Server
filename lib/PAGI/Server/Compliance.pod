@@ -52,9 +52,9 @@ defined in L<PAGI::Spec::Www>, across both HTTP/1.1 and HTTP/2:
 =over 4
 
 =item * B<Transport flow control> (C<pagi.transport>) -- C<buffered_amount>,
-high/low watermarks, and C<on_high_water>/C<on_drain> backpressure callbacks. On
-HTTP/1.1 for http/websocket/sse; on HTTP/2 for http streaming and sse. B<Not yet>
-on WebSocket-over-HTTP/2 (see L</"Transport Flow Control (pagi.transport)">).
+high/low watermarks, and C<on_high_water>/C<on_drain> backpressure callbacks, on
+both HTTP/1.1 and HTTP/2, for every streaming scope type PAGI offers it on:
+http, sse, and websocket (see L</"Transport Flow Control (pagi.transport)">).
 
 =item * B<Connection state> (C<pagi.connection>) for HTTP scopes --
 C<is_connected>, C<disconnect_reason>, C<on_disconnect> (abnormal only),
@@ -223,6 +223,15 @@ library for interoperability:
     | 6.9.2 #2   | Negative flow control window tracking              |
     +------------+----------------------------------------------------+
 
+Separately (not an h2spec failure, but the same category of nghttp2-library
+leniency): nghttp2's own HTTP-messaging validation drops header B<values>
+carrying leading or trailing whitespace (RFC 9113 section 8.2.1 forbids
+sending them) before the request or response ever reaches PAGI application
+code. An application inspecting C<scope-E<gt>{headers}> never observes a
+header value with leading/trailing whitespace on HTTP/2, even one a client
+actually sent -- nghttp2 has already stripped it at the C library layer.
+HTTP/1.1 performs no such stripping.
+
 =head2 Load Testing (h2load)
 
     Tool: h2load (nghttp2)
@@ -299,24 +308,17 @@ C<on_high_water>/C<on_drain> backpressure callbacks. Over HTTP/2 the handle
 measures the B<per-stream> send backlog, so each multiplexed stream is bounded
 independently.
 
-PAGI::Server provides C<pagi.transport> for HTTP/2 C<http> (streaming responses)
-and C<sse> scopes, matching its HTTP/1.1 coverage of C<http>, C<sse>, and
-C<websocket>.
-
-B<Known gap:> WebSocket over HTTP/2 (RFC 8441) does B<not> yet provide
-C<pagi.transport>. The HTTP/2 WebSocket send path hands each frame to nghttp2
-through its push-style C<submit_data> entry point, which keeps no per-stream
-send queue for the handle to measure, and the binding exposes no per-stream
-buffered-byte API. Closing the gap means converting the HTTP/2 WebSocket send
-path to the same pull-based data-provider model that HTTP/2 streaming and SSE
-use. Until then a WebSocket application running over HTTP/2 sees
-C<pagi.transport> as absent: the L<PAGI::WebSocket> helpers degrade quietly
-(C<buffered_amount> reports C<0>, C<is_writable> stays true, and the callbacks
-are no-ops). WebSocket over HTTP/1.1 is unaffected and provides the handle
-normally.
-
-The long-term goal is parity: C<pagi.transport> for every streaming scope type
-over every transport, so an application need not know whether it runs over
+PAGI::Server provides C<pagi.transport> for every streaming scope type on both
+transports: C<http> (streaming responses), C<sse>, and C<websocket>, on both
+HTTP/1.1 and HTTP/2. The HTTP/2 WebSocket send path frames application
+messages, protocol replies (pong, the close-frame echo), and its own keepalive
+ping through the same per-stream send queue and pull-based data-provider model
+that HTTP/2 streaming and SSE already use, rather than writing each frame
+straight to nghttp2's push-style C<submit_data> entry point (which kept no
+per-stream backlog for the handle to measure). From the application's
+perspective the transport is invisible: a WebSocket app sees the same
+C<pagi.transport> surface and semantics -- C<buffered_amount>, the high/low
+watermarks, C<on_high_water>/C<on_drain> -- whether the connection is
 HTTP/1.1 or HTTP/2.
 
 =head2 WebSocket over HTTP/2 (RFC 8441)

@@ -4689,6 +4689,20 @@ For high-concurrency production deployments, ensure adequate system limits:
 PAGI::Server defaults to a listen backlog of 2048, matching Uvicorn's
 default. This can be adjusted via the C<listener_backlog> option.
 
+B<Deploy note:> a very large C<RLIMIT_NOFILE> (soft file-descriptor limit) on
+the host -- around a million, the kind some container base images or systemd
+units set by default -- makes each C<workers> worker process take multiple
+seconds to (re)spawn (measured: approximately 4.2s). The cost is in
+L<IO::Async>'s own post-fork cleanup, which sweeps the process's file
+descriptor table; the sweep's cost scales with the configured limit, not with
+how many descriptors are actually open. This affects worker startup and
+respawn-after-crash, not steady-state request handling. If worker
+(re)spawns need to be fast (fast autoscaling, frequent restarts), either cap
+C<RLIMIT_NOFILE> to a realistic value for the deployment (a few tens of
+thousands is enough for very high concurrency; see C<ulimit -n> above) before
+starting the server, or pre-warm the worker pool so the cost is paid once at
+deploy time rather than on every restart.
+
 =head2 Event Loop Selection
 
 PAGI::Server works with any L<IO::Async> compatible event loop. If

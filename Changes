@@ -91,6 +91,19 @@
     it as the same protocol error the plain HTTP path reports, warning,
     synthesizing a 500 if the client is still connected, and closing the
     connection, instead of handing back a socket with zero bytes written.
+  - WebSocket over HTTP/2 now provides pagi.transport (buffered_amount, the
+    high/low watermarks, and on_high_water/on_drain), matching HTTP/1.1
+    WebSocket and every other h2 streaming scope type: from the
+    application's perspective the transport is invisible, the same
+    pagi.transport surface and semantics apply whether a WebSocket app runs
+    over HTTP/1.1 or HTTP/2. The h2 WebSocket send path now frames
+    application messages, protocol replies (pong, the close-frame echo), and
+    its own keepalive ping through the same per-stream send queue and
+    pull-based data-provider model the h2 http-streaming and SSE send paths
+    already use, instead of writing each frame straight to nghttp2's
+    push-style submit_data (which kept no per-stream backlog for the handle
+    to measure). Close-frame + END_STREAM wire behavior is unchanged: the
+    close frame still carries END_STREAM on its own final DATA frame.
 
   Breaking Changes
   - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping
