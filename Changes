@@ -155,6 +155,16 @@
     fetch-event-source) send the exact media type and are unaffected.
 
   Bug Fixes
+  - HTTP/1.1's completed SSE decline (sse.http.response.start +
+    sse.http.response.body) no longer delivers a synthesized
+    sse.disconnect to an application that calls receive() again before
+    returning. The decline's own teardown closed the connection via the
+    same _handle_disconnect_and_close('client_closed') every abnormal end
+    uses, which unconditionally synthesized sse.disconnect for any
+    sse_mode connection; per the spec a decline delivers no events at all.
+    A receive() call made after a completed decline now parks instead of
+    resolving with a fabricated disconnect. HTTP/2's decline path already
+    behaved correctly.
   - Socket read/write errors on a connection now report the spec's
     read_error/write_error disconnect reasons instead of client_closed.
     IO::Async::Stream's default behavior when no on_read_error/on_write_error

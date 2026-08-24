@@ -111,4 +111,45 @@ subtest 'first-send-wins: stream after decline, and decline after stream, raise'
     $s2->shutdown->get;
 };
 
+subtest 'a completed decline delivers no sse.disconnect to a later receive() call' => sub {
+    # Per the PAGI spec, a decline delivers no events at all. An app that
+    # calls receive() again after its decline response has fully completed
+    # (before it returns) must not observe a synthesized sse.disconnect --
+    # that would look exactly like an abnormal end that never happened.
+    my ($settled, $event);
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.http.response.start', status => 404, headers => [] });
+        await $send->({ type => 'sse.http.response.body', body => 'nope', more => 0 });
+
+        # Decline is now complete. Call receive() once more, WITHOUT
+        # awaiting it directly (an unresolved Future would hang this
+        # coroutine forever under the fix) -- just observe, after a bounded
+        # wait on the same loop, whether it ever resolved and with what.
+        my $future = $receive->();
+        await $loop->delay_future(after => 0.3);
+        $settled = $future->is_ready;
+        $event   = $future->is_ready ? $future->get : undef;
+    };
+
+    my $server = create_server($app);
+    my ($wire, $eof) = sse_get($server->port);
+
+    like($wire, qr{HTTP/1\.1 404}, 'decline delivered as usual');
+
+    # Give the app's post-decline receive() its full bounded window to settle.
+    $loop->loop_once(0.05) for 1 .. 10;
+
+    if ($settled) {
+        isnt($event->{type}, 'sse.disconnect',
+            'a resolved receive() did not synthesize sse.disconnect');
+    }
+    else {
+        ok(!$settled, 'receive() after a completed decline stayed pending (no event synthesized)');
+    }
+
+    $server->shutdown->get;
+};
+
 done_testing;

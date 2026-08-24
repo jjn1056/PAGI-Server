@@ -1057,7 +1057,11 @@ B<completed> C<sse.http.response.*> decline (it always closes the connection
 explicit C<Connection: close> header so it does not reuse the socket), and
 any B<abnormal> end (client disconnect, idle timeout, write error). An
 abnormal end is also the only thing that delivers C<sse.disconnect> to the
-application; a clean end never does.
+application; a clean end never does. This includes a completed decline: it
+is not an abnormal end, so it delivers no C<sse.disconnect> either -- an
+application that calls C<receive()> again after its decline response has
+already finished (before returning) gets no event at all; the call parks
+rather than resolving with a synthesized disconnect.
 
 An application that returns without ever answering the request at all --
 no C<sse.start>, and no completed decline via

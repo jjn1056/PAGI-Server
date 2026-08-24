@@ -4740,19 +4740,22 @@ sub _handle_disconnect {
     if ($self->{websocket_mode}) {
         $disconnect_event = $self->_ws_disconnect_event;
     } elsif ($self->{sse_mode}) {
+        # A completed decline is not an abnormal end -- the spec says a
+        # decline delivers no events at all, so leave $disconnect_event
+        # unset rather than synthesizing sse.disconnect for it.
         $disconnect_event = {
             type   => 'sse.disconnect',
             reason => $self->{sse_disconnect_reason} // 'client_closed',
-        };
+        } unless $self->{sse_decline_completed};
     } else {
         $disconnect_event = { type => 'http.disconnect' };
     }
 
     # Queue disconnect event (do this even if already closed)
-    push @{$self->{receive_queue}}, $disconnect_event;
+    push @{$self->{receive_queue}}, $disconnect_event if $disconnect_event;
 
     # Complete any pending receive
-    if ($self->{receive_pending} && !$self->{receive_pending}->is_ready) {
+    if ($disconnect_event && $self->{receive_pending} && !$self->{receive_pending}->is_ready) {
         $self->{receive_pending}->done($disconnect_event);
         $self->{receive_pending} = undef;
     }
@@ -4876,20 +4879,23 @@ sub _close {
     if ($self->{websocket_mode}) {
         $disconnect_event = $self->_ws_disconnect_event;
     } elsif ($self->{sse_mode}) {
+        # See _handle_disconnect: a completed decline delivers no events.
         $disconnect_event = {
             type   => 'sse.disconnect',
             reason => $self->{sse_disconnect_reason} // 'client_closed',
-        };
+        } unless $self->{sse_decline_completed};
     } else {
         $disconnect_event = { type => 'http.disconnect' };
     }
 
     # Cancel any tracked receive Futures that are still pending
-    for my $future (@{$self->{receive_futures}}) {
-        if (!$future->is_ready) {
-            # Complete with disconnect event instead of cancelling
-            # This allows the async sub to complete cleanly
-            $future->done($disconnect_event);
+    if ($disconnect_event) {
+        for my $future (@{$self->{receive_futures}}) {
+            if (!$future->is_ready) {
+                # Complete with disconnect event instead of cancelling
+                # This allows the async sub to complete cleanly
+                $future->done($disconnect_event);
+            }
         }
     }
     $self->{receive_futures} = [];
@@ -5303,8 +5309,17 @@ sub _create_sse_receive {
     };
 
     return sub {
-        return Future->done($sse_disconnect->())
-            if $stream_over->();
+        if ($stream_over->()) {
+            # A completed decline delivers no events at all (spec): a
+            # receive() call made after the decline response has already
+            # finished must not be answered with a synthesized
+            # sse.disconnect -- nothing abnormal happened. Park instead;
+            # the app has already gotten its answer (the decline response)
+            # and has nothing further to receive.
+            return $weak_self->{server}->loop->new_future
+                if $weak_self && $weak_self->{sse_decline_completed};
+            return Future->done($sse_disconnect->());
+        }
 
         my $future = (async sub {
             return $sse_disconnect->()
@@ -5642,6 +5657,11 @@ sub _create_sse_send {
             $weak_self->{response_started} = 1;
             $weak_self->{response_status}  = $status;   # access log
             # Declined: close the connection (no event stream was started).
+            # Marked BEFORE teardown so _handle_disconnect and a later
+            # receive() both know this closure is a completed decline, not
+            # an abnormal end -- per the spec, a decline delivers no events
+            # at all, so neither may synthesize sse.disconnect for it.
+            $weak_self->{sse_decline_completed} = 1;
             $weak_self->_handle_disconnect_and_close('client_closed');
         }
         elsif ($type eq 'http.fullflush') {
