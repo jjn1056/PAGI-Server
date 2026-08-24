@@ -11,6 +11,7 @@ eval { require Future::IO::Impl::IOAsync; 1 }
     or plan skip_all => 'Future::IO::Impl::IOAsync required for these tests';
 
 use PAGI::Server;
+use Protocol::WebSocket::Frame;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -350,6 +351,106 @@ subtest 'h1 WebSocket denial: app TE/Connection stripped' => sub {
 
         is(scalar(@{strip_warnings_matching(\@warnings, 'transfer-encoding')}), 1,
             "warns once for stripped 'transfer-encoding'");
+        is(scalar(@{strip_warnings_matching(\@warnings, 'connection')}), 1,
+            "warns once for stripped 'connection'");
+    }
+
+    $server->shutdown->get;
+};
+
+# ---------------------------------------------------------------------------
+# (f) h1 WebSocket accept (websocket.accept extra headers)
+# ---------------------------------------------------------------------------
+# The 101 response starts with the server's own literal "Connection: Upgrade"
+# line (RFC 6455 requires it -- untouched here), then appends the app's
+# websocket.accept headers with only byte validation. Before this fix an
+# app-supplied ['Connection', 'close'] reached the 101 verbatim, alongside
+# the server's own Connection: Upgrade -- two Connection lines on one
+# response. Strip the app's extra headers the same way every other h1
+# response-header path already does.
+subtest 'h1 websocket.accept: app TE/Connection stripped, server-owned Connection: Upgrade survives' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();   # websocket.connect
+        await $send->({
+            type    => 'websocket.accept',
+            headers => [
+                [ 'connection', 'close' ],
+                [ 'x-legit',    '1' ],
+            ],
+        });
+        while (1) {
+            my $event = await $receive->();
+            last if $event->{type} eq 'websocket.disconnect';
+            if ($event->{type} eq 'websocket.receive' && defined $event->{text}) {
+                await $send->({ type => 'websocket.send', text => "echo: $event->{text}" });
+            }
+        }
+        return;
+    };
+
+    my $server = create_server($app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 6 unless $sock;
+
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+        my $key = 'dGhlIHNhbXBsZSBub25jZQ==';
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Upgrade: websocket\r\n";
+        print $sock "Connection: Upgrade\r\n";
+        print $sock "Sec-WebSocket-Key: $key\r\n";
+        print $sock "Sec-WebSocket-Version: 13\r\n";
+        print $sock "\r\n";
+
+        my $wire = read_until($sock, sub { $_[0] =~ /\r\n\r\n/ });
+
+        is(scalar(@{header_lines_matching($wire, 'connection')}), 1,
+            'exactly one Connection header on the 101 (app duplicate stripped)');
+        like(header_lines_matching($wire, 'connection')->[0] // '', qr/Upgrade/i,
+            "the surviving Connection header is the server's own 'Upgrade' (RFC 6455)");
+        like($wire, qr/x-legit:\s*1/i, 'ordinary app header preserved');
+        like($wire, qr/\A HTTP\/1\.1 \s+ 101/x, 'handshake completed with 101 Switching Protocols');
+
+        # Handshake completed -- prove the connection is still a working
+        # WebSocket, not just a header-shaped response: send a masked client
+        # frame and read the server's echo (idiom: t/04-websocket.t).
+        my $ws_frame = Protocol::WebSocket::Frame->new(
+            buffer => 'still works',
+            type   => 'text',
+            masked => 1,
+        );
+        print $sock $ws_frame->to_bytes;
+
+        my $response_frame = Protocol::WebSocket::Frame->new;
+        my $echoed_text;
+        my $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) {
+                $response_frame->append($buf);
+                $echoed_text = $response_frame->next_bytes;
+                last if defined $echoed_text;
+            }
+            elsif (defined $n && $n == 0) {
+                last;
+            }
+            $loop->loop_once(0.05);
+        }
+        close $sock;
+
+        is($echoed_text, 'echo: still works',
+            'the WebSocket connection is still usable after the fix (client frame echoed)');
+
         is(scalar(@{strip_warnings_matching(\@warnings, 'connection')}), 1,
             "warns once for stripped 'connection'");
     }

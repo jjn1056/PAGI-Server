@@ -5629,8 +5629,14 @@ sub _create_websocket_send {
                 push @headers, "Sec-WebSocket-Protocol: $subprotocol\r\n";
             }
 
-            # Add custom headers if specified (with CRLF injection validation)
+            # Add custom headers if specified (with CRLF injection validation).
+            # The server's own "Connection: Upgrade" line above is untouched
+            # (RFC 6455 requires it) -- strip the app's extra headers the same
+            # way every other h1 response-header path already does, so an
+            # app-supplied connection/transfer-encoding value can't duplicate
+            # or contradict it on the wire.
             if (my $extra_headers = $event->{headers}) {
+                $extra_headers = _h1_strip_connection_headers($extra_headers);
                 for my $h (@$extra_headers) {
                     my ($name, $value) = @$h;
                     $name = _validate_header_name($name);

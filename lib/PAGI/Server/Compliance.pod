@@ -949,16 +949,19 @@ PAGI::Server strips C<Transfer-Encoding> and C<Connection>,
 case-insensitively, from application-supplied response headers before they
 reach the wire, on every HTTP/1.1 response path that maps application
 headers: C<http.response.start>, C<sse.start>, the
-C<websocket.http.response> denial, and the C<sse.http.response.*> decline.
+C<websocket.http.response> denial, the C<sse.http.response.*> decline, and
+the extra headers an application supplies on C<websocket.accept>.
 Before this strip, an application-supplied C<Transfer-Encoding> could
 duplicate or conflict with the server's own framing decision (two
 C<Transfer-Encoding> lines, or C<Transfer-Encoding> alongside
 C<Content-Length>), and an application-supplied C<Connection> could
 duplicate the server's own forced C<Connection: keep-alive> on
-C<sse.start>, or contradict the guaranteed close that follows an SSE
-decline or WebSocket denial. Each stripped occurrence, not deduplicated
-by name, logs C<PAGI: connection-specific header '$name' stripped from
-HTTP/1.1 response>.
+C<sse.start>, contradict the guaranteed close that follows an SSE decline
+or WebSocket denial, or duplicate the server's own C<Connection: Upgrade>
+on a C<websocket.accept> 101 response (that line is constructed separately
+and is itself untouched -- RFC 6455 requires it). Each stripped occurrence,
+not deduplicated by name, logs C<PAGI: connection-specific header '$name'
+stripped from HTTP/1.1 response>.
 
 This strip does not apply to C<http.response.trailers>: that event maps a
 different, non-C<http.response.start> header list, and HTTP/1.1 trailers

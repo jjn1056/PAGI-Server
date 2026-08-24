@@ -286,6 +286,14 @@
     inside the file-send helper with a less specific stat/open error. The
     response's own headers, if already flushed, are unaffected; a
     conforming app may still recover by sending a normal body afterward.
+  - HTTP/1.1 websocket.accept's extra application-supplied headers now go
+    through the same Transfer-Encoding/Connection strip as every other h1
+    response-header path. Previously an app-supplied ['Connection', 'close']
+    (or 'Transfer-Encoding') reached the 101 Switching Protocols response
+    verbatim, alongside the server's own literal "Connection: Upgrade" line
+    -- two Connection lines (or a stray Transfer-Encoding) on one handshake
+    response. The server's own Connection: Upgrade line is untouched (RFC
+    6455 requires it).
 
   Maintenance
   - Test coverage added for previously-untested but already-correct
