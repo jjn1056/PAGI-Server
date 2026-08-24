@@ -1003,6 +1003,12 @@ Value for the listener queue size. Default: 2048
 When in multi worker mode, the queue size for those workers inherits
 from this value.
 
+B<Which process consumes it:> the listening process -- the parent in
+traditional (shared-socket) mode, or each worker in C<reuseport> mode. In
+both cases it's the master's configured value being read at
+socket-creation time, not an independently configurable per-worker
+option.
+
 =item reuseport => $bool
 
 Enable SO_REUSEPORT mode for multi-worker servers. Default: 0 (disabled).
@@ -1032,6 +1038,12 @@ kernel load balancing. May actually decrease performance compared to shared
 socket mode. Use with caution - benchmark before deploying.
 
 =back
+
+B<Which process consumes it:> read by the parent to decide whether to
+create one shared listening socket or let each worker create its own;
+each worker then acts on this same master-configured value when creating
+its own socket. It is not an independently configurable per-worker
+option.
 
 =item max_receive_queue => $count
 
@@ -1111,6 +1123,12 @@ B<Default: 1000> (same as Mojolicious).
 When at capacity, new connections receive a 503 Service Unavailable
 response with a Retry-After header. This prevents resource exhaustion
 under heavy load.
+
+B<Which process consumes it:> in multi-worker mode, each worker enforces
+this limit independently against its own accepted connections -- it is a
+per-worker cap, not a total shared across all workers. C<workers>
+workers each configured with C<max_connections> => N gives an effective
+ceiling of roughly C<workers * N> connections across the whole server.
 
 B<Example:>
 
@@ -1537,6 +1555,13 @@ heartbeats every C<heartbeat_timeout / 2>. If a worker has not sent a
 heartbeat within C<heartbeat_timeout> seconds, the parent kills it with
 SIGKILL and respawns a replacement.
 
+B<Which process consumes it:> both. The worker reads it to compute how
+often it writes a heartbeat ping; the parent reads it to compute how
+often it checks for missed heartbeats and how long to wait before
+declaring a worker dead. Each worker process gets its own copy of this
+value (propagated at spawn), so it always matches what the parent is
+checking against.
+
 B<What this detects:> Event loop starvation — when the worker's event
 loop is completely blocked and cannot process any events. This happens
 with blocking syscalls (C<sleep()>, synchronous DNS, blocking database
@@ -1591,6 +1616,14 @@ backward compatibility, is ignored, and will be removed in a future release.
 
 Specifies the IO::Async::Loop subclass to use when calling C<run()>.
 This option is ignored when embedding the server in an existing loop.
+
+B<Which process consumes it:> whichever process creates its own fresh
+loop -- the single (or embedding) process calling C<run()>, and, in
+multi-worker mode, each worker. Workers always build a brand-new loop
+after forking (there is nothing to embed into post-fork), so
+C<loop_type> applies there the same way it does under C<run()>, even
+though the master's own loop may itself be an embedder-supplied one that
+ignores this option.
 
 B<Default:> Auto-detect (IO::Async chooses the best available backend)
 
