@@ -5949,7 +5949,8 @@ async sub _send_file_response {
     }
 }
 
-# Async filehandle response - uses worker pool for non-blocking reads
+# Async filehandle response - synchronous chunked reads in the send loop
+# (the fh can't cross a fork into the worker pool; see below).
 # Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
 # may be pipes, may be in-memory). Falls back to chunked reads.
 async sub _send_fh_response {

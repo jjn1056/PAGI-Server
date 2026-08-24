@@ -282,6 +282,14 @@ under the same per-stream backpressure watermark as chunked bodies
 
 =back
 
+Filehandle (C<fh>) response bodies are read B<synchronously>, in fixed-size
+chunks inside the connection's own send loop, on both HTTP/1.1 and HTTP/2 --
+the handle is application-owned and cannot be handed to the async worker
+pool across a fork boundary. This differs from C<file> (path) bodies opened
+by the server, which use the async worker pool (L<PAGI::Server::AsyncFile>)
+for files larger than C<sync_file_threshold>; a C<fh> body bypasses that
+pool regardless of size.
+
 =head2 Transport Flow Control (pagi.transport)
 
 PAGI exposes outbound flow-control introspection to applications through the
@@ -479,6 +487,13 @@ already disconnected first, in which case there is nothing new to report.
 C<pagi.connection> is provided for C<http> scopes on both HTTP/1.1 and
 HTTP/2. WebSocket and SSE scopes do not receive C<pagi.connection> on either
 transport -- they use their own dedicated disconnect events instead.
+
+C<response_complete()> -- the spec's SHOULD-level synchronous companion to
+C<on_complete>, reporting whether the response body has finished sending -- is
+B<not implemented>. Applications must treat it as an optional capability (per
+L<PAGI::Spec::Www/"Connection State">, C<undef> means unsupported) and cannot
+rely on it against PAGI::Server; C<response_started> (MUST-level) and
+C<on_complete>/C<disconnect_future> remain fully supported.
 
 =head2 Enabling HTTP/2
 

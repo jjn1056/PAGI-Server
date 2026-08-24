@@ -36,10 +36,10 @@ PAGI::Server::ConnectionState - Connection state tracking for HTTP requests
         commit();
     });
 
-    # Await abnormal disconnect (if Future provided)
-    if (my $future = $conn->disconnect_future) {
-        my $reason = await $future;
-    }
+    # Await abnormal disconnect. Always a Future: it resolves on an
+    # abnormal end, and stays pending forever after a clean completion
+    # (use on_complete to observe that case instead).
+    my $reason = await $conn->disconnect_future;
 
 =head1 DESCRIPTION
 
@@ -184,7 +184,7 @@ sub disconnect_reason {
 
 =head2 disconnect_future
 
-    my $future = $conn->disconnect_future;  # Future or undef
+    my $future = $conn->disconnect_future;  # always a Future
     my $reason = await $future;
 
 Returns a Future that resolves when the connection closes B<abnormally>

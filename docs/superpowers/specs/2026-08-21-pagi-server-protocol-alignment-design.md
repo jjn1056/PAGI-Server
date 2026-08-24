@@ -684,7 +684,7 @@ worker metadata as required by the existing implementation.
 **`lifespan_mode => 'off'` is removed.** PAGI's Lifespan spec now states
 that skipping the protocol is nonconforming ("A server must not offer an
 'off' switch for this protocol"), reversing this design's earlier decision
-to keep it as a documented override. The constructor and `set_app_config`
+to keep it as a documented override. The constructor and `configure`
 reject `'off'` with the same die-on-invalid-value behavior as any other
 unrecognized mode, and `pagi-server --lifespan off` fails at startup with a
 message pointing at the spec rationale. The remaining modes are `auto`
@@ -883,7 +883,7 @@ Test:
 
 - unknown and wrong-phase lifespan events;
 - lifespan configuration propagation into a real or controlled worker seam;
-- `lifespan_mode => 'off'` rejected by the constructor, `set_app_config`,
+- `lifespan_mode => 'off'` rejected by the constructor, `configure`,
   and `pagi-server --lifespan off`;
 - Date preservation without server duplication across relevant response paths;
 - extension advertisement matching each transport's accepted events.
@@ -927,6 +927,12 @@ Documentation must distinguish:
 - the separate future generic conformance-suite project.
 
 No PAGI specification file is changed by this work.
+
+The separate future generic conformance-suite project (see section 19.8) has
+no release-note entry of its own: nothing shipped here implements or exposes
+it, so there is no user-visible surface to document. This design document is
+the record of intent; a future project proposing that suite starts fresh from
+here rather than from a POD promise made in this branch.
 
 ## 17. Compatibility and operational effects
 
@@ -1091,7 +1097,13 @@ All gates run at branch HEAD (post Phase 2b, deviations D-P2B-1/2 signed off):
 - Complete suite, project Perl 5.42.2: **126 files / 853 tests PASS** (`/tmp/p2b-final-suite.out`), including the complete HTTP/2 group.
 - Release-sensitive tests (`RELEASE_TESTING=1`, all nine gated files incl. signals, hot restart, heartbeat, memory leak): **9 files / 36 tests PASS**.
 - Perl syntax floor: the dist intentionally requires 5.018 (commit 0366d05, branch ancestry verified), engaging this section's carve-out; `Perl::MinimumVersion` over `lib/` + `bin/pagi-server` reports the highest construct at **5.013002** (`s///r`) — within the declared floor.
-- POD validation: podchecker clean on all eight POD-bearing files. `git diff b2290dd --check`: clean.
+- POD validation: podchecker clean on all 11 POD-bearing files (`bin/pagi-server`,
+  `PAGI::Server`, `PAGI::Server::Runner`, `PAGI::Server::AsyncFile`,
+  `PAGI::Server::ConnectionState`, `PAGI::Server::Compliance`,
+  `PAGI::Server::EventValidator`, `PAGI::Server::TransportState`,
+  `PAGI::Server::Connection`, `PAGI::Server::Protocol::HTTP2`,
+  `PAGI::Server::Protocol::HTTP1`) -- the dist has 11, not eight. `git diff
+  b2290dd --check`: clean.
 - TLS: `IO::Async::SSL` 0.25 installed; `t/08-tls.t` runs live (no skip) and passes within the full suite. No release blocker.
 
 Suite runs use `ulimit -n 10240` (session shells carry an inflated RLIMIT_NOFILE that pathologically slows IO::Async worker forks) and `caffeinate -is`.
