@@ -4275,13 +4275,15 @@ sub _create_send {
             my $trailers = $weak_self->{_resp_pending} // '';
             $weak_self->{_resp_pending} = undef;
             $trailers .= "0\r\n";
+
+            my @validated_trailers;
             for my $header (@$trailer_headers) {
                 my ($name, $value) = @$header;
                 $name  = _validate_header_name($name);
                 $value = _validate_header_value($value);
-                $trailers .= "$name: $value\r\n";
+                push @validated_trailers, [$name, $value];
             }
-            $trailers .= "\r\n";
+            $trailers .= $weak_self->{protocol}->serialize_trailers(\@validated_trailers);
 
             $weak_self->{stream}->write($trailers);
         }
