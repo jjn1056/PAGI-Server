@@ -1083,3 +1083,15 @@ The project is complete when:
 12. Compliance and upgrading documentation describe the resulting behavior.
 13. The branch contains only owned PAGI::Server changes and is ready for one
     user review and one pull request.
+
+## 22. Section 15.7 branch-gate results (2026-08-24)
+
+All gates run at branch HEAD (post Phase 2b, deviations D-P2B-1/2 signed off):
+
+- Complete suite, project Perl 5.42.2: **126 files / 853 tests PASS** (`/tmp/p2b-final-suite.out`), including the complete HTTP/2 group.
+- Release-sensitive tests (`RELEASE_TESTING=1`, all nine gated files incl. signals, hot restart, heartbeat, memory leak): **9 files / 36 tests PASS**.
+- Perl syntax floor: the dist intentionally requires 5.018 (commit 0366d05, branch ancestry verified), engaging this section's carve-out; `Perl::MinimumVersion` over `lib/` + `bin/pagi-server` reports the highest construct at **5.013002** (`s///r`) — within the declared floor.
+- POD validation: podchecker clean on all eight POD-bearing files. `git diff b2290dd --check`: clean.
+- TLS: `IO::Async::SSL` 0.25 installed; `t/08-tls.t` runs live (no skip) and passes within the full suite. No release blocker.
+
+Suite runs use `ulimit -n 10240` (session shells carry an inflated RLIMIT_NOFILE that pathologically slows IO::Async worker forks) and `caffeinate -is`.
