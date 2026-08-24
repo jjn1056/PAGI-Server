@@ -1135,4 +1135,4 @@ All gates run at branch HEAD (post Phase 2b, deviations D-P2B-1/2 signed off):
   b2290dd --check`: clean.
 - TLS: `IO::Async::SSL` 0.25 installed; `t/08-tls.t` runs live (no skip) and passes within the full suite. No release blocker.
 
-Suite runs use `ulimit -n 10240` (session shells carry an inflated RLIMIT_NOFILE that pathologically slows IO::Async worker forks) and `caffeinate -is`.
+Suite runs use `ulimit -n 10240` (session shells carry an inflated RLIMIT_NOFILE; IO::Async::Function workers -- the AsyncFile pool -- spawn through ChildManager's 0..SC_OPEN_MAX FD sweep, measured ~1s+ per worker at nofile=1048576 versus 0.030s at 10240; plain `$loop->fork` worker processes are unaffected at 0.026s) and `caffeinate -is`.
