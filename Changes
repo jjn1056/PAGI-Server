@@ -108,6 +108,28 @@
     0.008 requesting HTTP/2 must upgrade Net::HTTP2::nghttp2 (or drop
     http2 => 1) before the server will start at all. HTTP/1.1-only
     deployments are unaffected.
+  - disconnect_future called for the first time after the request has
+    already completed cleanly now returns a Future that stays pending
+    forever, instead of one already resolved with undef -- a clean
+    completion is not a disconnect, so there is nothing for the Future to
+    resolve with. A Future requested after an abnormal disconnect is
+    unaffected: still already resolved with the disconnect reason. An
+    application awaiting this Future only after completion (e.g. via
+    Future->wait_any alongside other work that has already finished) now
+    hangs instead of resuming with undef; use on_complete to observe a
+    clean completion instead.
+  - SSE connection detection (HTTP/1.1 and HTTP/2) tightens from a raw
+    substring scan of the Accept header to PAGI's media-range
+    client-signal check: the sse scope is assigned only when the combined
+    Accept header values contain the exact range text/event-stream,
+    case-insensitively, with an effective quality value greater than zero;
+    q=0 and wildcard ranges (*/*, text/*) never signal SSE (nor did they
+    under the old substring scan). The old scan misclassified an explicit
+    refusal (Accept: text/event-stream;q=0) as SSE and false-positived on
+    any Accept token merely containing the substring "text/event-stream";
+    a request that reached sse only via one of those quirks now correctly
+    receives an http scope instead. Real SSE clients (EventSource,
+    fetch-event-source) send the exact media type and are unaffected.
 
   Bug Fixes
   - Fail the Future returned by $send when a file response's handle cannot be
@@ -119,12 +141,6 @@
   - http.response.trailers on an HTTP/1 response declared with Content-Length
     (not chunked) now fails the send Future ("requires chunked framing")
     instead of silently vanishing; trailers ride chunked framing only.
-  - disconnect_future called for the first time after the request has
-    already completed cleanly now returns a Future that stays pending
-    forever, instead of one already resolved with undef -- a clean
-    completion is not a disconnect, so there is nothing for the Future to
-    resolve with. A Future requested after an abnormal disconnect is
-    unaffected: still already resolved with the disconnect reason.
   - HTTP/2 WebSocket streams now deliver exactly one websocket.disconnect
     event per scope; every delivery site (peer Close frame, bare
     END_STREAM, RST_STREAM/other stream close, server-initiated protocol
@@ -146,15 +162,6 @@
     trailers-declared response that never sent its trailers). Per the PAGI
     spec, the carve-out applies only when the client had already
     disconnected; a server-caused end must still warn.
-  - SSE connection detection (HTTP/1.1 and HTTP/2) used a raw substring scan
-    of the Accept header, which misclassified an explicit refusal (Accept:
-    text/event-stream;q=0) as SSE, false-positived on any Accept token
-    merely containing the substring "text/event-stream", and matched
-    case-sensitively. Detection is now PAGI's media-range client-signal
-    check: the sse scope is assigned only when the combined Accept header
-    values contain the exact range text/event-stream, case-insensitively,
-    with an effective quality value greater than zero; q=0 and wildcard
-    ranges (*/*, text/*) never signal SSE.
   - sse.send string fields, sse.comment text, and generated keepalive
     comments are now encoded to UTF-8 exactly once at the wire boundary
     (chunk framing on HTTP/1.1, the per-stream send queue on HTTP/2). For an
