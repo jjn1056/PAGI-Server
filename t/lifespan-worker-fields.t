@@ -72,6 +72,37 @@ subtest 'worker fields are set during worker process creation' => sub {
     );
 };
 
+# Behavioral conformance: heartbeat_timeout is read by the worker process
+# itself (it drives how often the worker writes a liveness ping -- see
+# t/47-worker-heartbeat.t and the heartbeat_timeout POD). _run_as_worker
+# constructs a fresh PAGI::Server for the worker process; if
+# heartbeat_timeout isn't threaded into that constructor call, the worker's
+# own server object silently carries the wrong (default) value even though
+# the running process happens to still behave correctly today via a
+# closure over the master's (forked) $self. That's a representational trap
+# for anyone who later reads heartbeat_timeout off the worker object
+# instead of the closure. Assert the constructor call propagates it, and
+# that the interval calculation reads it from the worker's own object.
+subtest 'heartbeat_timeout propagates into the worker constructor' => sub {
+    my $source = do {
+        open my $fh, '<', 'lib/PAGI/Server.pm' or die "Cannot read: $!";
+        local $/;
+        <$fh>;
+    };
+
+    like(
+        $source,
+        qr/heartbeat_timeout\s*=>\s*\$self->\{heartbeat_timeout\},\s*\n\s*lifespan_mode/,
+        'heartbeat_timeout is passed into the worker PAGI::Server constructor call'
+    );
+
+    like(
+        $source,
+        qr/my \$interval = \(\$worker_server->\{heartbeat_timeout\} \|\| 50\) \/ 5;/,
+        'the worker heartbeat-writer interval reads heartbeat_timeout from the worker object, not a closure over the master'
+    );
+};
+
 # Behavioral conformance: per PAGI::Spec::Lifespan the lifespan scope's `state`
 # is a HashRef (or omitted if unsupported) -- never undef. PAGI::Server supports
 # it, so it must always be a defined, writable HashRef the app populates.

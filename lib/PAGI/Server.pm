@@ -3671,10 +3671,13 @@ sub _spawn_worker {
 sub _run_as_worker {
     my ($self, $listen_entries, $worker_num, $heartbeat_wr) = @_;
 
-    # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
     # Note: $SIG{INT} = 'IGNORE' inherited from parent - do NOT call watch_signal(INT)
     #       or it will overwrite the IGNORE with a CODE ref!
-    my $loop = IO::Async::Loop->new;
+    #
+    # The loop itself is created below, after $worker_server exists, via
+    # $worker_server->_create_loop -- so it respects a configured loop_type
+    # the same way the single-process run() path does. (Note: $ONE_TRUE_LOOP
+    # was already cleared by $loop->fork(), so this always creates a fresh loop.)
 
     # In reuseport mode, each worker creates its own TCP listening socket
     my $reuseport = $self->{reuseport};
@@ -3728,8 +3731,11 @@ sub _run_as_worker {
         max_ws_frame_size   => $self->{max_ws_frame_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
+        max_connections   => $self->{max_connections},
+        heartbeat_timeout => $self->{heartbeat_timeout},
         lifespan_mode            => $self->{lifespan_mode},
         lifespan_startup_timeout => $self->{lifespan_startup_timeout},
+        loop_type        => $self->{loop_type},
         workers          => 0,  # Single-worker mode in worker process
     );
     $worker_server->{is_worker} = 1;
@@ -3744,6 +3750,9 @@ sub _run_as_worker {
         }
     }
 
+    # Create the worker's own event loop now, respecting loop_type the same
+    # way the single-process run() path does (see _create_loop).
+    my $loop = $worker_server->_create_loop;
     $loop->add($worker_server);
 
     # Build SSL config for this worker (each worker gets its own SSL context post-fork)
@@ -3854,7 +3863,7 @@ sub _run_as_worker {
 
     # Set up heartbeat writer: periodically signal liveness to parent
     if ($heartbeat_wr) {
-        my $interval = ($self->{heartbeat_timeout} || 50) / 5;
+        my $interval = ($worker_server->{heartbeat_timeout} || 50) / 5;
         my $hb_timer = IO::Async::Timer::Periodic->new(
             interval => $interval,
             on_tick  => sub {
