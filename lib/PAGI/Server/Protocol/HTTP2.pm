@@ -42,7 +42,7 @@ use constant H2_PREFACE_LENGTH => 24;
 
 # Check for nghttp2 availability
 our $AVAILABLE;
-use constant MIN_NGHTTP2_VERSION => '0.008';
+use constant MIN_NGHTTP2_VERSION => '0.009';
 BEGIN {
     $AVAILABLE = eval {
         require Net::HTTP2::nghttp2;
@@ -116,10 +116,18 @@ sub new {
         on_request => sub { ($stream_id, $pseudo, $headers, $has_body) = @_ },
         on_body    => sub { ($stream_id, $data, $eof) = @_ },
         on_close   => sub { ($stream_id, $error_code) = @_ },
+        on_header_overflow => sub { ($stream_id) = @_ },
     );
 
 Creates a new HTTP/2 session for a connection. Returns a
 L<PAGI::Server::Protocol::HTTP2::Session> wrapper.
+
+C<on_header_overflow> is optional. It fires instead of C<on_request> when a
+request's HEADERS block exceeds C<max_header_list_size> (RFC 9113 section
+10.5.1): the caller is expected to submit a 431 response on the given
+stream id (no request state was ever dispatched, so there is nothing to
+clean up on the caller's side). If omitted, an oversized request is simply
+never dispatched and no response is sent for it.
 
 =cut
 
@@ -133,6 +141,7 @@ sub create_session {
         on_request => $callbacks{on_request},
         on_body    => $callbacks{on_body},
         on_close   => $callbacks{on_close},
+        on_header_overflow => $callbacks{on_header_overflow},
         settings   => {
             max_concurrent_streams  => $self->{max_concurrent_streams},
             initial_window_size     => $self->{initial_window_size},
@@ -164,6 +173,7 @@ sub new {
         on_request  => $args{on_request},
         on_body     => $args{on_body},
         on_close    => $args{on_close},
+        on_header_overflow => $args{on_header_overflow},
         settings    => $args{settings},
         h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
@@ -191,13 +201,28 @@ sub _init_nghttp2_session {
                 my ($stream_id, $type, $flags) = @_;
                 return 0 unless $weak_self;
 
-                # HEADERS frame starts a new request
+                # HEADERS frame: the first block on a stream establishes the
+                # request accumulator (as before). A LATER HEADERS block on
+                # an already-established stream (request trailers, RFC 9113
+                # section 8.1) must never reinitialize the committed
+                # request -- it accumulates into a separate {pending}
+                # sub-block instead, which on_frame_recv classifies by
+                # $frame->{headers_category} once the block is complete.
                 if (!defined $type || $type == Net::HTTP2::nghttp2::NGHTTP2_HEADERS()) {
-                    $weak_self->{streams}{$stream_id} = {
-                        headers          => [],
-                        pseudo           => {},
-                        header_list_size => 0,
-                    };
+                    my $existing = $weak_self->{streams}{$stream_id};
+                    if ($existing) {
+                        $existing->{pending} = {
+                            headers          => [],
+                            pseudo           => {},
+                            header_list_size => 0,
+                        };
+                    } else {
+                        $weak_self->{streams}{$stream_id} = {
+                            headers          => [],
+                            pseudo           => {},
+                            header_list_size => 0,
+                        };
+                    }
                 }
                 return 0;
             },
@@ -209,18 +234,48 @@ sub _init_nghttp2_session {
                 my $stream = $weak_self->{streams}{$stream_id};
                 return 0 unless $stream;
 
+                # Accumulate into the pending (trailer) block when one is
+                # in progress; otherwise into the main (request) block.
+                my $block = $stream->{pending} || $stream;
+
+                # Once the REQUEST block has been marked oversized (below),
+                # discard further fields for it instead of accumulating:
+                # HPACK decoding keeps running (nghttp2 already decoded and
+                # handed us this field), so dynamic-table state stays
+                # consistent, but PAGI stops storing fields for a block it
+                # will never dispatch. The overflow itself is reported as a
+                # 431 once the HEADERS frame commits (on_frame_recv), not
+                # here.
+                if (!$stream->{pending} && $stream->{oversized}) {
+                    return 0;
+                }
+
                 # RFC 7541: header entry size = name_len + value_len + 32
-                $stream->{header_list_size} += length($name) + length($value) + 32;
-                if ($stream->{header_list_size} > $weak_self->{settings}{max_header_list_size}) {
-                    delete $weak_self->{streams}{$stream_id};
-                    return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                $block->{header_list_size} += length($name) + length($value) + 32;
+                if ($block->{header_list_size} > $weak_self->{settings}{max_header_list_size}) {
+                    if ($stream->{pending}) {
+                        # Trailer block overflow: unchanged behavior --
+                        # PAGI defines no request-trailer error path, so
+                        # abort the stream outright.
+                        delete $stream->{pending};
+                        return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                    }
+                    # REQUEST block overflow (RFC 9113 section 10.5.1 / Go
+                    # net/http2 style): do NOT abort the callback -- a bare
+                    # abort here turns into a client-visible RST_STREAM
+                    # with no :status at all. Let HPACK decoding finish
+                    # instead, and mark the stream for a real 431 response
+                    # (synthesized by on_frame_recv once the HEADERS frame
+                    # commits) rather than dispatching it.
+                    $stream->{oversized} = 1;
+                    return 0;
                 }
 
                 # Pseudo-headers start with ':'
                 if ($name =~ /^:/) {
-                    $stream->{pseudo}{$name} = $value;
+                    $block->{pseudo}{$name} = $value;
                 } else {
-                    push @{$stream->{headers}}, [$name, $value];
+                    push @{$block->{headers}}, [$name, $value];
                 }
                 return 0;
             },
@@ -233,13 +288,73 @@ sub _init_nghttp2_session {
                 my $type = $frame->{type};
                 my $flags = $frame->{flags};
 
-                # HEADERS frame = request headers complete
+                # HEADERS frame = a request headers block completed
                 if ($type == Net::HTTP2::nghttp2::NGHTTP2_HEADERS()) {
                     my $stream = $weak_self->{streams}{$stream_id};
 
                     # Reject HEADERS on a stream where client already sent END_STREAM
                     if ($stream && $stream->{client_end_stream}) {
+                        delete $stream->{pending};
                         return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                    }
+
+                    my $category = $frame->{headers_category};
+
+                    # NGHTTP2_HCAT_HEADERS on an already-established stream
+                    # is a later ordinary HEADERS block -- request trailers.
+                    # The initial request is already committed on $stream;
+                    # this block was accumulated into {pending} by
+                    # on_begin_headers/on_header above.
+                    if ($stream
+                        && defined $category
+                        && $category == Net::HTTP2::nghttp2::NGHTTP2_HCAT_HEADERS()) {
+
+                        my $trailer = delete $stream->{pending};
+                        $trailer //= { headers => [], pseudo => {}, header_list_size => 0 };
+
+                        # RFC 9113 section 8.1: pseudo-header fields are
+                        # forbidden in trailers -- malformed, close the stream.
+                        if (%{$trailer->{pseudo}}) {
+                            return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                        }
+
+                        # PAGI defines no request-trailer receive event yet
+                        # (tracked separately) -- discard the fields.
+
+                        my $end_stream = $flags & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM();
+                        if ($end_stream) {
+                            $stream->{client_end_stream} = 1;
+                            # Deliver body completion exactly as the
+                            # DATA+END_STREAM arm below does: END_STREAM rode
+                            # the trailer HEADERS, not DATA, so the original
+                            # request's body_complete must still fire.
+                            if ($weak_self->{on_body}) {
+                                $weak_self->{on_body}->($stream_id, '', 1);
+                            }
+                        }
+
+                        return 0;
+                    }
+
+                    # REQUEST header block exceeded max_header_list_size
+                    # (marked by on_header above): do not dispatch. Instead
+                    # of deleting the stream entry outright, leave it in
+                    # place -- on_begin_headers still needs it to classify
+                    # a later trailer HEADERS block as {pending} rather
+                    # than a second request, and on_stream_close still
+                    # needs it for its ordinary cleanup. Only the
+                    # partially-accumulated fields are dropped here to
+                    # bound memory.
+                    if ($stream && $stream->{oversized}) {
+                        my $end_stream = $flags & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM();
+                        $stream->{client_end_stream} = 1 if $end_stream;
+                        $stream->{headers} = [];
+                        $stream->{pseudo}  = {};
+
+                        if ($weak_self->{on_header_overflow}) {
+                            $weak_self->{on_header_overflow}->($stream_id);
+                        }
+                        return 0;
                     }
 
                     if ($stream && $weak_self->{on_request}) {
@@ -455,6 +570,27 @@ sub resume_stream {
     return $self->{nghttp2}->resume_stream($stream_id);
 }
 
+=head2 submit_trailer
+
+    $session->submit_trailer($stream_id, headers => [['x-checksum', 'abc']]);
+
+Submit the trailing HEADERS block for a response (design section 8.3):
+queues C<NGHTTP2_FLAG_END_STREAM> on a HEADERS frame after any already-queued
+DATA, completing a response whose data provider reserved END_STREAM for the
+trailers (a three-value C<($chunk, $eof, $no_end_stream)> data-callback
+return). C<headers> defaults to C<[]> for a declared-but-empty trailer
+block. Throws (via the underlying C<Net::HTTP2::nghttp2::Session>) on a
+malformed tuple or a pseudo-header name. An unknown or already-gone stream
+id does not throw -- it returns a falsy nghttp2 status; C<stream_id == 0> is
+the one id nghttp2 rejects with an immediate croak (invalid argument).
+
+=cut
+
+sub submit_trailer {
+    my ($self, $stream_id, %args) = @_;
+    return $self->{nghttp2}->submit_trailer($stream_id, headers => $args{headers} // []);
+}
+
 =head2 submit_data
 
     $session->submit_data($stream_id, $data, $eof);
@@ -481,6 +617,25 @@ sub terminate {
     my ($self, $error_code) = @_;
     $error_code //= 0;  # NO_ERROR
     return $self->{nghttp2}->terminate_session($error_code);
+}
+
+=head2 submit_rst_stream
+
+    $session->submit_rst_stream($stream_id, $error_code);
+
+Reset a single stream with RST_STREAM, leaving the rest of the session
+untouched. C<$error_code> is an RFC 9113 section 7 error code (for example
+C<2>, INTERNAL_ERROR).
+
+Used by the server's HTTP/2 dispatch to abort a stream whose response was
+left started but incomplete -- the application returned early or threw after
+C<http.response.start>, so there is no honest way to finish the body.
+
+=cut
+
+sub submit_rst_stream {
+    my ($self, $stream_id, $error_code) = @_;
+    return $self->{nghttp2}->submit_rst_stream($stream_id, $error_code);
 }
 
 1;

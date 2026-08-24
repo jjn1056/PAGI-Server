@@ -8,6 +8,7 @@ use FindBin;
 use lib "$FindBin::Bin/../../lib";
 
 use PAGI::Server;
+use PAGI::Server::Connection;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -105,6 +106,42 @@ subtest 'queue overflow delivers reason=queue_overflow, code=1008' => sub {
     eval { $loop->remove($client) };
     $server->shutdown->get;
     eval { $loop->remove($server) };
+};
+
+# ============================================================
+# receive() fallback prefers the recorded ws_disconnect_reason over ''
+# ============================================================
+# White-box: exercises _create_websocket_receive's OWN fallback branch
+# directly -- the code path a receive() call takes when it resolves after
+# {closed} is already true (a server-initiated close, e.g. idle timeout,
+# racing an already-pending receive()), rather than through the primary
+# _handle_disconnect push+resolve path the queue_overflow subtest above
+# already covers. The fallback must report whatever ws_disconnect_reason a
+# server-initiated close recorded (_handle_disconnect sets it before
+# closing), via _ws_disconnect_event, defaulting to '' only when nothing
+# was recorded.
+subtest 'receive() fallback after close reports the recorded ws_disconnect_reason, not empty' => sub {
+    my $conn = PAGI::Server::Connection->new(app => sub { });
+    $conn->{closed} = 1;
+    $conn->{ws_disconnect_reason} = 'idle_timeout';
+
+    my $receive = $conn->_create_websocket_receive;
+    my $event = $receive->()->get;
+
+    is($event->{type}, 'websocket.disconnect', 'fallback event type is websocket.disconnect');
+    is($event->{code}, 1006, 'fallback code is still 1006 (abnormal closure)');
+    is($event->{reason}, 'idle_timeout', "fallback reason is the recorded token, not ''");
+};
+
+subtest 'receive() fallback with no recorded reason still falls back to empty' => sub {
+    my $conn = PAGI::Server::Connection->new(app => sub { });
+    $conn->{closed} = 1;
+
+    my $receive = $conn->_create_websocket_receive;
+    my $event = $receive->()->get;
+
+    is($event->{code}, 1006, 'fallback code is still 1006');
+    is($event->{reason}, '', "fallback reason is '' when nothing was recorded");
 };
 
 done_testing;

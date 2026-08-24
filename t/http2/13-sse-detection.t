@@ -128,12 +128,14 @@ subtest 'SSE request detected over HTTP/2' => sub {
     my $got_scope_type;
     my $got_http_version;
     my $got_path;
+    my $got_pagi;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         $got_scope_type = $scope->{type};
         $got_http_version = $scope->{http_version};
         $got_path = $scope->{path};
+        $got_pagi = $scope->{pagi};
 
         # Minimal SSE session: start then close
         await $send->({ type => 'sse.start', status => 200 });
@@ -172,6 +174,8 @@ subtest 'SSE request detected over HTTP/2' => sub {
     exchange_frames($client, $client_sock, 20);
 
     is($got_scope_type, 'sse', 'Scope type is sse');
+    is($got_pagi->{version}, '0.4', 'h2 SSE scope uses core PAGI version 0.4');
+    is($got_pagi->{spec_version}, '0.3', 'h2 SSE scope keeps spec_version 0.3');
     is($got_http_version, '2', 'HTTP version is 2');
     is($got_path, '/events', 'Path is correct');
     is($response_headers{':status'}, '200', 'Got 200 status');
@@ -260,6 +264,105 @@ subtest 'SSE receive returns sse.request' => sub {
     exchange_frames($client, $client_sock, 20);
 
     is($got_receive_type, 'sse.request', 'Receive returns sse.request event');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# Media-range detection matrix (spec 3cac188, PAGI Www.pod
+# "SSE Connection Detection"): sse iff the Accept header(s) carry the exact
+# media range text/event-stream, case-insensitively, with q > 0. A boolean
+# client-signal check, not content negotiation -- wildcards never signal
+# SSE, q=0 is an explicit refusal, and near-miss substrings must not
+# false-positive. Mirrors t/55-sse-alignment.t for HTTP/2.
+# ============================================================
+my @matrix = (
+    ['text/event-stream',                    'sse',  'exact match'],
+    ['TEXT/EVENT-STREAM',                    'sse',  'case-insensitive match'],
+    ['text/event-stream;q=0.4',              'sse',  'q>0 signals sse'],
+    ['text/event-stream, text/html;q=0.9',   'sse',  'presence, not preference'],
+    ['text/event-stream;q=0',                'http', 'q=0 is an explicit refusal'],
+    ['*/*',                                  'http', 'wildcard never signals sse'],
+    ['text/*',                               'http', 'partial wildcard never signals sse'],
+    ['application/json, text/event-streamer', 'http', 'substring near-miss must not false-positive'],
+);
+
+for my $row (@matrix) {
+    my ($accept, $expected, $label) = @$row;
+    subtest "h2 Accept: $accept -> $expected ($label)" => sub {
+        my $got_scope_type;
+
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            $got_scope_type = $scope->{type};
+
+            if ($scope->{type} eq 'sse') {
+                # Decline cleanly so the client isn't left hanging.
+                await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
+                await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+            }
+            else {
+                await $receive->();
+                await $send->({
+                    type    => 'http.response.start',
+                    status  => 200,
+                    headers => [['content-type', 'text/plain']],
+                });
+                await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+            }
+        };
+
+        my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+        my $client = create_client();
+        h2c_handshake($client, $client_sock);
+
+        $client->submit_request(
+            method    => 'GET',
+            path      => '/events',
+            scheme    => 'http',
+            authority => 'localhost',
+            headers   => [['accept', $accept]],
+        );
+        $client_sock->syswrite($client->mem_send);
+
+        exchange_frames($client, $client_sock, 20);
+
+        is($got_scope_type, $expected, "scope type is $expected");
+
+        $stream_io->close_now;
+        $loop->remove($server);
+    };
+}
+
+subtest 'h2: two Accept headers, only the second carries the range -> sse' => sub {
+    my $got_scope_type;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $got_scope_type = $scope->{type};
+        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
+        await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+
+    my $client = create_client();
+    h2c_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'application/json'], ['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    exchange_frames($client, $client_sock, 20);
+
+    is($got_scope_type, 'sse', 'scope type is sse');
 
     $stream_io->close_now;
     $loop->remove($server);

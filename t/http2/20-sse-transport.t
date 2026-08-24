@@ -32,6 +32,8 @@ use PAGI::Server::Protocol::HTTP2;
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
 
+use constant H2_CANCEL => 8;   # RST_STREAM error code CANCEL (RFC 9113)
+
 sub create_test_server {
     my (%args) = @_;
     my $server = PAGI::Server->new(
@@ -169,7 +171,7 @@ subtest 'SSE-over-h2 transport handle (and its $ss cycle) is collected at teardo
     ok($saw_handle, 'transport handle was attached to the SSE-over-h2 scope');
 
     # Client closes the SSE stream (stream id 1) -> server _h2_on_close.
-    $client->submit_rst_stream(1, 8);   # 8 = CANCEL
+    $client->submit_rst_stream(1, H2_CANCEL);
     $client_sock->syswrite($client->mem_send);
     pump($client, $client_sock);
 

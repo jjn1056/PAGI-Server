@@ -6,6 +6,7 @@ use Net::Async::HTTP;
 use Future::AsyncAwait;
 use Scalar::Util qw(refaddr);
 use File::Temp qw(tempfile);
+use Time::HiRes qw(time sleep);
 
 use PAGI::Server;
 
@@ -167,15 +168,99 @@ subtest 'Child process gets fresh loop (not parent cached)' => sub {
     diag("Worker PID: " . ($diag{pid} // 'unknown'));
 };
 
+# Fork a single-worker multi-worker master configured with the given
+# loop_type, and report back which IO::Async::Loop subclass the worker
+# process actually ends up running on (via $ONE_TRUE_LOOP, which
+# _run_as_worker registers when it builds the worker's loop). Returns the
+# class name, or undef if the worker never reported in.
+sub _worker_loop_class {
+    my ($loop_type) = @_;
+
+    my ($fh, $filename) = tempfile(UNLINK => 1);
+    close($fh);
+
+    my $reporting_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        if ($scope->{type} eq 'lifespan') {
+            while (1) {
+                my $event = await $receive->();
+                if ($event->{type} eq 'lifespan.startup') {
+                    # The worker's own loop is already registered as
+                    # $ONE_TRUE_LOOP by the time lifespan startup runs, so
+                    # a bare ->new returns that same loop -- its ref()
+                    # shows the actual backend class in use.
+                    my $worker_loop = IO::Async::Loop->new;
+                    open my $out, '>', $filename or die "Cannot write to $filename: $!";
+                    print $out ref($worker_loop);
+                    close $out;
+                    await $send->({ type => 'lifespan.startup.complete' });
+                }
+                elsif ($event->{type} eq 'lifespan.shutdown') {
+                    await $send->({ type => 'lifespan.shutdown.complete' });
+                    return;
+                }
+            }
+        }
+    };
+
+    my $server = PAGI::Server->new(
+        app       => $reporting_app,
+        host      => '127.0.0.1',
+        port      => 0,
+        workers   => 1,
+        loop_type => $loop_type,
+        quiet     => 1,
+    );
+
+    my $test_pid = fork();
+    die "Fork failed: $!" unless defined $test_pid;
+
+    if ($test_pid == 0) {
+        my $child_loop = IO::Async::Loop->new;
+        $child_loop->add($server);
+        eval {
+            $server->listen;
+            $child_loop->run;
+        };
+        exit(0);
+    }
+
+    my $deadline = time() + 15;
+    my $class;
+    while (time() < $deadline) {
+        if (-s $filename) {
+            open my $in, '<', $filename or die "Cannot read $filename: $!";
+            local $/;
+            $class = <$in>;
+            close $in;
+            last if $class;
+        }
+        sleep(0.1);
+    }
+
+    kill('TERM', $test_pid);
+    waitpid($test_pid, 0);
+
+    return $class;
+}
+
 # Test with different loop backends (skip if not available)
 subtest 'Loop isolation with IO::Async::Loop::Poll' => sub {
     # Poll is always available as it's part of core IO::Async
-    pass('Poll backend test placeholder - will be expanded in Step 2');
+    my $class = _worker_loop_class('Poll');
+    is($class, 'IO::Async::Loop::Poll',
+        'worker honors loop_type => Poll (explicit config propagated into the worker)');
 };
 
 subtest 'Loop isolation with IO::Async::Loop::Select' => sub {
-    # Select is always available
-    pass('Select backend test placeholder - will be expanded in Step 2');
+    # Select is always available. This is the important regression case:
+    # the auto-detected default backend on most dev/CI hosts is Poll, so a
+    # worker that silently ignores loop_type would still show Poll here,
+    # not Select -- this distinguishes "propagated and honored" from
+    # "happens to coincide with the default".
+    my $class = _worker_loop_class('Select');
+    is($class, 'IO::Async::Loop::Select',
+        'worker honors loop_type => Select (differs from the auto-detected default, so this proves propagation)');
 };
 
 subtest 'Loop isolation with IO::Async::Loop::Epoll' => sub {

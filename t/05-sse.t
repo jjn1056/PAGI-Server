@@ -57,7 +57,7 @@ subtest 'SSE broadcaster streams events' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 5 unless $sock;
+        skip "Cannot connect", 7 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
@@ -82,6 +82,8 @@ subtest 'SSE broadcaster streams events' => sub {
 
         like($response, qr/HTTP\/1\.1 200/, 'SSE response is 200 OK');
         like($response, qr/content-type:\s*text\/event-stream/i, 'Content-Type is text/event-stream');
+        like($response, qr/cache-control:\s*no-cache/i, 'Cache-Control defaults to no-cache (design 11.4)');
+        like($response, qr/^date:\s*\S/im, 'Date header present by default (design 11.4)');
         like($response, qr/event: tick.*data: 1/s, 'First tick event received');
         like($response, qr/event: tick.*data: 2/s, 'Second tick event received');
         like($response, qr/event: done.*data: finished/s, 'Done event received');
@@ -93,6 +95,7 @@ subtest 'SSE broadcaster streams events' => sub {
 # Test 2: SSE scope type is 'sse'
 subtest 'SSE scope type is sse' => sub {
     my $scope_type = '';
+    my $pagi;
 
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
@@ -112,6 +115,7 @@ subtest 'SSE scope type is sse' => sub {
         }
 
         $scope_type = $scope->{type};
+        $pagi = $scope->{pagi};
 
         await $send->({
             type    => 'sse.start',
@@ -135,7 +139,7 @@ subtest 'SSE scope type is sse' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 1 unless $sock;
+        skip "Cannot connect", 3 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
@@ -151,6 +155,8 @@ subtest 'SSE scope type is sse' => sub {
         close $sock;
 
         is($scope_type, 'sse', 'Scope type is sse');
+        is($pagi->{version}, '0.4', 'SSE scope uses core PAGI version 0.4');
+        is($pagi->{spec_version}, '0.3', 'SSE scope keeps spec_version 0.3');
     }
 
     $server->shutdown->get;
@@ -288,6 +294,18 @@ subtest 'SSE disconnect detection' => sub {
 subtest 'SSE chunked encoding properly terminated' => sub {
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
+
+        if ($scope->{type} eq 'http') {
+            # Serves the follow-up request that proves the connection survived.
+            await $receive->();
+            await $send->({
+                type    => 'http.response.start',
+                status  => 200,
+                headers => [ [ 'content-type', 'text/plain' ] ],
+            });
+            await $send->({ type => 'http.response.body', body => 'AFTER-SSE', more => 0 });
+            return;
+        }
         die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
 
         await $send->({
@@ -312,14 +330,16 @@ subtest 'SSE chunked encoding properly terminated' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 2 unless $sock;
+        skip "Cannot connect", 3 unless $sock;
 
         print $sock "GET / HTTP/1.1\r\n";
         print $sock "Host: 127.0.0.1:$port\r\n";
         print $sock "Accept: text/event-stream\r\n";
         print $sock "\r\n";
 
-        # Read until connection closes (server should close after sending terminator)
+        # Read to the chunked terminator. A clean stream end honors the
+        # "Connection: keep-alive" sse.start advertised (design 11.6), so the
+        # terminator -- not EOF -- is what ends the SSE response here.
         $sock->blocking(0);
         my $response = '';
         my $deadline = time + 5;
@@ -331,18 +351,35 @@ subtest 'SSE chunked encoding properly terminated' => sub {
                 $response .= $buf;
             }
             elsif (defined $n && $n == 0) {
-                # EOF - connection closed cleanly
+                # EOF - connection closed
                 $connection_closed = 1;
                 last;
             }
+            last if $response =~ /\r\n0\r\n\r\n/;
             $loop->loop_once(0.1);
         }
-        close $sock;
 
         # Verify chunked terminator is present (0\r\n\r\n)
         # The response uses chunked encoding, so final chunk should be "0\r\n\r\n"
         like($response, qr/0\r\n\r\n$/, 'Response ends with chunked terminator (0\\r\\n\\r\\n)');
-        ok($connection_closed, 'Connection closed cleanly after chunked terminator');
+        ok(!$connection_closed, 'Connection stays open after the chunked terminator');
+
+        # ...and is genuinely reusable: the same socket serves a plain request.
+        print $sock "GET /after HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n";
+        my $second = '';
+        $deadline = time + 5;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) { $second .= $buf }
+            elsif (defined $n && $n == 0) { last }
+            last if $second =~ /AFTER-SSE/;
+            $loop->loop_once(0.1);
+        }
+        close $sock;
+
+        like($second, qr{^HTTP/1\.1 200.*AFTER-SSE}s,
+            'same socket serves an ordinary request after the terminated SSE stream');
     }
 
     $server->shutdown->get;
@@ -404,6 +441,76 @@ subtest 'SSE id and retry fields' => sub {
 
         like($response, qr/id: msg-123/, 'id field present');
         like($response, qr/retry: 5000/, 'retry field present');
+    }
+
+    $server->shutdown->get;
+};
+
+# Test 6b: app-supplied Cache-Control/Date are not overridden (design 11.4:
+# server supplies these only when the app didn't).
+subtest 'SSE app-supplied Cache-Control and Date are preserved' => sub {
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'sse';
+
+        await $send->({
+            type    => 'sse.start',
+            status  => 200,
+            headers => [
+                [ 'content-type',  'text/event-stream' ],
+                [ 'cache-control', 'private, max-age=30' ],
+                [ 'date',          'Tue, 01 Jan 2030 00:00:00 GMT' ],
+            ],
+        });
+
+        await $send->({ type => 'sse.send', data => 'hello' });
+    };
+
+    my $server = create_server($test_app);
+    my $port = $server->port;
+
+    use IO::Socket::INET;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\n";
+        print $sock "Host: 127.0.0.1:$port\r\n";
+        print $sock "Accept: text/event-stream\r\n";
+        print $sock "\r\n";
+
+        $sock->blocking(0);
+        my $response = '';
+        my $deadline = time + 3;
+        while (time < $deadline) {
+            my $buf;
+            my $n = sysread($sock, $buf, 4096);
+            if (defined $n && $n > 0) {
+                $response .= $buf;
+            }
+            $loop->loop_once(0.1);
+            last if $response =~ /data: hello/;
+        }
+        close $sock;
+
+        # Header block only, so the SSE body can't skew the counts below.
+        my ($header_block) = $response =~ /\A(.*?)\r\n\r\n/s;
+        $header_block //= '';
+        my @cache_control_lines = $header_block =~ /^cache-control:.*$/mig;
+        my @date_lines          = $header_block =~ /^date:.*$/mig;
+
+        is(scalar(@cache_control_lines), 1, 'exactly one Cache-Control header on the wire');
+        like($cache_control_lines[0] // '', qr/private, max-age=30/,
+            'app-supplied Cache-Control is preserved, not overridden with no-cache');
+        is(scalar(@date_lines), 1, 'exactly one Date header on the wire');
+        like($date_lines[0] // '', qr/Tue, 01 Jan 2030 00:00:00 GMT/,
+            'app-supplied Date is preserved, not overridden with the server clock');
     }
 
     $server->shutdown->get;

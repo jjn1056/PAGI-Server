@@ -36,10 +36,10 @@ PAGI::Server::ConnectionState - Connection state tracking for HTTP requests
         commit();
     });
 
-    # Await abnormal disconnect (if Future provided)
-    if (my $future = $conn->disconnect_future) {
-        my $reason = await $future;
-    }
+    # Await abnormal disconnect. Always a Future: it resolves on an
+    # abnormal end, and stays pending forever after a clean completion
+    # (use on_complete to observe that case instead).
+    my $reason = await $conn->disconnect_future;
 
 =head1 DESCRIPTION
 
@@ -136,6 +136,20 @@ sub response_started { return $_[0]->{_response_started} ? 1 : 0 }
 # Server-internal: called from the send path when http.response.start is emitted.
 sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
+=head2 response_complete
+
+    my $done = $conn->response_complete;   # undef = unsupported, else 0 or 1
+
+Returns true once this request's response body has been fully sent, false
+while a response is still streaming or has not started, and C<undef> if the
+server does not track completion. This server does not currently track
+response-body completion, so this accessor always returns C<undef>. SHOULD-level
+per L<PAGI::Spec::Www/"Connection State">; test C<defined> before relying on it.
+
+=cut
+
+sub response_complete { return undef }
+
 =head2 disconnect_reason
 
     my $reason = $conn->disconnect_reason;  # String or undef
@@ -151,9 +165,9 @@ Standard reason strings:
 
 =item * C<client_timeout> - Client stopped responding (read timeout)
 
-=item * C<idle_timeout> - Connection idle too long before the request arrived
+=item * C<idle_timeout> - Connection or stream idle too long, before a request arrived or mid-stream on a quiet WebSocket or SSE session
 
-=item * C<keepalive_timeout> - Keep-alive connection idled out between requests
+=item * C<keepalive_timeout> - Keep-alive connection idled out between requests, or a WebSocket keepalive ping received no pong within its timeout
 
 =item * C<write_timeout> - Response write timed out
 
@@ -184,7 +198,7 @@ sub disconnect_reason {
 
 =head2 disconnect_future
 
-    my $future = $conn->disconnect_future;  # Future or undef
+    my $future = $conn->disconnect_future;  # always a Future
     my $reason = await $future;
 
 Returns a Future that resolves when the connection closes B<abnormally>
@@ -193,7 +207,22 @@ closes but this Future is deliberately left pending — use C<on_complete> to
 observe normal completion.
 
 The Future is created lazily on first call, avoiding allocation overhead
-for handlers that don't need async disconnect detection.
+for handlers that don't need async disconnect detection. Its behavior
+depends on which of the three connection states is current at call time:
+
+=over 4
+
+=item * B<connected> — a fresh, pending Future is returned; it resolves
+later if C<_mark_disconnected> occurs.
+
+=item * B<disconnected (abnormal)> — a Future already resolved with the
+disconnect reason is returned.
+
+=item * B<completed (clean)> — a Future is returned and left pending
+forever; the completion already happened and was not a disconnect, so
+there is nothing for it to resolve with.
+
+=back
 
 The Future resolves with the disconnect reason string.
 
@@ -221,8 +250,10 @@ sub disconnect_future {
         $self->{_future} = Future->new;
     }
 
-    # If already disconnected, resolve immediately
-    unless (${$self->{_connected}}) {
+    # Resolve immediately only for an ABNORMAL end. After a clean completion
+    # the connection is closed but this Future is deliberately left pending —
+    # completion is not a disconnect (on_complete is the completion signal).
+    if (!${$self->{_connected}} && !$self->{_completed}) {
         $self->{_future}->done(${$self->{_reason}});
     }
 

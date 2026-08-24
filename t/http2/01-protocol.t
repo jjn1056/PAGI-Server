@@ -443,9 +443,10 @@ subtest 'custom max_header_list_size is respected' => sub {
 };
 
 # ============================================================
-# Oversized headers are rejected with RST_STREAM
+# Oversized headers fire on_header_overflow instead of on_request
+# (RFC 9113 section 10.5.1: a real 431, not a bare RST_STREAM)
 # ============================================================
-subtest 'oversized headers rejected with RST_STREAM' => sub {
+subtest 'oversized headers fire on_header_overflow, not on_request' => sub {
     # Use a very small limit to make the test easy
     my $proto = PAGI::Server::Protocol::HTTP2->new(
         max_header_list_size => 128,
@@ -453,20 +454,40 @@ subtest 'oversized headers rejected with RST_STREAM' => sub {
 
     my @requests;
     my @closed;
-    my $session = $proto->create_session(
+    my @overflowed;
+    my $session;
+    $session = $proto->create_session(
         on_request => sub { push @requests, [@_] },
         on_body    => sub {},
         on_close   => sub { push @closed, [@_] },
+        on_header_overflow => sub {
+            my ($stream_id) = @_;
+            push @overflowed, $stream_id;
+            # Caller's responsibility per create_session's POD: submit the
+            # 431 on this stream.
+            $session->submit_response($stream_id,
+                status  => 431,
+                headers => [['content-type', 'text/plain']],
+                body    => "Request Header Fields Too Large\n",
+            );
+        },
     );
 
-    my $client = create_test_client();
+    my %response_headers;
+    my $client = create_test_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+    );
     complete_handshake($session, $client);
 
     # Send a request with headers that exceed 128 bytes
     # RFC 7541: each entry size = name_len + value_len + 32
     # :method=GET (3+3+32=38), :path=/ (5+1+32=38), :scheme=https (7+5+32=44),
     # :authority=localhost (10+9+32=51) = 171 bytes already > 128
-    $client->submit_request(
+    my $stream_id = $client->submit_request(
         method    => 'GET',
         path      => '/',
         scheme    => 'https',
@@ -475,15 +496,18 @@ subtest 'oversized headers rejected with RST_STREAM' => sub {
     my $request_data = $client->mem_send;
     $session->feed($request_data);
 
-    # Extract response — should contain RST_STREAM
     my $response = $session->extract;
     ok(defined $response && length($response) > 0, 'Server produced response');
-
-    # Feed response to client
     $client->mem_recv($response) if defined $response;
 
     # The request should NOT have been delivered to on_request
     is(scalar @requests, 0, 'Oversized request was not delivered to app');
+
+    is(scalar @overflowed, 1, 'on_header_overflow fired exactly once');
+    is($overflowed[0], $stream_id, 'on_header_overflow received the correct stream_id');
+
+    is($response_headers{':status'}, '431',
+        'client receives a real 431 status, not a bare RST_STREAM');
 };
 
 # ============================================================

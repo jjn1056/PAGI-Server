@@ -222,6 +222,72 @@ subtest 'file response with offset and length (Range request simulation)' => sub
     );
 };
 
+subtest 'HEAD request suppresses file body without opening the file' => sub {
+    with_server(
+        async sub  {
+        my ($scope, $receive, $send) = @_;
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', length($test_content)],
+                ],
+            });
+            # Nonexistent path: h1 has no -f/-r pre-check (it fails at
+            # open/stat -- see Task 5 report), so a clean resolve here
+            # proves the file arm was never entered for a HEAD request.
+            await $send->({
+                type => 'http.response.body',
+                file => '/nonexistent/head-file-probe.txt',
+            });
+        },
+        sub  {
+        my ($port, $server) = @_;
+            my $response = $http->HEAD("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'HEAD got 200');
+            is($response->content, '', 'HEAD file: no body');
+            is($response->header('Content-Length'), length($test_content),
+                'app Content-Length passes through untouched');
+        }
+    );
+};
+
+subtest 'HEAD request suppresses fh body without reading/seeking the handle' => sub {
+    my $tell_after;
+    with_server(
+        async sub  {
+        my ($scope, $receive, $send) = @_;
+            open my $fh, '<:raw', $test_file or die "Cannot open: $!";
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', length($test_content)],
+                ],
+            });
+            # Nonzero offset: if the server ever seeked/read this handle for
+            # a HEAD request, $fh's position would move off 0 below.
+            await $send->({
+                type => 'http.response.body',
+                fh => $fh,
+                offset => 3,
+            });
+            $tell_after = tell($fh);
+            close $fh;
+        },
+        sub  {
+        my ($port, $server) = @_;
+            my $response = $http->HEAD("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'HEAD got 200');
+            is($response->content, '', 'HEAD fh: no body');
+        }
+    );
+    is($tell_after, 0, 'fh was never seeked/read for a HEAD request');
+};
+
 subtest 'file response offset at end of file' => sub {
     my $offset = length($test_content) - 50;
     my $expected = substr($test_content, $offset);
@@ -354,6 +420,10 @@ subtest 'closed fh fails the send Future' => sub {
         '$send returns a Future instead of throwing synchronously',
     );
     ok(length($future_error), 'closed fh fails the Future returned by $send');
+    like($future_error, qr/^Failed to read filehandle: /,
+        'error names the failure (mirrors the h2 fh-closed message, t/http2/28-file-fh.t)');
+    unlike($future_error, qr/ at .+ line \d+\.?\s*\z/,
+        'die message ends with a trailing newline, so Perl does not append " at FILE line N." (matches h2\'s twin die at Connection.pm ~1660)');
 };
 
 subtest 'fh response without length reads to EOF' => sub {
@@ -509,6 +579,91 @@ subtest 'fh response with offset (seek)' => sub {
     );
 };
 
+subtest 'fh response offset past EOF sends zero bytes' => sub {
+    # PAGI spec (Www.pod, Response Body validation): an offset past the end
+    # of the file SHOULD send zero bytes, not fail the response. Mirrors
+    # the file-past-EOF subtests above, but for an application-owned fh --
+    # unlike the file arm, the fh arm never stats the source, so past-EOF
+    # is a plain zero-byte read() at the sought position, not a clamped
+    # length computation.
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            open my $fh, '<:raw', $test_file or die "Cannot open: $!";
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                ],
+            });
+            await $send->({
+                type => 'http.response.body',
+                fh => $fh,
+                offset => 999_999_999,
+            });
+            close $fh;
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for fh offset past EOF');
+            is($response->content, '', 'fh offset past EOF returns empty content');
+        }
+    );
+};
+
+subtest 'fh response with offset on an unseekable pipe fails the send Future loudly' => sub {
+    my $future_error = '';
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            # A pipe's read end is not seekable: a nonzero offset forces
+            # _send_fh_response's seek() call, which fails with ESPIPE
+            # ("Illegal seek").
+            pipe(my $read_fh, my $write_fh) or die "pipe: $!";
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                ],
+            });
+
+            eval {
+                await $send->({
+                    type   => 'http.response.body',
+                    fh     => $read_fh,
+                    offset => 1,
+                });
+                1;
+            } or $future_error = $@;
+            $future_error =~ s/\n/ /g;
+
+            # Recover with a normal body so the client side doesn't hang --
+            # mirrors the closed-fh recovery idiom above.
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+
+            close $read_fh;
+            close $write_fh;
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/")->get;
+            is($response->code, 200, 'got 200 response');
+            like($response->content, qr/err=.*Cannot seek/,
+                'seek failure on an unseekable fh fails the Future loudly; app recovered');
+        }
+    );
+};
+
 subtest 'binary file response preserves bytes' => sub {
     with_server(
         async sub  {
@@ -647,6 +802,130 @@ subtest 'file not found dies with error' => sub {
     like($error_message, qr/File not found/, 'error message mentions file not found');
 };
 
+subtest 'missing file: server pre-check fails the Future, app recovers with a normal body' => sub {
+    # h1 parity with h2's file arm (Connection.pm _h2_create_send): the file
+    # arm must reject a missing file with "File not found: $file\n" BEFORE
+    # ever reaching _send_file_response's -s/open, so a conforming app sees
+    # the same failure shape on both transports and can recover cleanly
+    # (mirrors the closed-fh recovery idiom above).
+    my $sync_error = '';
+    my $future_error = '';
+    my $returned_future = 0;
+    my $missing_file = "$tempdir/does-not-exist.txt";
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [['content-type', 'text/plain']],
+            });
+
+            my $send_future;
+            eval {
+                $send_future = $send->({
+                    type => 'http.response.body',
+                    file => $missing_file,
+                });
+                1;
+            } or $sync_error = $@;
+
+            $returned_future = eval { $send_future->isa('Future') } ? 1 : 0
+                if defined $send_future;
+
+            if ($returned_future) {
+                eval { await $send_future; 1 }
+                    or $future_error = $@;
+            }
+
+            # Response already started (200 sent); finish it with a plain
+            # body instead of the failed file, same recovery shape the
+            # closed-fh subtest above exercises.
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/missing-file")->get;
+            is($response->code, 200, 'response completes cleanly (app already sent 200)');
+            ok($server->is_running, 'server still running after file pre-check failure');
+        },
+    );
+
+    ok($returned_future && !length($sync_error),
+        '$send returns a Future instead of throwing synchronously');
+    ok(length($future_error), 'missing file fails the Future returned by $send');
+    is($future_error, "File not found: $missing_file\n",
+        'error matches h2 parity message exactly (Connection.pm _h2_create_send file arm)');
+};
+
+subtest 'unreadable file: server pre-check fails the Future, app recovers with a normal body' => sub {
+    plan skip_all => 'root ignores permission bits, cannot exercise -r failure' if $> == 0;
+
+    my $sync_error = '';
+    my $future_error = '';
+    my $returned_future = 0;
+    my $unreadable_file = "$tempdir/unreadable.txt";
+    open my $ufh, '>:raw', $unreadable_file or die "Cannot create test file: $!";
+    print $ufh "secret";
+    close $ufh;
+    chmod 0000, $unreadable_file or die "Cannot chmod test file: $!";
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [['content-type', 'text/plain']],
+            });
+
+            my $send_future;
+            eval {
+                $send_future = $send->({
+                    type => 'http.response.body',
+                    file => $unreadable_file,
+                });
+                1;
+            } or $sync_error = $@;
+
+            $returned_future = eval { $send_future->isa('Future') } ? 1 : 0
+                if defined $send_future;
+
+            if ($returned_future) {
+                eval { await $send_future; 1 }
+                    or $future_error = $@;
+            }
+
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/unreadable-file")->get;
+            is($response->code, 200, 'response completes cleanly (app already sent 200)');
+            ok($server->is_running, 'server still running after file pre-check failure');
+        },
+    );
+
+    chmod 0644, $unreadable_file;
+
+    ok($returned_future && !length($sync_error),
+        '$send returns a Future instead of throwing synchronously');
+    ok(length($future_error), 'unreadable file fails the Future returned by $send');
+    is($future_error, "Cannot read file: $unreadable_file\n",
+        'error matches h2 parity message exactly (Connection.pm _h2_create_send file arm)');
+};
+
 subtest 'zero-length file works' => sub {
     my $empty_file = "$tempdir/empty.txt";
     open $fh, '>:raw', $empty_file or die;
@@ -674,6 +953,93 @@ subtest 'zero-length file works' => sub {
             is($response->code, 200, 'got 200 response');
             is($response->content, '', 'empty file returns empty content');
             is(length($response->content), 0, 'content length is 0');
+        }
+    );
+};
+
+subtest 'file response offset past EOF sends zero bytes (chunked)' => sub {
+    # PAGI spec (Www.pod, Response Body validation): an offset past the end
+    # of the file SHOULD send zero bytes, not fail the response. No
+    # content-length header here, so this exercises the chunked framing
+    # path for a length-clamped-to-zero body.
+    # The app alternates: past-EOF (empty) on the first request, then a
+    # normal full-file response on the second -- so the "connection still
+    # usable" assertion below actually distinguishes a desynced connection
+    # (which would return the wrong bytes for request 2) from a healthy one.
+    my $request_count = 0;
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            $request_count++;
+            if ($request_count == 1) {
+                await $send->({
+                    type => 'http.response.start',
+                    status => 200,
+                    headers => [
+                        ['content-type', 'text/plain'],
+                    ],
+                });
+                await $send->({
+                    type => 'http.response.body',
+                    file => $test_file,
+                    offset => 999_999_999,
+                });
+            }
+            else {
+                await $send->({
+                    type => 'http.response.start',
+                    status => 200,
+                    headers => [
+                        ['content-type', 'text/plain'],
+                        ['content-length', length($test_content)],
+                    ],
+                });
+                await $send->({
+                    type => 'http.response.body',
+                    file => $test_file,
+                });
+            }
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for offset past EOF');
+            is($response->content, '', 'offset past EOF returns empty content');
+
+            # The connection must still be usable afterward -- a malformed
+            # zero-length chunk terminator would desync the next response.
+            my $second = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($second->code, 200, 'connection still usable for a follow-up request');
+            is($second->content, $test_content, 'follow-up request gets normal content');
+        }
+    );
+};
+
+subtest 'file response offset past EOF sends zero bytes (content-length)' => sub {
+    # Same rule, but with an explicit Content-Length: 0 header, exercising
+    # the non-chunked (sync fast-path) framing.
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['content-length', 0],
+                ],
+            });
+            await $send->({
+                type => 'http.response.body',
+                file => $test_file,
+                offset => 999_999_999,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+            is($response->code, 200, 'got 200 response for offset past EOF');
+            is($response->content, '', 'offset past EOF returns empty content');
         }
     );
 };

@@ -190,9 +190,72 @@ subtest 'Clean close handshake' => sub {
     $server->shutdown->get;
 };
 
+# Test 4b: WebSocket keepalive timeout delivers 1006/'keepalive_timeout'
+#
+# h1 parity check for the h2 per-stream keepalive added in Connection.pm
+# (design section 10.2): Www.pod "Keepalive - send event" mandates that a
+# withheld pong closes the connection with code 1006 and the app-facing
+# websocket.disconnect event carries reason 'keepalive_timeout'. No prior
+# test in this file or t/33-ws-sse-idle-timeout.t exercised this pairing
+# for h1 (only source-grep coverage existed, in t/39-disconnect-reasons.t).
+# Net::Async::WebSocket::Client's on_ping_frame is a plain observer -- the
+# module does not auto-answer pings (see
+# Net::Async::WebSocket::Protocol::on_read), so simply not sending a pong
+# back withholds it.
+subtest 'WebSocket keepalive timeout delivers 1006/keepalive_timeout' => sub {
+    my $disconnect_event;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        await $send->({ type => 'websocket.accept' });
+        await $send->({ type => 'websocket.keepalive', interval => 0.2, timeout => 0.3 });
+
+        my $event = await $receive->();
+        while ($event->{type} ne 'websocket.disconnect') {
+            $event = await $receive->();
+        }
+        $disconnect_event = $event;
+    };
+
+    my $server = create_server($test_app);
+    my $port = $server->port;
+
+    my $ping_seen = 0;
+    my $client = Net::Async::WebSocket::Client->new(
+        on_ping_frame => sub { $ping_seen++ },   # observe only -- never answer
+    );
+
+    $loop->add($client);
+
+    eval {
+        $client->connect(
+            url => "ws://127.0.0.1:$port/",
+        )->get;
+
+        # interval 0.2s + timeout 0.3s => disconnect expected at ~0.5s.
+        # Ceiling: 5s is a ~10x margin over the expected 0.5s.
+        my $deadline = time + 5;
+        while (!$disconnect_event && time < $deadline) {
+            $loop->loop_once(0.1);
+        }
+    };
+
+    ok($ping_seen, 'client observed at least one keepalive ping frame');
+    ok($disconnect_event, 'app received a websocket.disconnect event within the bounded window');
+    if ($disconnect_event) {
+        is($disconnect_event->{code}, 1006, 'code is 1006 (abnormal closure)');
+        is($disconnect_event->{reason}, 'keepalive_timeout', "reason is 'keepalive_timeout'");
+    }
+
+    $server->shutdown->get;
+};
+
 # Test 5: WebSocket scope type is 'websocket'
 subtest 'WebSocket scope type is websocket' => sub {
     my $scope_type = '';
+    my $pagi;
 
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
@@ -212,6 +275,7 @@ subtest 'WebSocket scope type is websocket' => sub {
         }
 
         $scope_type = $scope->{type};
+        $pagi = $scope->{pagi};
 
         my $event = await $receive->();
         await $send->({ type => 'websocket.accept' });
@@ -233,6 +297,8 @@ subtest 'WebSocket scope type is websocket' => sub {
     };
 
     is($scope_type, 'websocket', 'Scope type is websocket');
+    is($pagi->{version}, '0.4', 'WebSocket scope uses core PAGI version 0.4');
+    is($pagi->{spec_version}, '0.3', 'WebSocket scope keeps spec_version 0.3');
 
     $server->shutdown->get;
 };

@@ -237,22 +237,24 @@ times, similar to C<perl -I>.
 
 =item B<-a>, B<--app> FILE
 
-Path to .pl/.psgi file returning PAGI app coderef. Legacy option for
-backward compatibility; you can also just pass the file as an argument.
+Path to a .pl/.psgi file returning a PAGI app coderef or instantiated
+application-provider object. Legacy option for backward compatibility; you can
+also just pass the file as an argument.
 
 =item B<-e> CODE
 
-Inline app code, like C<perl -e>. Must return a PAGI app coderef.
+Inline app code, like C<perl -e>. Must return a PAGI app coderef or instantiated
+application-provider object.
 
     # Using a PAGI::App module
-    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")->to_app'
+    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")'
 
 =item B<-M> MODULE
 
 Load MODULE before evaluating C<-e> code, like C<perl -M>. Can be
 specified multiple times. Supports C<Module=import,args> syntax.
 
-    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")->to_app'
+    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")'
 
 =item B<-o>, B<--host> HOST
 
@@ -383,12 +385,12 @@ Connection idle timeout in seconds (default: 60)
 
 Graceful shutdown timeout in seconds (default: 30)
 
-=item B<--lifespan> auto|on|off
+=item B<--lifespan> auto|on
 
 How to treat the lifespan protocol: C<auto> (default; run lifespan if the app
-supports it, otherwise continue without it), C<on> (require it -- a startup
-decline is fatal), or C<off> (skip it entirely). See
-L<PAGI::Server/"lifespan_mode">.
+supports it, otherwise continue without it), or C<on> (require it -- a startup
+decline is fatal). There is no C<off> mode: the PAGI Lifespan spec forbids
+skipping the protocol entirely. See L<PAGI::Server/"lifespan_mode">.
 
 =item B<--lifespan-startup-timeout> NUM
 
@@ -490,7 +492,9 @@ If the argument contains C<::>, it's treated as a Perl module name:
 
     pagi-server PAGI::App::Directory root=/var/www
 
-The module must have C<new()> and C<to_app()> methods.
+The module must provide C<new()>. The constructed value must be either a native
+PAGI coderef or an instantiated application-provider object implementing
+C<to_app()>; a provider is normalized exactly once before serving begins.
 
 =head2 File Path
 
@@ -498,7 +502,8 @@ If the argument contains C</> or ends with C<.pl>/C<.psgi>:
 
     pagi-server ./app.pl
 
-The file must return a PAGI app coderef.
+The file must return a PAGI app coderef or instantiated application-provider
+object. A provider's C<to_app()> method is called exactly once while loading.
 
 =head2 Default
 

@@ -24,6 +24,57 @@ my $app = do $app_path;
 die "Could not load app from $app_path: $@" if $@;
 die "App did not return a coderef" unless ref $app eq 'CODE';
 
+subtest 'server construction normalizes application providers once' => sub {
+    my $provider_app = sub { return 'provider app' };
+    my $provider = bless {
+        app   => $provider_app,
+        calls => 0,
+    }, 'PAGITest::ServerBoundaryProvider';
+
+    my $server = PAGI::Server->new(app => $provider, quiet => 1);
+    is($provider->{calls}, 1, 'provider to_app is called exactly once');
+    is($server->{app}, $provider_app, 'server stores only the normalized coderef');
+
+    $PAGITest::ServerBoundaryCoderef::TO_APP_CALLS = 0;
+    my $blessed_app = sub { };
+    bless $blessed_app, 'PAGITest::ServerBoundaryCoderef';
+    my $coderef_server = PAGI::Server->new(app => $blessed_app, quiet => 1);
+    is($coderef_server->{app}, $blessed_app, 'a blessed coderef remains the native app');
+    is($PAGITest::ServerBoundaryCoderef::TO_APP_CALLS, 0,
+        'native coderef takes precedence over to_app');
+
+    like(
+        dies { PAGI::Server->new(app => 'PAGITest::ServerBoundaryProvider', quiet => 1) },
+        qr/instantiated application-provider object/i,
+        'a package-name string is not treated as a provider',
+    );
+
+    my $replacement_app = sub { return 'replacement app' };
+    my $replacement = bless {
+        app   => $replacement_app,
+        calls => 0,
+    }, 'PAGITest::ServerBoundaryProvider';
+    $server->configure(app => $replacement);
+    is($replacement->{calls}, 1, 'configure normalizes a provider exactly once');
+    is($server->{app}, $replacement_app, 'configure stores the normalized coderef');
+};
+
+{
+    package PAGITest::ServerBoundaryProvider;
+    sub to_app {
+        my ($self) = @_;
+        $self->{calls}++;
+        return $self->{app};
+    }
+
+    package PAGITest::ServerBoundaryCoderef;
+    our $TO_APP_CALLS = 0;
+    sub to_app {
+        $TO_APP_CALLS++;
+        die 'to_app must not be called for a native coderef';
+    }
+}
+
 # Test 1: Server starts and listens on specified port
 subtest 'Server starts and listens on port' => sub {
     my $server = PAGI::Server->new(
@@ -139,7 +190,8 @@ subtest 'HTTP scope contains all required keys' => sub {
     # Verify scope keys
     is($captured_scope->{type}, 'http', 'scope.type is http');
     ok(ref $captured_scope->{pagi} eq 'HASH', 'scope.pagi is a hashref');
-    is($captured_scope->{pagi}{version}, '0.3', 'scope.pagi.version is 0.3');
+    is($captured_scope->{pagi}{version}, '0.4', 'scope.pagi.version is 0.4');
+    is($captured_scope->{pagi}{spec_version}, '0.3', 'HTTP scope keeps spec_version 0.3');
     is($captured_scope->{http_version}, '1.1', 'scope.http_version is 1.1');
     is($captured_scope->{method}, 'GET', 'scope.method is GET');
     is($captured_scope->{scheme}, 'http', 'scope.scheme is http');

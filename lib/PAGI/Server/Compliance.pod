@@ -2,13 +2,13 @@
 
 =head1 NAME
 
-PAGI::Server::Compliance - HTTP/1.1, HTTP/2, WebSocket, and Security Compliance Documentation
+PAGI::Server::Compliance - HTTP/1.1, HTTP/2, WebSocket, SSE, and Security Compliance Documentation
 
 =head1 DESCRIPTION
 
 This document details the compliance testing results for PAGI::Server against
-HTTP/1.1 (RFC 7230/7231), HTTP/2 (RFC 9113), WebSocket (RFC 6455), and common
-security attack vectors.
+HTTP/1.1 (RFC 7230/7231), HTTP/2 (RFC 9113), WebSocket (RFC 6455), Server-Sent
+Events, and common security attack vectors.
 
 PAGI::Server demonstrates full HTTP/1.1 compliance, 93.8% HTTP/2 conformance
 (matching the nghttp2 library ceiling), strong security posture, stable resource
@@ -52,30 +52,87 @@ defined in L<PAGI::Spec::Www>, across both HTTP/1.1 and HTTP/2:
 =over 4
 
 =item * B<Transport flow control> (C<pagi.transport>) -- C<buffered_amount>,
-high/low watermarks, and C<on_high_water>/C<on_drain> backpressure callbacks. On
-HTTP/1.1 for http/websocket/sse; on HTTP/2 for http streaming and sse. B<Not yet>
-on WebSocket-over-HTTP/2 (see L</"Transport Flow Control (pagi.transport)">).
+high/low watermarks, and C<on_high_water>/C<on_drain> backpressure callbacks, on
+both HTTP/1.1 and HTTP/2, for every streaming scope type PAGI offers it on:
+http, sse, and websocket (see L</"Transport Flow Control (pagi.transport)">).
 
 =item * B<Connection state> (C<pagi.connection>) for HTTP scopes --
 C<is_connected>, C<disconnect_reason>, C<on_disconnect> (abnormal only),
-C<on_complete> (success only), and C<disconnect_future>.
+C<on_complete> (success only), and C<disconnect_future>. Tracked
+independently per stream on HTTP/2 (see L</"Connection State
+(pagi.connection)">).
 
 =item * B<WebSocket Denial Response> (the C<websocket.http.response> extension)
 -- reject a handshake with a custom HTTP response instead of a bare C<403>, on
 both HTTP/1.1 and HTTP/2.
 
-=item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT).
+=item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT), including
+per-stream C<websocket.keepalive> (see L</"WebSocket over HTTP/2 (RFC
+8441)">).
 
 =item * B<TLS introspection> (the C<tls> extension) -- certificates, negotiated
 version, and cipher suite. The server negotiates TLS 1.3 by default
 (C<min_version> is a floor, not a pin).
 
-=item * B<Server-Sent Events> over all HTTP methods, with keepalive.
+=item * B<Server-Sent Events> over all HTTP methods, with keepalive (see
+L</"SERVER-SENT EVENTS (SSE)">).
+
+=item * B<Lifespan> -- the per-process startup/shutdown protocol, in C<auto>
+(decline-tolerant, default) and C<on> (strict) modes (see L</"Lifespan
+Modes">).
 
 =back
 
-In development mode the server validates outbound events against the spec and
-rejects malformed ones.
+The server validates outbound events against the spec and rejects malformed
+ones unconditionally, on every send path, in every environment.
+
+=head2 Lifespan Modes
+
+C<lifespan_mode> controls how the server treats the PAGI lifespan protocol --
+the C<lifespan> scope an application may use to run startup/shutdown logic
+once per process.
+
+=over 4
+
+=item * B<auto> (default) -- decline-tolerant. If the application does not
+implement lifespan, or declines it (raises on the C<lifespan> scope, or
+returns without signalling C<lifespan.startup.complete>/
+C<lifespan.startup.failed>), the server continues startup without it. An
+explicit C<lifespan.startup.failed> still aborts startup in this mode too.
+
+=item * B<on> -- strict. A decline at startup is a fatal startup failure: the
+server refuses to start rather than serve traffic without the initialization
+the application depended on.
+
+=back
+
+There is no C<off> mode. The PAGI Lifespan spec forbids a server from
+skipping the protocol entirely: "A server must not offer an 'off' switch for
+this protocol." Passing C<lifespan_mode =E<gt> 'off'> to the constructor or
+to the C<configure> setter dies immediately, naming the rejected value.
+
+In multi-worker mode (C<workers =E<gt> N>), each forked worker inherits
+C<lifespan_mode> and C<lifespan_startup_timeout> from the master's
+configuration and runs its own lifespan handshake against its own copy of
+the application -- a worker never silently reverts to the C<auto> default
+when the master was configured C<on>.
+
+=head2 Extension Advertisement
+
+PAGI::Server's rule for the C<extensions> key in a scope is truthfulness: it
+names only extensions the connection can actually honor for that scope type.
+Extensions configured on the server (C<extensions =E<gt> \%extensions>, e.g.
+C<{ fullflush =E<gt> {} }>) pass through to every scope's C<extensions> hash
+unchanged, with one exception -- WebSocket scopes never advertise
+C<fullflush>. C<validate_websocket_send> has no C<http.fullflush> arm, so a
+WebSocket application that trusted the advertisement would get
+C<"Unrecognized event type"> instead of a working extension; C<http> and
+C<sse> scopes are unaffected and still advertise C<fullflush> when
+configured. Any other custom extension key an operator configures passes
+through to every scope, including WebSocket, unchanged -- the truthfulness
+rule removes only C<fullflush>, the one extension WebSocket cannot honor --
+except a key named C<tls>, which the server itself injects on TLS
+connections and removes on non-TLS ones regardless of what was configured.
 
 =head1 HTTP/1.1 COMPLIANCE
 
@@ -166,6 +223,19 @@ library for interoperability:
     | 6.9.2 #2   | Negative flow control window tracking              |
     +------------+----------------------------------------------------+
 
+Separately (not an h2spec failure, but the same category of nghttp2-library
+leniency): nghttp2's own HTTP-messaging validation B<rejects and omits> a
+header field whose value carries leading or trailing whitespace (RFC 9113
+section 8.2.1 forbids sending it) before the request or response ever
+reaches PAGI application code -- the field is dropped entirely, not merely
+trimmed of its whitespace. This holds in both directions: a response header
+an application sends with a padded value never reaches the client
+(C<t/http2/33-connection-specific-headers.t>), and a request header a
+client sends with a padded value never reaches C<scope-E<gt>{headers}>
+(same file, request-direction subtest) -- in neither case does the
+C library layer, nor PAGI, silently rewrite the value. HTTP/1.1 performs no
+such rejection.
+
 =head2 Load Testing (h2load)
 
     Tool: h2load (nghttp2)
@@ -215,7 +285,27 @@ Zero failures across 60,000 total requests under concurrent load.
 =item * Server SETTINGS: configurable max_concurrent_streams, initial_window_size,
 max_frame_size, max_header_list_size
 
+=item * A request HEADERS block exceeding max_header_list_size gets a real
+431 response (RFC 9113 section 10.5.1) instead of a bare RST_STREAM,
+matching HTTP/1.1
+
+=item * HEAD request body suppression, matching HTTP/1.1: DATA frames are
+withheld and file/fh bodies are never opened
+
+=item * File and filehandle body streaming through the per-stream send queue,
+under the same per-stream backpressure watermark as chunked bodies
+
+=item * C<http.fullflush> on HTTP and SSE streams
+
 =back
+
+Filehandle (C<fh>) response bodies are read B<synchronously>, in fixed-size
+chunks inside the connection's own send loop, on both HTTP/1.1 and HTTP/2 --
+the handle is application-owned and cannot be handed to the async worker
+pool across a fork boundary. This differs from C<file> (path) bodies opened
+by the server, which use the async worker pool (L<PAGI::Server::AsyncFile>)
+for files larger than C<sync_file_threshold>; a C<fh> body bypasses that
+pool regardless of size.
 
 =head2 Transport Flow Control (pagi.transport)
 
@@ -226,25 +316,263 @@ C<on_high_water>/C<on_drain> backpressure callbacks. Over HTTP/2 the handle
 measures the B<per-stream> send backlog, so each multiplexed stream is bounded
 independently.
 
-PAGI::Server provides C<pagi.transport> for HTTP/2 C<http> (streaming responses)
-and C<sse> scopes, matching its HTTP/1.1 coverage of C<http>, C<sse>, and
-C<websocket>.
+PAGI::Server provides C<pagi.transport> for every streaming scope type on both
+transports: C<http> (streaming responses), C<sse>, and C<websocket>, on both
+HTTP/1.1 and HTTP/2. The HTTP/2 WebSocket send path frames application
+messages, protocol replies (pong, the close-frame echo), and its own keepalive
+ping through the same per-stream send queue and pull-based data-provider model
+that HTTP/2 streaming and SSE use. From the application's perspective the
+transport is invisible: a WebSocket app sees the same C<pagi.transport>
+surface and semantics -- C<buffered_amount>, the high/low watermarks,
+C<on_high_water>/C<on_drain> -- whether the connection is HTTP/1.1 or
+HTTP/2.
 
-B<Known gap:> WebSocket over HTTP/2 (RFC 8441) does B<not> yet provide
-C<pagi.transport>. The HTTP/2 WebSocket send path hands each frame to nghttp2
-through its push-style C<submit_data> entry point, which keeps no per-stream
-send queue for the handle to measure, and the binding exposes no per-stream
-buffered-byte API. Closing the gap means converting the HTTP/2 WebSocket send
-path to the same pull-based data-provider model that HTTP/2 streaming and SSE
-use. Until then a WebSocket application running over HTTP/2 sees
-C<pagi.transport> as absent: the L<PAGI::WebSocket> helpers degrade quietly
-(C<buffered_amount> reports C<0>, C<is_writable> stays true, and the callbacks
-are no-ops). WebSocket over HTTP/1.1 is unaffected and provides the handle
-normally.
+C<on_drain> fires only for a genuine drain -- the buffer actually falling
+back below the low mark -- on both transports. Tearing a connection down
+while the buffer is still above the high mark (client disconnect, timeout,
+server shutdown, ...) does not fire C<on_drain>: the connection is going
+away, not draining. A producer parked on the blocking backpressure path
+(a C<$send> awaiting the buffer to drain) still resumes on teardown, so no
+coroutine is left hanging; only the app-facing hysteresis callback is
+withheld.
 
-The long-term goal is parity: C<pagi.transport> for every streaming scope type
-over every transport, so an application need not know whether it runs over
-HTTP/1.1 or HTTP/2.
+=head2 WebSocket over HTTP/2 (RFC 8441)
+
+PAGI::Server accepts a WebSocket upgrade over HTTP/2 through RFC 8441
+Extended CONNECT (C<:protocol =E<gt> 'websocket'>). Each accepted stream carries
+its own C<websocket.receive>/C<websocket.disconnect> event stream,
+multiplexed alongside every other stream on the connection.
+
+=head3 Framing Enforcement
+
+RFC 8441 requires WebSocket-over-HTTP/2 framing to be "identical to
+HTTP/1.1" (section 4), so the same three RFC 6455 framing checks the
+HTTP/1.1 WebSocket compliance section above performs also apply here, per
+stream: nonzero RSV1-3 bits close with
+C<1002> (section 5.2; C<Protocol::WebSocket::Frame> exposes C<rsv> but
+does not itself validate it), reserved/unknown opcodes C<3-7> and
+C<11-15> close with C<1002> (section 5.2), and a control frame
+(close/ping/pong) payload over 125 bytes closes with C<1002> (section
+5.5). Each violation follows the same server-initiated-protocol-close path
+described below: one Close frame on the wire, one C<websocket.disconnect>
+(code C<1002>, reason C<protocol_error>) delivered to the application.
+
+=head3 Keepalive
+
+C<websocket.keepalive> is supported per stream. An HTTP/2 connection
+multiplexes many WebSocket streams, so keepalive state and its timers live
+on the individual stream rather than the connection -- unlike HTTP/1.1,
+where one WebSocket occupies the whole connection and keepalive is
+connection-wide. A ping is delivered as an RFC 6455 ping frame carried in
+an HTTP/2 C<DATA> frame on that stream; the peer's pong (opcode 10) clears
+the stream's wait flag. Each C<websocket.keepalive> event for a stream
+supersedes any keepalive already running on it, and C<interval =E<gt> 0>
+stops it. When C<timeout> is given and no pong arrives
+within it, only that stream closes -- code C<1006>, reason
+C<keepalive_timeout> -- other streams multiplexed on the same connection
+are unaffected. That C<1006> is the code the application sees; it never
+reaches the wire, because RFC 6455 section 7.4.1 forbids C<1006> as the
+status code of a Close frame. A keepalive timeout sends no Close frame at
+all: it resets the stream (C<RST_STREAM>, error code C<CANCEL>), the
+HTTP/2 analogue of HTTP/1.1 dropping the transport. An omitted C<timeout>
+means the server never checks for a missing pong.
+
+=head3 Disconnect
+
+Each HTTP/2 WebSocket stream enqueues exactly one C<websocket.disconnect>
+event onto its scope's receive queue, whichever of the conditions below
+closes it first: the closure paths all funnel through one deduplicating
+enqueue, so no closure can queue a second disconnect and no two closure
+paths can race to queue conflicting ones. C<code> and C<reason> pair up the
+same way as
+L<the WebSocket "Disconnect - receive event" section of PAGI::Spec::Www|PAGI::Spec::Www>
+describes for the reference server:
+
+=over 4
+
+=item * B<The peer sent a Close frame.> C<code> is the peer's own close
+code (C<1005> if the frame carried none) and C<reason> is the peer's own
+reason text, which is commonly empty. The server does not substitute a
+token.
+
+=item * B<Abnormal drop with no close handshake> -- a bare C<END_STREAM>,
+an C<RST_STREAM>, or any other stream teardown that did not go through a
+Close frame. C<code> is C<1006> and C<reason> is C<client_closed>.
+
+=item * B<Keepalive pong timeout.> C<code> is C<1006> and C<reason> is
+C<keepalive_timeout>.
+
+=item * B<Server-initiated protocol close> -- the server detected a
+framing or protocol violation (a nonzero RSV bit, a reserved/unknown
+opcode, an oversized control-frame payload, an invalid close frame, an
+invalid close code, or invalid UTF-8 in a text frame or in a Close frame's
+reason) and sent the Close frame itself. C<code> is the RFC 6455 code for
+the fault (C<1002> for a framing/protocol error, C<1007> for invalid
+UTF-8) and C<reason> is C<protocol_error>.
+
+=item * B<Inbound receive-queue overflow> -- a text or binary message
+arrived while the stream's own receive queue already held
+C<max_receive_queue> undelivered events (default 1000; see
+L<PAGI::Server> for the C<max_receive_queue> constructor option), the same
+per-stream cap and enforcement point HTTP/1.1 uses. C<code> is C<1008> and
+C<reason> is C<queue_overflow>.
+
+=back
+
+"Exactly one" above is a property of the receive queue, not a hard cap on
+what any number of C<receive()> calls can ever return. Once the stream's
+state has been torn down -- the connection is closed, or the stream's state
+has already been reclaimed -- a further C<receive()> has no queue left to
+read and falls back to synthesizing a generic C<websocket.disconnect> with
+code C<1006> and an empty C<reason>. An application that keeps calling
+C<receive()> after its disconnect event therefore keeps getting that
+fallback rather than hanging. The queued disconnect (the one carrying the
+real code and reason from the table above) is still delivered exactly once.
+
+=head2 HTTP/2 Trailers (http.response.trailers)
+
+When an HTTP/2 response start declares C<trailers =E<gt> 1>, a terminal body
+event does not end the stream: the final C<DATA> frame carries no
+C<END_STREAM>. A following C<http.response.trailers> event submits a
+trailing C<HEADERS> block that carries C<END_STREAM>, completing the
+response; an empty or absent C<headers> list is valid and still terminates
+the stream. On a HEAD request the trailers event is validated and discarded
+rather than transmitted -- HEAD sends no body, so nothing needs to reach the
+wire, but the response still completes normally.
+
+The trailer field list goes through the same connection-specific-header
+strip as every other HTTP/2 response path (see "HTTP/2 Connection-Specific
+Header Stripping" below): an application-supplied C<Connection>,
+C<Keep-Alive>, C<Proxy-Connection>, C<Transfer-Encoding>, C<Upgrade>, or
+C<TE> field is removed from the trailer block before submission, with a
+warning logged per stripped occurrence. Unlike a response's own C<HEADERS>,
+a trailer block carries no C<TE>-with-C<trailers> carve-out -- RFC 9110
+section 6.6.2 forbids every connection-specific field from a trailer section
+outright, so a trailer-borne C<TE> is stripped unconditionally.
+
+Because the trailing C<HEADERS> must not be submitted ahead of body data the
+peer hasn't yet received, a C<send()> carrying C<http.response.trailers> can
+remain pending for as long as the peer withholds HTTP/2 flow-control window
+on the still-draining body: trailers participate in the same per-stream
+backpressure as ordinary body sends. The Future still resolves once nghttp2
+accepts the trailing C<HEADERS> submission, the same "accepted, not
+necessarily delivered" semantics every other HTTP/2 send Future uses.
+
+A response that declares C<trailers =E<gt> 1> and then returns, or throws,
+without ever sending C<http.response.trailers> is an incomplete response
+under the same rule that governs an unsent terminal body chunk (see
+"Application Left a Response Incomplete" below): the stream is reset
+(C<RST_STREAM>, C<INTERNAL_ERROR>) rather than left open or closed as if
+nothing were missing, so the incompleteness is observable to the client.
+
+PAGI::Server also accepts request trailers from the client -- a C<HEADERS>
+block following the request's initial headers and any C<DATA> frames (RFC
+9113 section 8.1). PAGI::Server accumulates the field list from nghttp2's own
+C<on_header> callback -- nghttp2 itself, not a PAGI-side check, is what
+enforces the field is well-formed at the HPACK/HTTP-messaging layer before
+that callback ever fires -- and then discards it: PAGI defines no
+request-trailer receive event yet, so an application never sees them. If
+C<END_STREAM> rides the trailer C<HEADERS> instead of a C<DATA> frame, the
+request body still completes normally for the application. A pseudo-header
+field in a trailer block is malformed under RFC 9113 section 8.1;
+PAGI::Server's own callback layer rejects it as a defense-in-depth check,
+though in practice a conforming client cannot construct one and get it as
+far as PAGI's code: nghttp2's own HTTP-messaging validation catches a
+pseudo-header in a trailer block first, at the C library layer, and tears
+down the whole connection (C<GOAWAY>) rather than only the offending stream.
+
+=head2 HTTP/2 Oversized Request Headers (RFC 9113 section 10.5.1)
+
+When a request's HEADERS block exceeds C<max_header_list_size>, PAGI::Server
+sends a real HTTP 431 (Request Header Fields Too Large) response rather than
+a bare C<RST_STREAM> with no C<:status> at all -- matching both RFC 9113
+section 10.5.1 ("a server that receives a larger header block than it is
+willing to handle can send an HTTP 431") and PAGI::Server's own HTTP/1.1
+behavior for the same condition.
+
+HPACK decoding of the oversized block is allowed to run to completion
+instead of being aborted mid-frame: nghttp2's dynamic table stays
+consistent, and PAGI simply stops storing fields for a block it will not
+dispatch once the running RFC 7541 accounting (C<name_len + value_len + 32>
+per field) crosses the limit. The 431 is synthesized once the C<HEADERS>
+frame commits; the request is never delivered to the application (no
+C<on_request> dispatch, no C<pagi.connection>, no receive-queue state).
+
+If a client sends request trailers (a later C<HEADERS> block, see "HTTP/2
+Trailers" above) after headers that were already too large to dispatch, the
+trailer block is still classified normally by the pending-block machinery
+and is harmlessly discarded (or, if the trailer block is itself oversized,
+handled by the case below) -- it never causes a crash or a second dispatch.
+
+This applies to the request's initial HEADERS block only. A trailer
+HEADERS block that is itself oversized keeps its original, unchanged
+behavior: the pending trailer block is discarded and the stream is reset
+(C<RST_STREAM>), since by that point a response may already be in flight
+and there is no request-trailer receive event for an application to see
+in the first place (see "HTTP/2 Trailers" above).
+
+=head2 Connection State (pagi.connection)
+
+PAGI exposes connection-lifecycle introspection to applications through the
+C<pagi.connection> scope key (see L<PAGI::Spec::Www/"Connection State">):
+C<is_connected>, C<disconnect_reason>, C<on_disconnect> (fires on an abnormal
+end only), C<on_complete> (fires on a clean completion only), and
+C<disconnect_future>. Exactly one of C<on_disconnect> / C<on_complete> fires
+per request; a request ends in one of two terminal states, B<completed>
+(clean) or B<disconnected> (abnormal), never both.
+
+On HTTP/2 each stream carries its own C<pagi.connection>, tracked
+independently of every other stream multiplexed on the same connection: one
+stream completing does not affect another still in flight. A stream reaches
+its terminal state exactly once, when the stream closes -- a response whose
+terminal event completed with no HTTP/2 error code on the stream is a clean
+completion; an early close or a nonzero error code is an abnormal disconnect
+(reason C<client_closed>). A whole-connection teardown (server shutdown,
+socket error) sweeps every still-open stream's connection state with the
+connection-level disconnect reason, so a stream mid-response when the
+connection dies still reports why.
+
+C<disconnect_future> follows the three possible states at the moment it is
+first called: while the request is still in flight it returns a fresh,
+pending Future that resolves later if the connection disconnects
+abnormally; after an abnormal disconnect it returns a Future already
+resolved with the disconnect reason; after a clean completion it returns a
+Future that is deliberately left pending forever, since a clean completion
+has no disconnect reason to resolve it with.
+
+B<Socket errors:> a C<sysread>/C<syswrite> failure on the underlying socket
+(other than a clean EOF, which is C<client_closed>) reports C<read_error> /
+C<write_error> respectively, per
+L<PAGI::Spec::Www/"Standard Disconnect Reasons">. C<write_timeout> is
+B<not currently produced> -- PAGI::Server has no mechanism that times a
+write's completion independently of the connection's other timeouts
+(C<timeout>, C<request_timeout>), so a stalled write is only ever caught,
+if at all, by one of those.
+
+B<Application Left a Response Incomplete:> when C<http.response.start> has
+been sent but the response's terminal event never arrives -- the final body
+chunk (C<more =E<gt> 0>), a C<file>/C<fh> body, or (having declared
+C<trailers =E<gt> 1>) the trailers event -- because the application returned
+early or raised an error, PAGI::Server forces an abnormal closure rather
+than synthesizing terminal framing that was never sent. On HTTP/1.1 the
+connection closes with no chunked terminator and is not kept alive or
+reused for pipelining. On HTTP/2 the stream is reset with C<RST_STREAM>
+(C<INTERNAL_ERROR>); other streams multiplexed on the same connection are
+unaffected. Either way C<on_disconnect> fires with reason C<server_error>
+(never C<on_complete>), and the server logs a warning unless the client had
+already disconnected first, in which case there is nothing new to report.
+
+C<pagi.connection> is provided for C<http> scopes on both HTTP/1.1 and
+HTTP/2. WebSocket and SSE scopes do not receive C<pagi.connection> on either
+transport -- they use their own dedicated disconnect events instead.
+
+C<response_complete()> -- the spec's SHOULD-level synchronous companion to
+C<on_complete>, reporting whether the response body has finished sending -- is
+present but B<always returns C<undef>>: this server does not track
+response-body completion. Per L<PAGI::Spec::Www/"Connection State">, C<undef>
+is the documented "unsupported" signal, so applications testing C<defined>
+before relying on the value behave correctly; C<response_started>
+(MUST-level) and C<on_complete>/C<disconnect_future> remain fully supported.
 
 =head2 Enabling HTTP/2
 
@@ -487,6 +815,23 @@ Validates close reason is valid UTF-8.
 
 =back
 
+=head2 Disconnect
+
+An HTTP/1.1 WebSocket connection enqueues exactly one C<websocket.disconnect>
+event onto its scope's receive queue -- the same "exactly once" guarantee
+described above for HTTP/2: whichever closure path fires
+first -- a peer Close frame (C<code>/C<reason> passed through unchanged, no
+PAGI token substitution), a TCP close with no close handshake (C<1006> /
+C<client_closed>), a keepalive pong timeout (C<1006> / C<keepalive_timeout>),
+or a server-initiated protocol close (C<1002>/C<1007>, reason
+C<protocol_error>) -- marks the connection's disconnect-handled state so no
+other path can queue a second, conflicting event. As with HTTP/2, this is a
+property of the receive queue, not a hard cap on what any number of
+C<receive()> calls can return: once the connection is closed, a further
+C<receive()> has no queue left to read and falls back to synthesizing a
+generic C<websocket.disconnect> (code C<1006>, empty C<reason>) rather than
+hanging.
+
 =head2 Known Limitations
 
 These limitations are in the Protocol::WebSocket library, not PAGI::Server:
@@ -516,6 +861,251 @@ Default 64KB limit. Configurable via C<max_ws_frame_size>:
 PAGI does not implement WebSocket compression (permessage-deflate per RFC 7692).
 This is optional and intentionally not supported. 216 tests are marked
 UNIMPLEMENTED, which is the correct behavior.
+
+=head1 SERVER-SENT EVENTS (SSE)
+
+PAGI::Server implements Server-Sent Events per L<PAGI::Spec::Www> on both
+HTTP/1.1 and HTTP/2, sharing behavior across transports wherever the wire
+format allows it.
+
+=head2 Connection Detection
+
+A request is classified as an C<sse> scope by a boolean client-signal check
+on the combined values of all C<Accept> headers, parsed as a comma-separated
+list of media ranges (RFC 9110 Section 12.5.1):
+
+=over 4
+
+=item * the C<sse> scope is assigned iff the exact range
+C<text/event-stream> appears, case-insensitively, with an effective quality
+value greater than zero;
+
+=item * C<q=0> is an explicit refusal and never signals SSE;
+
+=item * wildcard ranges (C<*/*>, C<text/*>) never signal SSE;
+
+=item * media-type parameters other than C<q> are ignored for the test.
+
+=back
+
+This is a light parse shared identically by both transports -- not full
+content negotiation, which stays application/middleware territory. It
+applies regardless of HTTP method: a C<GET>, or a C<POST> from the
+fetch-event-source/datastar request-then-stream pattern, both classify the
+same way.
+
+=head2 UTF-8 Wire Encoding
+
+C<sse.send> string fields, C<sse.comment> text, and server-generated
+keepalive comments are formatted as characters and then encoded to UTF-8
+exactly once, at the wire boundary, before queueing or HTTP/1.1 chunk
+framing. For an application-initiated send (C<sse.send> or C<sse.comment>),
+a Perl string that cannot be encoded fails that send's Future instead of
+writing corrupted bytes to the socket. Chunk lengths, per-stream send-queue
+byte counts, and transport watermarks are all measured on the
+already-encoded byte string.
+
+An C<sse.keepalive> event's optional C<comment> field is checked for the
+same encodability, but at arm time -- when the C<sse.keepalive> event
+itself is sent, not deferred to the keepalive timer's first tick.
+C<EventValidator> requires a present C<comment> to be a defined,
+non-reference string that round-trips
+C<Encode::encode('UTF-8', $comment, Encode::FB_CROAK)>, croaking
+C<"sse.keepalive 'comment' must be a UTF-8-encodable string"> otherwise. An
+unencodable comment therefore fails the send Future that armed the
+keepalive, rather than escaping as an uncaught die inside the timer tick.
+
+=head2 Request Bodies
+
+C<sse.request> (the event an application receives when it reads the body of
+a POST/PUT SSE request) shares its body-reading semantics with ordinary HTTP
+requests rather than a separate partial parser:
+
+=over 4
+
+=item * HTTP/1.1 supports both C<Content-Length> and chunked
+C<Transfer-Encoding> bodies, through the same body reader C<http.request>
+uses;
+
+=item * C<Expect: 100-continue> is handled transparently -- the server sends
+C<100 Continue> before waiting for body data;
+
+=item * HTTP/2 waits for the stream's C<DATA> frames and C<END_STREAM>
+before delivering the (one-shot) C<sse.request> event, so a body still
+arriving across frames is never reported early behind a truthful-looking
+C<more =E<gt> 0>;
+
+=item * an empty-body request receives one empty terminal event, and
+disconnect stays observable once the body is complete.
+
+=back
+
+=head2 Per-Stream HTTP/2 Keepalive and Idle Timeout
+
+As with HTTP/2 WebSocket (see L</"Keepalive">), an HTTP/2 connection
+multiplexes many SSE streams, so C<sse.keepalive> and C<sse_idle_timeout>
+state -- timer, interval, comment, writer, and last-activity reset -- live
+on the individual stream, not the connection. Starting or updating
+keepalive on one stream cannot stop, replace, or redirect another stream's
+timer, and an idle-timeout expiry ends only that stream (the server marks
+it closing, flushes any already-queued data, then sends the final
+C<END_STREAM> frame -- the same path an application-initiated C<sse.close>
+takes). Sibling streams and the connection itself are unaffected.
+
+Over HTTP/1.1, one connection carries only one SSE stream at a time, so
+C<sse_idle_timeout> is enforced at the connection level there: expiry closes
+the connection outright.
+
+=head2 Response Headers
+
+On C<sse.start> the server supplies C<Content-Type>, C<Cache-Control>, and
+C<Date> only when the application did not already set them; an
+application-supplied value for any of these is sent as-is, not duplicated
+alongside a server default. C<Connection: keep-alive> on HTTP/1.1 is the
+exception: it is a framing header the protocol requires the server to
+control, so it is always advertised regardless of what the application
+sent. HTTP/2 never emits an HTTP/1-only C<Connection> header or a
+C<Transfer-Encoding> (chunked-framing) header -- an HTTP/2 SSE stream is
+framed as DATA frames via C<submit_response_streaming>, which carries no
+such headers.
+
+The C<Date>-only-when-absent rule above holds server-wide, not only for
+C<sse.start>: on every response path, the server supplies a plain C<Date>
+header only when a C<Date> is not already present; where the application
+supplies its own header list, an application-supplied C<Date> is always
+honored as-is instead of being duplicated. This spans both transports and
+every response shape the server can emit:
+
+=over 4
+
+=item * B<Normal application responses> -- C<http.response.start> on
+HTTP/1.1 and HTTP/2 (including the HTTP/2 HEAD-request path, which reuses
+the same header list), and C<sse.start> on both transports (above).
+
+=item * B<Application declines> -- the C<websocket.http.response>
+extension's custom denial response and the C<sse.http.response.*> decline
+response, on both transports.
+
+=item * B<Server-generated responses, which carry no application header
+list to check> -- the HTTP/1.1 synthesized error response (e.g. the
+unanswered-request C<500> backstop and the bare WebSocket-handshake
+rejection, which both share that same path); and, HTTP/2 only, the bare
+WebSocket-handshake-rejection C<403>, the C<413> request-precheck
+rejection, the C<413> body-size-overrun rejection, the synthesized
+C<500>, and the plain (non-Extended-CONNECT) C<CONNECT> method's C<501>
+rejection.
+
+=back
+
+=head2 HTTP/2 Connection-Specific Header Stripping
+
+RFC 9113 section 8.2.2 forbids connection-specific header fields on
+HTTP/2: an application-supplied C<Connection>, C<Keep-Alive>,
+C<Proxy-Connection>, C<Transfer-Encoding>, or C<Upgrade> header -- or a
+C<TE> header carrying anything but the exact token C<trailers> -- corrupts
+the response at the framing layer (nghttp2 rejects the header list; the
+client receives only the C<:status> pseudo-header, with no body).
+PAGI::Server strips these six header names, case-insensitively, from
+application-supplied response headers before they reach nghttp2, on every
+HTTP/2 response path that maps application headers: C<http.response.start>
+(including the HEAD-request path, which reuses the same header list),
+C<sse.start>, the C<websocket.http.response> denial, the
+C<sse.http.response.*> decline, C<websocket.accept>, and the trailing
+C<HEADERS> block submitted by C<http.response.trailers> (see "HTTP/2
+Trailers" above).
+
+C<TE> is the one carve-out, and it applies only to a response's own
+C<HEADERS> block, where it advertises that trailers are coming: a C<TE>
+header whose value -- after trimming leading/trailing optional whitespace
+(OWS) -- is exactly the token C<trailers> is kept there; any other C<TE>
+value, including a compound value like C<trailers, gzip>, is stripped. That
+carve-out does not extend inside a trailer block itself -- RFC 9110 section
+6.6.2 forbids every connection-specific field, C<TE> included, from a
+trailer section outright, so C<http.response.trailers> strips a
+trailer-borne C<TE> unconditionally, regardless of its value. Each stripped
+occurrence, not deduplicated by name, logs C<PAGI: connection-specific
+header '$name' stripped from HTTP/2 response (RFC 9113)> for a response
+header, or C<PAGI: connection-specific header '$name' stripped from HTTP/2
+trailers (RFC 9113)> for a trailer field.
+
+HTTP/1.1 performs a narrower, separate strip of its own -- see the next
+section.
+
+=head2 HTTP/1.1 Connection-Specific Header Stripping
+
+The PAGI specification states: "Over HTTP/1.1 the server must ignore or
+strip application-supplied Transfer-Encoding and Connection -- it supplies
+its own -- and SHOULD log when it does." Unlike the HTTP/2 strip above,
+this covers only two header names, C<Transfer-Encoding> and C<Connection>
+-- HTTP/1.1 has no prohibition on C<Keep-Alive>, C<Proxy-Connection>,
+C<Upgrade>, or C<TE> as ordinary application response headers, so those
+four remain untouched.
+
+PAGI::Server strips C<Transfer-Encoding> and C<Connection>,
+case-insensitively, from application-supplied response headers before they
+reach the wire, on every HTTP/1.1 response path that maps application
+headers: C<http.response.start>, C<sse.start>, the
+C<websocket.http.response> denial, the C<sse.http.response.*> decline, and
+the extra headers an application supplies on C<websocket.accept>.
+Before this strip, an application-supplied C<Transfer-Encoding> could
+duplicate or conflict with the server's own framing decision (two
+C<Transfer-Encoding> lines, or C<Transfer-Encoding> alongside
+C<Content-Length>), and an application-supplied C<Connection> could
+duplicate the server's own forced C<Connection: keep-alive> on
+C<sse.start>, contradict the guaranteed close that follows an SSE decline
+or WebSocket denial, or duplicate the server's own C<Connection: Upgrade>
+on a C<websocket.accept> 101 response (that line is constructed separately
+and is itself untouched -- RFC 6455 requires it). Each stripped occurrence,
+not deduplicated by name, logs C<PAGI: connection-specific header '$name'
+stripped from HTTP/1.1 response>.
+
+The same two-name strip also applies to C<http.response.trailers>, on its
+own trailer header list, before the trailer block reaches the wire. RFC
+9110 section 6.5.1 forbids connection-specific fields in trailers outright,
+on any HTTP version -- not only the PAGI spec's h1 response-header rule
+above, so an application-supplied C<Transfer-Encoding> or C<Connection>
+trailer field is stripped the same way an application-supplied
+C<http.response.start> header is, logging the same C<PAGI:
+connection-specific header '$name' stripped from HTTP/1.1 response> line.
+Unlike the HTTP/2 strip, HTTP/1.1 trailers get no separate log message for
+the trailer context, and no C<TE> carve-out is relevant here -- C<TE> is
+not one of the two names HTTP/1.1 strips at all.
+
+=head2 Connection Reuse after a Clean Stream End (HTTP/1.1)
+
+C<sse.start> advertises C<Connection: keep-alive>, and the server honors it.
+When an HTTP/1.1 SSE stream ends B<cleanly> -- the application returns, or
+it sends C<sse.close> -- the server writes the chunked terminator, resets
+the per-request state the stream accumulated, and hands the connection back
+to ordinary keep-alive request handling, including serving any request
+already pipelined in the read buffer. A pooled client (browser,
+C<Net::Async::HTTP>, curl) can therefore reuse the same socket for its next
+request, which matters for the short POST-SSE-exchange pattern used by
+fetch-event-source and datastar.
+
+Keep-alive yields to the usual overrides, each of which closes the
+connection the same way it does outside SSE: a client C<Connection: close>,
+HTTP/1.0 semantics, server shutdown, an application exception, a
+B<completed> C<sse.http.response.*> decline (it always closes the connection
+-- no event stream was ever started -- and tells a pooling client with an
+explicit C<Connection: close> header so it does not reuse the socket), and
+any B<abnormal> end (client disconnect, idle timeout, write error). An
+abnormal end is also the only thing that delivers C<sse.disconnect> to the
+application; a clean end never does. This includes a completed decline: it
+is not an abnormal end, so it delivers no C<sse.disconnect> either -- an
+application that calls C<receive()> again after its decline response has
+already finished (before returning) gets no event at all; the call parks
+rather than resolving with a synthesized disconnect.
+
+An application that returns without ever answering the request at all --
+no C<sse.start>, and no completed decline via
+C<sse.http.response.start>/C<sse.http.response.body> -- does not reach the
+keep-alive path. That is the same protocol error the plain HTTP path
+reports: the server warns, synthesizes a C<500> response if the client is
+still connected, logs the access entry, and closes the connection. A
+decline that started (C<sse.http.response.start>) but never sent its
+terminal body has the same unanswerable shape -- its headers were only
+buffered -- and takes the same path.
 
 =head1 IMPLEMENTED PROTECTIONS
 
@@ -556,6 +1146,12 @@ UNIMPLEMENTED, which is the correct behavior.
 =item * Control frame size validation (closes with 1002)
 
 =item * Close code validation (closes with 1002)
+
+=item * The websocket scope advertises its enforced limits per
+L<PAGI::Spec::Www/"WebSocket Scope">: C<max_receive_queue> is always
+present (a hard, always-enforced cap); C<max_frame_size> is present when
+C<max_ws_frame_size> is nonzero and omitted when configured to C<0>
+(unlimited), on both HTTP/1.1 and HTTP/2 transports.
 
 =back
 
@@ -628,6 +1224,8 @@ For optimal performance on macOS, set the EV backend to kqueue:
 =head1 SEE ALSO
 
 L<PAGI::Server> - The main server module
+
+L<PAGI::Spec::Www> - The PAGI HTTP/WebSocket/SSE wire specification
 
 L<PAGI::Middleware::SecurityHeaders> - Security headers middleware
 

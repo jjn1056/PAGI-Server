@@ -1,5 +1,449 @@
 # Revision history for PAGI-Server
 
+0.002007 - UNRELEASED
+
+  Specification Alignment
+  - Advertise PAGI core version 0.4 on HTTP, HTTP/2, WebSocket, SSE, and
+    lifespan scopes while retaining each protocol's independent 0.3
+    spec_version.
+  - Accept either a native PAGI coderef or an instantiated application-provider
+    object from app files, module constructors, -e expressions, direct
+    PAGI::Server construction, and configure(app => ...). Providers are
+    normalized through to_app exactly once, blessed coderefs retain native-app
+    precedence, and package-name strings are not treated as providers.
+  - Clarify that PAGI::Server::Runner's new/run server backend seam is its own
+    plugin convention rather than a construction API required by PAGI.
+  - PAGI outgoing-event validation is now mandatory on every send path
+    (HTTP/1, HTTP/2, WebSocket, SSE, lifespan): malformed, mis-sequenced,
+    unknown, and unadvertised-extension events fail the $send Future in
+    all environments. validate_events is deprecated and ignored.
+  - Send sequencing is enforced per scope: events before response start,
+    duplicate starts, bodies after completion, undeclared trailers, and
+    wrong-phase lifespan results now fail instead of being silently
+    ignored or defaulted.
+  - HTTP/2 HEAD requests now suppress the response body like HTTP/1: the app
+    responds exactly as it would to GET, but DATA frames are never sent,
+    file/fh bodies are never opened, and trailers are accepted and discarded
+    rather than transmitted.
+  - HTTP/2 http.response.body events now stream file and filehandle bodies
+    through the per-stream send queue, under the same per-stream backpressure
+    watermark as chunked bodies. Filehandles remain application-owned: the
+    server never closes them, and a read failure fails the send Future
+    without treating it as EOF, matching HTTP/1.
+  - http.fullflush now flushes pending output on HTTP/2 HTTP and SSE streams
+    (previously HTTP/1.1 HTTP and SSE only), so an application advertising
+    the fullflush extension gets working flush semantics on every scope PAGI
+    offers it on.
+  - HTTP/2 streams now drive their own pagi.connection state to a terminal
+    value exactly once when the stream closes: a response whose terminal
+    event completed with no HTTP/2 error code marks the stream complete
+    (on_complete fires); an early close or a nonzero error code marks it
+    disconnected (on_disconnect fires, reason client_closed). A
+    whole-connection teardown (server shutdown, socket error) sweeps every
+    still-open stream's connection state with the connection-level
+    disconnect reason. WebSocket and SSE streams over HTTP/2 still have no
+    pagi.connection (per spec, they use their own disconnect events).
+  - An application that returns, or throws, after http.response.start
+    without ever sending the response's terminal event (the final body
+    chunk with more => 0, a file/fh body, or declared trailers) now
+    triggers the PAGI spec's forced abnormal closure on both transports,
+    instead of a silent keep-alive or an open stream: HTTP/1.1 closes the
+    connection with no chunked terminator and no keep-alive; HTTP/2 sends
+    RST_STREAM (INTERNAL_ERROR). Either way on_disconnect fires with reason
+    server_error (never on_complete), and the server logs a warning unless
+    the client had already disconnected. On HTTP/2, a request that resolves
+    without ever starting a response also now marks the stream's connection
+    state server_error before the 500 backstop is synthesized.
+  - HTTP/2 now implements http.response.trailers: a response that declares
+    trailers => 1 holds its final DATA frame without END_STREAM, and the
+    trailers event submits a trailing HEADERS block carrying END_STREAM
+    (an empty or absent headers list still submits and still terminates the
+    stream); on HEAD the event is validated and discarded rather than
+    transmitted. A trailers send() can block for as long as the peer
+    withholds flow-control window on a still-draining body, since trailers
+    now participate in the same per-stream backpressure as ordinary body
+    sends. Declaring trailers and never sending them is an incomplete
+    response, reported the same way an unsent terminal body chunk is
+    (RST_STREAM INTERNAL_ERROR). Requires Net::HTTP2::nghttp2 0.009 or
+    later.
+  - websocket.keepalive is now implemented over HTTP/2: per-stream ping/pong
+    timers (the h2 multiplexing analogue of the HTTP/1.1 connection-wide
+    keepalive), with pings delivered as h2 DATA-framed RFC 6455 ping frames.
+    An interval with no pong within its optional timeout closes only that
+    stream (code 1006, reason keepalive_timeout); other streams on the
+    same connection are unaffected. interval => 0 stops keepalive; an
+    omitted timeout means no dead-connection detection.
+  - SSE over HTTP/1.1 now honors the Connection: keep-alive it advertises on
+    sse.start. When a stream ends cleanly (application return, or
+    sse.close), the server writes the chunked terminator, resets the
+    per-request SSE state, and hands the connection back for ordinary
+    keep-alive request handling, including any request already pipelined in
+    the read buffer -- matching the reuse promise pooled clients
+    (Net::Async::HTTP, browsers, curl) expect from Connection: keep-alive,
+    and avoiding a TCP+TLS handshake per exchange for the short
+    POST-SSE-exchange pattern (fetch-event-source, datastar). The usual
+    overrides still close the connection as before: a client Connection:
+    close, HTTP/1.0 semantics, server shutdown, an application exception,
+    and any abnormal end (client disconnect, idle timeout, write error) --
+    an abnormal end remains the only thing that delivers sse.disconnect. An
+    application that returns without ever starting a response and without a
+    completed decline never reaches the keep-alive path: the server treats
+    it as the same protocol error the plain HTTP path reports, warning,
+    synthesizing a 500 if the client is still connected, and closing the
+    connection, instead of handing back a socket with zero bytes written.
+  - fix(h2): a concurrent or backlogged WebSocket-over-HTTP/2 send could
+    silently drop or truncate a frame. The previous send path wrote every
+    frame (app messages, pong, the close-frame echo, keepalive ping)
+    directly to nghttp2's submit_data, which registers only a single
+    pending-send slot per stream; submitting a second frame before nghttp2
+    had fully drained the first destroyed that slot's still-queued
+    remainder instead of queuing behind it. Any two h2 WebSocket frames
+    that landed close enough together for the first to still be in flight
+    -- a real, reachable condition, not just a theoretical one -- could
+    silently lose or truncate data with no error raised anywhere.
+  - feat(h2): as part of the fix above, the h2 WebSocket send path now
+    frames every send through the same per-stream send queue and
+    pull-based data-provider model the h2 http-streaming and SSE send paths
+    already use (FIFO, so wire ordering is unaffected), and now provides
+    pagi.transport (buffered_amount, the high/low watermarks, and
+    on_high_water/on_drain), matching HTTP/1.1 WebSocket and every other h2
+    streaming scope type: from the application's perspective the transport
+    is invisible, the same pagi.transport surface and semantics apply
+    whether a WebSocket app runs over HTTP/1.1 or HTTP/2. Close-frame +
+    END_STREAM wire behavior is unchanged: the close frame still carries
+    END_STREAM on its own final DATA frame, and a send() that wakes from
+    backpressure after the close frame is already queued now correctly
+    no-ops instead of risking a frame after Close (RFC 6455 5.5.1).
+  - HTTP/2 requests whose HEADERS block exceeds max_header_list_size now
+    receive a real 431 (Request Header Fields Too Large) response instead
+    of a bare RST_STREAM, matching HTTP/1.1 and RFC 9113 section 10.5.1.
+    HPACK decoding of the oversized block still runs to completion (fields
+    are simply discarded once the limit is crossed) rather than aborting
+    mid-frame, so nghttp2's dynamic table stays consistent; the request is
+    never dispatched to the application. Trailer-block overflow (a later
+    HEADERS block on an already-dispatched stream) is unaffected and keeps
+    resetting the stream as before.
+
+  Breaking Changes
+  - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping
+    the lifespan protocol entirely, so the constructor and setter now reject
+    it. auto remains the default; on remains strict mode.
+  - The Net::HTTP2::nghttp2 floor is raised from 0.008 to 0.009 (needed for
+    trailers support: submit_trailer and the three-value data-callback
+    return). The floor is enforced at load time regardless of the cpanfile's
+    "recommends" phrasing: constructing a PAGI::Server with http2 => 1 (or
+    --http2 on the command line) against an installed Net::HTTP2::nghttp2
+    below 0.009 now dies immediately with an explicit
+    "HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed, or
+    is older than 0.009" error and install instructions, instead of
+    starting. A deployment on
+    0.008 requesting HTTP/2 must upgrade Net::HTTP2::nghttp2 (or drop
+    http2 => 1) before the server will start at all. HTTP/1.1-only
+    deployments are unaffected.
+  - disconnect_future called for the first time after the request has
+    already completed cleanly now returns a Future that stays pending
+    forever, instead of one already resolved with undef -- a clean
+    completion is not a disconnect, so there is nothing for the Future to
+    resolve with. A Future requested after an abnormal disconnect is
+    unaffected: still already resolved with the disconnect reason. An
+    application awaiting this Future only after completion (e.g. via
+    Future->wait_any alongside other work that has already finished) now
+    hangs instead of resuming with undef; use on_complete to observe a
+    clean completion instead.
+  - SSE connection detection (HTTP/1.1 and HTTP/2) tightens from a raw
+    substring scan of the Accept header to PAGI's media-range
+    client-signal check: the sse scope is assigned only when the combined
+    Accept header values contain the exact range text/event-stream,
+    case-insensitively, with an effective quality value greater than zero;
+    q=0 and wildcard ranges (*/*, text/*) never signal SSE (nor did they
+    under the old substring scan). The old scan misclassified an explicit
+    refusal (Accept: text/event-stream;q=0) as SSE and false-positived on
+    any Accept token merely containing the substring "text/event-stream";
+    a request that reached sse only via one of those quirks now correctly
+    receives an http scope instead. Real SSE clients (EventSource,
+    fetch-event-source) send the exact media type and are unaffected.
+
+  Bug Fixes
+  - HTTP/1.1's completed SSE decline (sse.http.response.start +
+    sse.http.response.body) no longer delivers a synthesized
+    sse.disconnect to an application that calls receive() again before
+    returning. The decline's own teardown closed the connection via the
+    same _handle_disconnect_and_close('client_closed') every abnormal end
+    uses, which unconditionally synthesized sse.disconnect for any
+    sse_mode connection; per the spec a decline delivers no events at all.
+    A receive() call made after a completed decline now parks instead of
+    resolving with a fabricated disconnect. HTTP/2's decline path already
+    behaved correctly.
+  - Socket read/write errors on a connection now report the spec's
+    read_error/write_error disconnect reasons instead of client_closed.
+    IO::Async::Stream's default behavior when no on_read_error/on_write_error
+    handler is supplied is to call close (which this server's on_closed
+    handler reports as client_closed), making every socket error
+    indistinguishable from an ordinary clean peer disconnect. write_timeout
+    remains unproduced: this server has no mechanism that times a write's
+    completion independently of its other timeouts.
+  - HTTP/1.1's on_drain no longer fires when a connection tears down with
+    the outbound buffer still above the high mark (client disconnect,
+    timeout, server shutdown, ...). arm_drain previously piggybacked
+    directly on the same Future queue a blocking $send await uses, so
+    teardown resolved both indiscriminately; a new, separate _drain_fires
+    list now holds the on_drain callback, fired only on a genuine drain and
+    dropped unfired on teardown, matching how HTTP/2 already kept
+    stream_drain_waiters and transport_drain_fires apart. A producer parked
+    on the blocking backpressure path still resumes on teardown either way.
+  - _handle_disconnect now marks the HTTP connection-state object (and, on
+    HTTP/2, every open stream's connection-state) as disconnected before
+    cancelling pending drain waiters, not after. Cancelling a drain waiter
+    can synchronously resume an awaiting app coroutine (a $send blocked on
+    backpressure), and that resumed code's first act may be to check
+    is_connected()/disconnect_reason() -- previously it could observe a
+    stale "still connected" snapshot for the instant between its own
+    resumption and the state being marked.
+  - Fail the Future returned by $send when a file response's handle cannot be
+    read, instead of treating a read error as EOF. Applications may now safely
+    close a file resource only after the corresponding send Future resolves.
+  - The HTTP/1 SSE decline response now sends Connection: close explicitly, so
+    pooled clients do not attempt to reuse a socket the server has already
+    closed.
+  - http.response.trailers on an HTTP/1 response declared with Content-Length
+    (not chunked) now fails the send Future ("requires chunked framing")
+    instead of silently vanishing; trailers ride chunked framing only.
+  - HTTP/2 WebSocket streams now deliver exactly one websocket.disconnect
+    event per scope; every delivery site (peer Close frame, bare
+    END_STREAM, RST_STREAM/other stream close, server-initiated protocol
+    close, keepalive pong timeout) routes through a single dedup point, so
+    a stream that hits more than one of these in sequence still only
+    reports the first. A bare END_STREAM with no close handshake
+    previously reported two events (1005/empty-reason, then a second
+    1006/empty-reason from the stream close) and now reports exactly one,
+    code 1006 and reason client_closed. RST_STREAM and other abnormal
+    stream closes now likewise report reason client_closed instead of an
+    empty string. Server-initiated protocol closes (invalid close frame,
+    invalid close code, invalid UTF-8 in a text frame or close reason) now
+    report the spec's protocol_error reason token instead of an ad hoc
+    human-readable string (e.g. "Invalid close frame").
+  - HTTP/2's "client already disconnected, nothing new to report" log
+    carve-out no longer suppresses the incomplete-response/threw warning
+    for a stream whose connection state recorded server_error (the SERVER
+    caused the abnormal end, e.g. an early END_STREAM on a
+    trailers-declared response that never sent its trailers). Per the PAGI
+    spec, the carve-out applies only when the client had already
+    disconnected; a server-caused end must still warn.
+  - sse.send string fields, sse.comment text, and generated keepalive
+    comments are now encoded to UTF-8 exactly once at the wire boundary
+    (chunk framing on HTTP/1.1, the per-stream send queue on HTTP/2). For an
+    application-initiated send (sse.send or sse.comment), a string that
+    fails to encode now fails that send's Future instead of writing
+    corrupted bytes to the socket.
+  - SSE request bodies (sse.request) are now delivered completely and with
+    truthful more flags on both transports. HTTP/2: the first receive
+    previously returned sse.request as soon as it was called, gated only on
+    a sent flag, so a POST body still arriving across DATA frames could be
+    delivered truncated behind a false more => 0; it now waits for the
+    stream's body to actually complete. HTTP/1.1: chunked Transfer-Encoding
+    and Expect: 100-continue were never handled for SSE requests (body
+    presence was inferred from Content-Length alone), so a chunked body was
+    silently dropped and a client waiting for the 100-continue interim
+    response would stall; both now work, sharing the same body reader as
+    plain HTTP requests.
+  - HTTP/2 SSE keepalive and idle-timeout state (writer, timer, interval,
+    comment) is now per-stream instead of connection-level: a second
+    multiplexed SSE stream's sse.start no longer hijacks the first stream's
+    keepalive writer, and an idle timeout now ends only the stream that
+    went idle instead of the whole connection. HTTP/1.1 is unaffected --
+    one connection carries only one long-lived SSE stream, so its
+    keepalive/idle state stays connection-level.
+  - On sse.start, the server-supplied Cache-Control header (both
+    transports) and Date header (HTTP/1.1) are now added only when the
+    application did not already supply one, matching the existing
+    Content-Type behavior. An application-supplied Cache-Control or Date
+    was previously duplicated on the wire alongside the server's own value
+    instead of being honored.
+  - lifespan_mode and lifespan_startup_timeout now propagate to worker
+    processes spawned under workers => N. Previously each worker's
+    PAGI::Server->new call omitted both, so a worker silently ran under the
+    auto/30s defaults regardless of the master's configuration -- a master
+    configured lifespan_mode => 'on' had no effect on its workers.
+  - An HTTP/1.1 application exception raised after the response completed
+    now fires on_complete instead of on_disconnect, leaving
+    disconnect_reason() undef, matching HTTP/2's existing post-completion
+    handling. The started-but-incomplete-response warning (both
+    transports) now names trailers specifically when the response was
+    awaiting declared trailers that never arrived.
+  - An HTTP/2 request whose body exceeds max_body_size now wakes any
+    receive() the application is blocked on with the scope's disconnect
+    event (reason body_too_large) instead of leaving it pending forever;
+    the stream's pagi.connection state (http scopes) is marked
+    disconnected too.
+  - Closed a window where an HTTP/2 stream that died at the nghttp2 level
+    (e.g. a client RST_STREAM) before its deferred cleanup ran could still
+    accept a submit_response/submit_rst_stream call from the dispatch
+    fallback -- undefined behavior at the C level, observed as both
+    SIGABRT and SIGSEGV.
+  - HTTP/2 server-initiated stream teardowns (SSE idle timeout, WebSocket
+    keepalive pong-timeout) now report their real reason (idle_timeout,
+    keepalive_timeout) instead of the generic client_closed, in both the
+    connection_state mark and the queued disconnect event. WebSocket
+    receive() fallbacks (HTTP/1.1 and HTTP/2) now report a recorded
+    server-initiated close reason instead of always returning code 1006
+    with an empty reason.
+  - max_requests now counts HTTP/1.1 SSE and WebSocket requests toward a
+    worker's recycle threshold. Previously only plain HTTP/1.1 requests
+    and HTTP/2 streams were counted, so a worker serving only SSE or
+    WebSocket traffic on HTTP/1.1 never hit its recycle point.
+  - The server now supplies a Date header exactly when the application
+    didn't already supply one, consistently across ten response paths
+    that previously disagreed: three HTTP/1.1 paths (normal
+    http.response.start, SSE decline, WebSocket denial) stopped
+    duplicating an application-supplied Date, and seven HTTP/2 paths (the
+    413 Content-Length precheck, the 413 body-size overrun, the
+    synthesized 500, WebSocket denial, the bare WebSocket 403, SSE
+    decline, and the plain-CONNECT 501) now supply Date where they
+    previously supplied none.
+  - HTTP/2 now strips six connection-specific header names (connection,
+    keep-alive, proxy-connection, transfer-encoding, upgrade, and te
+    unless its value is exactly 'trailers') from application-supplied
+    response headers on all five paths that map them
+    (http.response.start, including the HEAD-reuse path; sse.start;
+    WebSocket denial; SSE decline; and websocket.accept), warning once
+    per stripped occurrence. Previously an application-supplied
+    connection or transfer-encoding header on any of these paths
+    destroyed the response at the framing layer (the client saw only
+    :status, no body), per RFC 9113 section 8.2.2. (HTTP/1.1's own,
+    narrower strip is described below.)
+  - HTTP/1.1 now strips two application-supplied response header names --
+    transfer-encoding and connection -- on all six paths that map them
+    (http.response.start; sse.start; SSE decline; WebSocket denial;
+    websocket.accept extra headers; and http.response.trailers trailer
+    blocks, where RFC 9110 6.5.1 forbids such fields on any HTTP version),
+    warning once per stripped occurrence, per the PAGI spec's "the server
+    must ignore or strip application-supplied Transfer-Encoding and
+    Connection -- it supplies its own" clause. Previously an
+    application-supplied transfer-encoding header could duplicate or
+    conflict with the server's own framing header (two Transfer-Encoding
+    lines, or Transfer-Encoding alongside Content-Length), and an
+    application-supplied connection header could duplicate the server's
+    own forced 'Connection: keep-alive' on sse.start or contradict the
+    guaranteed close on SSE decline. Unlike HTTP/2, HTTP/1.1 does not
+    strip keep-alive, proxy-connection, upgrade, or te -- those remain
+    ordinary, legal application response headers on HTTP/1.1.
+  - sse.keepalive's optional comment field is now validated at arm time
+    (must be a UTF-8-encodable string), so an unencodable comment fails
+    the send Future that armed the keepalive instead of dying uncaught
+    inside the keepalive timer's first tick.
+  - WebSocket scopes no longer advertise the fullflush extension, since
+    validate_websocket_send has no http.fullflush arm. A WebSocket
+    application that previously trusted the advertisement got
+    "Unrecognized event type" instead of a working extension; http and
+    sse scopes are unaffected.
+  - A client sending legal HTTP/2 request trailers (a HEADERS block after
+    the request's initial headers and any DATA frames, RFC 9113 section
+    8.1) no longer corrupts the in-flight request. Every HEADERS block on a
+    stream used to reinitialize the request accumulator, so the trailer
+    block wiped the already-committed request state and triggered a second,
+    spurious application dispatch with an empty pseudo-header set; the
+    original request's body also never reached completion, since its
+    END_STREAM arrived on the trailer HEADERS rather than a DATA frame.
+    HEADERS blocks are now classified by nghttp2's own headers_category: a
+    later block on an established stream accumulates separately, is
+    validated and discarded (PAGI defines no request-trailer receive event
+    yet), and its END_STREAM still completes the original request's body.
+  - HTTP/1.1 http.response.body{file} sends now pre-check the file with -f
+    and -r before streaming, matching HTTP/2's existing behavior: a missing
+    file fails the send Future with "File not found: $file" and an unreadable
+    file fails with "Cannot read file: $file", instead of failing later
+    inside the file-send helper with a less specific stat/open error. The
+    response's own headers, if already flushed, are unaffected; a
+    conforming app may still recover by sending a normal body afterward.
+  - HTTP/1.1 websocket.accept's extra application-supplied headers now go
+    through the same Transfer-Encoding/Connection strip as every other h1
+    response-header path. Previously an app-supplied ['Connection', 'close']
+    (or 'Transfer-Encoding') reached the 101 Switching Protocols response
+    verbatim, alongside the server's own literal "Connection: Upgrade" line
+    -- two Connection lines (or a stray Transfer-Encoding) on one handshake
+    response. The server's own Connection: Upgrade line is untouched (RFC
+    6455 requires it).
+  - HTTP/1.1 WebSocket connections now deliver exactly one
+    websocket.disconnect event per scope after a clean peer-initiated close.
+    Processing the peer's Close frame previously queued the app-facing
+    disconnect event without marking the connection's disconnect-handled
+    guard, so the TCP close that follows (or the application's own
+    session-complete teardown, if it returns without calling receive()
+    again) queued a second, ghost event -- 1006/client_closed -- that the
+    application never asked for and, since it had already stopped calling
+    receive() after the first (correct) event, never drained. The peer's
+    own code and reason are still passed through unchanged, as before; only
+    the spurious second delivery is gone. This mirrors the equivalent HTTP/2
+    fix described above.
+  - HTTP/2 WebSocket streams now enforce the same RFC 6455 framing rules
+    HTTP/1.1 already did: a nonzero RSV1-3 bit, a reserved/unknown opcode
+    (3-7, 11-15), or an oversized control-frame payload (>125 bytes) now
+    closes the stream with code 1002 and delivers a single
+    websocket.disconnect (reason protocol_error), the same
+    server-initiated-protocol-close pairing the existing invalid-UTF-8
+    (1007) path already used. Previously none of these three checks
+    existed on HTTP/2 -- Protocol::WebSocket::Frame exposes rsv/opcode but
+    doesn't validate them itself -- so a client could send any of them over
+    an h2 WebSocket stream with no error raised anywhere, contrary to RFC
+    8441's requirement that h2 WebSocket framing be identical to HTTP/1.1.
+  - HTTP/2 WebSocket streams now enforce max_receive_queue on inbound
+    text/binary messages, the same per-stream cap and 1008/queue_overflow
+    close HTTP/1.1 already enforces: once a stream's own receive queue
+    already holds max_receive_queue undelivered events, the next message
+    closes the stream (code 1008) and delivers a single
+    websocket.disconnect (reason queue_overflow) instead of queueing
+    without bound. Previously _h2_process_ws_frames had no such check, so a
+    client sending messages faster than the application drained receive()
+    could grow a stream's receive_queue without limit -- an unbounded
+    per-connection memory DoS on a transport that otherwise mirrors
+    HTTP/1.1's WebSocket support exactly. Fixing this also closed a related
+    gap in the h2 WebSocket close funnel (_h2_ws_close): it queued one
+    Close frame per call with no idempotency guard, so a burst of several
+    already-buffered frames that each independently warranted closure (as
+    this overflow scenario naturally produces) could queue several Close
+    frames for one stream instead of the one the wire is supposed to see;
+    it now no-ops once a Close frame is already queued for that stream,
+    matching the single-delivery guarantee _h2_ws_enqueue_disconnect
+    already provided for the app-facing event.
+  - The between-requests idle timer's internal disconnect reason is now
+    keepalive_timeout, not idle_timeout, once a request has already
+    completed on the connection -- matching the reason already documented
+    in PAGI::Server::ConnectionState's disconnect_reason list. A connection
+    that idles out before ever completing a request still reports
+    idle_timeout. Neither token is currently observable by an application
+    (no live request scope exists at that moment) or the access log; this
+    corrects the internal bookkeeping only, in case future code paths
+    (logging, metrics) come to depend on it.
+  - The websocket scope now advertises its enforced inbound limits, per
+    PAGI 0.4's optional max_frame_size/max_receive_queue scope keys, on
+    both HTTP/1.1 and HTTP/2 transports. max_receive_queue is always
+    present (the cap is always enforced); max_frame_size is present when
+    max_ws_frame_size is nonzero and omitted when configured to 0
+    (unlimited), matching Protocol::WebSocket::Frame's own
+    max_payload_size semantics for "unenforced".
+  - lifespan_startup_timeout => 0 is now rejected at construction and by
+    configure(), the same way an invalid lifespan_mode already is. 0
+    previously disabled the startup timeout entirely, letting a hung
+    lifespan handler block server startup forever; the PAGI Lifespan spec
+    requires that a server must not block startup indefinitely waiting for
+    a lifespan signal.
+  - PAGI::Server::ConnectionState now implements response_complete(), the
+    spec's SHOULD-level synchronous companion to on_complete. It always
+    returns undef (this server does not track response-body completion),
+    which is the spec's documented "unsupported" signal, rather than
+    raising "Can't locate object method" when an application (or the
+    spec's own probe idiom) calls it.
+
+  Maintenance
+  - Test coverage added for previously-untested but already-correct
+    behavior: HTTP/1.1 and HTTP/2 HEAD requests against a filehandle body,
+    a filehandle body opened past EOF, a seek failure on a non-seekable
+    filehandle (e.g. a pipe), and an application send() issued after the
+    peer has already reset an HTTP/2 stream resolving as a silent no-op.
+    The duplicated preamble and rollback tail shared by HTTP/2's file and
+    filehandle response arms was extracted into one helper; the file-only
+    and filehandle-only logic in between is unchanged.
+
 0.002006 - 2026-07-04
 
   Bug Fixes

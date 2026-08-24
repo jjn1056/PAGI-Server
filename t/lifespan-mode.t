@@ -2,7 +2,6 @@ use strict;
 use warnings;
 use Test2::V0;
 use IO::Async::Loop;
-use Net::Async::HTTP;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
@@ -45,37 +44,22 @@ subtest "lifespan_mode 'on' makes a startup decline fatal" => sub {
     $loop->remove($server);
 };
 
-subtest "lifespan_mode 'off' skips the lifespan scope entirely" => sub {
-    my $loop = IO::Async::Loop->new;
-
-    my %seen;
-    my $app = async sub {
-        my ($scope, $receive, $send) = @_;
-        $seen{ $scope->{type} }++;
-        return await respond_ok($scope, $receive, $send) if $scope->{type} eq 'http';
-        die "Unsupported scope type: $scope->{type}";
+subtest "lifespan_mode 'off' is rejected (Lifespan spec: no off switch)" => sub {
+    my $err = dies {
+        PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                          quiet => 1, lifespan_mode => 'off');
     };
+    like($err, qr/Invalid lifespan_mode 'off'/, 'constructor rejects off');
+    like($err, qr/nonconforming/, 'error explains why');
+};
 
-    my $server = PAGI::Server->new(
-        app => $app, host => '127.0.0.1', port => 0, quiet => 1,
-        lifespan_mode => 'off',
-    );
-    $loop->add($server);
-    $server->listen->get;
+subtest "configure(lifespan_mode => 'off') is rejected with the same message" => sub {
+    my $server = PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                                    quiet => 1);
 
-    ok($server->is_running, 'server started with lifespan_mode=off');
-
-    my $http = Net::Async::HTTP->new;
-    $loop->add($http);
-    my $resp = $http->GET('http://127.0.0.1:' . $server->port . '/')->get;
-    is($resp->code, 200, 'HTTP still works with lifespan off');
-
-    ok(!$seen{lifespan}, 'the app was never invoked with a lifespan scope');
-    ok($seen{http},      'the app was invoked with an http scope');
-
-    $server->shutdown->get;
-    $loop->remove($http);
-    $loop->remove($server);
+    my $err = dies { $server->configure(lifespan_mode => 'off') };
+    like($err, qr/Invalid lifespan_mode 'off'/, 'configure() rejects off');
+    like($err, qr/nonconforming/, 'error explains why');
 };
 
 subtest 'an invalid lifespan_mode is rejected at construction' => sub {
@@ -84,6 +68,39 @@ subtest 'an invalid lifespan_mode is rejected at construction' => sub {
     };
     ok($err, 'construction failed');
     like($err, qr/lifespan_mode/, 'error names the offending option');
+    like($err, qr/auto.*on/, "error names the two valid modes");
+};
+
+subtest "lifespan_startup_timeout => 0 is rejected (spec: must not block startup indefinitely)" => sub {
+    my $err = dies {
+        PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                          quiet => 1, lifespan_startup_timeout => 0);
+    };
+    ok($err, 'construction failed');
+    like($err, qr/lifespan_startup_timeout/, 'error names the offending option');
+    like($err, qr/block startup indefinitely/, 'error cites the spec constraint');
+};
+
+subtest "configure(lifespan_startup_timeout => 0) is rejected with the same message" => sub {
+    my $server = PAGI::Server->new(app => sub { }, host => '127.0.0.1', port => 0,
+                                    quiet => 1);
+
+    my $err = dies { $server->configure(lifespan_startup_timeout => 0) };
+    ok($err, 'configure() failed');
+    like($err, qr/lifespan_startup_timeout/, 'error names the offending option');
+    like($err, qr/block startup indefinitely/, 'error cites the spec constraint');
+};
+
+subtest "bin/pagi-server --lifespan off exits nonzero with the spec-forbids message" => sub {
+    my $pagi_server = "$FindBin::Bin/../bin/pagi-server";
+    local $ENV{PAGI_ENV} = 'production';   # deterministic mode, no Lint wrap
+    my $out = `$^X -I$FindBin::Bin/../lib $pagi_server --lifespan off --port 0 -e "sub { }" 2>&1`;
+    my $exit_code = $? >> 8;
+
+    is($exit_code, 255, '--lifespan off exits with code 255');
+    like($out, qr/Invalid lifespan_mode 'off'/, 'stderr carries the same rejection message');
+    like($out, qr/the PAGI Lifespan spec forbids skipping the protocol/,
+        'stderr explains why per the Lifespan spec');
 };
 
 done_testing;

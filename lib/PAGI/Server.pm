@@ -45,7 +45,9 @@ use Scalar::Util qw(weaken refaddr);
 use Socket qw(sockaddr_family unpack_sockaddr_in unpack_sockaddr_un AF_UNIX AF_INET);
 use POSIX ();
 
+use PAGI::Server::AppNormalizer ();
 use PAGI::Server::Connection;
+use PAGI::Server::EventValidator;
 use PAGI::Server::Protocol::HTTP1;
 
 
@@ -751,9 +753,14 @@ Creates a new PAGI::Server instance. Options:
 
 =over 4
 
-=item app => \&coderef (required)
+=item app => $app (required)
 
-The PAGI application coderef with signature: async sub ($scope, $receive, $send)
+Either a PAGI application coderef with signature
+C<async sub ($scope, $receive, $send)> or an instantiated application-provider
+object implementing C<to_app>. A provider is normalized exactly once during
+construction, and C<to_app> must return a coderef. Package-name strings are not
+providers. C<configure(app =E<gt> $app)> applies the same normalization rules.
+Only the normalized coderef is retained for per-connection dispatch.
 
 =item host => $host
 
@@ -996,6 +1003,12 @@ Value for the listener queue size. Default: 2048
 When in multi worker mode, the queue size for those workers inherits
 from this value.
 
+B<Which process consumes it:> the listening process -- the parent in
+traditional (shared-socket) mode, or each worker in C<reuseport> mode. In
+both cases it's the master's configured value being read at
+socket-creation time, not an independently configurable per-worker
+option.
+
 =item reuseport => $bool
 
 Enable SO_REUSEPORT mode for multi-worker servers. Default: 0 (disabled).
@@ -1026,6 +1039,12 @@ socket mode. Use with caution - benchmark before deploying.
 
 =back
 
+B<Which process consumes it:> read by the parent to decide whether to
+create one shared listening socket or let each worker create its own;
+each worker then acts on this same master-configured value when creating
+its own socket. It is not an independently configurable per-worker
+option.
+
 =item max_receive_queue => $count
 
 Maximum number of messages that can be queued in the WebSocket receive queue
@@ -1039,6 +1058,10 @@ B<Default:> 1000 messages
 B<When exceeded:> The server sends a WebSocket close frame with code 1008
 (Policy Violation) and reason "Message queue overflow", then closes the
 connection.
+
+This value is also advertised to the application as the C<max_receive_queue>
+key on the websocket scope, per L<PAGI::Spec::Www/"WebSocket Scope"> --
+always present, since this cap is always enforced.
 
 B<Tuning guidelines:>
 
@@ -1077,6 +1100,11 @@ B<Default:> 65536 (64KB) - matches Protocol::WebSocket default
 B<When exceeded:> The server closes the connection. The error is logged as
 "PAGI connection error: Payload is too big."
 
+This value is also advertised to the application as the C<max_frame_size>
+key on the websocket scope, per L<PAGI::Spec::Www/"WebSocket Scope">, when
+enforced. Set to C<0> to disable the limit; the scope then omits
+C<max_frame_size> rather than advertising a cap that isn't enforced.
+
 B<Tuning guidelines:>
 
 =over 4
@@ -1104,6 +1132,12 @@ B<Default: 1000> (same as Mojolicious).
 When at capacity, new connections receive a 503 Service Unavailable
 response with a Retry-After header. This prevents resource exhaustion
 under heavy load.
+
+B<Which process consumes it:> in multi-worker mode, each worker enforces
+this limit independently against its own accepted connections -- it is a
+per-worker cap, not a total shared across all workers. C<workers>
+workers each configured with C<max_connections> => N gives an effective
+ceiling of roughly C<workers * N> connections across the whole server.
 
 B<Example:>
 
@@ -1332,6 +1366,11 @@ restart is 40,000 requests. Workers restart individually without downtime.
 
 Connection idle timeout in seconds. Closes connections that are idle between
 requests (applies to keep-alive connections waiting for the next request).
+The internal disconnect reason recorded for this expiry follows
+L<PAGI::Spec::Www/"Standard Disconnect Reasons">: C<idle_timeout> when no
+request has ever completed on this connection (the client connected but
+never sent one), C<keepalive_timeout> once a request has completed and the
+kept-alive connection then idles out waiting for the next one.
 
 B<Default:> 60
 
@@ -1369,10 +1408,12 @@ Maximum time in seconds to wait for the lifespan application to signal startup
 lifespan handler neither signals startup nor returns within this window, the
 server logs an error and aborts startup rather than blocking forever.
 
-B<Default:> 30. Set to 0 to disable the timeout (the server will wait
-indefinitely for the startup signal).
+B<Default:> 30. C<< lifespan_startup_timeout => 0 >> is rejected at
+construction and by C<configure()>: the PAGI Lifespan spec requires that a
+server B<must not> block startup indefinitely waiting for a lifespan signal,
+so there is no way to disable this bound.
 
-=item lifespan_mode => 'auto' | 'on' | 'off'
+=item lifespan_mode => 'auto' | 'on'
 
 Controls how the server treats the lifespan protocol.
 
@@ -1388,12 +1429,21 @@ runs.
 logs it and refuses to start. Use this for applications whose startup must
 succeed (for example, one that opens a database pool in lifespan).
 
-=item * B<off> -- skip the lifespan protocol entirely. The application is never
-invoked with a C<lifespan> scope.
-
 =back
 
 An explicit C<lifespan.startup.failed> aborts startup in all modes.
+
+There is no C<off> mode: the PAGI Lifespan spec requires every server instance
+or worker to send the lifespan events and forbids an "off" switch that skips
+the protocol entirely ("Skipping the lifespan protocol entirely is not a
+conforming option. ... A server must not offer an 'off' switch for this
+protocol."). Passing C<< lifespan_mode => 'off' >> is rejected at construction.
+
+B<Multi-worker mode:> each worker forked under C<workers> runs its own
+lifespan handshake against its own copy of the application and inherits both
+C<lifespan_mode> and C<lifespan_startup_timeout> from the master's
+configuration -- a worker never silently falls back to the C<auto> default
+when the master was configured with C<on>.
 
 =item request_timeout => $seconds
 
@@ -1521,6 +1571,13 @@ heartbeats every C<heartbeat_timeout / 2>. If a worker has not sent a
 heartbeat within C<heartbeat_timeout> seconds, the parent kills it with
 SIGKILL and respawns a replacement.
 
+B<Which process consumes it:> both. The worker reads it to compute how
+often it writes a heartbeat ping; the parent reads it to compute how
+often it checks for missed heartbeats and how long to wait before
+declaring a worker dead. Each worker process gets its own copy of this
+value (propagated at spawn), so it always matches what the parent is
+checking against.
+
 B<What this detects:> Event loop starvation — when the worker's event
 loop is completely blocked and cannot process any events. This happens
 with blocking syscalls (C<sleep()>, synchronous DNS, blocking database
@@ -1566,18 +1623,23 @@ B<CLI:> C<--shutdown-timeout 30>
 
 =item validate_events => $bool
 
-Enable runtime validation of outbound events your application sends (HTTP,
-WebSocket, and SSE), catching malformed event structures with a clear error
-instead of undefined behavior. Default: off, but B<auto-enabled> when the
-environment is development (C<< $ENV{PAGI_ENV} eq 'development' >>, which
-C<pagi-server -E development> sets). Pass an explicit value to override the
-auto-detection. Intended for development; leave off in production to avoid
-the per-event overhead.
+B<Deprecated, no-op.> Outbound event validation (shape and send sequencing,
+per the PAGI spec) is always performed on every send path, in every
+environment; there is no way to disable it. This option is accepted for
+backward compatibility, is ignored, and will be removed in a future release.
 
 =item loop_type => $backend
 
 Specifies the IO::Async::Loop subclass to use when calling C<run()>.
 This option is ignored when embedding the server in an existing loop.
+
+B<Which process consumes it:> whichever process creates its own fresh
+loop -- the single (or embedding) process calling C<run()>, and, in
+multi-worker mode, each worker. Workers always build a brand-new loop
+after forking (there is nothing to embed into post-fork), so
+C<loop_type> applies there the same way it does under C<run()>, even
+though the master's own loop may itself be an embedder-supplied one that
+ignores this option.
 
 B<Default:> Auto-detect (IO::Async chooses the best available backend)
 
@@ -1790,7 +1852,24 @@ keys in C<http.response.body> events:
 
 The server streams files in 64KB chunks to avoid memory bloat. Small files
 (under 64KB) are read synchronously for speed; larger files use async I/O
-via a worker pool to avoid blocking the event loop.
+via a worker pool (L<PAGI::Server::AsyncFile>, backed by
+L<IO::Async::Function>) to avoid blocking the event loop.
+
+B<Deploy note:> a very large C<RLIMIT_NOFILE> (soft file-descriptor limit) on
+the host -- around a million, the kind some container base images or systemd
+units set by default -- makes each worker in this async-file-I/O pool take
+over a second to start (measured: approximately 1.025s/worker at
+C<nofile=1048576>). The cost is C<IO::Async::Internals::ChildManager>'s
+post-fork file-descriptor-table sweep (it walks C<0 .. SC_OPEN_MAX>, the
+path C<IO::Async::Function> uses to spawn a worker via C<spawn_child>); the
+sweep's cost scales with the configured limit, not with how many descriptors
+are actually open. This is specific to this worker pool: C<workers> worker
+processes spawn via a bare C<fork> (no such sweep) and are unaffected
+(measured: approximately 0.026s at the same C<nofile> setting). If large
+files are served often enough that AsyncFile worker startup latency
+matters, cap C<RLIMIT_NOFILE> to a realistic value for the deployment (a few
+tens of thousands is enough for very high concurrency; see C<ulimit -n>
+under L</System Tuning>) before starting the server.
 
 =head2 Production Recommendations for Static Files
 
@@ -2180,7 +2259,9 @@ B<Graceful shutdown for maintenance:>
 sub _init {
     my ($self, $params) = @_;
 
-    $self->{app}              = delete $params->{app} or die "app is required";
+    my $app = delete $params->{app};
+    die "app is required" unless defined $app;
+    $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
 
     # Extract listener-related params
     my $listen      = delete $params->{listen};
@@ -2309,10 +2390,12 @@ sub _init {
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
-    $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal (0 = disabled)
-    $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal) | off (skip lifespan)
-    die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be one of: auto, on, off\n"
-        unless $self->{lifespan_mode} =~ /\A(?:auto|on|off)\z/;
+    $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal
+    die "Invalid lifespan_startup_timeout '0' - the PAGI Lifespan spec requires that a server must not block startup indefinitely waiting for a lifespan signal\n"
+        if $self->{lifespan_startup_timeout} == 0;
+    $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal)
+    die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
+        unless $self->{lifespan_mode} =~ /\A(?:auto|on)\z/;
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
@@ -2320,7 +2403,7 @@ sub _init {
         die "Invalid loop_type '$lt': must contain only letters, digits, and ::\n"
             unless $lt =~ /\A[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)*\z/;
     }
-    # Dev-mode event validation: explicit flag, or auto-enable in development mode
+    # Deprecated: core event validation is mandatory; this flag is retained for compatibility and controls nothing.
     $self->{validate_events}     = delete $params->{validate_events}
         // (($ENV{PAGI_ENV} // '') eq 'development' ? 1 : 0);
 
@@ -2368,7 +2451,8 @@ sub _init {
             }
         } else {
             die <<"END_HTTP2_ERROR";
-HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed.
+HTTP/2 support requested but Net::HTTP2::nghttp2 is not installed, or is
+older than @{[ PAGI::Server::Protocol::HTTP2::MIN_NGHTTP2_VERSION() ]}.
 
 To install:
     cpanm Net::HTTP2::nghttp2
@@ -2386,7 +2470,8 @@ sub configure {
     my ($self, %params) = @_;
 
     if (exists $params{app}) {
-        $self->{app} = delete $params{app};
+        my $app = delete $params{app};
+        $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
     }
     if (exists $params{host}) {
         $self->{host} = delete $params{host};
@@ -2454,12 +2539,15 @@ sub configure {
         $self->{shutdown_timeout} = delete $params{shutdown_timeout};
     }
     if (exists $params{lifespan_startup_timeout}) {
-        $self->{lifespan_startup_timeout} = delete $params{lifespan_startup_timeout};
+        my $timeout = delete $params{lifespan_startup_timeout};
+        die "Invalid lifespan_startup_timeout '0' - the PAGI Lifespan spec requires that a server must not block startup indefinitely waiting for a lifespan signal\n"
+            if $timeout == 0;
+        $self->{lifespan_startup_timeout} = $timeout;
     }
     if (exists $params{lifespan_mode}) {
         my $mode = delete $params{lifespan_mode};
-        die "Invalid lifespan_mode '$mode' - must be one of: auto, on, off\n"
-            unless $mode =~ /\A(?:auto|on|off)\z/;
+        die "Invalid lifespan_mode '$mode' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
+            unless $mode =~ /\A(?:auto|on)\z/;
         $self->{lifespan_mode} = $mode;
     }
     if (exists $params{max_receive_queue}) {
@@ -3654,10 +3742,13 @@ sub _spawn_worker {
 sub _run_as_worker {
     my ($self, $listen_entries, $worker_num, $heartbeat_wr) = @_;
 
-    # Note: $ONE_TRUE_LOOP already cleared by $loop->fork(), so this creates a fresh loop
     # Note: $SIG{INT} = 'IGNORE' inherited from parent - do NOT call watch_signal(INT)
     #       or it will overwrite the IGNORE with a CODE ref!
-    my $loop = IO::Async::Loop->new;
+    #
+    # The loop itself is created below, after $worker_server exists, via
+    # $worker_server->_create_loop -- so it respects a configured loop_type
+    # the same way the single-process run() path does. (Note: $ONE_TRUE_LOOP
+    # was already cleared by $loop->fork(), so this always creates a fresh loop.)
 
     # In reuseport mode, each worker creates its own TCP listening socket
     my $reuseport = $self->{reuseport};
@@ -3711,6 +3802,11 @@ sub _run_as_worker {
         max_ws_frame_size   => $self->{max_ws_frame_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
+        max_connections   => $self->{max_connections},
+        heartbeat_timeout => $self->{heartbeat_timeout},
+        lifespan_mode            => $self->{lifespan_mode},
+        lifespan_startup_timeout => $self->{lifespan_startup_timeout},
+        loop_type        => $self->{loop_type},
         workers          => 0,  # Single-worker mode in worker process
     );
     $worker_server->{is_worker} = 1;
@@ -3725,6 +3821,9 @@ sub _run_as_worker {
         }
     }
 
+    # Create the worker's own event loop now, respecting loop_type the same
+    # way the single-process run() path does (see _create_loop).
+    my $loop = $worker_server->_create_loop;
     $loop->add($worker_server);
 
     # Build SSL config for this worker (each worker gets its own SSL context post-fork)
@@ -3835,7 +3934,7 @@ sub _run_as_worker {
 
     # Set up heartbeat writer: periodically signal liveness to parent
     if ($heartbeat_wr) {
-        my $interval = ($self->{heartbeat_timeout} || 50) / 5;
+        my $interval = ($worker_server->{heartbeat_timeout} || 50) / 5;
         my $hb_timer = IO::Async::Timer::Periodic->new(
             interval => $interval,
             on_tick  => sub {
@@ -3931,6 +4030,7 @@ sub _send_503_and_close {
         "Content-Length: " . length($body),
         "Connection: close",
         "Retry-After: 5",
+        "Date: " . $self->{protocol}->format_date,
         "",
         $body
     );
@@ -4050,16 +4150,11 @@ sub _on_request_complete {
 async sub _run_lifespan_startup {
     my ($self) = @_;
 
-    # lifespan_mode 'off': skip the protocol entirely -- never invoke the app
-    # with a lifespan scope.
-    return { success => 1, lifespan_supported => 0 }
-        if ($self->{lifespan_mode} // 'auto') eq 'off';
-
     # Create lifespan scope
     my $scope = {
         type => 'lifespan',
         pagi => {
-            version      => '0.3',
+            version      => '0.4',
             spec_version => '0.3',
             is_worker    => $self->{is_worker} // 0,
             worker_num   => $self->{worker_num},  # undef for single-worker, 1-N for multi-worker
@@ -4071,6 +4166,8 @@ async sub _run_lifespan_startup {
     my @send_queue;
     my $receive_pending;
     my $startup_complete = Future->new;
+
+    $self->{lifespan_phase} = 'startup_pending';
 
     # $receive for the app - returns events from the server
     my $receive = sub {
@@ -4085,6 +4182,10 @@ async sub _run_lifespan_startup {
     my $send = async sub  {
         my ($event) = @_;
         my $type = $event->{type} // '';
+
+        PAGI::Server::EventValidator::validate_lifespan_send($event);
+        $self->{lifespan_phase} = PAGI::Server::EventValidator::advance_lifespan(
+            $self->{lifespan_phase}, $event);
 
         if ($type eq 'lifespan.startup.complete') {
             $startup_complete->done({ success => 1 });
@@ -4178,22 +4279,19 @@ async sub _run_lifespan_startup {
 
     # Wait for startup complete, bounded by lifespan_startup_timeout so a hung
     # lifespan handler (one that neither signals startup nor returns) cannot
-    # block the server forever. 0 disables the bound. without_cancel keeps
-    # $startup_complete pending on timeout, so a late signal cannot croak.
+    # block the server forever. The constructor and configure() both reject a
+    # value of 0, so this bound always applies -- the PAGI Lifespan spec
+    # requires that a server must not block startup indefinitely.
+    # without_cancel keeps $startup_complete pending on timeout, so a late
+    # signal cannot croak.
     my $startup_timeout = $self->{lifespan_startup_timeout} // 30;
-    my $result;
-    if ($startup_timeout > 0) {
-        my $timeout_f = $self->loop->delay_future(after => $startup_timeout)
-            ->then(sub { Future->done(undef) });
-        $result = await Future->wait_any($startup_complete->without_cancel, $timeout_f);
-        if (!defined $result) {
-            my $message = "Lifespan startup timed out after ${startup_timeout}s";
-            $self->_log(error => $message);
-            return { success => 0, message => $message };
-        }
-    }
-    else {
-        $result = await $startup_complete;
+    my $timeout_f = $self->loop->delay_future(after => $startup_timeout)
+        ->then(sub { Future->done(undef) });
+    my $result = await Future->wait_any($startup_complete->without_cancel, $timeout_f);
+    if (!defined $result) {
+        my $message = "Lifespan startup timed out after ${startup_timeout}s";
+        $self->_log(error => $message);
+        return { success => 0, message => $message };
     }
 
     # Track if lifespan is supported
@@ -4215,6 +4313,7 @@ async sub _run_lifespan_shutdown {
     my $send_queue = $self->{lifespan_send_queue};
     my $receive_pending_ref = $self->{lifespan_receive_pending};
 
+    $self->{lifespan_phase} = 'shutdown_pending';
     push @$send_queue, { type => 'lifespan.shutdown' };
 
     # Trigger pending receive if waiting

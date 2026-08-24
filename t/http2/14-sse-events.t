@@ -196,6 +196,13 @@ subtest 'complete SSE session with named events, id, and comment' => sub {
     is($response_headers{':status'}, '200', 'Status 200');
     like($response_headers{'content-type'}, qr{text/event-stream}, 'Content-Type correct');
     is($response_headers{'cache-control'}, 'no-cache', 'Cache-Control set');
+    ok(defined $response_headers{'date'} && length $response_headers{'date'},
+        'Date header present by default (design 11.4)');
+
+    # design doc section 11.4: HTTP/2 never emits HTTP/1-only Connection or
+    # chunked-framing headers (it uses DATA frames via submit_response_streaming).
+    ok(!exists $response_headers{'connection'}, 'no Connection header on HTTP/2 SSE responses');
+    ok(!exists $response_headers{'transfer-encoding'}, 'no Transfer-Encoding header on HTTP/2 SSE responses');
 
     # Verify SSE event format
     like($response_body, qr/event: update\n/, 'Named event field present');
@@ -289,6 +296,8 @@ subtest 'SSE with custom status and headers' => sub {
             headers => [
                 ['x-stream-id', 'test-123'],
                 ['content-type', 'text/event-stream; charset=utf-8'],
+                ['cache-control', 'private, max-age=30'],
+                ['date', 'Tue, 01 Jan 2030 00:00:00 GMT'],
             ],
         });
 
@@ -298,11 +307,13 @@ subtest 'SSE with custom status and headers' => sub {
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
     my %response_headers;
+    my %header_counts;
     my $response_body = '';
     my $client = create_client(
         on_header => sub {
             my ($sid, $name, $value) = @_;
             $response_headers{$name} = $value;
+            $header_counts{$name}++;
             return 0;
         },
         on_data_chunk_recv => sub {
@@ -328,6 +339,16 @@ subtest 'SSE with custom status and headers' => sub {
     is($response_headers{'x-stream-id'}, 'test-123', 'Custom header preserved');
     like($response_headers{'content-type'}, qr{text/event-stream}, 'Custom content-type preserved');
     like($response_body, qr/data: custom\n/, 'Data received');
+
+    # design doc section 11.4: Cache-Control and Date are server-supplied
+    # only when the app didn't supply them -- an app-supplied value must be
+    # preserved as the sole occurrence, not duplicated alongside a server default.
+    is($header_counts{'cache-control'}, 1, 'exactly one Cache-Control header on the wire');
+    is($response_headers{'cache-control'}, 'private, max-age=30',
+        'app-supplied Cache-Control is preserved, not overridden with no-cache');
+    is($header_counts{'date'}, 1, 'exactly one Date header on the wire');
+    is($response_headers{'date'}, 'Tue, 01 Jan 2030 00:00:00 GMT',
+        'app-supplied Date is preserved, not overridden with the server clock');
 
     $stream_io->close_now;
     $loop->remove($server);

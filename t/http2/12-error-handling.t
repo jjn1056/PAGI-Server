@@ -315,20 +315,42 @@ subtest 'plain CONNECT method rejected with 501' => sub {
     # malformed CONNECT frames at the protocol level before our
     # code ever sees them — this tests our defense-in-depth.
     my $fake_stream_id = 99;
-    $conn->_h2_on_request(
-        $fake_stream_id,
-        { ':method' => 'CONNECT', ':authority' => 'proxy.example.com:443' },
-        [],
-        0,
-    );
 
-    # Let the deferred response fire
-    exchange_frames($client, $client_sock, 10);
+    # The fake stream_id was never opened via the client's nghttp2
+    # session, so nghttp2 never invokes on_header for its response frames
+    # (confirmed empirically: %response_headers never gains an entry for
+    # it) -- the wire is not observable here. Spy on submit_response
+    # instead, capturing the headers argument at the call site; this
+    # matches the subtest's existing style of testing the defense-in-depth
+    # code directly rather than via a full client round-trip.
+    my $submitted_headers;
+    {
+        no warnings 'redefine';
+        local *PAGI::Server::Protocol::HTTP2::Session::submit_response = sub {
+            my ($session, $sid, %args) = @_;
+            $submitted_headers = $args{headers} if $sid == $fake_stream_id;
+            return $session->{nghttp2}->submit_response($sid, %args);
+        };
+
+        $conn->_h2_on_request(
+            $fake_stream_id,
+            { ':method' => 'CONNECT', ':authority' => 'proxy.example.com:443' },
+            [],
+            0,
+        );
+
+        # Let the deferred response fire (submit_response runs from the
+        # loop->later callback, so the override must still be in effect).
+        exchange_frames($client, $client_sock, 10);
+    }
 
     # The app should NOT have been called for the CONNECT stream
     # (it may have been called for the GET /normal request)
     ok(!exists $conn->{h2_streams}{$fake_stream_id},
        'No stream state created for plain CONNECT');
+
+    ok($submitted_headers && (grep { lc($_->[0]) eq 'date' } @$submitted_headers),
+       'plain CONNECT 501 response carries a Date header');
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -474,6 +496,249 @@ subtest 'content-length exceeding max_body_size rejected early with 413' => sub 
 
     is($response_headers{':status'}, '413', 'Server responded with 413 based on content-length');
     ok(!$app_called, 'App was never called');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# max_body_size 413 overrun wakes a PENDING receive(): the overrun branch in
+# _h2_on_body must set body_complete, queue a disconnect event, and wake
+# body_pending before reclaiming the stream state, so an app parked on
+# receive() resolves instead of hanging forever, and $cs leaves 'connected'.
+# ============================================================
+subtest 'max_body_size 413 overrun wakes pending receive() with http.disconnect and marks body_too_large' => sub {
+    my ($receive_resolved, $receive_event, $disconnect_reason, $cs);
+    my @app_warnings;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $cs = $scope->{'pagi.connection'};
+        $cs->on_disconnect(sub { $disconnect_reason = $_[0] });
+        $receive_event = await $receive->();
+        $receive_resolved = 1;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app           => $app,
+        max_body_size => 40,
+    );
+
+    my %response_headers;
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+    );
+
+    h2c_handshake($client, $client_sock);
+
+    # Streaming body (no content-length header) so the early content-length
+    # rejection doesn't fire and the app gets dispatched and parked on
+    # receive() before any body data overruns max_body_size.
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/overrun',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['content-type', 'application/octet-stream']],
+        body      => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    local $SIG{__WARN__} = sub { push @app_warnings, $_[0] };
+
+    # Poll (bounded) until the app is dispatched and parked on receive()
+    # (body_pending armed but not yet resolved), so the overrun below is
+    # guaranteed to land on a PENDING receive, not a not-yet-dispatched one.
+    my $dispatched = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        my $ss = $conn->{h2_streams}{$stream_id};
+        if ($ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app dispatched and parked on receive() before the overrun')
+        or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
+
+    # Push body data past max_body_size (40 bytes).
+    $client->submit_data($stream_id, ('X' x 100), 0);
+    $client_sock->syswrite($client->mem_send);
+
+    # Bounded wait (never an unbounded hang) for both the app's parked
+    # receive() to resolve AND the 413 response headers to reach the client
+    # -- the response write is flushed on a later loop tick than the one
+    # that resolves receive_resolved, so waiting on receive_resolved alone
+    # can exit before the client has read the response.
+    my $settled = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        if ($receive_resolved && exists $response_headers{':status'}) {
+            $settled = 1;
+            last;
+        }
+    }
+    ok($settled, 'pending receive() resolved and the 413 reached the client within the bounded wait')
+        or diag('receive_resolved=' . ($receive_resolved // 0)
+                 . ' status=' . ($response_headers{':status'} // '<none>'));
+
+    is($response_headers{':status'}, '413', 'client still sees the 413');
+    ok($receive_resolved, 'pending receive() resolved instead of hanging forever');
+    is($receive_event->{type}, 'http.disconnect', 'receive resolved to http.disconnect');
+    is($disconnect_reason, 'body_too_large', 'on_disconnect fired with body_too_large');
+    ok($cs && !$cs->is_connected, 'connection_state left the connected state');
+    ok(!exists $conn->{h2_streams}{$stream_id},
+        'server-side stream state reclaimed after the overrun');
+    ok(!(grep { /returned without starting a response/ } @app_warnings),
+        'dispatch wrapper did not synthesize a second (500) response over the 413')
+        or diag(join('', @app_warnings));
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# max_body_size 413 overrun: a send() the app makes AFTER its parked
+# receive() resolves with the disconnect must be a silent no-op (design
+# §6.2 / §21 item 1 -- post-close sends are validated silent no-ops, same
+# as h1's already-closed carve-out). Regression: the overrun branch used
+# to wake the parked receive() (letting the app resume synchronously and
+# call send()) BEFORE deleting h2_streams{$stream_id}, so the send
+# closure's stream-gone check saw a live entry and let a second
+# submit_response (200) reach nghttp2 on top of the 413 already
+# submitted for the same stream id.
+# ============================================================
+subtest 'send() after 413 overrun is a silent no-op (no second submit_response)' => sub {
+    my ($receive_resolved, $receive_event, $send_future_resolved);
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        $receive_event = await $receive->();
+        $receive_resolved = 1;
+        # HTTP/2 combines status+headers+body into ONE submit_response call
+        # (unlike h1's separate start/body split) -- http.response.start
+        # alone only stages $status/@response_headers, so the reproduction
+        # needs the terminal http.response.body (more=>0) to actually reach
+        # nghttp2's submit_response.
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [],
+        });
+        await $send->({
+            type => 'http.response.body',
+            body => 'should never reach the client',
+            more => 0,
+        });
+        $send_future_resolved = 1;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app           => $app,
+        max_body_size => 40,
+    );
+
+    my %response_headers;
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+    );
+
+    h2c_handshake($client, $client_sock);
+
+    # Streaming body (no content-length header) so the app gets dispatched
+    # and parked on receive() before any body data overruns max_body_size.
+    my $stream_id = $client->submit_request(
+        method    => 'POST',
+        path      => '/overrun-send',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['content-type', 'application/octet-stream']],
+        body      => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Poll (bounded) until the app is dispatched and parked on receive().
+    my $dispatched = 0;
+    for (1..20) {
+        $loop->loop_once(0.1);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        my $ss = $conn->{h2_streams}{$stream_id};
+        if ($ss && $ss->{body_pending} && !$ss->{body_pending}->is_ready) {
+            $dispatched = 1;
+            last;
+        }
+    }
+    ok($dispatched, 'app dispatched and parked on receive() before the overrun')
+        or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
+
+    # Spy on submit_response the same way the CONNECT-501 subtest above
+    # does: a local typeglob wrapper that calls through and records, scoped
+    # to this block so it stops intercepting once we leave it.
+    my $submit_response_calls = 0;
+    my @submitted_statuses;
+    {
+        no warnings 'redefine';
+        local *PAGI::Server::Protocol::HTTP2::Session::submit_response = sub {
+            my ($session, $sid, %args) = @_;
+            if ($sid == $stream_id) {
+                $submit_response_calls++;
+                push @submitted_statuses, $args{status};
+            }
+            return $session->{nghttp2}->submit_response($sid, %args);
+        };
+
+        # Push body data past max_body_size (40 bytes).
+        $client->submit_data($stream_id, ('X' x 100), 0);
+        $client_sock->syswrite($client->mem_send);
+
+        # Bounded wait for both the parked receive() to resolve AND the
+        # app's subsequent send() to settle -- never an unbounded hang.
+        my $settled = 0;
+        for (1..20) {
+            $loop->loop_once(0.1);
+            my $buf = '';
+            $client_sock->sysread($buf, 16384);
+            $client->mem_recv($buf) if length($buf);
+            my $out = $client->mem_send;
+            $client_sock->syswrite($out) if length($out);
+            if ($receive_resolved && $send_future_resolved) {
+                $settled = 1;
+                last;
+            }
+        }
+        ok($settled, 'parked receive() resolved and the post-disconnect send() settled within the bounded wait')
+            or diag('receive_resolved=' . ($receive_resolved // 0)
+                     . ' send_future_resolved=' . ($send_future_resolved // 0));
+    }
+
+    is($receive_event->{type}, 'http.disconnect', 'receive resolved to http.disconnect');
+    ok($send_future_resolved, "the app's post-disconnect send() resolved as a no-op instead of hanging");
+    is($submit_response_calls, 1,
+        'only ONE submit_response reached nghttp2 for this stream -- the 413, not a second (200) on top of it')
+        or diag('submitted statuses: ' . join(', ', @submitted_statuses));
+    is($submitted_statuses[0], 413, 'the one submit_response that landed was the 413');
 
     $stream_io->close_now;
     $loop->remove($server);

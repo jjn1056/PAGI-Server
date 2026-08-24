@@ -153,6 +153,7 @@ subtest 'returns 503 when at max_connections' => sub {
         if ($response) {
             like($response, qr/503/, 'second connection gets 503 Service Unavailable');
             like($response, qr/Retry-After:/, 'response includes Retry-After header');
+            like($response, qr/Date:\s*\S/, 'response includes a Date header, like every other server-built response');
         } else {
             fail('second connection got empty response');
         }

@@ -11,6 +11,8 @@ use File::Spec;
 use POSIX qw(setsid);
 use FindBin ();
 
+use PAGI::Server::AppNormalizer ();
+
 =head1 NAME
 
 PAGI::Server::Runner - PAGI application loader and server runner
@@ -88,8 +90,10 @@ If the app specifier contains C<::>, it's treated as a module name:
 
     pagi-server PAGI::App::Directory root=/var/www show_hidden=1
 
-The module is loaded, instantiated with the provided key=value arguments,
-and C<to_app> is called to get the PAGI app coderef.
+The module is loaded and C<new> is called with the provided key=value
+arguments. The constructed value may be a native PAGI coderef or an
+instantiated application-provider object. A provider is normalized by calling
+C<to_app> exactly once; C<to_app> is never invoked as a class method.
 
 =head2 File Path
 
@@ -99,7 +103,9 @@ it's treated as a file path:
     pagi-server ./app.pl
     pagi-server /path/to/myapp.psgi
 
-The file is loaded via C<do> and must return a coderef.
+The file is loaded via C<do> and must return either a native PAGI coderef or an
+instantiated application-provider object. A provider is normalized through
+C<to_app> exactly once before the server is constructed.
 
 For compatibility with Plack's C<plackup>, the runner localizes C<$0> to the
 app file before loading it. This ensures C<FindBin::Bin> resolves to the app
@@ -192,7 +198,7 @@ via the C<server_options> hashref (see L</load_server>).
 
 Example with C<-e> and C<-M>:
 
-    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")->to_app'
+    pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")'
 
 =head3 Server-Specific Options
 
@@ -335,7 +341,8 @@ sub mode {
     my $app = $runner->load_app;
 
 Loads the PAGI application based on the app specifier from command
-line arguments. Returns the app coderef.
+line arguments. Every accepted loading form is normalized to and returns the
+native PAGI app coderef used by the server.
 
 =cut
 
@@ -366,8 +373,7 @@ sub load_app {
         my $code = $self->{eval};
         my $app = eval $code;
         die "Error evaluating -e code: $@\n" if $@;
-        die "-e code must return a coderef, got " . (ref($app) || 'non-reference') . "\n"
-            unless ref $app eq 'CODE';
+        $app = PAGI::Server::AppNormalizer::normalize_app($app, '-e code');
         $self->{app_spec} = '-e';
         $self->{app} = $app;
         return $app;
@@ -458,9 +464,10 @@ sub prepare_app {
     my $server = $runner->load_server;
 
 Constructs the configured server class (C<-s CLASS>, default
-L<PAGI::Server>) according to the server runner contract documented in
-L<PAGI::Spec::Server>: C<< $class->new(%options) >> followed by
-C<< $server->run >>. Any class implementing that contract works here.
+L<PAGI::Server>) according to this runner's backend convention:
+C<< $class->new(%options) >> followed by C<< $server->run >>. This is a
+PAGI::Server::Runner plugin interface, not a construction API required by
+L<PAGI::Spec::Server>.
 
 Creates the server instance with the prepared app and configuration.
 Parses server-specific options and passes them to the server constructor.
@@ -657,23 +664,21 @@ sub _load_module {
         die "Cannot find module '$module': $@\n";
     }
 
-    # Check for to_app method
-    unless ($module->can('new') && $module->can('to_app')) {
-        die "Module '$module' does not have new() and to_app() methods\n";
-    }
+    die "Module '$module' does not have a new() method\n"
+        unless $module->can('new');
 
     # Get the module's actual file path for correct home directory detection
     my $module_file = $INC{$file};
 
-    # Instantiate and get app (pass _caller_file for correct home dir)
-    my $instance = $module->new(%args, _caller_file => $module_file);
-    my $app = $instance->to_app;
+    # Instantiate, then normalize the resulting value. Discovery may produce
+    # either a native PAGI coderef or an application-provider object.
+    my $instance = eval { $module->new(%args, _caller_file => $module_file) };
+    die "Error constructing module '$module': $@\n" if $@;
 
-    unless (ref $app eq 'CODE') {
-        die "Module '$module' to_app() did not return a coderef\n";
-    }
-
-    return $app;
+    return PAGI::Server::AppNormalizer::normalize_app(
+        $instance,
+        "Module '$module' constructor",
+    );
 }
 
 sub _load_file {
@@ -699,12 +704,7 @@ sub _load_file {
     if (!defined $app && $!) {
         die "Error reading $file: $!\n";
     }
-    unless (ref $app eq 'CODE') {
-        my $type = ref($app) || 'non-reference';
-        die "App file must return a coderef, got: $type\n";
-    }
-
-    return $app;
+    return PAGI::Server::AppNormalizer::normalize_app($app, 'App file');
 }
 
 sub _parse_app_args {

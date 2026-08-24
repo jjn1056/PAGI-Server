@@ -17,6 +17,7 @@ use Test2::V0;
 use Future;
 
 require PAGI::Server::ConnectionState;
+require PAGI::Server::Connection;
 
 # =============================================================================
 # Test: Initial state
@@ -258,6 +259,20 @@ subtest 'disconnect_future does not resolve on completion' => sub {
     ok(!$future->is_ready, 'disconnect_future remains pending after clean completion');
 };
 
+subtest 'disconnect_future requested after clean completion stays pending' => sub {
+    my $conn = PAGI::Server::ConnectionState->new;
+    $conn->_mark_complete;
+    my $f = $conn->disconnect_future;
+    ok( $f, 'future returned' );
+    ok( !$f->is_ready, 'deliberately left pending — completion is not a disconnect' );
+
+    my $conn2 = PAGI::Server::ConnectionState->new;
+    $conn2->_mark_disconnected('client_closed');
+    my $f2 = $conn2->disconnect_future;
+    ok( $f2->is_ready, 'after abnormal disconnect: already resolved' );
+    is( $f2->get, 'client_closed', 'carries the reason' );
+};
+
 subtest 'on_complete after already completed fires immediately' => sub {
     my $conn = PAGI::Server::ConnectionState->new();
     $conn->_mark_complete;
@@ -312,6 +327,59 @@ subtest 'on_complete callback errors do not break others' => sub {
 
     ok($cb2_called, 'cb2 still called despite cb1 error');
     like($warnings[0], qr/callback error/, 'warning emitted');
+};
+
+# =============================================================================
+# Test: _handle_disconnect marks connection state BEFORE resuming parked
+# drain waiters. A producer parked on a blocking backpressure await
+# (_wait_for_drain) can be resumed synchronously the moment its Future is
+# resolved (Future::AsyncAwait resumes inline off ->done, same as ->on_ready
+# below); if that resumption races ahead of the connection-state marking, the
+# app observes is_connected() == 1 immediately after its own disconnect was
+# detected. Exercises the real Connection._handle_disconnect ordering
+# directly (unit-level, no live socket needed).
+# =============================================================================
+
+subtest 'disconnect marks connection state before resuming parked drain waiters' => sub {
+    my $conn = PAGI::Server::Connection->new(app => sub { });
+    my $conn_state = PAGI::Server::ConnectionState->new(connection => $conn);
+    $conn->{current_connection_state} = $conn_state;
+
+    # A producer parked on a blocking backpressure await -- pushed directly
+    # onto _drain_waiters (the same queue _wait_for_drain uses), without
+    # needing a real stream/buffer to get there.
+    my $parked = Future->new;
+    push @{$conn->{_drain_waiters}}, $parked;
+
+    my ($observed_connected, $observed_reason);
+    $parked->on_ready(sub {
+        # Fires synchronously from within _handle_disconnect below, exactly
+        # as an awaiting coroutine resumes -- this is the resumed app's very
+        # first chance to look at its own connection state.
+        $observed_connected = $conn_state->is_connected;
+        $observed_reason    = $conn_state->disconnect_reason;
+    });
+
+    $conn->_handle_disconnect('client_closed');
+
+    is($observed_connected, 0,
+        'resumed waiter observes is_connected already false (no stale-true window)');
+    is($observed_reason, 'client_closed',
+        'resumed waiter observes disconnect_reason already set');
+};
+
+# =============================================================================
+# Test: response_complete accessor (SHOULD-level; unsupported -> undef)
+# =============================================================================
+
+subtest 'response_complete is undef (unsupported)' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+
+    ok($conn->can('response_complete'), 'response_complete method exists');
+
+    my $result = eval { $conn->response_complete };
+    ok(!$@, 'response_complete does not throw') or diag("error: $@");
+    is($result, undef, 'response_complete returns undef (unsupported)');
 };
 
 # =============================================================================
