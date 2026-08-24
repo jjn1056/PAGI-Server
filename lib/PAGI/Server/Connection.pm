@@ -4398,7 +4398,12 @@ sub _create_send {
                 die "http.response.trailers requires chunked framing (response declared content-length)\n";
             }
 
-            my $trailer_headers = $event->{headers} // [];
+            # RFC 9110 section 6.5.1 additionally forbids connection-specific/
+            # framing fields in trailers outright, on any HTTP version -- not
+            # just the PAGI spec's h1 response-header rule this strip
+            # otherwise exists for. Strip at ingestion, same placement as
+            # every h1 response-header site above.
+            my $trailer_headers = _h1_strip_connection_headers($event->{headers} // []);
 
             # Send final chunk + trailers (prepend any still-buffered headers).
             my $trailers = $weak_self->{_resp_pending} // '';

@@ -967,9 +967,17 @@ and is itself untouched -- RFC 6455 requires it). Each stripped occurrence,
 not deduplicated by name, logs C<PAGI: connection-specific header '$name'
 stripped from HTTP/1.1 response>.
 
-This strip does not apply to C<http.response.trailers>: that event maps a
-different, non-C<http.response.start> header list, and HTTP/1.1 trailers
-already ride chunked framing the server itself controls.
+The same two-name strip also applies to C<http.response.trailers>, on its
+own trailer header list, before the trailer block reaches the wire. RFC
+9110 section 6.5.1 forbids connection-specific fields in trailers outright,
+on any HTTP version -- not only the PAGI spec's h1 response-header rule
+above, so an application-supplied C<Transfer-Encoding> or C<Connection>
+trailer field is stripped the same way an application-supplied
+C<http.response.start> header is, logging the same C<PAGI:
+connection-specific header '$name' stripped from HTTP/1.1 response> line.
+Unlike the HTTP/2 strip, HTTP/1.1 trailers get no separate log message for
+the trailer context, and no C<TE> carve-out is relevant here -- C<TE> is
+not one of the two names HTTP/1.1 strips at all.
 
 =head2 Connection Reuse after a Clean Stream End (HTTP/1.1)
 

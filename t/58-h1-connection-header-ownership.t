@@ -81,6 +81,15 @@ sub strip_warnings_matching {
     return [ grep { /connection-specific header '\Q$name\E' stripped from HTTP\/1\.1 response/ } @$warnings ];
 }
 
+# The bytes after the final chunk's "0\r\n" -- i.e. the trailer header lines
+# (if any) plus the terminating blank line. Empty-trailers wire ("0\r\n\r\n")
+# yields just "\r\n".
+sub trailer_section_of {
+    my ($wire) = @_;
+    my ($section) = $wire =~ /\r\n0\r\n(.*)\z/s;
+    return $section // '';
+}
+
 # ---------------------------------------------------------------------------
 # (a) h1 http.response.start, Content-Length framing
 # ---------------------------------------------------------------------------
@@ -451,6 +460,66 @@ subtest 'h1 websocket.accept: app TE/Connection stripped, server-owned Connectio
         is($echoed_text, 'echo: still works',
             'the WebSocket connection is still usable after the fix (client frame echoed)');
 
+        is(scalar(@{strip_warnings_matching(\@warnings, 'connection')}), 1,
+            "warns once for stripped 'connection'");
+    }
+
+    $server->shutdown->get;
+};
+
+# ---------------------------------------------------------------------------
+# (g) h1 http.response.trailers
+# ---------------------------------------------------------------------------
+# RFC 9110 section 6.5.1 additionally forbids connection-specific/framing
+# fields in trailers outright, on any HTTP version -- not just the h1
+# response-header rule this file otherwise covers. An app-supplied
+# Connection or Transfer-Encoding trailer tuple must never reach the wire,
+# same as it never reaches the wire in a response header block.
+subtest 'h1 http.response.trailers: app TE/Connection stripped from the trailer section' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({
+            type     => 'http.response.start',
+            status   => 200,
+            trailers => 1,
+            headers  => [ [ 'content-type', 'text/plain' ] ],
+        });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+        await $send->({
+            type    => 'http.response.trailers',
+            headers => [
+                [ 'x-t',              '1' ],
+                [ 'connection',        'close' ],
+                [ 'transfer-encoding', 'chunked' ],
+            ],
+        });
+    };
+
+    my $server = create_server($app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 3 unless $sock;
+
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+        print $sock "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n";
+        my $wire = read_until($sock, sub {
+            $_[0] =~ /\r\nok\r\n0\r\n/ && $_[0] =~ /\r\n\r\n\z/;
+        });
+        close $sock;
+
+        is(trailer_section_of($wire), "x-t: 1\r\n\r\n",
+            'trailer section contains only x-t, terminated correctly (app Connection/Transfer-Encoding stripped)');
+
+        is(scalar(@{strip_warnings_matching(\@warnings, 'transfer-encoding')}), 1,
+            "warns once for stripped 'transfer-encoding'");
         is(scalar(@{strip_warnings_matching(\@warnings, 'connection')}), 1,
             "warns once for stripped 'connection'");
     }
