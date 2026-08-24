@@ -91,6 +91,35 @@ sub _h2_strip_connection_headers {
     return \@kept;
 }
 
+# =============================================================================
+# HTTP/1.1 connection-specific header stripping (PAGI spec: "Over HTTP/1.1
+# the server must ignore or strip application-supplied Transfer-Encoding and
+# Connection -- it supplies its own -- and SHOULD log when it does")
+# =============================================================================
+# Deliberately narrower than the HTTP/2 six-name strip above: HTTP/1.1 has
+# no prohibition on keep-alive, proxy-connection, upgrade, or te as ordinary
+# application response headers, so only the two names the server itself
+# always owns the framing/connection-state for -- transfer-encoding and
+# connection -- are stripped here.
+my %H1_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 } qw(transfer-encoding connection);
+
+# Returns a new arrayref with app-supplied transfer-encoding/connection pairs
+# removed, warning once per stripped occurrence (not deduplicated by name --
+# two 'connection' headers warn twice). Does not mutate $headers.
+sub _h1_strip_connection_headers {
+    my ($headers) = @_;
+    my @kept;
+    for my $h (@$headers) {
+        my ($name, $value) = @$h;
+        if ($H1_CONNECTION_SPECIFIC_HEADER{lc $name}) {
+            warn "PAGI: connection-specific header '$name' stripped from HTTP/1.1 response\n";
+            next;
+        }
+        push @kept, $h;
+    }
+    return \@kept;
+}
+
 # SSE client-signal check (PAGI Www.pod "SSE Connection Detection"): the
 # exact media range text/event-stream, case-insensitively, with q > 0.
 # A boolean signal test, not content negotiation: wildcards never signal
@@ -4058,6 +4087,9 @@ sub _create_send {
 
             my $status = $event->{status} // 200;
             my $headers = $event->{headers} // [];
+            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
+            # strip any app-supplied values before they reach the wire.
+            $headers = _h1_strip_connection_headers($headers);
 
             # Check if we need chunked encoding (no Content-Length)
             my $has_content_length = 0;
@@ -5177,6 +5209,9 @@ sub _create_sse_send {
             my $status = $event->{status} // 200;
             $weak_self->{response_status} = $status;  # Track for access logging
             my $headers = $event->{headers} // [];
+            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
+            # strip any app-supplied values before they reach the wire.
+            $headers = _h1_strip_connection_headers($headers);
 
             # Ensure Content-Type is text/event-stream
             my $has_content_type = 0;
@@ -5297,6 +5332,9 @@ sub _create_sse_send {
                 map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
                     @{$event->{headers} // []}
             ];
+            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
+            # strip any app-supplied values before submission.
+            $weak_self->{sse_decline_headers} = _h1_strip_connection_headers($weak_self->{sse_decline_headers});
             $weak_self->{sse_decline_body} = '';
         }
         elsif ($type eq 'sse.http.response.body') {
@@ -5662,6 +5700,9 @@ sub _create_websocket_send {
                 map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
                     @{$event->{headers} // []}
             ];
+            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
+            # strip any app-supplied values before submission.
+            $weak_self->{ws_denial_headers} = _h1_strip_connection_headers($weak_self->{ws_denial_headers});
             $weak_self->{ws_denial_body} = '';
         }
         elsif ($type eq 'websocket.http.response.body') {

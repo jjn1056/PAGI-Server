@@ -932,9 +932,37 @@ header '$name' stripped from HTTP/2 response (RFC 9113)> for a response
 header, or C<PAGI: connection-specific header '$name' stripped from HTTP/2
 trailers (RFC 9113)> for a trailer field.
 
-HTTP/1.1 is unaffected: C<Connection> and C<Transfer-Encoding> are
-ordinary, meaningful HTTP/1.1 response headers there, so no HTTP/1.1
-response path performs this strip.
+HTTP/1.1 performs a narrower, separate strip of its own -- see the next
+section.
+
+=head2 HTTP/1.1 Connection-Specific Header Stripping
+
+The PAGI specification states: "Over HTTP/1.1 the server must ignore or
+strip application-supplied Transfer-Encoding and Connection -- it supplies
+its own -- and SHOULD log when it does." Unlike the HTTP/2 strip above,
+this covers only two header names, C<Transfer-Encoding> and C<Connection>
+-- HTTP/1.1 has no prohibition on C<Keep-Alive>, C<Proxy-Connection>,
+C<Upgrade>, or C<TE> as ordinary application response headers, so those
+four remain untouched.
+
+PAGI::Server strips C<Transfer-Encoding> and C<Connection>,
+case-insensitively, from application-supplied response headers before they
+reach the wire, on every HTTP/1.1 response path that maps application
+headers: C<http.response.start>, C<sse.start>, the
+C<websocket.http.response> denial, and the C<sse.http.response.*> decline.
+Before this strip, an application-supplied C<Transfer-Encoding> could
+duplicate or conflict with the server's own framing decision (two
+C<Transfer-Encoding> lines, or C<Transfer-Encoding> alongside
+C<Content-Length>), and an application-supplied C<Connection> could
+duplicate the server's own forced C<Connection: keep-alive> on
+C<sse.start>, or contradict the guaranteed close that follows an SSE
+decline or WebSocket denial. Each stripped occurrence, not deduplicated
+by name, logs C<PAGI: connection-specific header '$name' stripped from
+HTTP/1.1 response>.
+
+This strip does not apply to C<http.response.trailers>: that event maps a
+different, non-C<http.response.start> header list, and HTTP/1.1 trailers
+already ride chunked framing the server itself controls.
 
 =head2 Connection Reuse after a Clean Stream End (HTTP/1.1)
 

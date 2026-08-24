@@ -242,8 +242,22 @@
     per stripped occurrence. Previously an application-supplied
     connection or transfer-encoding header on any of these paths
     destroyed the response at the framing layer (the client saw only
-    :status, no body), per RFC 9113 section 8.2.2. HTTP/1.1 is
-    unaffected.
+    :status, no body), per RFC 9113 section 8.2.2. (HTTP/1.1's own,
+    narrower strip is described below.)
+  - HTTP/1.1 now strips two application-supplied response header names --
+    transfer-encoding and connection -- on all four paths that map them
+    (http.response.start; sse.start; SSE decline; and WebSocket denial),
+    warning once per stripped occurrence, per the PAGI spec's "the server
+    must ignore or strip application-supplied Transfer-Encoding and
+    Connection -- it supplies its own" clause. Previously an
+    application-supplied transfer-encoding header could duplicate or
+    conflict with the server's own framing header (two Transfer-Encoding
+    lines, or Transfer-Encoding alongside Content-Length), and an
+    application-supplied connection header could duplicate the server's
+    own forced 'Connection: keep-alive' on sse.start or contradict the
+    guaranteed close on SSE decline. Unlike HTTP/2, HTTP/1.1 does not
+    strip keep-alive, proxy-connection, upgrade, or te -- those remain
+    ordinary, legal application response headers on HTTP/1.1.
   - sse.keepalive's optional comment field is now validated at arm time
     (must be a UTF-8-encodable string), so an unencodable comment fails
     the send Future that armed the keepalive instead of dying uncaught
