@@ -114,6 +114,15 @@
     END_STREAM on its own final DATA frame, and a send() that wakes from
     backpressure after the close frame is already queued now correctly
     no-ops instead of risking a frame after Close (RFC 6455 5.5.1).
+  - HTTP/2 requests whose HEADERS block exceeds max_header_list_size now
+    receive a real 431 (Request Header Fields Too Large) response instead
+    of a bare RST_STREAM, matching HTTP/1.1 and RFC 9113 section 10.5.1.
+    HPACK decoding of the oversized block still runs to completion (fields
+    are simply discarded once the limit is crossed) rather than aborting
+    mid-frame, so nghttp2's dynamic table stays consistent; the request is
+    never dispatched to the application. Trailer-block overflow (a later
+    HEADERS block on an already-dispatched stream) is unaffected and keeps
+    resetting the stream as before.
 
   Breaking Changes
   - lifespan_mode 'off' is removed: the PAGI Lifespan spec forbids skipping

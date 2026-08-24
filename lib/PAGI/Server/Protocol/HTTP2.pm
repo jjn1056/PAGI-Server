@@ -116,10 +116,18 @@ sub new {
         on_request => sub { ($stream_id, $pseudo, $headers, $has_body) = @_ },
         on_body    => sub { ($stream_id, $data, $eof) = @_ },
         on_close   => sub { ($stream_id, $error_code) = @_ },
+        on_header_overflow => sub { ($stream_id) = @_ },
     );
 
 Creates a new HTTP/2 session for a connection. Returns a
 L<PAGI::Server::Protocol::HTTP2::Session> wrapper.
+
+C<on_header_overflow> is optional. It fires instead of C<on_request> when a
+request's HEADERS block exceeds C<max_header_list_size> (RFC 9113 section
+10.5.1): the caller is expected to submit a 431 response on the given
+stream id (no request state was ever dispatched, so there is nothing to
+clean up on the caller's side). If omitted, an oversized request is simply
+never dispatched and no response is sent for it.
 
 =cut
 
@@ -133,6 +141,7 @@ sub create_session {
         on_request => $callbacks{on_request},
         on_body    => $callbacks{on_body},
         on_close   => $callbacks{on_close},
+        on_header_overflow => $callbacks{on_header_overflow},
         settings   => {
             max_concurrent_streams  => $self->{max_concurrent_streams},
             initial_window_size     => $self->{initial_window_size},
@@ -164,6 +173,7 @@ sub new {
         on_request  => $args{on_request},
         on_body     => $args{on_body},
         on_close    => $args{on_close},
+        on_header_overflow => $args{on_header_overflow},
         settings    => $args{settings},
         h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
@@ -228,15 +238,37 @@ sub _init_nghttp2_session {
                 # in progress; otherwise into the main (request) block.
                 my $block = $stream->{pending} || $stream;
 
+                # Once the REQUEST block has been marked oversized (below),
+                # discard further fields for it instead of accumulating:
+                # HPACK decoding keeps running (nghttp2 already decoded and
+                # handed us this field), so dynamic-table state stays
+                # consistent, but PAGI stops storing fields for a block it
+                # will never dispatch. The overflow itself is reported as a
+                # 431 once the HEADERS frame commits (on_frame_recv), not
+                # here.
+                if (!$stream->{pending} && $stream->{oversized}) {
+                    return 0;
+                }
+
                 # RFC 7541: header entry size = name_len + value_len + 32
                 $block->{header_list_size} += length($name) + length($value) + 32;
                 if ($block->{header_list_size} > $weak_self->{settings}{max_header_list_size}) {
                     if ($stream->{pending}) {
+                        # Trailer block overflow: unchanged behavior --
+                        # PAGI defines no request-trailer error path, so
+                        # abort the stream outright.
                         delete $stream->{pending};
-                    } else {
-                        delete $weak_self->{streams}{$stream_id};
+                        return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
                     }
-                    return Net::HTTP2::nghttp2::NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE();
+                    # REQUEST block overflow (RFC 9113 section 10.5.1 / Go
+                    # net/http2 style): do NOT abort the callback -- a bare
+                    # abort here turns into a client-visible RST_STREAM
+                    # with no :status at all. Let HPACK decoding finish
+                    # instead, and mark the stream for a real 431 response
+                    # (synthesized by on_frame_recv once the HEADERS frame
+                    # commits) rather than dispatching it.
+                    $stream->{oversized} = 1;
+                    return 0;
                 }
 
                 # Pseudo-headers start with ':'
@@ -301,6 +333,27 @@ sub _init_nghttp2_session {
                             }
                         }
 
+                        return 0;
+                    }
+
+                    # REQUEST header block exceeded max_header_list_size
+                    # (marked by on_header above): do not dispatch. Instead
+                    # of deleting the stream entry outright, leave it in
+                    # place -- on_begin_headers still needs it to classify
+                    # a later trailer HEADERS block as {pending} rather
+                    # than a second request, and on_stream_close still
+                    # needs it for its ordinary cleanup. Only the
+                    # partially-accumulated fields are dropped here to
+                    # bound memory.
+                    if ($stream && $stream->{oversized}) {
+                        my $end_stream = $flags & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM();
+                        $stream->{client_end_stream} = 1 if $end_stream;
+                        $stream->{headers} = [];
+                        $stream->{pseudo}  = {};
+
+                        if ($weak_self->{on_header_overflow}) {
+                            $weak_self->{on_header_overflow}->($stream_id);
+                        }
                         return 0;
                     }
 

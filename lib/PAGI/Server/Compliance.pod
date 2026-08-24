@@ -285,6 +285,10 @@ Zero failures across 60,000 total requests under concurrent load.
 =item * Server SETTINGS: configurable max_concurrent_streams, initial_window_size,
 max_frame_size, max_header_list_size
 
+=item * A request HEADERS block exceeding max_header_list_size gets a real
+431 response (RFC 9113 section 10.5.1) instead of a bare RST_STREAM,
+matching HTTP/1.1
+
 =item * HEAD request body suppression, matching HTTP/1.1: DATA frames are
 withheld and file/fh bodies are never opened
 
@@ -476,6 +480,36 @@ though in practice a conforming client cannot construct one and get it as
 far as PAGI's code: nghttp2's own HTTP-messaging validation catches a
 pseudo-header in a trailer block first, at the C library layer, and tears
 down the whole connection (C<GOAWAY>) rather than only the offending stream.
+
+=head2 HTTP/2 Oversized Request Headers (RFC 9113 section 10.5.1)
+
+When a request's HEADERS block exceeds C<max_header_list_size>, PAGI::Server
+sends a real HTTP 431 (Request Header Fields Too Large) response rather than
+a bare C<RST_STREAM> with no C<:status> at all -- matching both RFC 9113
+section 10.5.1 ("a server that receives a larger header block than it is
+willing to handle can send an HTTP 431") and PAGI::Server's own HTTP/1.1
+behavior for the same condition.
+
+HPACK decoding of the oversized block is allowed to run to completion
+instead of being aborted mid-frame: nghttp2's dynamic table stays
+consistent, and PAGI simply stops storing fields for a block it will not
+dispatch once the running RFC 7541 accounting (C<name_len + value_len + 32>
+per field) crosses the limit. The 431 is synthesized once the C<HEADERS>
+frame commits; the request is never delivered to the application (no
+C<on_request> dispatch, no C<pagi.connection>, no receive-queue state).
+
+If a client sends request trailers (a later C<HEADERS> block, see "HTTP/2
+Trailers" above) after headers that were already too large to dispatch, the
+trailer block is still classified normally by the pending-block machinery
+and is harmlessly discarded (or, if the trailer block is itself oversized,
+handled by the case below) -- it never causes a crash or a second dispatch.
+
+This applies to the request's initial HEADERS block only. A trailer
+HEADERS block that is itself oversized keeps its original, unchanged
+behavior: the pending trailer block is discarded and the stream is reset
+(C<RST_STREAM>), since by that point a response may already be in flight
+and there is no request-trailer receive event for an application to see
+in the first place (see "HTTP/2 Trailers" above).
 
 =head2 Connection State (pagi.connection)
 

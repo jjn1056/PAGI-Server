@@ -525,6 +525,11 @@ sub _init_h2_session {
             return unless $weak_self;
             $weak_self->_h2_on_close($stream_id, $error_code);
         },
+        on_header_overflow => sub {
+            my ($stream_id) = @_;
+            return unless $weak_self;
+            $weak_self->_h2_on_header_overflow($stream_id);
+        },
     );
 
     # Send initial SETTINGS to client
@@ -562,6 +567,33 @@ sub _h2_write_pending {
 # =============================================================================
 # HTTP/2 Stream Callbacks
 # =============================================================================
+
+# RFC 9113 section 10.5.1: "a server that receives a larger header block
+# than it is willing to handle can send an HTTP 431". Fired by the protocol
+# layer (PAGI::Server::Protocol::HTTP2) instead of on_request when a
+# request's HEADERS block exceeds max_header_list_size -- no request state
+# was ever dispatched (HTTP2.pm never called on_request for this stream),
+# so there is nothing in {h2_streams} to initialize or clean up here.
+# Mirrors the plain-CONNECT-501 and content-length-413 idiom below: defer
+# the response to avoid re-entrant nghttp2 calls (we're inside feed/mem_recv).
+sub _h2_on_header_overflow {
+    my ($self, $stream_id) = @_;
+
+    weaken(my $ws = $self);
+    $self->{server}->loop->later(sub {
+        return unless $ws;
+        return if $ws->{closed};
+        $ws->{h2_session}->submit_response($stream_id,
+            status  => 431,
+            headers => [
+                ['content-type', 'text/plain'],
+                ['date', $ws->{protocol}->format_date],
+            ],
+            body    => "Request Header Fields Too Large\n",
+        );
+        $ws->_h2_write_pending;
+    });
+}
 
 sub _h2_on_request {
     my ($self, $stream_id, $pseudo, $headers, $has_body) = @_;
