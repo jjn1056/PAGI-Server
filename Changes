@@ -268,8 +268,10 @@
     :status, no body), per RFC 9113 section 8.2.2. (HTTP/1.1's own,
     narrower strip is described below.)
   - HTTP/1.1 now strips two application-supplied response header names --
-    transfer-encoding and connection -- on all four paths that map them
-    (http.response.start; sse.start; SSE decline; and WebSocket denial),
+    transfer-encoding and connection -- on all six paths that map them
+    (http.response.start; sse.start; SSE decline; WebSocket denial;
+    websocket.accept extra headers; and http.response.trailers trailer
+    blocks, where RFC 9110 6.5.1 forbids such fields on any HTTP version),
     warning once per stripped occurrence, per the PAGI spec's "the server
     must ignore or strip application-supplied Transfer-Encoding and
     Connection -- it supplies its own" clause. Previously an
