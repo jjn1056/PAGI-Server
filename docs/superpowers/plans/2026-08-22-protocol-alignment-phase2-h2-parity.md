@@ -462,7 +462,7 @@ git commit -m "refactor: remove dispatcher dead code the mandatory validator obs
 
 - [ ] **Step 1: Changes** — under 0.002007's "Specification Alignment" section add: h2 HEAD suppression; h2 file/fh streaming with backpressure and app-owned handles; h2 fullflush (HTTP + SSE); h1 trailers-on-content-length now fail loudly; note that HTTP/2 trailers remain unimplemented pending a Net::HTTP2::nghttp2 `submit_trailer` release (Phase 2b).
 - [ ] **Step 2: Compliance.pod** — update the HTTP/2 section: parity now includes HEAD/file/fh/fullflush; a "Known limitations" entry for h2 trailers naming the dependency gate and the loud-failure behavior an app sees meanwhile. Follow the file's existing structure; podchecker must pass.
-- [ ] **Step 3: Verify** — `podchecker lib/PAGI/Server/Compliance.pod` + read both files' diffs. 
+- [ ] **Step 3: Verify** — `podchecker lib/PAGI/Server/Compliance.pod` + read both files' diffs.
 - [ ] **Step 4: Commit**
 
 ```bash
