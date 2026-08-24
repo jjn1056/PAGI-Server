@@ -1091,6 +1091,12 @@ buffered -- and takes the same path.
 
 =item * Close code validation (closes with 1002)
 
+=item * The websocket scope advertises its enforced limits per
+L<PAGI::Spec::Www/"WebSocket Scope">: C<max_receive_queue> is always
+present (a hard, always-enforced cap); C<max_frame_size> is present when
+C<max_ws_frame_size> is nonzero and omitted when configured to C<0>
+(unlimited), on both HTTP/1.1 and HTTP/2 transports.
+
 =back
 
 =head2 Resource Protection

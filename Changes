@@ -361,6 +361,13 @@
     it now no-ops once a Close frame is already queued for that stream,
     matching the single-delivery guarantee _h2_ws_enqueue_disconnect
     already provided for the app-facing event.
+  - The websocket scope now advertises its enforced inbound limits, per
+    PAGI 0.4's optional max_frame_size/max_receive_queue scope keys, on
+    both HTTP/1.1 and HTTP/2 transports. max_receive_queue is always
+    present (the cap is always enforced); max_frame_size is present when
+    max_ws_frame_size is nonzero and omitted when configured to 0
+    (unlimited), matching Protocol::WebSocket::Frame's own
+    max_payload_size semantics for "unenforced".
   - lifespan_startup_timeout => 0 is now rejected at construction and by
     configure(), the same way an invalid lifespan_mode already is. 0
     previously disabled the startup timeout entirely, letting a hung

@@ -1059,6 +1059,10 @@ B<When exceeded:> The server sends a WebSocket close frame with code 1008
 (Policy Violation) and reason "Message queue overflow", then closes the
 connection.
 
+This value is also advertised to the application as the C<max_receive_queue>
+key on the websocket scope, per L<PAGI::Spec::Www/"WebSocket Scope"> --
+always present, since this cap is always enforced.
+
 B<Tuning guidelines:>
 
 =over 4
@@ -1095,6 +1099,11 @@ B<Default:> 65536 (64KB) - matches Protocol::WebSocket default
 
 B<When exceeded:> The server closes the connection. The error is logged as
 "PAGI connection error: Payload is too big."
+
+This value is also advertised to the application as the C<max_frame_size>
+key on the websocket scope, per L<PAGI::Spec::Www/"WebSocket Scope">, when
+enforced. Set to C<0> to disable the limit; the scope then omits
+C<max_frame_size> rather than advertising a cap that isn't enforced.
 
 B<Tuning guidelines:>
 

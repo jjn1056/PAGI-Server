@@ -1906,6 +1906,16 @@ sub _h2_create_websocket_scope {
             delete $ext{fullflush};
             \%ext;
         },
+        # max_frame_size: omitted when unenforced (max_ws_frame_size 0/undef
+        # means unlimited, per Protocol::WebSocket::Frame's max_payload_size
+        # semantics -- a server that does not enforce a cap must not
+        # advertise one). max_receive_queue has no unlimited mode (a hard,
+        # always-enforced cap), so it is always present.
+        ($self->{max_ws_frame_size}
+            ? (max_frame_size => $self->{max_ws_frame_size})
+            : ()
+        ),
+        max_receive_queue => $self->{max_receive_queue},
         # Per-stream outbound flow-control handle. Like the h2 sse/streaming
         # scopes, it measures THIS stream's send queue (h2 multiplexes many
         # streams over one connection, so the shared TCP buffer is
@@ -5672,6 +5682,16 @@ sub _create_websocket_scope {
             delete $ext{fullflush};
             \%ext;
         },
+        # max_frame_size: omitted when unenforced (max_ws_frame_size 0/undef
+        # means unlimited, per Protocol::WebSocket::Frame's max_payload_size
+        # semantics -- a server that does not enforce a cap must not
+        # advertise one). max_receive_queue has no unlimited mode (a hard,
+        # always-enforced cap), so it is always present.
+        ($self->{max_ws_frame_size}
+            ? (max_frame_size => $self->{max_ws_frame_size})
+            : ()
+        ),
+        max_receive_queue => $self->{max_receive_queue},
         # Outbound flow-control introspection (buffered_amount, watermarks,
         # on_high_water/on_drain). Stashed on the connection too, so the send
         # path can poke _check_watermarks after each write.

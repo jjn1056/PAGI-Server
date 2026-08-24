@@ -41,6 +41,10 @@ my $loop = IO::Async::Loop->new;
 # config on each transport, not a coincidence of two identical defaults.
 my %WATERMARKS = (write_high_watermark => 32768, write_low_watermark => 8192);
 
+# Same idea for the websocket scope's max_frame_size/max_receive_queue keys
+# (spec: PAGI::Spec::Www "WebSocket Scope").
+my %WS_LIMITS = (max_ws_frame_size => 32768, max_receive_queue => 250);
+
 # The one app both transports run. Probes pagi.transport's surface (method
 # presence, configured watermark values, buffered_amount's type) and issues
 # one send comfortably over the high mark -- a SINGLE call, so it queues
@@ -69,6 +73,11 @@ sub make_transport_probe_app {
         }
 
         return unless $scope->{type} eq 'websocket';
+
+        $results->{$tag}{has_max_frame_size}    = exists $scope->{max_frame_size} ? 1 : 0;
+        $results->{$tag}{max_frame_size}        = $scope->{max_frame_size};
+        $results->{$tag}{has_max_receive_queue} = exists $scope->{max_receive_queue} ? 1 : 0;
+        $results->{$tag}{max_receive_queue}     = $scope->{max_receive_queue};
 
         my $t = $scope->{'pagi.transport'};
         $results->{$tag}{has_transport} = $t ? 1 : 0;
@@ -105,11 +114,13 @@ sub make_transport_probe_app {
 # harness only needs to get through the handshake and read frames).
 # ============================================================
 sub run_h1_probe {
-    my ($results) = @_;
-    my $app = make_transport_probe_app(tag => 'h1', results => $results);
+    my ($results, %opts) = @_;
+    my $tag    = $opts{tag} // 'h1';
+    my %config = (%WATERMARKS, %{ $opts{config} // {} });
+    my $app = make_transport_probe_app(tag => $tag, results => $results);
 
     my $server = PAGI::Server->new(
-        app => $app, host => '127.0.0.1', port => 0, quiet => 1, %WATERMARKS,
+        app => $app, host => '127.0.0.1', port => 0, quiet => 1, %config,
     );
     $loop->add($server);
     $server->listen->get;
@@ -170,12 +181,14 @@ sub run_h1_probe {
 # t/http2/36-ws-transport.t's harness.
 # ============================================================
 sub run_h2_probe {
-    my ($results) = @_;
-    my $app = make_transport_probe_app(tag => 'h2', results => $results);
+    my ($results, %opts) = @_;
+    my $tag    = $opts{tag} // 'h2';
+    my %config = (%WATERMARKS, %{ $opts{config} // {} });
+    my $app = make_transport_probe_app(tag => $tag, results => $results);
     my $protocol = PAGI::Server::Protocol::HTTP1->new;
 
     my $server = PAGI::Server->new(
-        app => $app, host => '127.0.0.1', port => 0, quiet => 1, http2 => 1, %WATERMARKS,
+        app => $app, host => '127.0.0.1', port => 0, quiet => 1, http2 => 1, %config,
     );
     $loop->add($server);
 
@@ -190,6 +203,8 @@ sub run_h2_probe {
         h2_protocol => $server->{http2_protocol}, alpn_protocol => 'h2',
         write_high_watermark => $server->{write_high_watermark},
         write_low_watermark  => $server->{write_low_watermark},
+        max_receive_queue => $server->{max_receive_queue},
+        max_ws_frame_size => $server->{max_ws_frame_size},
     );
     $server->add_child($stream);
     $conn->start;
@@ -261,8 +276,16 @@ sub run_h2_probe {
 }
 
 my %results;
-run_h1_probe(\%results);
-run_h2_probe(\%results);
+run_h1_probe(\%results, tag => 'h1', config => \%WS_LIMITS);
+run_h2_probe(\%results, tag => 'h2', config => \%WS_LIMITS);
+
+# A second pair of probes configured with max_ws_frame_size => 0 (unlimited,
+# per Protocol::WebSocket::Frame's max_payload_size semantics: a server that
+# does not enforce a cap must not advertise one). max_receive_queue has no
+# such unlimited mode (it is a hard, always-enforced cap), so it is left at
+# its default here and not probed for omission.
+run_h1_probe(\%results, tag => 'h1_unlimited', config => { max_ws_frame_size => 0 });
+run_h2_probe(\%results, tag => 'h2_unlimited', config => { max_ws_frame_size => 0 });
 
 # ============================================================
 # Parity assertions: the SAME app, the SAME questions, on both transports.
@@ -295,6 +318,31 @@ for my $tag (qw(h1 h2)) {
     ok(defined $results{$tag}{buffered_after_send}
             && $results{$tag}{buffered_after_send} =~ /^\d+$/,
         "$tag: buffered_amount is a well-defined non-negative integer after a large send");
+}
+
+# ============================================================
+# max_frame_size / max_receive_queue PARITY (spec: WebSocket Scope, optional
+# Int keys "when the server enforces one").
+# ============================================================
+for my $tag (qw(h1 h2)) {
+    ok($results{$tag}{has_max_frame_size},
+        "$tag: max_frame_size key is present on the websocket scope when enforced");
+    is($results{$tag}{max_frame_size}, $WS_LIMITS{max_ws_frame_size},
+        "$tag: websocket scope max_frame_size reports the configured max_ws_frame_size");
+
+    ok($results{$tag}{has_max_receive_queue},
+        "$tag: max_receive_queue key is present on the websocket scope");
+    is($results{$tag}{max_receive_queue}, $WS_LIMITS{max_receive_queue},
+        "$tag: websocket scope max_receive_queue reports the configured value");
+}
+is($results{h1}{max_frame_size}, $results{h2}{max_frame_size},
+    'PARITY: max_frame_size is the identical number on both transports');
+is($results{h1}{max_receive_queue}, $results{h2}{max_receive_queue},
+    'PARITY: max_receive_queue is the identical number on both transports');
+
+for my $tag (qw(h1_unlimited h2_unlimited)) {
+    ok(!$results{$tag}{has_max_frame_size},
+        "$tag: max_frame_size key is absent from the websocket scope when max_ws_frame_size is 0 (unlimited)");
 }
 
 done_testing;
