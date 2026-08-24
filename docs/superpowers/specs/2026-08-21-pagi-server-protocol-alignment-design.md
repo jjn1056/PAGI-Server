@@ -82,6 +82,16 @@ are against the `main`-based worktree, not the perf branch.
   the 413 path gains _mark_disconnected('body_too_large') + receive wake
   in phase 6 (the spec's standard-reason table already provides the token;
   ratified as consistent with RFC 9110 15.5.14 practice).
+- **Baseline bumps (2026-08-24, packet walk — all John-ratified, all
+  codifying shipped-and-pinned server behavior; server conformance
+  verified per clause during the walk):** `main` advanced `4bc54fe` →
+  `50d8a4c` (connection-level/framing response headers belong to the
+  server; h2 strips the six-name set, h1 must strip Transfer-Encoding
+  and Connection — WSGI/ASGI lineage) → `1bb2397` (file/fh delivery
+  failure is fail-don't-mutate; the failed Future is the notification;
+  incomplete-response rules govern once bytes reached the wire) →
+  `8d4b3b3` (sends are sequential: one outstanding send per connection,
+  overlap unspecified — gRPC one-outstanding-write precedent).
 - **Baseline bump (2026-08-24):** `main` at `4bc54fe` widens the
   `idle_timeout`/`keepalive_timeout` token definitions to the union of
   senses in real use (mid-stream ws/sse idle; missed-pong keepalive) --
