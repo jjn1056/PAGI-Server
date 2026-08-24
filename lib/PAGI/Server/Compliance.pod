@@ -516,10 +516,11 @@ transport -- they use their own dedicated disconnect events instead.
 
 C<response_complete()> -- the spec's SHOULD-level synchronous companion to
 C<on_complete>, reporting whether the response body has finished sending -- is
-B<not implemented>. Applications must treat it as an optional capability (per
-L<PAGI::Spec::Www/"Connection State">, C<undef> means unsupported) and cannot
-rely on it against PAGI::Server; C<response_started> (MUST-level) and
-C<on_complete>/C<disconnect_future> remain fully supported.
+present but B<always returns C<undef>>: this server does not track
+response-body completion. Per L<PAGI::Spec::Www/"Connection State">, C<undef>
+is the documented "unsupported" signal, so applications testing C<defined>
+before relying on the value behave correctly; C<response_started>
+(MUST-level) and C<on_complete>/C<disconnect_future> remain fully supported.
 
 =head2 Enabling HTTP/2
 

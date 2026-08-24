@@ -136,6 +136,20 @@ sub response_started { return $_[0]->{_response_started} ? 1 : 0 }
 # Server-internal: called from the send path when http.response.start is emitted.
 sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
+=head2 response_complete
+
+    my $done = $conn->response_complete;   # undef = unsupported, else 0 or 1
+
+Returns true once this request's response body has been fully sent, false
+while a response is still streaming or has not started, and C<undef> if the
+server does not track completion. This server does not currently track
+response-body completion, so this accessor always returns C<undef>. SHOULD-level
+per L<PAGI::Spec::Www/"Connection State">; test C<defined> before relying on it.
+
+=cut
+
+sub response_complete { return undef }
+
 =head2 disconnect_reason
 
     my $reason = $conn->disconnect_reason;  # String or undef

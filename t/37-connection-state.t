@@ -329,6 +329,20 @@ subtest 'on_complete callback errors do not break others' => sub {
 };
 
 # =============================================================================
+# Test: response_complete accessor (SHOULD-level; unsupported -> undef)
+# =============================================================================
+
+subtest 'response_complete is undef (unsupported)' => sub {
+    my $conn = PAGI::Server::ConnectionState->new();
+
+    ok($conn->can('response_complete'), 'response_complete method exists');
+
+    my $result = eval { $conn->response_complete };
+    ok(!$@, 'response_complete does not throw') or diag("error: $@");
+    is($result, undef, 'response_complete returns undef (unsupported)');
+};
+
+# =============================================================================
 # Test: Server implements disconnect reason code paths (source inspection)
 # =============================================================================
 

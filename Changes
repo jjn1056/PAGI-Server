@@ -361,6 +361,12 @@
     it now no-ops once a Close frame is already queued for that stream,
     matching the single-delivery guarantee _h2_ws_enqueue_disconnect
     already provided for the app-facing event.
+  - PAGI::Server::ConnectionState now implements response_complete(), the
+    spec's SHOULD-level synchronous companion to on_complete. It always
+    returns undef (this server does not track response-body completion),
+    which is the spec's documented "unsupported" signal, rather than
+    raising "Can't locate object method" when an application (or the
+    spec's own probe idiom) calls it.
 
   Maintenance
   - Test coverage added for previously-untested but already-correct
