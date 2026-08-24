@@ -1366,6 +1366,11 @@ restart is 40,000 requests. Workers restart individually without downtime.
 
 Connection idle timeout in seconds. Closes connections that are idle between
 requests (applies to keep-alive connections waiting for the next request).
+The internal disconnect reason recorded for this expiry follows
+L<PAGI::Spec::Www/"Standard Disconnect Reasons">: C<idle_timeout> when no
+request has ever completed on this connection (the client connected but
+never sent one), C<keepalive_timeout> once a request has completed and the
+kept-alive connection then idles out waiting for the next one.
 
 B<Default:> 60
 

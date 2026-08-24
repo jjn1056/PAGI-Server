@@ -361,6 +361,15 @@
     it now no-ops once a Close frame is already queued for that stream,
     matching the single-delivery guarantee _h2_ws_enqueue_disconnect
     already provided for the app-facing event.
+  - The between-requests idle timer's internal disconnect reason is now
+    keepalive_timeout, not idle_timeout, once a request has already
+    completed on the connection -- matching the reason already documented
+    in PAGI::Server::ConnectionState's disconnect_reason list. A connection
+    that idles out before ever completing a request still reports
+    idle_timeout. Neither token is currently observable by an application
+    (no live request scope exists at that moment) or the access log; this
+    corrects the internal bookkeeping only, in case future code paths
+    (logging, metrics) come to depend on it.
   - The websocket scope now advertises its enforced inbound limits, per
     PAGI 0.4's optional max_frame_size/max_receive_queue scope keys, on
     both HTTP/1.1 and HTTP/2 transports. max_receive_queue is always

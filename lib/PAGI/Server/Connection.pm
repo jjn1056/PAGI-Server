@@ -235,6 +235,7 @@ sub new {
         _response_size   => 0,      # Track response body bytes for logging
         request_start    => undef,  # Track request start time for logging
         idle_timer    => undef,  # IO::Async::Timer for idle timeout
+        _served_a_request => 0,  # True once a request has completed on this connection (idle_timer reason: idle_timeout -> keepalive_timeout)
         stall_timer   => undef,  # IO::Async::Timer for request stall timeout
         ws_idle_timer => undef,  # IO::Async::Timer for WebSocket idle timeout
         sse_idle_timer => undef, # IO::Async::Timer for SSE idle timeout
@@ -409,9 +410,15 @@ sub start {
     );
 }
 
-# Arm the between-requests idle timeout. Called once at connection setup and
-# again whenever a long-lived mode that removed the timer (SSE) hands the
-# connection back to ordinary keep-alive request handling.
+# Arm the idle timeout. Called once at connection setup (before any request
+# has completed on this connection) and again whenever a long-lived mode
+# that removed the timer (SSE) hands the connection back to ordinary
+# keep-alive request handling, or a plain request completes and the
+# connection stays open awaiting the next one. The same timer instance
+# serves both cases (it is only reset, never re-created, by ordinary reads);
+# on_expire decides its reason token at fire time from _served_a_request,
+# per the spec's split between idle_timeout (nothing has arrived yet) and
+# keepalive_timeout (a request already completed on this connection).
 sub _start_idle_timer {
     my ($self) = @_;
 
@@ -426,7 +433,8 @@ sub _start_idle_timer {
             return unless $weak_self;
             return if $weak_self->{closed};
             # Close idle connection
-            $weak_self->_handle_disconnect_and_close('idle_timeout');
+            my $reason = $weak_self->{_served_a_request} ? 'keepalive_timeout' : 'idle_timeout';
+            $weak_self->_handle_disconnect_and_close($reason);
         },
     );
     $self->{idle_timer} = $timer;
@@ -3904,6 +3912,11 @@ async sub _handle_request {
         $conn_state->_mark_complete;
     }
 
+    # A request has now completed on this connection: the idle timer's next
+    # expiry (if the connection stays open awaiting another request) reports
+    # keepalive_timeout rather than idle_timeout.
+    $self->{_served_a_request} = 1;
+
     # Determine if we should keep the connection alive
     my $keep_alive = $self->_should_keep_alive($request);
 
@@ -5157,6 +5170,11 @@ sub _reset_after_sse_stream {
     $self->{receive_queue}   = [];
     $self->{receive_pending} = undef;
     $self->{receive_futures} = [];
+
+    # The SSE stream that just ended completed a request on this connection,
+    # same as the plain HTTP path: the next idle expiry reports
+    # keepalive_timeout rather than idle_timeout.
+    $self->{_served_a_request} = 1;
 
     # SSE removed the between-requests idle timer as a long-lived mode; an
     # ordinary keep-alive connection must not sit open forever.
