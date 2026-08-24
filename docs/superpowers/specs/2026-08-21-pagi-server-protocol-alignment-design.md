@@ -947,9 +947,13 @@ Two further deliberate behavior changes, both spec-driven:
   must drop the option — an application that does not use lifespan declines
   at effectively no cost.
 - SSE detection tightens (see section 11.5): requests whose `Accept` only
-  matched by substring or wildcard now receive an `http` scope. Real SSE
-  clients (`EventSource`, `fetch-event-source`) send the exact media type
-  and are unaffected.
+  matched the old implementation's substring scan now receive an `http`
+  scope — concretely, `Accept: text/event-stream;q=0` (an explicit refusal
+  the substring scan misclassified as SSE) and substring near-misses.
+  Wildcards (`*/*`, `text/*`) never matched under either implementation,
+  since a wildcard does not contain the literal token. Real SSE clients
+  (`EventSource`, `fetch-event-source`) send the exact media type and are
+  unaffected.
 
 Valid applications retain the same API. HTTP/2 clients gain missing behavior;
 they should not observe a semantic regression. Per-stream resets replace
