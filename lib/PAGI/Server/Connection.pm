@@ -4172,6 +4172,13 @@ sub _create_send {
                 # complete" for a body that was never actually sent.
                 $weak_self->_flush_pending_headers;   # headers before the file body
                 eval {
+                    # h2 parity (Connection.pm _h2_create_send file arm): fail
+                    # fast on a missing/unreadable file with the same messages,
+                    # ahead of _send_file_response's own -s/open, which would
+                    # otherwise report a less specific error for the same fault.
+                    die "File not found: $file\n"  unless -f $file;
+                    die "Cannot read file: $file\n" unless -r $file;
+
                     await $weak_self->_send_file_response($file, $offset, $length, $chunked);
                     1;
                 } or do {

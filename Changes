@@ -279,6 +279,13 @@
     later block on an established stream accumulates separately, is
     validated and discarded (PAGI defines no request-trailer receive event
     yet), and its END_STREAM still completes the original request's body.
+  - HTTP/1.1 http.response.body{file} sends now pre-check the file with -f
+    and -r before streaming, matching HTTP/2's existing behavior: a missing
+    file fails the send Future with "File not found: $file" and an unreadable
+    file fails with "Cannot read file: $file", instead of failing later
+    inside the file-send helper with a less specific stat/open error. The
+    response's own headers, if already flushed, are unaffected; a
+    conforming app may still recover by sending a normal body afterward.
 
   Maintenance
   - Test coverage added for previously-untested but already-correct

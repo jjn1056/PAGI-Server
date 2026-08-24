@@ -802,6 +802,130 @@ subtest 'file not found dies with error' => sub {
     like($error_message, qr/File not found/, 'error message mentions file not found');
 };
 
+subtest 'missing file: server pre-check fails the Future, app recovers with a normal body' => sub {
+    # h1 parity with h2's file arm (Connection.pm _h2_create_send): the file
+    # arm must reject a missing file with "File not found: $file\n" BEFORE
+    # ever reaching _send_file_response's -s/open, so a conforming app sees
+    # the same failure shape on both transports and can recover cleanly
+    # (mirrors the closed-fh recovery idiom above).
+    my $sync_error = '';
+    my $future_error = '';
+    my $returned_future = 0;
+    my $missing_file = "$tempdir/does-not-exist.txt";
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [['content-type', 'text/plain']],
+            });
+
+            my $send_future;
+            eval {
+                $send_future = $send->({
+                    type => 'http.response.body',
+                    file => $missing_file,
+                });
+                1;
+            } or $sync_error = $@;
+
+            $returned_future = eval { $send_future->isa('Future') } ? 1 : 0
+                if defined $send_future;
+
+            if ($returned_future) {
+                eval { await $send_future; 1 }
+                    or $future_error = $@;
+            }
+
+            # Response already started (200 sent); finish it with a plain
+            # body instead of the failed file, same recovery shape the
+            # closed-fh subtest above exercises.
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/missing-file")->get;
+            is($response->code, 200, 'response completes cleanly (app already sent 200)');
+            ok($server->is_running, 'server still running after file pre-check failure');
+        },
+    );
+
+    ok($returned_future && !length($sync_error),
+        '$send returns a Future instead of throwing synchronously');
+    ok(length($future_error), 'missing file fails the Future returned by $send');
+    is($future_error, "File not found: $missing_file\n",
+        'error matches h2 parity message exactly (Connection.pm _h2_create_send file arm)');
+};
+
+subtest 'unreadable file: server pre-check fails the Future, app recovers with a normal body' => sub {
+    plan skip_all => 'root ignores permission bits, cannot exercise -r failure' if $> == 0;
+
+    my $sync_error = '';
+    my $future_error = '';
+    my $returned_future = 0;
+    my $unreadable_file = "$tempdir/unreadable.txt";
+    open my $ufh, '>:raw', $unreadable_file or die "Cannot create test file: $!";
+    print $ufh "secret";
+    close $ufh;
+    chmod 0000, $unreadable_file or die "Cannot chmod test file: $!";
+
+    with_server(
+        async sub {
+            my ($scope, $receive, $send) = @_;
+
+            await $send->({
+                type => 'http.response.start',
+                status => 200,
+                headers => [['content-type', 'text/plain']],
+            });
+
+            my $send_future;
+            eval {
+                $send_future = $send->({
+                    type => 'http.response.body',
+                    file => $unreadable_file,
+                });
+                1;
+            } or $sync_error = $@;
+
+            $returned_future = eval { $send_future->isa('Future') } ? 1 : 0
+                if defined $send_future;
+
+            if ($returned_future) {
+                eval { await $send_future; 1 }
+                    or $future_error = $@;
+            }
+
+            await $send->({
+                type => 'http.response.body',
+                body => "err=$future_error",
+                more => 0,
+            });
+        },
+        sub {
+            my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/unreadable-file")->get;
+            is($response->code, 200, 'response completes cleanly (app already sent 200)');
+            ok($server->is_running, 'server still running after file pre-check failure');
+        },
+    );
+
+    chmod 0644, $unreadable_file;
+
+    ok($returned_future && !length($sync_error),
+        '$send returns a Future instead of throwing synchronously');
+    ok(length($future_error), 'unreadable file fails the Future returned by $send');
+    is($future_error, "Cannot read file: $unreadable_file\n",
+        'error matches h2 parity message exactly (Connection.pm _h2_create_send file arm)');
+};
+
 subtest 'zero-length file works' => sub {
     my $empty_file = "$tempdir/empty.txt";
     open $fh, '>:raw', $empty_file or die;
