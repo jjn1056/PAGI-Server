@@ -527,4 +527,102 @@ subtest 'h1 http.response.trailers: app TE/Connection stripped from the trailer 
     $server->shutdown->get;
 };
 
+# ---------------------------------------------------------------------------
+# Upgrade companion rule (PAGI spec, main @ e6ba2bb): over HTTP/1.1, when an
+# application response carries an Upgrade header (e.g. 426 Upgrade Required),
+# the server must include 'upgrade' among the tokens of the Connection header
+# it supplies -- RFC 9110 requires the pair from any Upgrade sender. The app
+# never sends Connection: upgrade itself (it would be stripped like any other
+# app-supplied Connection header).
+# ---------------------------------------------------------------------------
+subtest 'h1 426 with Upgrade: server supplies the Connection: upgrade companion' => sub {
+    my $body = 'Upgrade Required';
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({
+            type    => 'http.response.start',
+            status  => 426,
+            headers => [
+                [ 'upgrade',        'websocket' ],
+                [ 'connection',     'upgrade' ],   # app-supplied: still stripped
+                [ 'content-type',   'text/plain' ],
+                [ 'content-length', length($body) ],
+            ],
+        });
+        await $send->({ type => 'http.response.body', body => $body, more => 0 });
+    };
+
+    my $server = create_server($app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 6 unless $sock;
+
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+        print $sock "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n";
+        my $wire = read_until($sock, sub { $_[0] =~ /\Q$body\E\z/ });
+        close $sock;
+
+        my $conn_lines = header_lines_matching($wire, 'connection');
+        is(scalar(@$conn_lines), 1,
+            'exactly one Connection header on the wire');
+        like($conn_lines->[0] // '', qr/^connection:\s*.*\bupgrade\b/i,
+            "server-supplied Connection carries the 'upgrade' token");
+        is(scalar(@{header_lines_matching($wire, 'upgrade')}), 1,
+            'app-supplied Upgrade header preserved (h1 does not strip it)');
+        like($wire, qr/\A\QHTTP\E\/1\.1 426/, 'status 426 on the wire');
+
+        is(scalar(@{strip_warnings_matching(\@warnings, 'connection')}), 1,
+            "app-supplied 'connection' still stripped with one warning");
+        is(scalar(@{strip_warnings_matching(\@warnings, 'upgrade')}), 0,
+            "no strip warning for 'upgrade' (legal h1 app header)");
+    }
+
+    $server->shutdown->get;
+};
+
+subtest 'h1 response without Upgrade: server still supplies no Connection header' => sub {
+    my $body = 'plain';
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [
+                [ 'content-type',   'text/plain' ],
+                [ 'content-length', length($body) ],
+            ],
+        });
+        await $send->({ type => 'http.response.body', body => $body, more => 0 });
+    };
+
+    my $server = create_server($app);
+    my $port   = $server->port;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect", 1 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n";
+        my $wire = read_until($sock, sub { $_[0] =~ /\Q$body\E\z/ });
+        close $sock;
+
+        is(header_lines_matching($wire, 'connection'), [],
+            'no Connection header when the response carries no Upgrade (keep-alive stays implicit)');
+    }
+
+    $server->shutdown->get;
+};
+
 done_testing;

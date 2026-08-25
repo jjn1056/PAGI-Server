@@ -4393,6 +4393,16 @@ sub _create_send {
                 push @final_headers, ['date', $weak_self->{protocol}->format_date];
             }
 
+            # PAGI spec Upgrade companion rule: over HTTP/1.1, a response
+            # carrying an app-supplied Upgrade header (e.g. 426 Upgrade
+            # Required) must also carry 'upgrade' among the server-supplied
+            # Connection tokens -- RFC 9110 requires the pair from any
+            # Upgrade sender, and the app's own Connection header was
+            # stripped above. HTTP/1.0 has no upgrade mechanism.
+            if (!$is_http10 && grep { lc($_->[0]) eq 'upgrade' } @final_headers) {
+                push @final_headers, ['connection', 'upgrade'];
+            }
+
             # For HEAD requests, don't use chunked encoding (no body will be sent)
             # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
             if ($is_head_request || $is_http10) {

@@ -1,5 +1,16 @@
 # Revision history for PAGI-Server
 
+0.002008 - UNRELEASED
+
+  Specification Alignment
+  - HTTP/1.1 responses carrying an application-supplied Upgrade header
+    (e.g. 426 Upgrade Required) now also carry 'upgrade' among the
+    server-supplied Connection tokens, per the PAGI spec's new Upgrade
+    companion rule (RFC 9110 requires the pair from any Upgrade sender).
+    The application's own Connection header is still stripped; the server
+    completes the pair itself. Responses without Upgrade are unchanged
+    (no Connection header; keep-alive stays implicit).
+
 0.002007 - 2026-08-24
 
   Specification Alignment
