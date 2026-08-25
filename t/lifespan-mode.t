@@ -97,7 +97,10 @@ subtest "bin/pagi-server --lifespan off exits nonzero with the spec-forbids mess
     my $out = `$^X -I$FindBin::Bin/../lib $pagi_server --lifespan off --port 0 -e "sub { }" 2>&1`;
     my $exit_code = $? >> 8;
 
-    is($exit_code, 255, '--lifespan off exits with code 255');
+    # An uncaught die's exit status is $! when errno is nonzero (else 255),
+    # and ambient errno at die time varies by platform and module-search
+    # history -- only "nonzero" is portable.
+    isnt($exit_code, 0, '--lifespan off exits nonzero');
     like($out, qr/Invalid lifespan_mode 'off'/, 'stderr carries the same rejection message');
     like($out, qr/the PAGI Lifespan spec forbids skipping the protocol/,
         'stderr explains why per the Lifespan spec');
