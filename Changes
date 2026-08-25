@@ -1,6 +1,15 @@
 # Revision history for PAGI-Server
 
-0.002008 - UNRELEASED
+0.002008 - 2026-08-25
+
+  Maintenance
+  - t/lifespan-mode.t no longer asserts the exact exit code of the CLI's
+    --lifespan off rejection. An uncaught die's exit status is $! when
+    errno is nonzero (else 255), and ambient errno at die time varies by
+    platform and module-search history -- CPAN smokers' long PERL5LIB
+    searches leave ENOENT set, so every Linux smoker saw exit 2 and
+    failed 0.002007's exact-255 assertion. The test now requires only a
+    nonzero exit; the rejection message assertions are unchanged.
 
   Specification Alignment
   - HTTP/1.1 responses carrying an application-supplied Upgrade header
