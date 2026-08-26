@@ -359,13 +359,14 @@ is( scalar keys %{ $conn_b->{h2_streams} }, 0,
     'stream state is not leaked after a malformed (pseudo-header) trailer block' );
 
 # Wire-level pin for the comment above: nghttp2's own HTTP-messaging
-# validation, not PAGI's TEMPORAL_CALLBACK_FAILURE check, is what actually
-# tears the connection down for this malformed trailer -- a whole-connection
-# GOAWAY, not a per-stream RST_STREAM.
-ok( (grep { $_->{type} == Net::HTTP2::nghttp2::NGHTTP2_GOAWAY() } @frames_b),
-    'client observes a GOAWAY frame (whole-connection teardown)' );
-ok( !(grep { $_->{type} == 3 } @frames_b),   # RFC 9113 section 6.4: RST_STREAM = 0x3
-    'client does not observe an RST_STREAM frame (not a per-stream reset)' );
+# validation, not PAGI's TEMPORAL_CALLBACK_FAILURE check, tears the stream
+# down for this malformed trailer. RFC 9113 8.1.1 lets an implementation
+# treat a malformed message as either a stream error (RST_STREAM) or a
+# connection error (GOAWAY), and libnghttp2 versions differ in which they
+# choose -- assert that SOME teardown signal reached the wire, not which.
+ok( (grep { $_->{type} == Net::HTTP2::nghttp2::NGHTTP2_GOAWAY()
+            || $_->{type} == 3 } @frames_b),   # RFC 9113 6.4: RST_STREAM = 0x3
+    'client observes a teardown signal (GOAWAY or RST_STREAM) for the malformed trailer' );
 
 # ============================================================
 # (c) normal request without trailers: zero behavior change (regression).
