@@ -2793,6 +2793,17 @@ sub _create_loop {
     return IO::Async::Loop->new;
 }
 
+# Listener fds this process's live PAGI::Server instances have published in
+# PAGI_REUSE. The env var is ambient process state meant for the exec-based
+# hot-restart handoff; without this registry, a SECOND server constructed in
+# the same process would collect a sibling's live listener as "inherited"
+# and reap it as unmatched -- closing it out from under both the sibling and
+# the event loop (IO::Async::Loop::Epoll croaks on the ensuing fd reuse).
+# Across exec the interpreter restarts and the registry is empty, so real
+# hot-restart inheritance is unaffected; forked workers inherit the copy and
+# correctly leave the master's fds alone.
+my %OWNED_REUSE_FDS;
+
 async sub listen {
     my ($self) = @_;
 
@@ -2975,6 +2986,8 @@ async sub _listen_singleworker {
                     ? "unix:$spec->{path}:$fd"
                     : "$spec->{host}:$spec->{port}:$fd";
                 $spec->{_reuse_key} = $reuse_key;
+                $spec->{_reuse_fd} = $fd;
+                $OWNED_REUSE_FDS{$fd} = 1;
                 $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
                     ? "$ENV{PAGI_REUSE},$reuse_key"
                     : $reuse_key;
@@ -3154,6 +3167,8 @@ sub _listen_multiworker {
                 my $fd = fileno($socket);
                 my $reuse_key = "unix:$spec->{path}:$fd";
                 $spec->{_reuse_key} = $reuse_key;
+                $spec->{_reuse_fd} = $fd;
+                $OWNED_REUSE_FDS{$fd} = 1;
                 $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
                     ? "$ENV{PAGI_REUSE},$reuse_key"
                     : $reuse_key;
@@ -3196,6 +3211,8 @@ sub _listen_multiworker {
                 my $fd = fileno($socket);
                 my $reuse_key = "$spec->{host}:" . $socket->sockport . ":$fd";
                 $spec->{_reuse_key} = $reuse_key;
+                $spec->{_reuse_fd} = $fd;
+                $OWNED_REUSE_FDS{$fd} = 1;
                 $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
                     ? "$ENV{PAGI_REUSE},$reuse_key"
                     : $reuse_key;
@@ -3446,6 +3463,15 @@ sub _collect_inherited_fds {
         delete @ENV{qw(LISTEN_FDS LISTEN_PID LISTEN_FDNAMES)};
     }
 
+    # Entries published by a live sibling server in THIS process are not
+    # inheritance -- leave them alone (neither claim nor close).
+    for my $key (keys %inherited) {
+        next unless $OWNED_REUSE_FDS{ $inherited{$key}{fd} };
+        $self->_log(debug => "PAGI_REUSE entry $key belongs to a live server "
+            . "in this process; leaving it alone");
+        delete $inherited{$key};
+    }
+
     return \%inherited;
 }
 
@@ -3483,6 +3509,8 @@ sub _initiate_multiworker_shutdown {
             my $key = $entry->{spec}{_reuse_key};
             if ($key && defined $ENV{PAGI_REUSE}) {
                 $ENV{PAGI_REUSE} =~ s/(?:^|,)\Q$key\E//;
+                delete $OWNED_REUSE_FDS{ $entry->{spec}{_reuse_fd} }
+                    if defined $entry->{spec}{_reuse_fd};
                 $ENV{PAGI_REUSE} =~ s/^,// if defined $ENV{PAGI_REUSE};
             }
         }
@@ -4362,6 +4390,8 @@ async sub shutdown {
         my $key = $entry->{spec}{_reuse_key};
         if ($key && !$self->{_hot_restart_in_progress} && defined $ENV{PAGI_REUSE}) {
             $ENV{PAGI_REUSE} =~ s/(?:^|,)\Q$key\E//;
+            delete $OWNED_REUSE_FDS{ $entry->{spec}{_reuse_fd} }
+                if defined $entry->{spec}{_reuse_fd};
             $ENV{PAGI_REUSE} =~ s/^,// if defined $ENV{PAGI_REUSE};
         }
     }

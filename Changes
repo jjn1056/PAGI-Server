@@ -3,6 +3,21 @@
 0.002009 - UNRELEASED
 
   Bug Fixes
+  - Constructing a second PAGI::Server in the same process no longer
+    silently closes the first server's listening sockets. The PAGI_REUSE
+    hot-restart mechanism publishes listener fds in the environment; a
+    sibling server's startup collected those entries as "inherited",
+    found they matched none of its own listener specs, and reaped them --
+    closing a live listener out from under both the sibling and the event
+    loop (on IO::Async::Loop::Epoll the stale watch then crashed the next
+    connection with "Epoll cannot cope with fd changing handle under it",
+    the CPAN smoker failure that exposed this; on other loops the first
+    server just silently stopped accepting). A process-local ownership
+    registry now marks fds published by live servers in this process, and
+    fd collection leaves them alone. Exec-based hot restart starts a
+    fresh interpreter with an empty registry, so real fd inheritance is
+    unchanged (verified against the hot-restart suite), and forked
+    workers inherit the registry copy and leave the master's fds alone.
   - An application-supplied HTTP/2 response 'te' header that passes the
     trailers carve-out is now submitted as the canonical lowercase token,
     never the original value. RFC 9113 8.2.1 forbids OWS in field values
