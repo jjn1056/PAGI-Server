@@ -192,10 +192,11 @@ subtest 'buffered_amount grows under withheld WINDOW_UPDATE and drains after rel
                 # The payload is built ONCE, outside the loop: a repeat-op
                 # inside a foreach that also awaits yields undef from a
                 # later iteration onward under Future::AsyncAwait on
-                # DEBUGGING+ithreads perls (reported upstream; minimal
-                # 14-line reproducer with no PAGI involved). Building it
-                # here keeps the test about buffered_amount, not about
-                # that upstream bug.
+                # ITHREADS perls (reported upstream; minimal 14-line
+                # reproducer with no PAGI involved -- threads is the
+                # trigger, DEBUGGING is not required). Building it here
+                # keeps the test about buffered_amount, not about that
+                # upstream bug.
                 my $chunk = 'x' x 20_000;
                 for my $_i (1 .. 4) {
                     await $send->({ type => 'websocket.send', text => $chunk });
