@@ -1,5 +1,17 @@
 # Revision history for PAGI-Server
 
+0.002009 - UNRELEASED
+
+  Maintenance
+  - t/integration/sse-close-end-to-end.t now requires PAGI-Tools 0.002001+
+    like its sibling integration tests, instead of a bare require of
+    PAGI::SSE. The pre-split PAGI distribution (0.001x) also shipped a
+    PAGI::SSE whose close() is synchronous; on a smoker with that old
+    distribution still installed, the bare guard let the test run and die
+    awaiting the non-awaitable close (the same stale-install class the
+    0.002006 guards fixed elsewhere). close() became awaitable in
+    PAGI-Tools 0.002001, which is the floor the guard now enforces.
+
 0.002008 - 2026-08-25
 
   Maintenance
