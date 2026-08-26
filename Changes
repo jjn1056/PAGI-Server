@@ -1,53 +1,29 @@
 # Revision history for PAGI-Server
 
-0.002009 - UNRELEASED
+0.002009 - 2026-08-26
 
   Bug Fixes
   - Constructing a second PAGI::Server in the same process no longer
-    silently closes the first server's listening sockets. The PAGI_REUSE
-    hot-restart mechanism publishes listener fds in the environment; a
-    sibling server's startup collected those entries as "inherited",
-    found they matched none of its own listener specs, and reaped them --
-    closing a live listener out from under both the sibling and the event
-    loop (on IO::Async::Loop::Epoll the stale watch then crashed the next
-    connection with "Epoll cannot cope with fd changing handle under it",
-    the CPAN smoker failure that exposed this; on other loops the first
-    server just silently stopped accepting). A process-local ownership
-    registry now marks fds published by live servers in this process, and
-    fd collection leaves them alone. Exec-based hot restart starts a
-    fresh interpreter with an empty registry, so real fd inheritance is
-    unchanged (verified against the hot-restart suite), and forked
-    workers inherit the registry copy and leave the master's fds alone.
-  - An application-supplied HTTP/2 response 'te' header that passes the
-    trailers carve-out is now submitted as the canonical lowercase token,
-    never the original value. RFC 9113 8.2.1 forbids OWS in field values
-    and libnghttp2 versions disagree on how to punish one (reject-and-omit
-    the field vs corrupt the whole response to a bare :status, the latter
-    observed on CPAN smokers); normalizing before submission makes the
-    behavior identical on every libnghttp2.
+    closes the first server's listeners: PAGI_REUSE entries published by
+    live servers in this process are now exempt from inherited-fd
+    collection. Exec-based hot restart and forked workers are unaffected.
+    (Surfaced as "Epoll cannot cope with fd changing handle under it" on
+    CPAN smokers; on other loops the first server silently stopped
+    accepting.)
+  - An HTTP/2 response 'te' header passing the trailers carve-out is now
+    submitted as the canonical lowercase token: libnghttp2 versions punish
+    RFC-forbidden whitespace in field values differently, some by
+    corrupting the whole response.
 
-  Maintenance
-  - t/http2/34-request-trailers.t no longer pins WHICH teardown frame a
-    malformed trailer block produces. RFC 9113 8.1.1 permits either a
-    stream error (RST_STREAM) or a connection error (GOAWAY) for a
-    malformed message, and libnghttp2 versions differ in their choice --
-    the dominant CPAN smoker failure for 0.002008. The test now asserts a
-    teardown signal was observed; the functional assertions (app sees
-    http.disconnect, no response delivered, no stream-state leak) are
-    unchanged.
-  - All cross-distribution integration tests (the t/integration files that
-    exercise PAGI-Tools against this server) now gate on INTEGRATION_TEST=1
-    like their existing siblings, so CPAN smokers never run tests whose
-    behavior depends on whichever PAGI-Tools version happens to be
-    installed. The version-floor guards remain for gated runs.
-  - t/integration/sse-close-end-to-end.t now requires PAGI-Tools 0.002001+
-    like its sibling integration tests, instead of a bare require of
-    PAGI::SSE. The pre-split PAGI distribution (0.001x) also shipped a
-    PAGI::SSE whose close() is synchronous; on a smoker with that old
-    distribution still installed, the bare guard let the test run and die
-    awaiting the non-awaitable close (the same stale-install class the
-    0.002006 guards fixed elsewhere). close() became awaitable in
-    PAGI-Tools 0.002001, which is the floor the guard now enforces.
+  Maintenance (CPAN smoker-proofing)
+  - t/http2/34 accepts either RFC-legal teardown frame (GOAWAY or
+    RST_STREAM) for a malformed trailer block instead of pinning one
+    libnghttp2 version's choice.
+  - The SSE end-to-end test requires PAGI-Tools 0.002001+; a pre-split
+    PAGI install shipped a PAGI::SSE whose close() is not awaitable.
+  - All cross-distribution integration tests now gate on
+    INTEGRATION_TEST=1, so smoker results never depend on whichever
+    PAGI-Tools version is installed.
 
 0.002008 - 2026-08-25
 
