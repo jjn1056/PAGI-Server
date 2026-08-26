@@ -189,14 +189,22 @@ subtest 'buffered_amount grows under withheld WINDOW_UPDATE and drains after rel
             $event = await $receive->();
             if ($event->{type} eq 'websocket.receive'
                     && ($event->{text} // '') eq 'go') {
-                # The payload is built ONCE, outside the loop: a repeat-op
-                # inside a foreach that also awaits yields undef from a
-                # later iteration onward under Future::AsyncAwait on
-                # ITHREADS perls (reported upstream; minimal 14-line
-                # reproducer with no PAGI involved -- threads is the
-                # trigger, DEBUGGING is not required). Building it here
-                # keeps the test about buffered_amount, not about that
-                # upstream bug.
+                # The payload is built ONCE, outside the loop, to dodge an
+                # upstream Future::AsyncAwait bug (0.69-0.71): a constant-
+                # folded string literal larger than perl's COW threshold
+                # ('x' x 20_000 is folded at compile time), assigned inside
+                # any loop whose body genuinely suspends via await, comes
+                # back undef from a later iteration onward -- but ONLY on
+                # perls built with -Dusethreads (folded constants live in
+                # the pad under ithreads, and FAA's pad save/restore across
+                # suspend mangles the COW buffer). Unthreaded perls are
+                # unaffected; no threads need be spawned; DEBUGGING is
+                # irrelevant. Reproduced with only Future + FAA, no PAGI or
+                # event loop involved, and reported upstream with that
+                # minimal test case -- the real fix is Paul Evans accepting
+                # it and repairing FAA. Until then, hoisting keeps this
+                # test about buffered_amount, not about that bug; do not
+                # move the literal back inside the loop.
                 my $chunk = 'x' x 20_000;
                 for my $_i (1 .. 4) {
                     await $send->({ type => 'websocket.send', text => $chunk });
