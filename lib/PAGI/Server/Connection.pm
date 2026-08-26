@@ -79,7 +79,11 @@ sub _h2_strip_connection_headers {
             if (!$in_trailers && $lc_name eq 'te') {
                 (my $v = lc $value) =~ s/^\s+|\s+\z//g;
                 if ($v eq 'trailers') {
-                    push @kept, $h;
+                    # Submit the normalized token, never the original value:
+                    # RFC 9113 8.2.1 forbids OWS in field values, and
+                    # libnghttp2 versions disagree on how to punish one
+                    # (omit the field vs corrupt the whole response).
+                    push @kept, [$name, 'trailers'];
                     next;
                 }
             }

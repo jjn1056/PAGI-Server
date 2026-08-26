@@ -196,7 +196,8 @@ subtest "te: 'trailers' is preserved, not stripped" => sub {
 
     ok($stream_closed, 'request completed');
     is($headers{':status'}, '200', 'status arrived');
-    is($headers{'te'}, 'Trailers', "te: trailers passed through (case-insensitive value match)");
+    is($headers{'te'}, 'trailers',
+        "te recognized case-insensitively and submitted as the canonical token");
     ok(!(grep { /connection-specific header/ } @warnings), 'no strip warning for te: trailers');
 
     $stream_io->close_now;
@@ -244,15 +245,14 @@ subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => s
     ok(!(grep { /connection-specific header/ } @warnings),
         "no strip warning for te with OWS around trailers -- the compare correctly recognizes the token");
 
-    # nghttp2 itself rejects and omits header field values carrying leading
-    # or trailing whitespace (RFC 9113 8.2.1 forbids OWS in field values)
-    # rather than trimming them -- the field is absent, not present with the
-    # whitespace stripped. This is independent of and unaffected by the
-    # connection-specific-header strip under test here, so the 'te' header
-    # itself is not observed by the client even though our code never
-    # flagged it as a violation. See the request-direction subtest below for
-    # the symmetric proof on receipt (the app's scope->{headers} side).
-    ok(!exists $headers{'te'}, "the 'te' header itself does not survive nghttp2's own OWS field-value rule");
+    # RFC 9113 8.2.1 forbids OWS in field values, and libnghttp2 versions
+    # disagree on what to do with one (reject-and-omit the field vs fail the
+    # whole HEADERS submission -- the latter corrupts the response to bare
+    # :status, observed on CPAN smokers). The server therefore never hands
+    # nghttp2 the padded value: a te that passes the trailers carve-out is
+    # submitted with the normalized token, identically on every libnghttp2.
+    is($headers{'te'}, 'trailers',
+        "te arrives normalized -- the server trims RFC-forbidden OWS before submission");
 
     $stream_io->close_now;
     $loop->remove($server);
