@@ -87,6 +87,8 @@ subtest 'integration: server responds to requests' => sub {
 # SUBTEST: 'integration: module-based app serves files'
 # ---------------------------------------------------------------------------
 subtest 'integration: module-based app serves files' => sub {
+    skip_all 'Cross-distribution subtest; set INTEGRATION_TEST=1 to run'
+        unless $ENV{INTEGRATION_TEST};
     skip_all 'PAGI::App::File not available (install PAGI-Tools >= 0.002000)'
         unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::File; 1 };
     my $loop = IO::Async::Loop->new;

@@ -16,6 +16,8 @@ use PAGI::Server;
 # PAGI::App::File / ::Directory are in the sibling PAGI-Tools distribution. Skip
 # when not installed.
 BEGIN {
+    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
+        unless $ENV{INTEGRATION_TEST};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::File; require PAGI::App::Directory; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::App::File/Directory) not installed');
 }

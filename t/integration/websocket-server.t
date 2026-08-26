@@ -14,6 +14,8 @@ use PAGI::Server;
 # server+Tools integration test; skip when Tools is not installed (the raw
 # WebSocket protocol is covered Tools-free in t/04-websocket.t and others).
 BEGIN {
+    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
+        unless $ENV{INTEGRATION_TEST};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::WebSocket; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::WebSocket) not installed');
 }

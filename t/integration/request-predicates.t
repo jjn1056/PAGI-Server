@@ -10,6 +10,8 @@ use lib 'lib';
 # Skip when it is not installed; the server-side behavior these exercise is
 # covered Tools-free elsewhere (t/10-http-compliance.t, t/03-request-body.t).
 BEGIN {
+    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
+        unless $ENV{INTEGRATION_TEST};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::Request; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::Request) not installed');
 }

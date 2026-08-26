@@ -2,7 +2,29 @@
 
 0.002009 - UNRELEASED
 
+  Bug Fixes
+  - An application-supplied HTTP/2 response 'te' header that passes the
+    trailers carve-out is now submitted as the canonical lowercase token,
+    never the original value. RFC 9113 8.2.1 forbids OWS in field values
+    and libnghttp2 versions disagree on how to punish one (reject-and-omit
+    the field vs corrupt the whole response to a bare :status, the latter
+    observed on CPAN smokers); normalizing before submission makes the
+    behavior identical on every libnghttp2.
+
   Maintenance
+  - t/http2/34-request-trailers.t no longer pins WHICH teardown frame a
+    malformed trailer block produces. RFC 9113 8.1.1 permits either a
+    stream error (RST_STREAM) or a connection error (GOAWAY) for a
+    malformed message, and libnghttp2 versions differ in their choice --
+    the dominant CPAN smoker failure for 0.002008. The test now asserts a
+    teardown signal was observed; the functional assertions (app sees
+    http.disconnect, no response delivered, no stream-state leak) are
+    unchanged.
+  - All cross-distribution integration tests (the t/integration files that
+    exercise PAGI-Tools against this server) now gate on INTEGRATION_TEST=1
+    like their existing siblings, so CPAN smokers never run tests whose
+    behavior depends on whichever PAGI-Tools version happens to be
+    installed. The version-floor guards remain for gated runs.
   - t/integration/sse-close-end-to-end.t now requires PAGI-Tools 0.002001+
     like its sibling integration tests, instead of a bare require of
     PAGI::SSE. The pre-split PAGI distribution (0.001x) also shipped a

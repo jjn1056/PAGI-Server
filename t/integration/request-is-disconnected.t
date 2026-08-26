@@ -19,6 +19,8 @@ use Future;
 # PAGI::Request is in the sibling PAGI-Tools distribution; ConnectionState is
 # PAGI-Server's own. Skip when Tools is not installed.
 BEGIN {
+    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
+        unless $ENV{INTEGRATION_TEST};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::Request; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::Request) not installed');
 }

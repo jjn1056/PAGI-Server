@@ -12,6 +12,8 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # PAGI::App::WrapPSGI is in the sibling PAGI-Tools distribution. Skip when not
 # installed.
 BEGIN {
+    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
+        unless $ENV{INTEGRATION_TEST};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::WrapPSGI; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::App::WrapPSGI) not installed');
 }
