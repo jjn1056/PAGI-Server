@@ -11,6 +11,21 @@
     a receive-based app). Same one-shot discipline the SSE closure already
     had. Pinned by t/http2/40-pending-io-at-disconnect.t.
 
+  Specification conformance (PAGI 0.002006: core spec 0.5 / Www 0.4)
+  - Scopes report pagi.version '0.5' and, for http/websocket/sse,
+    spec_version '0.4' -- the feature-detection gate for the new
+    settlement contract, which this server already implemented. The
+    lifespan scope keeps spec_version '0.3' (its sub-spec did not bump).
+  - New end-to-end conformance tests pin the settlement contract over
+    real sockets on every protocol: a send parked on backpressure at
+    abrupt disconnect resolves (never fails, never hangs), the resumed
+    coroutine observes the completed state transition, on_disconnect is
+    never invoked inside the application's send call frame, a pending
+    receive resolves with the protocol's disconnect event, and h2
+    RST_STREAM settles per-stream I/O without cancelling the application
+    Future (t/61-pending-io-at-disconnect.t,
+    t/http2/40-pending-io-at-disconnect.t).
+
   Maintenance
   - t/http2/36 builds its 20KB payload once, outside its send loop: a
     repeat-op inside a foreach that also awaits yields undef on later
