@@ -174,8 +174,8 @@ subtest 'SSE request detected over HTTP/2' => sub {
     exchange_frames($client, $client_sock, 20);
 
     is($got_scope_type, 'sse', 'Scope type is sse');
-    is($got_pagi->{version}, '0.4', 'h2 SSE scope uses core PAGI version 0.4');
-    is($got_pagi->{spec_version}, '0.3', 'h2 SSE scope keeps spec_version 0.3');
+    is($got_pagi->{version}, '0.5', 'h2 SSE scope uses core PAGI version 0.5');
+    is($got_pagi->{spec_version}, '0.4', 'h2 SSE scope reports spec_version 0.4');
     is($got_http_version, '2', 'HTTP version is 2');
     is($got_path, '/events', 'Path is correct');
     is($response_headers{':status'}, '200', 'Got 200 status');
