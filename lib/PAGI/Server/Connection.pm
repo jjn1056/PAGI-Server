@@ -1225,8 +1225,14 @@ sub _h2_create_receive {
                 return shift @{$ss->{receive_queue}};
             }
 
-            # If body is already complete, return final body event
-            if ($ss->{body_complete}) {
+            # If body is already complete, return the final body event --
+            # once. A receive called after the terminal event parks in the
+            # wait loop below until the stream ends, matching h1's
+            # post-request receive contract (stream close queues
+            # http.disconnect and wakes body_pending). Same one-shot
+            # discipline as the SSE closure's sse_request_sent.
+            if ($ss->{body_complete} && !$ss->{final_request_delivered}) {
+                $ss->{final_request_delivered} = 1;
                 my $body = $ss->{body};
                 $ss->{body} = '';
                 return {
@@ -1236,28 +1242,40 @@ sub _h2_create_receive {
                 };
             }
 
-            # Wait for body data
-            if (!$ss->{body_pending}) {
-                $ss->{body_pending} = Future->new;
+            while (1) {
+                # Wait for body data (or, once the request has been fully
+                # delivered, for the stream to end)
+                if (!$ss->{body_pending}) {
+                    $ss->{body_pending} = Future->new;
+                }
+                await $ss->{body_pending};
+
+                # Re-fetch stream state (may have changed)
+                $ss = $weak_self->{h2_streams}{$stream_id};
+                return { type => 'http.disconnect' } unless $ss;
+
+                # Check queue after waking -- a queued event wins over the
+                # body fallthrough (a close can set body_complete AND queue
+                # http.disconnect on the same wake)
+                if (@{$ss->{receive_queue}}) {
+                    return shift @{$ss->{receive_queue}};
+                }
+
+                # Terminal event already delivered: this wake brought
+                # nothing for the application -- park again rather than
+                # re-synthesize the final body event.
+                next if $ss->{final_request_delivered};
+
+                my $more = $ss->{body_complete} ? 0 : 1;
+                $ss->{final_request_delivered} = 1 unless $more;
+                my $body = $ss->{body};
+                $ss->{body} = '';
+                return {
+                    type => 'http.request',
+                    body => $body,
+                    more => $more,
+                };
             }
-            await $ss->{body_pending};
-
-            # Re-fetch stream state (may have changed)
-            $ss = $weak_self->{h2_streams}{$stream_id};
-            return { type => 'http.disconnect' } unless $ss;
-
-            # Check queue after waking
-            if (@{$ss->{receive_queue}}) {
-                return shift @{$ss->{receive_queue}};
-            }
-
-            my $body = $ss->{body};
-            $ss->{body} = '';
-            return {
-                type => 'http.request',
-                body => $body,
-                more => $ss->{body_complete} ? 0 : 1,
-            };
         })->();
 
         return $future;
