@@ -155,8 +155,8 @@ subtest 'SSE scope type is sse' => sub {
         close $sock;
 
         is($scope_type, 'sse', 'Scope type is sse');
-        is($pagi->{version}, '0.4', 'SSE scope uses core PAGI version 0.4');
-        is($pagi->{spec_version}, '0.3', 'SSE scope keeps spec_version 0.3');
+        is($pagi->{version}, '0.5', 'SSE scope uses core PAGI version 0.5');
+        is($pagi->{spec_version}, '0.4', 'SSE scope reports spec_version 0.4');
     }
 
     $server->shutdown->get;

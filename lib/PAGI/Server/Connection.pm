@@ -1176,8 +1176,8 @@ sub _h2_create_scope {
     return {
         type         => 'http',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -1951,8 +1951,8 @@ sub _h2_create_websocket_scope {
     return {
         type         => 'websocket',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => '2',
         scheme       => $self->_get_ws_scheme,
@@ -2360,8 +2360,8 @@ sub _h2_create_sse_scope {
     return {
         type         => 'sse',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -4068,8 +4068,8 @@ sub _create_scope {
     my $scope = {
         type         => 'http',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -5294,8 +5294,8 @@ sub _create_sse_scope {
     my $scope = {
         type         => 'sse',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -5791,8 +5791,8 @@ sub _create_websocket_scope {
     my $scope = {
         type         => 'websocket',
         pagi         => {
-            version      => '0.4',
-            spec_version => '0.3',
+            version      => '0.5',
+            spec_version => '0.4',
         },
         http_version => $request->{http_version},
         scheme       => $self->_get_ws_scheme,

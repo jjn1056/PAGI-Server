@@ -117,7 +117,7 @@ subtest 'Shared state is shallow-copied per request' => sub {
     my $response2 = $http2->GET("http://127.0.0.1:$port/")->get;
 
     is(scalar(@request_states), 2, 'Two request states captured');
-    is($lifespan_pagi->{version}, '0.4', 'lifespan scope uses core PAGI version 0.4');
+    is($lifespan_pagi->{version}, '0.5', 'lifespan scope uses core PAGI version 0.5');
     is($lifespan_pagi->{spec_version}, '0.3', 'lifespan scope keeps spec_version 0.3');
 
     # Each request should get a shallow copy - verify they're different refs
