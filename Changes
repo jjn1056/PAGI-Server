@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002010 - UNRELEASED
+0.002010 - 2026-08-28
 
   Bug fixes
   - h2: a receive() called after the request has been fully delivered now
