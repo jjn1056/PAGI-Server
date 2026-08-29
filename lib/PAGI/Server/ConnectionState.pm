@@ -456,19 +456,33 @@ sub _mark_complete {
 
 __END__
 
-=head1 USAGE WITH PAGI::Request
+=head1 USAGE
 
-The L<PAGI::Request> class exposes this object through C<connection>,
-plus one convenience predicate:
+The server provides one instance per HTTP request, in the scope under the
+C<pagi.connection> key (MUST-level for C<http> scopes; WebSocket and SSE
+scopes use their own disconnect events instead):
 
-    my $req = PAGI::Request->new($scope, $receive);
+    async sub app {
+        my ($scope, $receive, $send) = @_;
+        my $conn = $scope->{'pagi.connection'};
 
-    my $conn = $req->connection;           # the pagi.connection object
-    $req->is_disconnected;                 # convenience: !$conn->is_connected
+        $conn->is_connected;                   # synchronous, non-destructive
+        $conn->disconnect_reason;              # undef until an abnormal end
+        $conn->on_disconnect(sub { ... });     # abnormal end only
+        $conn->on_complete(sub { ... });       # clean finish only
+        ...
+    }
 
-    # Everything else -- is_connected, disconnect_reason, on_disconnect,
-    # disconnect_future -- is used via $conn directly:
-    $conn->on_disconnect(sub { ... });
+To race long-running work against the client leaving, take a fresh
+observer from C<disconnect_future> for the race (each returned Future is
+cancellation-isolated, so losing the race never disarms the signal):
+
+    await Future->wait_any($work, $conn->disconnect_future);
+    return unless $conn->is_connected;     # authoritative at resume
+
+Frameworks layered above PAGI typically wrap this object in their own
+request abstractions; this class is the raw per-request surface they
+build on.
 
 =head1 EXAMPLE: Basic Connection Check
 
