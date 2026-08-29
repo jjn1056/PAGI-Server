@@ -415,4 +415,35 @@ subtest 'server implements disconnect reason code paths' => sub {
     );
 };
 
+# =============================================================================
+# Test: disconnect_future is cancellation-isolated (PAGI 0.002007)
+#
+# The spec's Connection State section: cancelling a returned Future --
+# directly, or as the losing component of a combinator such as
+# Future->wait_any -- must not affect the server's disconnect processing
+# or any Future returned by another call.
+# =============================================================================
+
+subtest 'disconnect_future is cancellation-isolated' => sub {
+    my $conn    = PAGI::Server::ConnectionState->new();
+    my $sibling = $conn->disconnect_future;          # obtained before any race
+    my $victim  = $conn->disconnect_future;
+    my $work    = Future->new;
+    my $race    = Future->wait_any($work, $victim);
+    $work->done('won');                              # victim cancelled as loser
+
+    ok($victim->is_cancelled, 'losing observer was cancelled (alone)');
+    ok(!$sibling->is_ready,   'sibling observer unaffected by the race');
+
+    $conn->_mark_disconnected('client_closed');
+    is($sibling->get, 'client_closed', 'sibling still receives the reason');
+    is($conn->disconnect_future->get, 'client_closed',
+        'a late caller receives the reason');
+
+    ok(lives { $conn->disconnect_future->cancel },
+        'direct cancel of an observer is harmless');
+    is($conn->disconnect_future->get, 'client_closed',
+        'and the signal survives it');
+};
+
 done_testing;

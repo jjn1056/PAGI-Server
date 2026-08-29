@@ -226,6 +226,14 @@ there is nothing for it to resolve with.
 
 The Future resolves with the disconnect reason string.
 
+Each call returns a B<cancellation-isolated> observer of one private
+master future (per the PAGI spec's Connection State section): cancelling
+a returned Future — directly, or implicitly as the losing component of a
+combinator such as C<< Future->wait_any >> — never disturbs the
+connection's disconnect processing or a Future returned by another call.
+Take a fresh one for each race; a Future that lost one race cannot win a
+later one.
+
 This is useful for racing against other async operations:
 
     await Future->wait_any($disconnect_future, $event_future);
@@ -235,29 +243,32 @@ This is useful for racing against other async operations:
 sub disconnect_future {
     my $self = shift;
 
-    # Return cached Future if exists
-    return $self->{_future} if $self->{_future};
+    unless ($self->{_future}) {
+        # Create new Future (lazy)
+        my $conn = $self->{_connection};
+        my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
 
-    # Create new Future (lazy)
-    my $conn = $self->{_connection};
-    my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
+        if ($loop) {
+            $self->{_future} = $loop->new_future;
+        } else {
+            # Fallback if no loop available (shouldn't happen in practice)
+            require Future;
+            $self->{_future} = Future->new;
+        }
 
-    if ($loop) {
-        $self->{_future} = $loop->new_future;
-    } else {
-        # Fallback if no loop available (shouldn't happen in practice)
-        require Future;
-        $self->{_future} = Future->new;
+        # Resolve immediately only for an ABNORMAL end. After a clean completion
+        # the connection is closed but this Future is deliberately left pending —
+        # completion is not a disconnect (on_complete is the completion signal).
+        if (!${$self->{_connected}} && !$self->{_completed}) {
+            $self->{_future}->done(${$self->{_reason}});
+        }
     }
 
-    # Resolve immediately only for an ABNORMAL end. After a clean completion
-    # the connection is closed but this Future is deliberately left pending —
-    # completion is not a disconnect (on_complete is the completion signal).
-    if (!${$self->{_connected}} && !$self->{_completed}) {
-        $self->{_future}->done(${$self->{_reason}});
-    }
-
-    return $self->{_future};
+    # Cancellation-isolated observer per call (spec, Connection State):
+    # cancelling a returned future — e.g. as a wait_any loser — must never
+    # disturb the connection's signal or other consumers. The cached master
+    # stays private; it alone is resolved at transition step 3.
+    return $self->{_future}->without_cancel;
 }
 
 =head2 on_disconnect
