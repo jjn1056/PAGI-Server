@@ -458,20 +458,17 @@ __END__
 
 =head1 USAGE WITH PAGI::Request
 
-The L<PAGI::Request> class provides convenience methods that delegate
-to the connection object:
+The L<PAGI::Request> class exposes this object through C<connection>,
+plus one convenience predicate:
 
     my $req = PAGI::Request->new($scope, $receive);
 
-    # Access connection object directly
-    my $conn = $req->connection;
+    my $conn = $req->connection;           # the pagi.connection object
+    $req->is_disconnected;                 # convenience: !$conn->is_connected
 
-    # Convenience delegates
-    $req->is_connected;                    # $conn->is_connected
-    $req->is_disconnected;                 # !$conn->is_connected
-    $req->disconnect_reason;               # $conn->disconnect_reason
-    $req->on_disconnect(sub { ... });      # $conn->on_disconnect(...)
-    $req->disconnect_future;               # $conn->disconnect_future
+    # Everything else -- is_connected, disconnect_reason, on_disconnect,
+    # disconnect_future -- is used via $conn directly:
+    $conn->on_disconnect(sub { ... });
 
 =head1 EXAMPLE: Basic Connection Check
 
