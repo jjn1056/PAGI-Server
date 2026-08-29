@@ -1,5 +1,15 @@
 # Revision history for PAGI-Server
 
+0.002011 - UNRELEASED
+
+  Bug fixes
+  - disconnect_future() returns a cancellation-isolated observer per call
+    (the cached master stays private): cancelling a returned future --
+    directly, or as the losing component of Future->wait_any -- no longer
+    silently disarms disconnect notification for every other consumer of
+    the request. Latent bug under the accessor's existing promise, made
+    explicit by PAGI 0.002007. Pinned by a new t/37 subtest.
+
 0.002010 - 2026-08-28
 
   Bug fixes
