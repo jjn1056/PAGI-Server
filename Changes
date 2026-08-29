@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002011 - UNRELEASED
+0.002011 - 2026-08-29
 
   Bug fixes
   - disconnect_future() returns a cancellation-isolated observer per call

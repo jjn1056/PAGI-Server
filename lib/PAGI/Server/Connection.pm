@@ -2,7 +2,7 @@ package PAGI::Server::Connection;
 use strict;
 use warnings;
 
-our $VERSION = '0.002010';
+our $VERSION = '0.002011';
 
 use Future;
 use Future::AsyncAwait;
