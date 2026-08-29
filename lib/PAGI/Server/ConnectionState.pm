@@ -533,7 +533,7 @@ build on.
 
 =head1 SEE ALSO
 
-L<PAGI::Request> - High-level request API with connection convenience methods
+L<PAGI::Spec::Www/"Connection State"> - The governing specification
 
 L<PAGI::Server> - Reference server implementation
 
