@@ -4926,6 +4926,16 @@ yourself before loading any Future::IO-based libraries:
     $server->listen->get;
     $loop->run;
 
+The ordering is not stylistic. The B<first> call into Future::IO latches an
+implementation permanently, so if any code reaches it before you bind one,
+the built-in fallback wins and your later bind is refused:
+
+    Unable to set Future::IO implementation to Future::IO::Impl::IOAsync
+    as it is already Future::IO::_DefaultImpl
+
+From that point the process cannot be recovered -- every subsequent await
+hangs. Bind before you load anything that might call Future::IO.
+
 =head2 Why This Matters
 
 L<Future::IO> provides event loop-agnostic async I/O operations (sleep,
@@ -4948,8 +4958,14 @@ Features that require Future::IO configuration:
 
 =back
 
-If Future::IO is not configured, these features will fail with a helpful
-error message explaining how to fix it.
+B<Only the first of those reports the problem.> L<PAGI::SSE/every> checks for
+a configured implementation and croaks with instructions. Nothing else does:
+Future::IO falls back to a built-in implementation whose futures advance only
+while C<< ->await >> or C<< ->get >> is running, and under an event loop --
+which is exactly the situation inside PAGI::Server -- nothing ever calls
+those. The future never completes and the request hangs, with no warning and
+no error. If a Future::IO-based library appears to stall for no reason, check
+C<$Future::IO::IMPL> first.
 
 =head1 SEE ALSO
 
