@@ -10,6 +10,7 @@ use Pod::Usage;
 use File::Spec;
 use POSIX qw(setsid);
 use FindBin ();
+use IO::Handle ();
 
 use PAGI::Server::AppNormalizer ();
 
@@ -148,6 +149,7 @@ sub new {
         loop              => $args{loop},
         access_log        => $args{access_log},
         no_access_log     => $args{no_access_log}     // 0,
+        error_log         => $args{error_log},
         daemonize         => $args{daemonize}         // 0,
         pid_file          => $args{pid_file},
         user              => $args{user},
@@ -188,6 +190,7 @@ via the C<server_options> hashref (see L</load_server>).
     -D, --daemonize     Run as background daemon
     --access-log FILE   Access log file (default: STDERR)
     --no-access-log     Disable access logging
+    --error-log FILE    Diagnostic log file (default: STDERR)
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
     --group GROUP       Run as specified group (after binding)
@@ -199,6 +202,23 @@ via the C<server_options> hashref (see L</load_server>).
 Example with C<-e> and C<-M>:
 
     pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")'
+
+=head3 Diagnostic Output
+
+Diagnostics -- the server's own log messages, and the warnings emitted by
+application and middleware code -- go to C<STDERR> by default.
+
+C<--error-log FILE> sends them to a file instead. It is opened immediately
+after the command line is parsed -- before the application is loaded and
+before any listener is bound -- so it captures app-loading failures and bind
+errors as well as everything the server says once it is running. The
+descriptor is inherited across both C<--daemonize> forks, so the destination
+survives daemonizing; without it, daemonizing reopens C<STDERR> on
+F</dev/null> and every diagnostic in the process is discarded.
+
+Note that C<--access-log> is a separate destination covering request records
+only, and that it is disabled by default in production mode, so a daemonized
+production server with neither option configured writes no log output at all.
 
 =head3 Server-Specific Options
 
@@ -255,6 +275,7 @@ sub parse_options {
         # Logging
         'access-log=s'        => \$opts{access_log},
         'no-access-log'       => \$opts{no_access_log},
+        'error-log=s'         => \$opts{error_log},
 
         # Daemon/process
         'D|daemonize'         => \$opts{daemonize},
@@ -292,6 +313,7 @@ sub parse_options {
     $self->{loop}       = $opts{loop}       if defined $opts{loop};
     $self->{access_log} = $opts{access_log} if defined $opts{access_log};
     $self->{no_access_log} = $opts{no_access_log} if $opts{no_access_log};
+    $self->{error_log}  = $opts{error_log}  if defined $opts{error_log};
     $self->{daemonize}  = $opts{daemonize}  if $opts{daemonize};
     $self->{pid_file}   = $opts{pid_file}   if defined $opts{pid_file};
     $self->{user}       = $opts{user}       if defined $opts{user};
@@ -555,6 +577,13 @@ sub run {
     # Parse options
     $self->parse_options(@_);
 
+    # Open the error log and point STDERR at it before anything can report a
+    # problem. Future::IO configuration, app loading and listener binding all
+    # diagnose through STDERR, and every distribution in the ecosystem warns
+    # there; opening later would lose whatever was said in the meantime.
+    $self->_open_error_log;
+    $self->_redirect_stderr_to_error_log;
+
     # Export resolved mode to environment so apps can check it
     # (similar to Plack's PLACK_ENV)
     $ENV{PAGI_ENV} = $self->mode;
@@ -582,8 +611,9 @@ sub run {
     # Create server
     my $server = $self->load_server;
 
-    # Daemonize before running (bind errors will be lost in daemon mode,
-    # but this is acceptable for production where systemd/docker is preferred)
+    # Daemonize before running. The error log's descriptor was opened above and
+    # is inherited across both forks, so --error-log keeps bind errors and
+    # everything after them; without it, daemonizing still discards STDERR.
     if ($self->{daemonize}) {
         $self->_daemonize;
     }
@@ -738,6 +768,7 @@ Common Options (handled by Runner):
     -l, --loop BACKEND  Event loop backend (EV, Epoll, UV, Poll)
     --access-log FILE   Access log file (default: STDERR)
     --no-access-log     Disable access logging
+    --error-log FILE    Diagnostic log file (default: STDERR)
     -D, --daemonize     Run as background daemon
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
@@ -801,12 +832,51 @@ sub _daemonize {
     # Clear umask
     umask(0);
 
-    # Redirect standard file descriptors to /dev/null
-    open(STDIN, '<', '/dev/null') or die "Cannot redirect STDIN: $!";
-    open(STDOUT, '>', '/dev/null') or die "Cannot redirect STDOUT: $!";
-    open(STDERR, '>', '/dev/null') or die "Cannot redirect STDERR: $!";
+    $self->_redirect_std_handles;
 
     return $$;  # Return daemon PID
+}
+
+# Opens the error log named by --error-log and keeps the handle on the runner.
+# Called before any fork so the descriptor survives daemonizing, exactly as the
+# access log's handle does.
+sub _open_error_log {
+    my ($self) = @_;
+
+    return unless $self->{error_log};
+
+    open my $fh, '>>', $self->{error_log}
+        or die "Cannot open error log $self->{error_log}: $!\n";
+    $fh->autoflush(1);
+
+    return $self->{_error_log_fh} = $fh;
+}
+
+# Points STDERR at an already-opened error log. Returns false when no error log
+# was configured, leaving the caller to decide what STDERR should become.
+sub _redirect_stderr_to_error_log {
+    my ($self) = @_;
+
+    my $fh = $self->{_error_log_fh} or return 0;
+
+    open(STDERR, '>&', $fh) or die "Cannot redirect STDERR to error log: $!\n";
+    STDERR->autoflush(1);
+
+    return 1;
+}
+
+sub _redirect_std_handles {
+    my ($self) = @_;
+
+    open(STDIN, '<', '/dev/null') or die "Cannot redirect STDIN: $!";
+    open(STDOUT, '>', '/dev/null') or die "Cannot redirect STDOUT: $!";
+
+    # Diagnostics reach STDERR from every PAGI distribution, most of them as a
+    # bare warn that never passes through the server's own logger. Discarding
+    # it is only correct when the operator has named nowhere else to put it.
+    return if $self->_redirect_stderr_to_error_log;
+
+    open(STDERR, '>', '/dev/null') or die "Cannot redirect STDERR: $!";
 }
 
 sub _write_pid_file {
