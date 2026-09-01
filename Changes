@@ -1,5 +1,29 @@
 # Revision history for PAGI-Server
 
+0.002012 - UNRELEASED
+
+  Conformance
+  - A response body is either a sequence of inline http.response.body events
+    or a single file/fh event, never both. Sending file or fh once inline
+    body bytes have been delivered now fails that send's Future, per PAGI
+    0.002008 ("Payload kinds do not mix within a response"). A failed send
+    delivers no bytes and leaves the response sequence state untouched, so an
+    application may still recover by finishing inline.
+
+    The rule exists for intermediaries. A middleware that transforms body
+    bytes commits to an encoding before it can know a delegated payload will
+    follow, and cannot apply that encoding to bytes the server streams on the
+    application's behalf. Measured in PAGI-Tools before the rule: a response
+    advertising Content-Encoding: gzip carrying gzip bytes followed by raw
+    file bytes, which no client can decode.
+
+    Implemented in EventValidator::advance_http, which already tracked the
+    response sequence: the two "started" states split by whether inline bytes
+    were delivered. No new per-connection state. Every seq_state comparison
+    in the server tests for 'complete' or 'awaiting_trailers', so the split
+    is invisible to them; only t/http2/28-file-fh.t changed, since it
+    asserted the behaviour the spec now forbids.
+
 0.002011 - 2026-08-29
 
   Bug fixes

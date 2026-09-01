@@ -264,10 +264,21 @@ $File::app = async sub {
         return;
     }
     if ($path eq '/file-after-chunks') {
+        # A response's body is either inline events or one opaque event, never
+        # both (PAGI::Spec::Www, "Payload kinds do not mix within a response").
+        # The file send is rejected; the failed send delivers no bytes and
+        # leaves the sequence state untouched, so the application recovers by
+        # finishing inline -- exactly as it may after any failed file send.
         await $send->({ type => 'http.response.start', status => 200,
                          headers => [['content-type','application/octet-stream']] });
         await $send->({ type => 'http.response.body', body => 'x', more => 1 });
-        await $send->({ type => 'http.response.body', file => $File::BIG });
+        my $err = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', file => $File::BIG }) };
+            $@;
+        };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.body', body => "err=$err", more => 0 });
         return;
     }
     if ($path eq '/fh-full') {
@@ -343,7 +354,9 @@ is( get_h2('/file-small')->{body}, $small_content,
 like( get_h2('/file-before-start')->{body}, qr/err=.*before http\.response\.start/,
     'file event before start reports the SEQUENCE error, not File not found (M2)' );
 like( get_h2('/file-missing')->{body}, qr/err=.*File not found/, 'open failure fails the Future; app recovered with a normal body' );
-is( get_h2('/file-after-chunks')->{body}, 'x' . $pattern, 'file appended to an in-progress stream' );
+like( get_h2('/file-after-chunks')->{body},
+    qr/\Ax\Qerr=\E.*after inline body bytes/,
+    'a file body after inline chunks is rejected; the chunk already sent stands and the app recovers inline' );
 
 is( get_h2('/fh-full')->{body}, $pattern, 'fh streamed byte-exact' );
 ok( $FhOwn::CLOSED_OK, 'application still owns the handle after the send resolves' );

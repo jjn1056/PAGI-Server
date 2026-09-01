@@ -436,9 +436,14 @@ sub validate_lifespan_send {
 # Dispatchers run shape validation first and call these separately.
 # =============================================================================
 
+sub _http_body_is_opaque {
+    my ($event) = @_;
+    return defined $event->{file} || defined $event->{fh};
+}
+
 sub _http_body_is_terminal {
     my ($event) = @_;
-    return 1 if defined $event->{file} || defined $event->{fh};
+    return 1 if _http_body_is_opaque($event);
     my $more = $event->{more} // 0;
     return !$more;
 }
@@ -468,11 +473,21 @@ sub advance_http {
     return $state if $type eq 'http.fullflush';
 
     if ($type eq 'http.response.body') {
-        if ($state eq 'started') {
-            return _http_body_is_terminal($event) ? 'complete' : 'started';
-        }
-        if ($state eq 'started_t') {
-            return _http_body_is_terminal($event) ? 'awaiting_trailers' : 'started_t';
+        # A response's body is either a sequence of inline events or a single
+        # file/fh event, never both (PAGI::Spec::Www, "Payload kinds do not
+        # mix within a response"). The '_i' suffix records that inline bytes
+        # were delivered; once set, a delegated payload can no longer join
+        # them. An intermediary that transforms body bytes commits to an
+        # encoding before it could know a file event was coming, and cannot
+        # apply it to bytes the server streams on the application's behalf.
+        croak "cannot send a file/fh body after inline body bytes"
+            if _http_body_is_opaque($event) && $state =~ /_i\z/;
+
+        if ($state =~ /\Astarted(_t)?(?:_i)?\z/) {
+            my $trailers_declared = $1 ? '_t' : '';
+            return _http_body_is_terminal($event)
+                 ? ($trailers_declared ? 'awaiting_trailers' : 'complete')
+                 : "started${trailers_declared}_i";
         }
     }
 
