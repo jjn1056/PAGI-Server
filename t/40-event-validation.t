@@ -479,11 +479,11 @@ subtest 'advance_http transition matrix' => sub {
     my $adv = \&PAGI::Server::EventValidator::advance_http;
     is( $adv->('initial', { type => 'http.response.start', status => 200 }), 'started', 'start -> started');
     is( $adv->('initial', { type => 'http.response.start', status => 200, trailers => 1 }), 'started_t', 'start+trailers -> started_t');
-    is( $adv->('started', { type => 'http.response.body', body => 'x', more => 1 }), 'started', 'streaming chunk keeps started');
+    is( $adv->('started', { type => 'http.response.body', body => 'x', more => 1 }), 'started_i', 'streaming chunk marks inline bytes delivered');
     is( $adv->('started', { type => 'http.response.body', body => 'x' }), 'complete', 'terminal body -> complete');
     is( $adv->('started', { type => 'http.response.body', file => '/tmp/f' }), 'complete', 'file body -> complete');
     is( $adv->('started', { type => 'http.response.body', fh => \*STDOUT, more => 1 }), 'complete', 'fh body is always terminal regardless of more');
-    is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 1 }), 'started_t', 'streaming chunk keeps started_t');
+    is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 1 }), 'started_t_i', 'streaming chunk marks inline bytes delivered, trailers still declared');
     is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 0 }), 'awaiting_trailers', 'terminal body with declared trailers -> awaiting_trailers');
     is( $adv->('awaiting_trailers', { type => 'http.response.trailers', headers => [] }), 'complete', 'trailers -> complete');
     is( $adv->('started', { type => 'http.fullflush' }), 'started', 'fullflush leaves started unchanged');
@@ -499,6 +499,41 @@ subtest 'advance_http transition matrix' => sub {
     like( dies { $adv->('complete', { type => 'http.response.trailers' }) }, qr/already complete/, 'trailers after completion');
     like( dies { $adv->('complete', { type => 'http.response.start', status => 200 }) }, qr/already complete/, 'start after completion');
     like( dies { $adv->('awaiting_trailers', { type => 'http.response.body', body => 'x' }) }, qr/awaiting_trailers/, 'body while awaiting trailers is rejected');
+};
+
+subtest 'a response body is inline events or one opaque event, never both' => sub {
+    # PAGI::Spec::Www, "Payload kinds do not mix within a response": an
+    # application MUST NOT send a file/fh event once inline body bytes have
+    # been delivered, and the server MUST fail such a send. A compressing
+    # intermediary commits to an encoding before it can know a delegated
+    # payload will follow, and cannot compress bytes the server streams on
+    # the application's behalf.
+    my $adv = \&PAGI::Server::EventValidator::advance_http;
+
+    # Delivering an inline chunk is what closes the door.
+    is( $adv->('started', { type => 'http.response.body', body => 'x', more => 1 }),
+        'started_i', 'an inline chunk records that inline bytes were delivered');
+    is( $adv->('started_t', { type => 'http.response.body', body => 'x', more => 1 }),
+        'started_t_i', 'likewise when trailers were declared');
+
+    like( dies { $adv->('started_i', { type => 'http.response.body', file => '/tmp/f' }) },
+        qr/after inline body bytes/, 'file after an inline chunk is rejected');
+    like( dies { $adv->('started_i', { type => 'http.response.body', fh => \*STDOUT }) },
+        qr/after inline body bytes/, 'fh after an inline chunk is rejected');
+    like( dies { $adv->('started_t_i', { type => 'http.response.body', file => '/tmp/f' }) },
+        qr/after inline body bytes/, 'and with trailers declared');
+
+    # Everything legal still advances exactly as before.
+    is( $adv->('started', { type => 'http.response.body', file => '/tmp/f' }), 'complete',
+        'a file event alone is still the whole body');
+    is( $adv->('started_i', { type => 'http.response.body', body => 'x', more => 1 }),
+        'started_i', 'further inline chunks are fine');
+    is( $adv->('started_i', { type => 'http.response.body', body => 'x', more => 0 }),
+        'complete', 'and terminate normally');
+    is( $adv->('started_t_i', { type => 'http.response.body', body => 'x', more => 0 }),
+        'awaiting_trailers', 'reaching the trailers phase as before');
+    is( $adv->('started_i', { type => 'http.fullflush' }), 'started_i',
+        'fullflush leaves the inline marker alone');
 };
 
 subtest 'advance_sse close is idempotent, streams stay exclusive' => sub {
