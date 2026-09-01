@@ -322,4 +322,66 @@ subtest 'Client disconnect stops streaming app' => sub {
     $loop->remove($server);
 };
 
+# A response body is either inline events or one opaque event, never both
+# (PAGI::Spec::Www, "Payload kinds do not mix within a response"). The
+# validator is shared across every send path; this proves the rejection over
+# HTTP/1.1 end to end, where t/http2/28-file-fh.t proves it over HTTP/2.
+subtest 'a file body after inline chunks is rejected over HTTP/1.1' => sub {
+    my $captured_error;
+
+    my $mixing_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported: $scope->{type}" if $scope->{type} ne 'http';
+
+        while (1) {
+            my $event = await $receive->();
+            last if $event->{type} ne 'http.request';
+            last unless $event->{more};
+        }
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain']],
+        });
+        await $send->({ type => 'http.response.body', body => 'inline;', more => 1 });
+
+        # Delegating the rest is now a programming error: an intermediary that
+        # had begun transforming these bytes could not transform what the
+        # server streams on the application's behalf.
+        $captured_error = do {
+            local $@;
+            eval { await $send->({ type => 'http.response.body', file => '/etc/hosts' }) };
+            $@;
+        };
+
+        # The failed send delivered no bytes and left the sequence untouched,
+        # so the application may still finish inline.
+        await $send->({ type => 'http.response.body', body => 'recovered', more => 0 });
+    };
+
+    my $server = PAGI::Server->new(
+        app   => $mixing_app,
+        host  => '127.0.0.1',
+        port  => 0,
+        quiet => 1,
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+    my $response = $http->GET("http://127.0.0.1:" . $server->port . "/")->get;
+
+    like($captured_error, qr/after inline body bytes/,
+        'the file send failed with the mixing error');
+    is($response->code, 200, 'the response the application started still stands');
+    is($response->decoded_content, 'inline;recovered',
+        'the delivered chunk stands and the application recovered inline');
+
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
 done_testing;
