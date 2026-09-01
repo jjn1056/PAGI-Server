@@ -191,7 +191,7 @@ subtest 'HTTP scope contains all required keys' => sub {
     is($captured_scope->{type}, 'http', 'scope.type is http');
     ok(ref $captured_scope->{pagi} eq 'HASH', 'scope.pagi is a hashref');
     is($captured_scope->{pagi}{version}, '0.5', 'scope.pagi.version is 0.5');
-    is($captured_scope->{pagi}{spec_version}, '0.4', 'HTTP scope reports spec_version 0.4');
+    is($captured_scope->{pagi}{spec_version}, '0.5', 'HTTP scope reports spec_version 0.5');
     is($captured_scope->{http_version}, '1.1', 'scope.http_version is 1.1');
     is($captured_scope->{method}, 'GET', 'scope.method is GET');
     is($captured_scope->{scheme}, 'http', 'scope.scheme is http');

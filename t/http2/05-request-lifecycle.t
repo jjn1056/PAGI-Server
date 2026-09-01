@@ -190,7 +190,7 @@ subtest 'GET request produces correct PAGI scope' => sub {
         my $scope = $scopes[0];
         is($scope->{type}, 'http', 'scope type is http');
         is($scope->{pagi}{version}, '0.5', 'h2 HTTP scope uses core PAGI version 0.5');
-        is($scope->{pagi}{spec_version}, '0.4', 'h2 HTTP scope reports spec_version 0.4');
+        is($scope->{pagi}{spec_version}, '0.5', 'h2 HTTP scope reports spec_version 0.5');
         is($scope->{method}, 'GET', 'method is GET');
         is($scope->{path}, '/hello', 'path is /hello');
         is($scope->{query_string}, 'foo=bar', 'query_string is foo=bar');

@@ -1177,7 +1177,7 @@ sub _h2_create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -1970,7 +1970,7 @@ sub _h2_create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => '2',
         scheme       => $self->_get_ws_scheme,
@@ -2379,7 +2379,7 @@ sub _h2_create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -4087,7 +4087,7 @@ sub _create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -5313,7 +5313,7 @@ sub _create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -5810,7 +5810,7 @@ sub _create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.4',
+            spec_version => '0.5',
         },
         http_version => $request->{http_version},
         scheme       => $self->_get_ws_scheme,

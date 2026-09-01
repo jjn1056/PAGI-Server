@@ -272,7 +272,7 @@ subtest 'Extended CONNECT creates websocket scope' => sub {
         my $scope = $scopes[0];
         is($scope->{type}, 'websocket', 'scope type is websocket');
         is($scope->{pagi}{version}, '0.5', 'h2 WebSocket scope uses core PAGI version 0.5');
-        is($scope->{pagi}{spec_version}, '0.4', 'h2 WebSocket scope reports spec_version 0.4');
+        is($scope->{pagi}{spec_version}, '0.5', 'h2 WebSocket scope reports spec_version 0.5');
         is($scope->{http_version}, '2', 'http_version is 2');
         is($scope->{path}, '/ws/chat', 'path is /ws/chat');
         is($scope->{scheme}, 'ws', 'scheme is ws (WebSocket, no TLS in test)');
