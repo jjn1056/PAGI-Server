@@ -2,6 +2,31 @@
 
 A real-time job queue dashboard demonstrating PAGI's async capabilities with HTTP, SSE, and WebSocket protocols working together.
 
+> **This copy is deliberately IO::Async-bound, and that is the point.** The
+> background worker tick, the WebSocket keepalive ping and the per-job delays
+> use `IO::Async::Timer::Periodic` and `::Countdown`, obtaining the loop via
+> `IO::Async::Loop` in application code. It therefore runs only under an
+> IO::Async-based server such as PAGI::Server.
+>
+> **It is not the recommended approach.** A PAGI application should name no
+> event loop. The loop-agnostic version of this same example lives in the spec
+> repository at `PAGI/examples/11-job-runner`, where every timer is a
+> `Future::IO->sleep` and the application runs unchanged under any conforming
+> server. Compare the two if you want the diff.
+>
+> It is kept here because binding the loop is a real choice with real
+> benefits, and pretending otherwise would be dishonest. Reaching directly for
+> `IO::Async::Timer::*` gives you the whole timer API -- rescheduling,
+> adjustable intervals, `IO::Async::Function`, the rest of the ecosystem --
+> rather than only the ability to sleep. If you know your deployment is
+> PAGI::Server and you accept the trade, this is what that looks like.
+>
+> The trade: the application no longer runs under a non-IO::Async PAGI server,
+> and the coupling does not stay in one file. Here it reaches five, because a
+> loop handed in at startup gets threaded wherever timing is needed. That
+> spread is the real cost, and it is easier to see in a worked example than to
+> describe.
+
 ## Running
 
 From the PAGI root directory:
