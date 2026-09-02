@@ -947,12 +947,20 @@ Valid levels (from least to most verbose):
 
 B<CLI:> C<--log-level debug>
 
+C<log_level> is the only control over how much the server says. In
+multi-worker mode it governs the workers as well as the master: a worker's
+messages carry a C<Worker N (pid):> prefix, and an unprefixed line is the
+master's.
+
 =item quiet => $bool
 
-Suppress all log output except errors. Default: 0. When true, C<_log>
-messages below the C<error> level are dropped regardless of C<log_level>;
-error-level messages are always emitted. Worker processes run quiet
-internally so only the master logs lifecycle events.
+B<Deprecated.> A spelling of C<< log_level => 'error' >>, kept so existing
+callers keep working. An explicit C<log_level> wins when both are supplied.
+
+In earlier releases this suppressed everything below C<error> B<regardless
+of> C<log_level>, and workers were started with it set -- so
+C<--log-level debug> combined with C<--workers> reported nothing from the
+processes actually serving traffic. Use C<< log_level => 'error' >> instead.
 
 B<CLI:> C<-q>, C<--quiet>
 
@@ -2366,8 +2374,11 @@ sub _init {
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
         $self->{access_log_format}
     );
-    $self->{quiet}            = delete $params->{quiet} // 0;
-    $self->{log_level}        = delete $params->{log_level} // 'info';
+    # quiet is a deprecated spelling of log_level => 'error'. An explicit
+    # log_level wins: a threshold must not be overridden by a second control.
+    my $quiet = delete $params->{quiet};
+    $self->{log_level}        = delete $params->{log_level}
+                             // ($quiet ? 'error' : 'info');
     # Validate log level
     my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
     die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
@@ -2504,7 +2515,12 @@ sub configure {
         );
     }
     if (exists $params{quiet}) {
-        $self->{quiet} = delete $params{quiet};
+        # Deprecated spelling of log_level => 'error'; ignored when log_level
+        # is supplied in the same call, which is the control that wins.
+        my $quiet = delete $params{quiet};
+        if ($quiet && !exists $params{log_level}) {
+            $params{log_level} = 'error';
+        }
     }
     if (exists $params{log_level}) {
         my $level = delete $params{log_level};
@@ -2583,7 +2599,11 @@ sub _log {
 
     my $level_num = $_LOG_LEVELS{$level} // 2;
     return if $level_num < $self->{_log_level_num};
-    return if $self->{quiet} && $level ne 'error';
+
+    # Workers and the master share one destination, so a worker's messages say
+    # which process they came from. An unprefixed line is the master's.
+    $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker};
+
     warn "$msg\n";
 }
 
@@ -3039,12 +3059,12 @@ async sub _listen_singleworker {
         weaken($weak_self);
         $self->loop->watch_signal(HUP => sub {
             $weak_self->_log(warn => "Received HUP signal (graceful restart only works in multi-worker mode)")
-                if $weak_self && !$weak_self->{quiet};
+                if $weak_self;
         });
 
         $self->loop->watch_signal(USR2 => sub {
             $weak_self->_log(warn => "Received USR2 signal (hot restart only works in multi-worker mode)")
-                if $weak_self && !$weak_self->{quiet};
+                if $weak_self;
         });
     }
 
@@ -3815,7 +3835,6 @@ sub _run_as_worker {
         extensions      => $self->{extensions},
         access_log      => $self->{access_log},
         log_level       => $self->{log_level},
-        quiet           => 1,  # Workers should be quiet
         timeout         => $self->{timeout},
         max_header_size  => $self->{max_header_size},
         max_header_count => $self->{max_header_count},
@@ -3872,7 +3891,7 @@ sub _run_as_worker {
                     $loop->stop;
                 })->on_fail(sub {
                     my ($error) = @_;
-                    $worker_server->_log(error => "Worker shutdown error: $error");
+                    $worker_server->_log(error => "shutdown error: $error");
                     $loop->stop;  # Still stop even on error
                 })
             );
@@ -4159,14 +4178,14 @@ sub _on_request_complete {
     if ($self->{_request_count} >= $self->{max_requests}) {
         return if $self->{_max_requests_shutdown_triggered};  # Prevent duplicate shutdowns
         $self->{_max_requests_shutdown_triggered} = 1;
-        $self->_log(info => "Worker $$: reached max_requests ($self->{max_requests}), shutting down");
+        $self->_log(info => "reached max_requests ($self->{max_requests}), shutting down");
         # Initiate graceful shutdown (finish current connections, then exit)
         $self->adopt_future(
             $self->shutdown->on_done(sub {
                 $self->loop->stop;
             })->on_fail(sub {
                 my ($error) = @_;
-                $self->_log(error => "Worker $$: max_requests shutdown error: $error");
+                $self->_log(error => "max_requests shutdown error: $error");
                 $self->loop->stop;  # Still stop even on error
             })
         );
