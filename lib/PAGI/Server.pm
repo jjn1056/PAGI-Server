@@ -952,6 +952,40 @@ multi-worker mode it governs the workers as well as the master: a worker's
 messages carry a C<Worker N (pid):> prefix, and an unprefixed line is the
 master's.
 
+=item logger => $coderef
+
+Where the server's own diagnostics go. Receives one hashref per message:
+
+    PAGI::Server->new(
+        app    => $app,
+        logger => sub {
+            my ($event) = @_;   # { level, message, category }
+            $log_dispatch->log(
+                level   => $event->{level} eq 'fatal' ? 'critical' : $event->{level},
+                message => "[$event->{category}] $event->{message}",
+            );
+        },
+    );
+
+C<level> is one of C<debug>, C<info>, C<warn>, C<error>, C<fatal> -- the five
+L<PSGI> and Rack settled on. C<message> carries no trailing newline.
+C<category> is C<PAGI::Server>.
+
+A coderef rather than a logging object on purpose: frameworks disagree about
+level names -- Log::Dispatch has no C<fatal> and silently discards a message
+sent at that level -- so the closure is where the translation belongs.
+
+Default: emit C<< $event->{message} >> to C<STDERR> with a trailing newline,
+which is what the server did before the destination was replaceable. Messages
+below C<log_level> never reach the sink at all.
+
+B<This logger is deliberately not published into the request scope.> It is
+the operator's channel, filtered by the operator's C<log_level>; an
+application's diagnostics should not disappear because someone set
+C<--log-level error> to quiet the server down. Applications and middleware
+have their own arrangements -- see L<PAGI::Tools> -- and a runner that wants
+one destination for both can pass the same coderef to each.
+
 =item quiet => $bool
 
 B<Deprecated.> A spelling of C<< log_level => 'error' >>, kept so existing
@@ -2374,6 +2408,9 @@ sub _init {
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
         $self->{access_log_format}
     );
+    $self->{logger}           = delete $params->{logger};
+    die "Invalid logger - must be a coderef taking one hashref\n"
+        if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
     # quiet is a deprecated spelling of log_level => 'error'. An explicit
     # log_level wins: a threshold must not be overridden by a second control.
     my $quiet = delete $params->{quiet};
@@ -2514,6 +2551,12 @@ sub configure {
             $self->{access_log_format}
         );
     }
+    if (exists $params{logger}) {
+        my $logger = delete $params{logger};
+        die "Invalid logger - must be a coderef taking one hashref\n"
+            if defined $logger && ref($logger) ne 'CODE';
+        $self->{logger} = $logger;
+    }
     if (exists $params{quiet}) {
         # Deprecated spelling of log_level => 'error'; ignored when log_level
         # is supplied in the same call, which is the control that wins.
@@ -2591,8 +2634,14 @@ sub configure {
     $self->SUPER::configure(%params);
 }
 
-# Log levels: debug=1, info=2, warn=3, error=4
-my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4);
+# Log levels: debug=1, info=2, warn=3, error=4, fatal=5.
+# fatal is sortable but is not a valid log_level: a fatal threshold would
+# silence errors. It exists so the five levels PSGI and Rack converged on can
+# be handed to a sink unchanged.
+my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
+
+# Emits exactly what the server emitted before the destination was replaceable.
+my $_DEFAULT_LOGGER = sub { warn "$_[0]{message}\n" };
 
 sub _log {
     my ($self, $level, $msg) = @_;
@@ -2604,7 +2653,11 @@ sub _log {
     # which process they came from. An unprefixed line is the master's.
     $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker};
 
-    warn "$msg\n";
+    ($self->{logger} // $_DEFAULT_LOGGER)->({
+        level    => $level,
+        message  => $msg,
+        category => 'PAGI::Server',
+    });
 }
 
 # Returns a human-readable TLS status string for the startup banner
