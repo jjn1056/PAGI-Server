@@ -194,7 +194,7 @@ via the C<server_options> hashref (see L</load_server>).
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
     --group GROUP       Run as specified group (after binding)
-    -q, --quiet         Suppress startup messages
+    -q, --quiet         Report errors only (shorthand for --log-level error)
     --default-middleware  Toggle mode middleware (default: on)
     -v, --version       Show version info
     --help              Show help
@@ -219,6 +219,12 @@ F</dev/null> and every diagnostic in the process is discarded.
 Note that C<--access-log> is a separate destination covering request records
 only, and that it is disabled by default in production mode, so a daemonized
 production server with neither option configured writes no log output at all.
+
+How much is said is governed by one threshold. C<-q> / C<--quiet> is
+shorthand for the C<error> level. Where the server being run offers a
+C<--log-level> option, the runner's own messages answer to it as well, so a
+single flag covers both; an explicit level wins over C<-q>. A server that
+has no such option simply leaves the runner on its default.
 
 =head3 Server-Specific Options
 
@@ -469,11 +475,10 @@ sub prepare_app {
     if ($use_middleware && $self->mode eq 'development') {
         if (eval { require PAGI::Middleware::Lint; 1 }) {
             $app = PAGI::Middleware::Lint->new(strict => 1)->wrap($app);
-            warn "PAGI development mode - Lint middleware enabled\n"
-                unless $self->{quiet};
+            $self->_log(info => 'PAGI development mode - Lint middleware enabled');
         }
-        elsif (!$self->{quiet}) {
-            warn "PAGI development mode - install PAGI-Tools for Lint middleware\n";
+        else {
+            $self->_log(info => 'PAGI development mode - install PAGI-Tools for Lint middleware');
         }
     }
 
@@ -658,8 +663,8 @@ sub _configure_future_io {
 
     if ($configured) {
         # Report in non-production mode
-        if ($self->mode ne 'production' && !$self->{quiet}) {
-            warn "Future::IO configured for IO::Async\n";
+        if ($self->mode ne 'production') {
+            $self->_log(info => 'Future::IO configured for IO::Async');
         }
     }
     # If Future::IO::Impl::IOAsync not installed, that's fine - user just
@@ -746,7 +751,7 @@ sub _parse_app_args {
             $result{$1} = $2;
         }
         else {
-            warn "Ignoring argument without '=': $arg\n";
+            $self->_log(warn => "Ignoring argument without '=': $arg");
         }
     }
     return %result;
@@ -773,7 +778,7 @@ Common Options (handled by Runner):
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
     --group GROUP       Run as specified group (after binding)
-    -q, --quiet         Suppress startup messages
+    -q, --quiet         Report errors only (shorthand for --log-level error)
     --no-default-middleware  Disable mode-based middleware
     -v, --version       Show version info
     --help              Show this help
@@ -840,6 +845,29 @@ sub _daemonize {
 # Opens the error log named by --error-log and keeps the handle on the runner.
 # Called before any fork so the descriptor survives daemonizing, exactly as the
 # access log's handle does.
+# Runner keeps its own threshold rather than borrowing the server's logger,
+# which would tie it to one server class. It reads log_level out of
+# server_options when the operator asked for one -- read-only, optional, and
+# nothing new is passed down, so a server that has no such option is
+# unaffected and Runner simply keeps its default.
+my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
+
+sub _log_level_num {
+    my ($self) = @_;
+
+    my $level = $self->{server_options}{log_level}
+             // ($self->{quiet} ? 'error' : 'info');
+
+    return $_LOG_LEVELS{$level} // $_LOG_LEVELS{info};
+}
+
+sub _log {
+    my ($self, $level, $msg) = @_;
+
+    return if ($_LOG_LEVELS{$level} // 2) < $self->_log_level_num;
+    warn "$msg\n";
+}
+
 sub _open_error_log {
     my ($self) = @_;
 
