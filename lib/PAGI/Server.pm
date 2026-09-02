@@ -2660,6 +2660,39 @@ sub _log {
     });
 }
 
+# The spec distribution's version, or undef. PAGI::Server has no runtime
+# dependency on PAGI, so the banner names it only when it is actually there.
+# Kept separate so a test can make the spec appear absent.
+sub _pagi_spec_version { return eval { require PAGI; PAGI->VERSION } }
+
+# The two banner lines: what is running and where, then what it can do. One
+# builder for all four listen shapes, which is what stops them drifting apart.
+sub _startup_banner {
+    my ($self, $where, $per_worker) = @_;
+
+    my $identity = 'PAGI::Server ' . (__PACKAGE__->VERSION // 'unknown');
+    if (defined(my $spec = $self->_pagi_spec_version)) {
+        $identity .= " (PAGI $spec)";
+    }
+
+    my $loop_class = ref($self->loop);
+    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
+
+    my $max_conn = $self->effective_max_connections;
+    $max_conn .= '/worker' if $per_worker;
+
+    return (
+        "$identity listening on $where",
+        sprintf('  loop %s, max_conn %s, http2 %s, tls %s, future_xs %s',
+            $loop_class,
+            $max_conn,
+            $self->_http2_status_string,
+            $self->_tls_status_string,
+            $self->_future_xs_status_string,
+        ),
+    );
+}
+
 # Returns a human-readable TLS status string for the startup banner
 sub _tls_status_string {
     my ($self) = @_;
@@ -3121,13 +3154,6 @@ async sub _listen_singleworker {
         });
     }
 
-    my $loop_class = ref($self->loop);
-    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
-    my $max_conn = $self->effective_max_connections;
-    my $tls_status = $self->_tls_status_string;
-    my $http2_status = $self->_http2_status_string;
-    my $future_xs_status = $self->_future_xs_status_string;
-
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
         $self->_log(warn =>
@@ -3138,25 +3164,14 @@ async sub _listen_singleworker {
 
     # Log listening banner
     my $scheme = $self->{tls_enabled} ? 'https' : 'http';
-    if (@listen_entries == 1) {
-        my $spec = $listen_entries[0]{spec};
-        if ($spec->{type} eq 'unix') {
-            $self->_log(info => "PAGI Server listening on unix:$spec->{path} (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
-        } else {
-            $self->_log(info => "PAGI Server listening on $scheme://$spec->{host}:$spec->{port}/ (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
-        }
-    } else {
-        my @addrs;
-        for my $entry (@listen_entries) {
-            my $s = $entry->{spec};
-            if ($s->{type} eq 'unix') {
-                push @addrs, "unix:$s->{path}";
-            } else {
-                push @addrs, "$scheme://$s->{host}:$s->{port}/";
-            }
-        }
-        $self->_log(info => "PAGI Server listening on: " . join(', ', @addrs) . " (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
+    my @addrs;
+    for my $entry (@listen_entries) {
+        my $s = $entry->{spec};
+        push @addrs, $s->{type} eq 'unix'
+            ? "unix:$s->{path}"
+            : "$scheme://$s->{host}:$s->{port}/";
     }
+    $self->_log(info => $_) for $self->_startup_banner(join(', ', @addrs));
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
@@ -3320,13 +3335,7 @@ sub _listen_multiworker {
     }
 
     my $scheme = $self->{ssl} ? 'https' : 'http';
-    my $loop_class = ref($self->loop);
-    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
     my $mode = $reuseport ? 'reuseport' : 'shared-socket';
-    my $max_conn = $self->effective_max_connections;
-    my $tls_status = $self->_tls_status_string;
-    my $http2_status = $self->_http2_status_string;
-    my $future_xs_status = $self->_future_xs_status_string;
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
@@ -3347,8 +3356,8 @@ sub _listen_multiworker {
             push @addrs, "$scheme://$s->{host}:$port/";
         }
     }
-    my $addr_str = join(', ', @addrs);
-    $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $addr_str with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
+    my $where = join(', ', @addrs) . " with $workers workers ($mode)";
+    $self->_log(info => $_) for $self->_startup_banner($where, 'per worker');
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
