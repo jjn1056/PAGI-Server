@@ -54,7 +54,7 @@ sub create_test_server {
         app   => $args{app} // sub { },
         host  => '127.0.0.1',
         port  => 0,
-        quiet => 1,
+        log_level => 'warn',
         http2 => 1,
         %args,
     );

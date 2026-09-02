@@ -35,7 +35,7 @@ my $loop = IO::Async::Loop->new;
 sub create_server {
     my ($app) = @_;
     my $server = PAGI::Server->new(
-        app => $app, host => '127.0.0.1', port => 0, quiet => 1, shutdown_timeout => 1,
+        app => $app, host => '127.0.0.1', port => 0, log_level => 'warn', shutdown_timeout => 1,
     );
     $loop->add($server);
     $server->listen->get;

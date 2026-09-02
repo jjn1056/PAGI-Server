@@ -78,6 +78,9 @@ sub new {
         # Connection reference for lazy Future creation (will be weakened)
         _connection => $args{connection},
 
+        # Not weakened: diagnostics must survive the connection going away.
+        _server     => $args{server},
+
         # State (scalar refs - for internal consistency)
         _connected => \$connected,
         _reason    => \$reason,
@@ -312,7 +315,7 @@ sub on_disconnect {
     return if $self->{_completed};
 
     eval { $cb->(${$self->{_reason}}) };
-    warn "on_disconnect callback error: $@" if $@;
+    $self->_log(error => "on_disconnect callback error: $@") if $@;
 }
 
 =head2 on_complete
@@ -357,7 +360,7 @@ sub on_complete {
     return unless $self->{_completed};
 
     eval { $cb->() };
-    warn "on_complete callback error: $@" if $@;
+    $self->_log(error => "on_complete callback error: $@") if $@;
 }
 
 =head2 _mark_disconnected
@@ -403,7 +406,7 @@ sub _mark_disconnected {
     # 3. Invoke callbacks
     for my $cb (@{$self->{_callbacks}}) {
         eval { $cb->(${$self->{_reason}}) };
-        warn "on_disconnect callback error: $@" if $@;
+        $self->_log(error => "on_disconnect callback error: $@") if $@;
     }
 
     # 4. Clear callbacks to release references. The request ended abnormally,
@@ -444,12 +447,24 @@ sub _mark_complete {
     # Invoke completion callbacks (no reason argument).
     for my $cb (@{$self->{_complete_callbacks}}) {
         eval { $cb->() };
-        warn "on_complete callback error: $@" if $@;
+        $self->_log(error => "on_complete callback error: $@") if $@;
     }
 
     # Clear both lists to release references.
     $self->{_complete_callbacks} = [];
     $self->{_callbacks}          = [];
+}
+
+# The server is passed in rather than reached for through _connection, which is
+# weakened and may already be gone by the time a callback throws.
+sub _log {
+    my ($self, $level, $msg) = @_;
+
+    my $server = $self->{_server};
+    return $server->_log($level, $msg, __PACKAGE__) if $server;
+
+    warn "$msg\n";
+    return;
 }
 
 1;

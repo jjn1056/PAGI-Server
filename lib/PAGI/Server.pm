@@ -2301,6 +2301,23 @@ B<Graceful shutdown for maintenance:>
 sub _init {
     my ($self, $params) = @_;
 
+    # Establish the log destination and threshold before anything else, so
+    # a problem found while validating the remaining parameters can be
+    # reported through the channel the caller configured.
+    $self->{logger}           = delete $params->{logger};
+    die "Invalid logger - must be a coderef taking one hashref\n"
+        if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
+    # quiet is a deprecated spelling of log_level => 'error'. An explicit
+    # log_level wins: a threshold must not be overridden by a second control.
+    my $quiet = delete $params->{quiet};
+    $self->{log_level}        = delete $params->{log_level}
+                             // ($quiet ? 'error' : 'info');
+    # Validate log level
+    my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
+    die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
+        unless $valid_levels{$self->{log_level}};
+    $self->{_log_level_num}   = $valid_levels{$self->{log_level}};
+
     my $app = delete $params->{app};
     die "app is required" unless defined $app;
     $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
@@ -2319,7 +2336,7 @@ sub _init {
     if (my $ssl = $self->{ssl}) {
         if ($self->{disable_tls}) {
             # Skip TLS setup and cert validation — ssl config is stored but not applied
-            warn "PAGI::Server: TLS disabled via disable_tls option, ssl config ignored\n";
+            $self->_log(warn => "PAGI::Server: TLS disabled via disable_tls option, ssl config ignored");
         } else {
             if (my $cert = $ssl->{cert_file}) {
                 die "SSL certificate file not found: $cert\n" unless -e $cert;
@@ -2408,19 +2425,6 @@ sub _init {
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
         $self->{access_log_format}
     );
-    $self->{logger}           = delete $params->{logger};
-    die "Invalid logger - must be a coderef taking one hashref\n"
-        if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
-    # quiet is a deprecated spelling of log_level => 'error'. An explicit
-    # log_level wins: a threshold must not be overridden by a second control.
-    my $quiet = delete $params->{quiet};
-    $self->{log_level}        = delete $params->{log_level}
-                             // ($quiet ? 'error' : 'info');
-    # Validate log level
-    my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
-    die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
-        unless $valid_levels{$self->{log_level}};
-    $self->{_log_level_num}   = $valid_levels{$self->{log_level}};
     $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
     $self->{max_header_count} = delete $params->{max_header_count} // 100;  # Max number of headers
@@ -2644,7 +2648,7 @@ my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
 my $_DEFAULT_LOGGER = sub { warn "$_[0]{message}\n" };
 
 sub _log {
-    my ($self, $level, $msg) = @_;
+    my ($self, $level, $msg, $category) = @_;
 
     my $level_num = $_LOG_LEVELS{$level} // 2;
     return if $level_num < $self->{_log_level_num};
@@ -2656,7 +2660,9 @@ sub _log {
     ($self->{logger} // $_DEFAULT_LOGGER)->({
         level    => $level,
         message  => $msg,
-        category => 'PAGI::Server',
+        # Classes that log through the server name themselves, so a sink can
+        # separate connection noise from lifecycle events.
+        category => $category // 'PAGI::Server',
     });
 }
 
@@ -3703,7 +3709,7 @@ sub _hot_restart {
             : ();
         exec($^X, $0, @args)
             or do {
-                warn "Hot restart exec failed: $!\n";
+                $self->_log(error => "Hot restart exec failed: $!");
                 POSIX::_exit(1);
             };
     }

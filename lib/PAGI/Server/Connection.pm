@@ -61,6 +61,7 @@ my %H2_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 }
 # not something a trailer block may then contain. A trailer-borne 'te'
 # tuple is therefore stripped regardless of its value.
 sub _h2_strip_connection_headers {
+    my $self = shift;
     my ($headers, $in_trailers) = @_;
     my $context = $in_trailers ? 'trailers' : 'response';
     my @kept;
@@ -87,7 +88,7 @@ sub _h2_strip_connection_headers {
                     next;
                 }
             }
-            warn "PAGI: connection-specific header '$name' stripped from HTTP/2 $context (RFC 9113)\n";
+            $self->_log(warn => "PAGI: connection-specific header '$name' stripped from HTTP/2 $context (RFC 9113)");
             next;
         }
         push @kept, $h;
@@ -111,12 +112,13 @@ my %H1_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 } qw(transfer-encoding connect
 # removed, warning once per stripped occurrence (not deduplicated by name --
 # two 'connection' headers warn twice). Does not mutate $headers.
 sub _h1_strip_connection_headers {
+    my $self = shift;
     my ($headers) = @_;
     my @kept;
     for my $h (@$headers) {
         my ($name, $value) = @$h;
         if ($H1_CONNECTION_SPECIFIC_HEADER{lc $name}) {
-            warn "PAGI: connection-specific header '$name' stripped from HTTP/1.1 response\n";
+            $self->_log(warn => "PAGI: connection-specific header '$name' stripped from HTTP/1.1 response");
             next;
         }
         push @kept, $h;
@@ -403,7 +405,7 @@ sub start {
             };
             if (my $error = $@) {
                 # Log the error and close the connection gracefully
-                warn "PAGI connection error: $error";
+                $self->_log(error => "PAGI connection error: $error");
                 return 0 unless $weak_self;
                 $weak_self->_handle_disconnect_and_close('server_error');
             }
@@ -612,7 +614,7 @@ sub _h2_on_request {
     # in-flight request's accumulated state (body, receive_queue,
     # connection_state, seq_state).
     if ($self->{h2_streams}{$stream_id}) {
-        warn "PAGI::Server::Connection: ignoring duplicate HTTP/2 request dispatch for stream $stream_id (existing in-flight request would have been destroyed)\n";
+        $self->_log(warn => "PAGI::Server::Connection: ignoring duplicate HTTP/2 request dispatch for stream $stream_id (existing in-flight request would have been destroyed)");
         return;
     }
 
@@ -1061,9 +1063,9 @@ sub _h2_dispatch_stream {
                 # response, synthesize a 500 (only possible while no response
                 # has begun). A clean return that produced no response is a
                 # protocol error, same as a throw.
-                warn $error
-                    ? "PAGI application error (HTTP/2 stream $stream_id): $error\n"
-                    : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)\n";
+                $self->_log(error => $error
+                    ? "PAGI application error (HTTP/2 stream $stream_id): $error"
+                    : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)");
                 # Mark BEFORE the response settles: submitting it (below) can
                 # complete the stream synchronously once flushed, and
                 # _h2_on_close would then mark this same connection_state
@@ -1105,9 +1107,9 @@ sub _h2_dispatch_stream {
                 # still matches as a contiguous substring.
                 my $trailers_note = (($stream_state->{seq_state} // '') eq 'awaiting_trailers')
                     ? ' (trailers were declared but never sent)' : '';
-                warn $error
-                    ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n"
-                    : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)$trailers_note\n";
+                $self->_log(error => $error
+                    ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error"
+                    : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)$trailers_note");
                 # Mark BEFORE the RST. _h2_on_close fires for our own RST
                 # too (as an abnormal close, since seq_state never reached
                 # 'complete') and would mark this same connection_state
@@ -1124,7 +1126,7 @@ sub _h2_dispatch_stream {
             elsif ($error) {
                 # Response already complete; cannot send a 500 or usefully
                 # reset a finished stream. Log only.
-                warn "PAGI application error after response started (HTTP/2 stream $stream_id): $error\n";
+                $self->_log(error => "PAGI application error after response started (HTTP/2 stream $stream_id): $error");
             }
         }
 
@@ -1168,6 +1170,7 @@ sub _h2_create_scope {
 
     my $connection_state = PAGI::Server::ConnectionState->new(
         connection => $self,
+        server     => $self->{server},
     );
     # Store on the stream-state so the send path can mark response_started on
     # this stream's own connection object (h2 multiplexes many streams).
@@ -1624,7 +1627,7 @@ sub _h2_create_send {
             # same as every response-header path; $in_trailers=1 drops the
             # response-only 'te: trailers' carve-out (RFC 9110 6.6.2 bans
             # connection-specific fields from trailers outright).
-            $trailer_headers = _h2_strip_connection_headers($trailer_headers, 1);
+            $trailer_headers = $weak_self->_h2_strip_connection_headers($trailer_headers, 1);
 
             my $ok;
             if ($data_eof_delivered) {
@@ -1823,7 +1826,7 @@ sub _h2_create_send {
             # RFC 9113 8.2.2 / design 13.3 — strips app-supplied connection,
             # transfer-encoding, etc. before this list reaches nghttp2 (also
             # covers the HEAD path below, which submits this same array).
-            @response_headers = @{ _h2_strip_connection_headers(\@response_headers) };
+            @response_headers = @{ $weak_self->_h2_strip_connection_headers(\@response_headers) };
             # Server-supplied Date header (HTTP/1.1 parity) — add if the app didn't.
             unless (grep { lc($_->[0]) eq 'date' } @response_headers) {
                 push @response_headers, ['date', $weak_self->{protocol}->format_date];
@@ -2207,7 +2210,7 @@ sub _h2_create_websocket_send {
             }
             # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
             # transfer-encoding, etc. before submission.
-            @headers = @{ _h2_strip_connection_headers(\@headers) };
+            @headers = @{ $weak_self->_h2_strip_connection_headers(\@headers) };
 
             $ss->{ws_accepted} = 1;
             $ss->{response_started} = 1;
@@ -2297,7 +2300,7 @@ sub _h2_create_websocket_send {
             ];
             # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
             # transfer-encoding, etc. before submission.
-            $ss->{ws_denial_headers} = _h2_strip_connection_headers($ss->{ws_denial_headers});
+            $ss->{ws_denial_headers} = $weak_self->_h2_strip_connection_headers($ss->{ws_denial_headers});
             $ss->{ws_denial_body} = '';
         }
         elsif ($type eq 'websocket.http.response.body') {
@@ -2623,7 +2626,7 @@ sub _h2_create_sse_send {
             }
             # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
             # transfer-encoding, etc. before submission.
-            @final_headers = @{ _h2_strip_connection_headers(\@final_headers) };
+            @final_headers = @{ $weak_self->_h2_strip_connection_headers(\@final_headers) };
             if (!$has_content_type) {
                 push @final_headers, ['content-type', 'text/event-stream'];
             }
@@ -2755,7 +2758,7 @@ sub _h2_create_sse_send {
             ];
             # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
             # transfer-encoding, etc. before submission.
-            $ss->{sse_decline_headers} = _h2_strip_connection_headers($ss->{sse_decline_headers});
+            $ss->{sse_decline_headers} = $weak_self->_h2_strip_connection_headers($ss->{sse_decline_headers});
             $ss->{sse_decline_body} = '';
         }
         elsif ($type eq 'sse.http.response.body') {
@@ -3922,7 +3925,7 @@ async sub _handle_request {
         # stream's connection_state is likewise marked complete before the
         # exception is even observed there.
         if ($self->{response_started} && (($self->{h1_seq} // '') eq 'complete')) {
-            warn "PAGI application error (after response complete): $error\n";
+            $self->_log(error => "PAGI application error (after response complete): $error");
             $self->_write_access_log;
             $self->{server}->_on_request_complete if $self->{server};
             if (my $conn_state = $self->{current_connection_state}) {
@@ -3936,10 +3939,10 @@ async sub _handle_request {
         # If response already started, we can't send error page (3.17)
         if ($self->{response_started}) {
             $self->_flush_pending_headers;   # don't lose a started response's headers
-            warn "PAGI application error (after response started): $error\n";
+            $self->_log(error => "PAGI application error (after response started): $error");
         } else {
             $self->_send_error_response(500, "Internal Server Error");
-            warn "PAGI application error: $error\n";
+            $self->_log(error => "PAGI application error: $error");
         }
         # Write access log before closing
         $self->_write_access_log;
@@ -3959,7 +3962,7 @@ async sub _handle_request {
     # and keep-alive logic below.
     if (!$self->{response_started}) {
         unless ($self->{closed}) {
-            warn "PAGI application returned without starting a response\n";
+            $self->_log(error => "PAGI application returned without starting a response");
             $self->_send_error_response(500, "Internal Server Error");
         }
         $self->_write_access_log;
@@ -4080,6 +4083,7 @@ sub _create_scope {
     # Uses lazy Future creation - Future only allocated if disconnect_future() is called
     my $connection_state = PAGI::Server::ConnectionState->new(
         connection => $self,
+        server     => $self->{server},
     );
     $self->{current_connection_state} = $connection_state;
 
@@ -4398,7 +4402,7 @@ sub _create_send {
             my $headers = $event->{headers} // [];
             # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
             # strip any app-supplied values before they reach the wire.
-            $headers = _h1_strip_connection_headers($headers);
+            $headers = $weak_self->_h1_strip_connection_headers($headers);
 
             # Check if we need chunked encoding (no Content-Length)
             my $has_content_length = 0;
@@ -4593,7 +4597,7 @@ sub _create_send {
             # just the PAGI spec's h1 response-header rule this strip
             # otherwise exists for. Strip at ingestion, same placement as
             # every h1 response-header site above.
-            my $trailer_headers = _h1_strip_connection_headers($event->{headers} // []);
+            my $trailer_headers = $weak_self->_h1_strip_connection_headers($event->{headers} // []);
 
             # Send final chunk + trailers (prepend any still-buffered headers).
             my $trailers = $weak_self->{_resp_pending} // '';
@@ -5051,7 +5055,7 @@ sub _extract_tls_info {
         }
     };
     if ($@) {
-        warn "TLS server certificate extraction error: $@\n";
+        $self->_log(warn => "TLS server certificate extraction error: $@");
     }
 
     # Get client certificate if provided
@@ -5094,7 +5098,7 @@ sub _extract_tls_info {
         }
     };
     if ($@) {
-        warn "TLS client certificate extraction error: $@\n";
+        $self->_log(warn => "TLS client certificate extraction error: $@");
     }
 
     $self->{tls_info} = $tls_info;
@@ -5154,7 +5158,7 @@ async sub _handle_sse_request {
         if (!$self->{sse_started}) {
             $self->_send_error_response(500, "Internal Server Error");
         }
-        warn "PAGI application error (SSE): $error\n";
+        $self->_log(error => "PAGI application error (SSE): $error");
         # An exception is not a clean end -- never keep the connection alive
         # after one, exactly as the plain HTTP request path does.
         $app_failed = 1;
@@ -5174,7 +5178,7 @@ async sub _handle_sse_request {
     # about to be discarded, so it is equally unanswerable.
     if (!$self->{sse_started} && !$self->{response_started}) {
         unless ($self->{closed}) {
-            warn "PAGI application returned without starting an SSE stream or a response\n";
+            $self->_log(error => "PAGI application returned without starting an SSE stream or a response");
             $self->_send_error_response(500, "Internal Server Error");
         }
         $self->_write_access_log;
@@ -5569,7 +5573,7 @@ sub _create_sse_send {
             my $headers = $event->{headers} // [];
             # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
             # strip any app-supplied values before they reach the wire.
-            $headers = _h1_strip_connection_headers($headers);
+            $headers = $weak_self->_h1_strip_connection_headers($headers);
 
             # Ensure Content-Type is text/event-stream
             my $has_content_type = 0;
@@ -5692,7 +5696,7 @@ sub _create_sse_send {
             ];
             # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
             # strip any app-supplied values before submission.
-            $weak_self->{sse_decline_headers} = _h1_strip_connection_headers($weak_self->{sse_decline_headers});
+            $weak_self->{sse_decline_headers} = $weak_self->_h1_strip_connection_headers($weak_self->{sse_decline_headers});
             $weak_self->{sse_decline_body} = '';
         }
         elsif ($type eq 'sse.http.response.body') {
@@ -5772,7 +5776,7 @@ async sub _handle_websocket_request {
         if (!$self->{websocket_accepted}) {
             $self->_send_error_response(500, "Internal Server Error");
         }
-        warn "PAGI application error (WebSocket): $error\n";
+        $self->_log(error => "PAGI application error (WebSocket): $error");
     }
 
     # Write access log entry (logs at connection close with total duration)
@@ -6002,7 +6006,7 @@ sub _create_websocket_send {
             # app-supplied connection/transfer-encoding value can't duplicate
             # or contradict it on the wire.
             if (my $extra_headers = $event->{headers}) {
-                $extra_headers = _h1_strip_connection_headers($extra_headers);
+                $extra_headers = $weak_self->_h1_strip_connection_headers($extra_headers);
                 for my $h (@$extra_headers) {
                     my ($name, $value) = @$h;
                     $name = _validate_header_name($name);
@@ -6081,7 +6085,7 @@ sub _create_websocket_send {
             ];
             # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
             # strip any app-supplied values before submission.
-            $weak_self->{ws_denial_headers} = _h1_strip_connection_headers($weak_self->{ws_denial_headers});
+            $weak_self->{ws_denial_headers} = $weak_self->_h1_strip_connection_headers($weak_self->{ws_denial_headers});
             $weak_self->{ws_denial_body} = '';
         }
         elsif ($type eq 'websocket.http.response.body') {
@@ -6453,6 +6457,19 @@ async sub _send_fh_response {
     if ($chunked) {
         $stream->write("0\r\n\r\n");
     }
+}
+
+# Diagnostics go through the server so log_level governs them and a replaced
+# sink sees them. A connection can outlive its server reference during
+# shutdown, so falling back to STDERR is a real path, not a formality.
+sub _log {
+    my ($self, $level, $msg) = @_;
+
+    my $server = $self->{server};
+    return $server->_log($level, $msg, __PACKAGE__) if $server;
+
+    warn "$msg\n";
+    return;
 }
 
 1;
