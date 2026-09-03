@@ -664,7 +664,7 @@ sub _configure_future_io {
     if ($configured) {
         # Report in non-production mode
         if ($self->mode ne 'production') {
-            $self->_log(info => 'Future::IO configured for IO::Async');
+            $self->_log(debug => 'Future::IO configured for IO::Async');
         }
     }
     # If Future::IO::Impl::IOAsync not installed, that's fine - user just

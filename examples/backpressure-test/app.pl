@@ -158,7 +158,8 @@ async sub app {
 
     # Only handle HTTP
     if ($scope->{type} ne 'http') {
-        die "Unsupported scope type: $scope->{type}";
+        # A scope this app does not serve. Returning is the clean decline.
+        return;
     }
 
     my $path = $scope->{path};

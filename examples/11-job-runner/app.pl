@@ -42,7 +42,8 @@ my $app = async sub  {
         await $sse_handler->($scope, $receive, $send);
     }
     else {
-        die "Unsupported scope type: $type";
+        # A scope this app does not serve. Returning is the clean decline.
+        return;
     }
 };
 

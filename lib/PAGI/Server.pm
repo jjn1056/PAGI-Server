@@ -973,7 +973,38 @@ C<category> is C<PAGI::Server>.
 
 A coderef rather than a logging object on purpose: frameworks disagree about
 level names -- Log::Dispatch has no C<fatal> and silently discards a message
-sent at that level -- so the closure is where the translation belongs.
+sent at that level -- so the closure is where the translation belongs:
+
+    use Log::Dispatch;
+
+    my $log = Log::Dispatch->new(outputs => [
+        ['Screen', min_level => 'debug',   newline => 1],
+        ['File',   min_level => 'warning', newline => 1,
+                   filename  => '/var/log/pagi/server.log', mode => 'append'],
+    ]);
+
+    my %LEVEL = (fatal => 'critical');   # Log::Dispatch is syslog-named
+
+    PAGI::Server->new(
+        app       => $app,
+        log_level => 'debug',
+        logger    => sub {
+            my ($event) = @_;
+            $log->log(
+                level   => $LEVEL{ $event->{level} } // $event->{level},
+                message => "[$event->{category}] $event->{message}",
+            );
+        },
+    );
+
+Note the two thresholds doing different jobs. C<log_level> is the server's:
+below it, nothing reaches the sink at all. C<min_level> on each output is the
+operator's: the screen takes everything, the file takes problems only. The
+server's threshold is a floor, not a policy.
+
+C<< examples/13-custom-logging >> is a runnable version of this, along with a
+structured-JSON variant. If you only want the diagnostics in a file rather than
+reshaped, C<< pagi-server --error-log FILE >> does that without a runner script.
 
 Default: emit C<< $event->{message} >> to C<STDERR> with a trailing newline,
 which is what the server did before the destination was replaceable. Messages
@@ -2653,6 +2684,11 @@ sub _log {
     my $level_num = $_LOG_LEVELS{$level} // 2;
     return if $level_num < $self->{_log_level_num};
 
+    # The payload promises a message with no trailing newline, but most of
+    # these interpolate $@ or $! from an ordinary die "...\n". Make the promise
+    # true here rather than asking every sink author to chomp.
+    $msg =~ s/\n+\z//;
+
     # Workers and the master share one destination, so a worker's messages say
     # which process they came from. An unprefixed line is the master's.
     $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker};
@@ -3131,10 +3167,16 @@ async sub _listen_singleworker {
     unless (WIN32) {
         my $shutdown_triggered = 0;
         my $shutdown_handler = sub {
+            my ($signal) = @_;
             return if $shutdown_triggered;
             $shutdown_triggered = 1;
+            # Say so. A graceful stop that prints nothing is indistinguishable
+            # from the process being killed, which is the one thing an operator
+            # watching a terminal wants to be able to tell apart.
+            $self->_log(info => "Received $signal, shutting down");
             $self->adopt_future(
                 $self->shutdown->on_done(sub {
+                    $self->_log(info => 'Shutdown complete');
                     $self->loop->stop;
                 })->on_fail(sub {
                     my ($error) = @_;
@@ -3143,8 +3185,8 @@ async sub _listen_singleworker {
                 })
             );
         };
-        $self->loop->watch_signal(TERM => $shutdown_handler);
-        $self->loop->watch_signal(INT => $shutdown_handler);
+        $self->loop->watch_signal(TERM => sub { $shutdown_handler->('TERM') });
+        $self->loop->watch_signal(INT  => sub { $shutdown_handler->('INT')  });
 
         # HUP in single-worker mode just warns (graceful restart requires multi-worker)
         my $weak_self = $self;
@@ -3162,7 +3204,7 @@ async sub _listen_singleworker {
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(warn =>
+        $self->_log(debug =>
             "access_log is a terminal; this may impact performance. " .
             "Consider redirecting to a file or setting access_log => undef for benchmarks."
         );
@@ -3345,7 +3387,7 @@ sub _listen_multiworker {
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(warn =>
+        $self->_log(debug =>
             "access_log is a terminal; this may impact performance. " .
             "Consider redirecting to a file or setting access_log => undef for benchmarks."
         );
@@ -3385,8 +3427,8 @@ sub _listen_multiworker {
     # Set up signal handlers for parent process AFTER forking
     # Note: Windows doesn't support Unix signals, so this is skipped there
     unless (WIN32) {
-        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
-        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
+        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown('TERM') });
+        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown('INT')  });
         $loop->watch_signal(HUP => sub { $self->_graceful_restart });
         $loop->watch_signal(TTIN => sub { $self->_increase_workers });
         $loop->watch_signal(TTOU => sub { $self->_decrease_workers });
@@ -3565,11 +3607,16 @@ sub _collect_inherited_fds {
 
 # Initiate graceful shutdown in multi-worker mode
 sub _initiate_multiworker_shutdown {
-    my ($self) = @_;
+    my ($self, $signal) = @_;
 
     return if $self->{shutting_down};
     $self->{shutting_down} = 1;
     $self->{running} = 0;
+
+    # See the single-worker handler: a silent graceful stop cannot be told
+    # apart from the process being killed.
+    $self->_log(info => "Received $signal, shutting down $self->{workers} workers")
+        if defined $signal;
 
     # Stop heartbeat monitoring — shutdown escalation timer handles stuck workers
     if ($self->{_heartbeat_check_timer}) {
@@ -4369,8 +4416,14 @@ async sub _run_lifespan_startup {
             else {
                 # auto: continue without lifespan. This matches Uvicorn/Hypercorn
                 # "auto"; an app may decline by returning on the lifespan scope or
-                # by dying on it. Include the raised message so a genuine startup
-                # failure masquerading as a decline is still visible.
+                # by dying on it.
+                #
+                # Report it either way: an application whose lifespan handler is
+                # silently not being reached has nothing else to tell it apart from
+                # one that never had a handler. The raised message is included when
+                # there is one, because a genuine startup failure can wear a decline
+                # as a disguise -- but an application that declines by returning
+                # says so cleanly, without dressing an ordinary boot as an error.
                 my $msg = "Lifespan not supported, continuing without it";
                 $msg .= " (application raised: $detail)" if defined $detail;
                 $self->_log(info => $msg);

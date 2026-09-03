@@ -9,7 +9,10 @@ use Future::AsyncAwait;
 async sub app {
     my ($scope, $receive, $send) = @_;
 
-    die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
+    # A scope this app does not serve -- lifespan, most often. Returning is
+    # the clean decline; dying is also legal but makes an ordinary startup
+    # look like a failure in the server's log.
+    return if $scope->{type} ne 'http';
 
     # Drain request body if present
     while (1) {

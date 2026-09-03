@@ -31,7 +31,10 @@ async sub app {
         return;
     }
 
-    die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+    # A scope this app does not serve -- lifespan, most often. Returning is
+    # the clean decline; dying is also legal but makes an ordinary startup
+    # look like a failure in the server's log.
+    return unless $scope->{type} eq 'http';
     await drain_body($receive);
 
     my $tls = $scope->{extensions}{tls};
