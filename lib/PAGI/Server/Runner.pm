@@ -10,6 +10,7 @@ use Pod::Usage;
 use File::Spec;
 use POSIX qw(setsid);
 use FindBin ();
+use IO::Handle ();
 
 use PAGI::Server::AppNormalizer ();
 
@@ -148,6 +149,7 @@ sub new {
         loop              => $args{loop},
         access_log        => $args{access_log},
         no_access_log     => $args{no_access_log}     // 0,
+        error_log         => $args{error_log},
         daemonize         => $args{daemonize}         // 0,
         pid_file          => $args{pid_file},
         user              => $args{user},
@@ -188,10 +190,11 @@ via the C<server_options> hashref (see L</load_server>).
     -D, --daemonize     Run as background daemon
     --access-log FILE   Access log file (default: STDERR)
     --no-access-log     Disable access logging
+    --error-log FILE    Diagnostic log file (default: STDERR)
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
     --group GROUP       Run as specified group (after binding)
-    -q, --quiet         Suppress startup messages
+    -q, --quiet         Report errors only (shorthand for --log-level error)
     --default-middleware  Toggle mode middleware (default: on)
     -v, --version       Show version info
     --help              Show help
@@ -199,6 +202,29 @@ via the C<server_options> hashref (see L</load_server>).
 Example with C<-e> and C<-M>:
 
     pagi-server -MPAGI::App::File -e 'PAGI::App::File->new(root => ".")'
+
+=head3 Diagnostic Output
+
+Diagnostics -- the server's own log messages, and the warnings emitted by
+application and middleware code -- go to C<STDERR> by default.
+
+C<--error-log FILE> sends them to a file instead. It is opened immediately
+after the command line is parsed -- before the application is loaded and
+before any listener is bound -- so it captures app-loading failures and bind
+errors as well as everything the server says once it is running. The
+descriptor is inherited across both C<--daemonize> forks, so the destination
+survives daemonizing; without it, daemonizing reopens C<STDERR> on
+F</dev/null> and every diagnostic in the process is discarded.
+
+Note that C<--access-log> is a separate destination covering request records
+only, and that it is disabled by default in production mode, so a daemonized
+production server with neither option configured writes no log output at all.
+
+How much is said is governed by one threshold. C<-q> / C<--quiet> is
+shorthand for the C<error> level. Where the server being run offers a
+C<--log-level> option, the runner's own messages answer to it as well, so a
+single flag covers both; an explicit level wins over C<-q>. A server that
+has no such option simply leaves the runner on its default.
 
 =head3 Server-Specific Options
 
@@ -255,6 +281,7 @@ sub parse_options {
         # Logging
         'access-log=s'        => \$opts{access_log},
         'no-access-log'       => \$opts{no_access_log},
+        'error-log=s'         => \$opts{error_log},
 
         # Daemon/process
         'D|daemonize'         => \$opts{daemonize},
@@ -292,6 +319,7 @@ sub parse_options {
     $self->{loop}       = $opts{loop}       if defined $opts{loop};
     $self->{access_log} = $opts{access_log} if defined $opts{access_log};
     $self->{no_access_log} = $opts{no_access_log} if $opts{no_access_log};
+    $self->{error_log}  = $opts{error_log}  if defined $opts{error_log};
     $self->{daemonize}  = $opts{daemonize}  if $opts{daemonize};
     $self->{pid_file}   = $opts{pid_file}   if defined $opts{pid_file};
     $self->{user}       = $opts{user}       if defined $opts{user};
@@ -330,10 +358,45 @@ or auto-detection based on TTY.
 
 sub mode {
     my ($self) = @_;
+    return ($self->_resolve_mode)[0];
+}
 
-    return $self->{env} if defined $self->{env};
-    return $ENV{PAGI_ENV} if defined $ENV{PAGI_ENV};
-    return -t STDIN ? 'development' : 'production';
+# The mode and what decided it, from one precedence chain so the two cannot
+# disagree. The source matters because the last rule -- whether STDIN is a
+# terminal -- silently makes production of anything without one: systemd,
+# docker, cron, CI, a backgrounded shell.
+sub _resolve_mode {
+    my ($self) = @_;
+
+    return ($self->{env},     '--env')    if defined $self->{env};
+    return ($ENV{PAGI_ENV},   'PAGI_ENV') if defined $ENV{PAGI_ENV};
+    return -t STDIN ? ('development', 'tty') : ('production', 'no tty');
+}
+
+# One line saying what is running, in which mode, and why that mode. Emitted in
+# production as well as development: confirming that a host did NOT come up in
+# development, wrapping every request in Lint, is worth more than confirming
+# that it did.
+# Facts only the runner knows. They are handed to the server rather than printed
+# here, so startup reads as one aligned block instead of ragged lines from two
+# layers. Runner is not server-agnostic in this iteration; this is the trade.
+sub _startup_note {
+    my ($self, $label, $text) = @_;
+    push @{ $self->{_startup_notes} ||= [] }, [$label, $text];
+    return;
+}
+
+sub _record_startup_summary {
+    my ($self, $middleware_note) = @_;
+
+    my $mode = $self->mode;
+    $mode .= " ($self->{_mode_source})" if defined $self->{_mode_source};
+    $mode .= ", $middleware_note"       if defined $middleware_note;
+
+    unshift @{ $self->{_startup_notes} ||= [] },
+        [serving => $self->{app_spec} // 'unknown'],
+        [mode    => $mode];
+    return;
 }
 
 =head2 load_app
@@ -444,16 +507,22 @@ sub prepare_app {
     # Wrap with mode middleware unless disabled
     my $use_middleware = $self->{default_middleware} // 1;
 
-    if ($use_middleware && $self->mode eq 'development') {
-        if (eval { require PAGI::Middleware::Lint; 1 }) {
-            $app = PAGI::Middleware::Lint->new(strict => 1)->wrap($app);
-            warn "PAGI development mode - Lint middleware enabled\n"
-                unless $self->{quiet};
+    my $middleware_note;
+    if ($self->mode eq 'development') {
+        if (!$use_middleware) {
+            # Worth saying: otherwise Lint's absence looks like a fault.
+            $middleware_note = 'default middleware disabled';
         }
-        elsif (!$self->{quiet}) {
-            warn "PAGI development mode - install PAGI-Tools for Lint middleware\n";
+        elsif (eval { require PAGI::Middleware::Lint; 1 }) {
+            $app = PAGI::Middleware::Lint->new(strict => 1)->wrap($app);
+            $middleware_note = 'Lint enabled';
+        }
+        else {
+            $middleware_note = 'Lint unavailable -- install PAGI-Tools';
         }
     }
+
+    $self->_record_startup_summary($middleware_note);
 
     $self->{app} = $app;
     return $app;
@@ -491,6 +560,9 @@ sub load_server {
 
     # Get server-specific options (passed from bin/pagi-server or similar)
     my %server_opts = %{$self->{server_options} // {}};
+
+    # Hand over what only the runner knows, for the startup block.
+    $server_opts{startup_notes} = $self->{_startup_notes} || [];
 
     # Handle access log
     # Production mode disables logging by default for performance
@@ -555,9 +627,18 @@ sub run {
     # Parse options
     $self->parse_options(@_);
 
+    # Open the error log and point STDERR at it before anything can report a
+    # problem. Future::IO configuration, app loading and listener binding all
+    # diagnose through STDERR, and every distribution in the ecosystem warns
+    # there; opening later would lose whatever was said in the meantime.
+    $self->_open_error_log;
+    $self->_redirect_stderr_to_error_log;
+
     # Export resolved mode to environment so apps can check it
-    # (similar to Plack's PLACK_ENV)
-    $ENV{PAGI_ENV} = $self->mode;
+    # (similar to Plack's PLACK_ENV). Note what decided the mode first: after
+    # this assignment PAGI_ENV is always set, and would claim the credit.
+    (my $resolved_mode, $self->{_mode_source}) = $self->_resolve_mode;
+    $ENV{PAGI_ENV} = $resolved_mode;
 
     # Configure Future::IO for IO::Async if available
     # This enables Future::IO-based libraries (Async::Redis, etc.) and
@@ -582,8 +663,9 @@ sub run {
     # Create server
     my $server = $self->load_server;
 
-    # Daemonize before running (bind errors will be lost in daemon mode,
-    # but this is acceptable for production where systemd/docker is preferred)
+    # Daemonize before running. The error log's descriptor was opened above and
+    # is inherited across both forks, so --error-log keeps bind errors and
+    # everything after them; without it, daemonizing still discards STDERR.
     if ($self->{daemonize}) {
         $self->_daemonize;
     }
@@ -628,8 +710,8 @@ sub _configure_future_io {
 
     if ($configured) {
         # Report in non-production mode
-        if ($self->mode ne 'production' && !$self->{quiet}) {
-            warn "Future::IO configured for IO::Async\n";
+        if ($self->mode ne 'production') {
+            $self->_startup_note('future.io' => 'configured for IO::Async');
         }
     }
     # If Future::IO::Impl::IOAsync not installed, that's fine - user just
@@ -716,7 +798,7 @@ sub _parse_app_args {
             $result{$1} = $2;
         }
         else {
-            warn "Ignoring argument without '=': $arg\n";
+            $self->_log(warn => "Ignoring argument without '=': $arg");
         }
     }
     return %result;
@@ -738,11 +820,12 @@ Common Options (handled by Runner):
     -l, --loop BACKEND  Event loop backend (EV, Epoll, UV, Poll)
     --access-log FILE   Access log file (default: STDERR)
     --no-access-log     Disable access logging
+    --error-log FILE    Diagnostic log file (default: STDERR)
     -D, --daemonize     Run as background daemon
     --pid FILE          Write PID to file
     --user USER         Run as specified user (after binding)
     --group GROUP       Run as specified group (after binding)
-    -q, --quiet         Suppress startup messages
+    -q, --quiet         Report errors only (shorthand for --log-level error)
     --no-default-middleware  Disable mode-based middleware
     -v, --version       Show version info
     --help              Show this help
@@ -801,12 +884,74 @@ sub _daemonize {
     # Clear umask
     umask(0);
 
-    # Redirect standard file descriptors to /dev/null
-    open(STDIN, '<', '/dev/null') or die "Cannot redirect STDIN: $!";
-    open(STDOUT, '>', '/dev/null') or die "Cannot redirect STDOUT: $!";
-    open(STDERR, '>', '/dev/null') or die "Cannot redirect STDERR: $!";
+    $self->_redirect_std_handles;
 
     return $$;  # Return daemon PID
+}
+
+# Opens the error log named by --error-log and keeps the handle on the runner.
+# Called before any fork so the descriptor survives daemonizing, exactly as the
+# access log's handle does.
+# Runner keeps its own threshold rather than borrowing the server's logger,
+# which would tie it to one server class. It reads log_level out of
+# server_options when the operator asked for one -- read-only, optional, and
+# nothing new is passed down, so a server that has no such option is
+# unaffected and Runner simply keeps its default.
+my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
+
+sub _log_level_num {
+    my ($self) = @_;
+
+    my $level = $self->{server_options}{log_level}
+             // ($self->{quiet} ? 'error' : 'info');
+
+    return $_LOG_LEVELS{$level} // $_LOG_LEVELS{info};
+}
+
+sub _log {
+    my ($self, $level, $msg) = @_;
+
+    return if ($_LOG_LEVELS{$level} // 2) < $self->_log_level_num;
+    warn "$msg\n";
+}
+
+sub _open_error_log {
+    my ($self) = @_;
+
+    return unless $self->{error_log};
+
+    open my $fh, '>>', $self->{error_log}
+        or die "Cannot open error log $self->{error_log}: $!\n";
+    $fh->autoflush(1);
+
+    return $self->{_error_log_fh} = $fh;
+}
+
+# Points STDERR at an already-opened error log. Returns false when no error log
+# was configured, leaving the caller to decide what STDERR should become.
+sub _redirect_stderr_to_error_log {
+    my ($self) = @_;
+
+    my $fh = $self->{_error_log_fh} or return 0;
+
+    open(STDERR, '>&', $fh) or die "Cannot redirect STDERR to error log: $!\n";
+    STDERR->autoflush(1);
+
+    return 1;
+}
+
+sub _redirect_std_handles {
+    my ($self) = @_;
+
+    open(STDIN, '<', '/dev/null') or die "Cannot redirect STDIN: $!";
+    open(STDOUT, '>', '/dev/null') or die "Cannot redirect STDOUT: $!";
+
+    # Diagnostics reach STDERR from every PAGI distribution, most of them as a
+    # bare warn that never passes through the server's own logger. Discarding
+    # it is only correct when the operator has named nowhere else to put it.
+    return if $self->_redirect_stderr_to_error_log;
+
+    open(STDERR, '>', '/dev/null') or die "Cannot redirect STDERR: $!";
 }
 
 sub _write_pid_file {

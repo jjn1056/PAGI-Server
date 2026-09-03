@@ -38,7 +38,7 @@ sub create_test_server {
     my (%args) = @_;
     my $server = PAGI::Server->new(
         app => $args{app} // sub { }, host => '127.0.0.1', port => 0,
-        quiet => 1, http2 => 1, %args,
+        log_level => 'warn', http2 => 1, %args,
     );
     $loop->add($server);
     return $server;

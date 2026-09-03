@@ -6,6 +6,8 @@ This directory contains progressively more advanced PAGI examples. Each subdirec
 - Perl 5.18+ with `Future::AsyncAwait`
 - For timers/sleeps: `Future::IO` (loop-agnostic)
 - Run examples with: `pagi-server examples/01-hello-http/app.pl --port 5000`
+- One exception: `13-custom-logging` is a runner script, run with `perl` — the
+  option it demonstrates takes a coderef, which a command line cannot carry.
 
 These are raw PAGI applications and run with `pagi-server` alone — no other
 distribution required. (In development mode the runner auto-enables Lint
@@ -28,6 +30,7 @@ Examples assume you understand the core PAGI specification (see the `PAGI::Spec`
 8. `08-tls-introspection` - prints TLS metadata when present
 9. `11-job-runner` - background job processing example
 10. `12-utf8` - UTF-8 handling demonstration
+11. `13-custom-logging` - sending the server's diagnostics somewhere else (needs `Log::Dispatch`)
 
 Also included: `backpressure-test` - demonstrates backpressure handling (unnumbered utility example)
 

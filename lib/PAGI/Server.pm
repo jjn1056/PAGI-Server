@@ -947,12 +947,85 @@ Valid levels (from least to most verbose):
 
 B<CLI:> C<--log-level debug>
 
+C<log_level> is the only control over how much the server says. In
+multi-worker mode it governs the workers as well as the master: a worker's
+messages carry a C<Worker N (pid):> prefix, and an unprefixed line is the
+master's.
+
+=item logger => $coderef
+
+Where the server's own diagnostics go. Receives one hashref per message:
+
+    PAGI::Server->new(
+        app    => $app,
+        logger => sub {
+            my ($event) = @_;   # { level, message, category }
+            $log_dispatch->log(
+                level   => $event->{level} eq 'fatal' ? 'critical' : $event->{level},
+                message => "[$event->{category}] $event->{message}",
+            );
+        },
+    );
+
+C<level> is one of C<debug>, C<info>, C<warn>, C<error>, C<fatal> -- the five
+L<PSGI> and Rack settled on. C<message> carries no trailing newline.
+C<category> is C<PAGI::Server>.
+
+A coderef rather than a logging object on purpose: frameworks disagree about
+level names -- Log::Dispatch has no C<fatal> and silently discards a message
+sent at that level -- so the closure is where the translation belongs:
+
+    use Log::Dispatch;
+
+    my $log = Log::Dispatch->new(outputs => [
+        ['Screen', min_level => 'debug',   newline => 1],
+        ['File',   min_level => 'warning', newline => 1,
+                   filename  => '/var/log/pagi/server.log', mode => 'append'],
+    ]);
+
+    my %LEVEL = (fatal => 'critical');   # Log::Dispatch is syslog-named
+
+    PAGI::Server->new(
+        app       => $app,
+        log_level => 'debug',
+        logger    => sub {
+            my ($event) = @_;
+            $log->log(
+                level   => $LEVEL{ $event->{level} } // $event->{level},
+                message => "[$event->{category}] $event->{message}",
+            );
+        },
+    );
+
+Note the two thresholds doing different jobs. C<log_level> is the server's:
+below it, nothing reaches the sink at all. C<min_level> on each output is the
+operator's: the screen takes everything, the file takes problems only. The
+server's threshold is a floor, not a policy.
+
+C<< examples/13-custom-logging >> is a runnable version of this, along with a
+structured-JSON variant. If you only want the diagnostics in a file rather than
+reshaped, C<< pagi-server --error-log FILE >> does that without a runner script.
+
+Default: emit C<< $event->{message} >> to C<STDERR> with a trailing newline,
+which is what the server did before the destination was replaceable. Messages
+below C<log_level> never reach the sink at all.
+
+B<This logger is deliberately not published into the request scope.> It is
+the operator's channel, filtered by the operator's C<log_level>; an
+application's diagnostics should not disappear because someone set
+C<--log-level error> to quiet the server down. Applications and middleware
+have their own arrangements -- see L<PAGI::Tools> -- and a runner that wants
+one destination for both can pass the same coderef to each.
+
 =item quiet => $bool
 
-Suppress all log output except errors. Default: 0. When true, C<_log>
-messages below the C<error> level are dropped regardless of C<log_level>;
-error-level messages are always emitted. Worker processes run quiet
-internally so only the master logs lifecycle events.
+B<Deprecated.> A spelling of C<< log_level => 'error' >>, kept so existing
+callers keep working. An explicit C<log_level> wins when both are supplied.
+
+In earlier releases this suppressed everything below C<error> B<regardless
+of> C<log_level>, and workers were started with it set -- so
+C<--log-level debug> combined with C<--workers> reported nothing from the
+processes actually serving traffic. Use C<< log_level => 'error' >> instead.
 
 B<CLI:> C<-q>, C<--quiet>
 
@@ -2259,6 +2332,27 @@ B<Graceful shutdown for maintenance:>
 sub _init {
     my ($self, $params) = @_;
 
+    # Establish the log destination and threshold before anything else, so
+    # a problem found while validating the remaining parameters can be
+    # reported through the channel the caller configured.
+    # Facts the runner knows and the server does not -- which application is
+    # being served, which mode resolved and why. Rendered in the startup block
+    # rather than printed separately, so startup reads as one thing.
+    $self->{startup_notes}    = delete $params->{startup_notes} // [];
+    $self->{logger}           = delete $params->{logger};
+    die "Invalid logger - must be a coderef taking one hashref\n"
+        if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
+    # quiet is a deprecated spelling of log_level => 'error'. An explicit
+    # log_level wins: a threshold must not be overridden by a second control.
+    my $quiet = delete $params->{quiet};
+    $self->{log_level}        = delete $params->{log_level}
+                             // ($quiet ? 'error' : 'info');
+    # Validate log level
+    my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
+    die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
+        unless $valid_levels{$self->{log_level}};
+    $self->{_log_level_num}   = $valid_levels{$self->{log_level}};
+
     my $app = delete $params->{app};
     die "app is required" unless defined $app;
     $self->{app} = PAGI::Server::AppNormalizer::normalize_app($app, 'app');
@@ -2277,7 +2371,7 @@ sub _init {
     if (my $ssl = $self->{ssl}) {
         if ($self->{disable_tls}) {
             # Skip TLS setup and cert validation — ssl config is stored but not applied
-            warn "PAGI::Server: TLS disabled via disable_tls option, ssl config ignored\n";
+            $self->_log(warn => "PAGI::Server: TLS disabled via disable_tls option, ssl config ignored");
         } else {
             if (my $cert = $ssl->{cert_file}) {
                 die "SSL certificate file not found: $cert\n" unless -e $cert;
@@ -2366,13 +2460,6 @@ sub _init {
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
         $self->{access_log_format}
     );
-    $self->{quiet}            = delete $params->{quiet} // 0;
-    $self->{log_level}        = delete $params->{log_level} // 'info';
-    # Validate log level
-    my %valid_levels = (debug => 1, info => 2, warn => 3, error => 4);
-    die "Invalid log_level '$self->{log_level}' - must be one of: debug, info, warn, error\n"
-        unless $valid_levels{$self->{log_level}};
-    $self->{_log_level_num}   = $valid_levels{$self->{log_level}};
     $self->{timeout}          = delete $params->{timeout} // 60;  # Connection idle timeout (seconds)
     $self->{max_header_size}  = delete $params->{max_header_size} // 8192;  # Max header size in bytes
     $self->{max_header_count} = delete $params->{max_header_count} // 100;  # Max number of headers
@@ -2503,8 +2590,19 @@ sub configure {
             $self->{access_log_format}
         );
     }
+    if (exists $params{logger}) {
+        my $logger = delete $params{logger};
+        die "Invalid logger - must be a coderef taking one hashref\n"
+            if defined $logger && ref($logger) ne 'CODE';
+        $self->{logger} = $logger;
+    }
     if (exists $params{quiet}) {
-        $self->{quiet} = delete $params{quiet};
+        # Deprecated spelling of log_level => 'error'; ignored when log_level
+        # is supplied in the same call, which is the control that wins.
+        my $quiet = delete $params{quiet};
+        if ($quiet && !exists $params{log_level}) {
+            $params{log_level} = 'error';
+        }
     }
     if (exists $params{log_level}) {
         my $level = delete $params{log_level};
@@ -2575,16 +2673,95 @@ sub configure {
     $self->SUPER::configure(%params);
 }
 
-# Log levels: debug=1, info=2, warn=3, error=4
-my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4);
+# Log levels: debug=1, info=2, warn=3, error=4, fatal=5.
+# fatal is sortable but is not a valid log_level: a fatal threshold would
+# silence errors. It exists so the five levels PSGI and Rack converged on can
+# be handed to a sink unchanged.
+my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
+
+# Emits exactly what the server emitted before the destination was replaceable.
+my $_DEFAULT_LOGGER = sub { warn "$_[0]{message}\n" };
 
 sub _log {
-    my ($self, $level, $msg) = @_;
+    my ($self, $level, $msg, $category) = @_;
 
     my $level_num = $_LOG_LEVELS{$level} // 2;
     return if $level_num < $self->{_log_level_num};
-    return if $self->{quiet} && $level ne 'error';
-    warn "$msg\n";
+
+    # The payload promises a message with no trailing newline, but most of
+    # these interpolate $@ or $! from an ordinary die "...\n". Make the promise
+    # true here rather than asking every sink author to chomp.
+    $msg =~ s/\n+\z//;
+
+    # Workers and the master share one destination, so a worker's messages say
+    # which process they came from. An unprefixed line is the master's.
+    $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker};
+
+    ($self->{logger} // $_DEFAULT_LOGGER)->({
+        level    => $level,
+        message  => $msg,
+        # Classes that log through the server name themselves, so a sink can
+        # separate connection noise from lifecycle events.
+        category => $category // 'PAGI::Server',
+    });
+}
+
+# The spec distribution's version, or undef. PAGI::Server has no runtime
+# dependency on PAGI, so the banner names it only when it is actually there.
+# Kept separate so a test can make the spec appear absent.
+sub _pagi_spec_version { return eval { require PAGI; PAGI->VERSION } }
+
+# A fact worth showing in the startup block rather than on a ragged line of its
+# own. Workers never reach the banner -- it is emitted from _create_loop, which
+# the worker path does not call -- so they report immediately instead, keeping
+# their Worker N prefix.
+sub _startup_note {
+    my ($self, $label, $text) = @_;
+
+    # The label carries the subject inside the block ("lifespan  not supported");
+    # on its own line it has to be restored, or the message loses what it is about.
+    return $self->_log(info => "$label $text") if $self->{is_worker};
+
+    push @{ $self->{_startup_notes} ||= [] }, [$label, $text];
+    return;
+}
+
+# The startup block: what is running and where, then everything worth knowing
+# about it, aligned. One builder for all four listen shapes, which is what stops
+# them drifting apart.
+sub _startup_banner {
+    my ($self, $where, $per_worker) = @_;
+
+    my $identity = 'PAGI::Server ' . (__PACKAGE__->VERSION // 'unknown');
+    if (defined(my $spec = $self->_pagi_spec_version)) {
+        $identity .= " (PAGI $spec)";
+    }
+
+    my $loop_class = ref($self->loop);
+    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
+
+    my $max_conn = $self->effective_max_connections;
+    $max_conn .= '/worker' if $per_worker;
+
+    my @notes = (
+        @{ $self->{startup_notes} || [] },      # contributed by the runner
+        @{ $self->{_startup_notes} || [] },     # gathered during our own startup
+        ['loop', sprintf('%s, max_conn %s, http2 %s, tls %s, future_xs %s',
+            $loop_class,
+            $max_conn,
+            $self->_http2_status_string,
+            $self->_tls_status_string,
+            $self->_future_xs_status_string,
+        )],
+    );
+
+    my $width = 0;
+    for (@notes) { $width = length $_->[0] if length $_->[0] > $width }
+
+    return (
+        "$identity listening on $where",
+        map { sprintf('  %-*s  %s', $width, $_->[0], $_->[1]) } @notes,
+    );
 }
 
 # Returns a human-readable TLS status string for the startup banner
@@ -3019,10 +3196,16 @@ async sub _listen_singleworker {
     unless (WIN32) {
         my $shutdown_triggered = 0;
         my $shutdown_handler = sub {
+            my ($signal) = @_;
             return if $shutdown_triggered;
             $shutdown_triggered = 1;
+            # Say so. A graceful stop that prints nothing is indistinguishable
+            # from the process being killed, which is the one thing an operator
+            # watching a terminal wants to be able to tell apart.
+            $self->_log(info => "Received $signal, shutting down");
             $self->adopt_future(
                 $self->shutdown->on_done(sub {
+                    $self->_log(info => 'Shutdown complete');
                     $self->loop->stop;
                 })->on_fail(sub {
                     my ($error) = @_;
@@ -3031,59 +3214,39 @@ async sub _listen_singleworker {
                 })
             );
         };
-        $self->loop->watch_signal(TERM => $shutdown_handler);
-        $self->loop->watch_signal(INT => $shutdown_handler);
+        $self->loop->watch_signal(TERM => sub { $shutdown_handler->('TERM') });
+        $self->loop->watch_signal(INT  => sub { $shutdown_handler->('INT')  });
 
         # HUP in single-worker mode just warns (graceful restart requires multi-worker)
         my $weak_self = $self;
         weaken($weak_self);
         $self->loop->watch_signal(HUP => sub {
             $weak_self->_log(warn => "Received HUP signal (graceful restart only works in multi-worker mode)")
-                if $weak_self && !$weak_self->{quiet};
+                if $weak_self;
         });
 
         $self->loop->watch_signal(USR2 => sub {
             $weak_self->_log(warn => "Received USR2 signal (hot restart only works in multi-worker mode)")
-                if $weak_self && !$weak_self->{quiet};
+                if $weak_self;
         });
     }
 
-    my $loop_class = ref($self->loop);
-    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
-    my $max_conn = $self->effective_max_connections;
-    my $tls_status = $self->_tls_status_string;
-    my $http2_status = $self->_http2_status_string;
-    my $future_xs_status = $self->_future_xs_status_string;
-
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(warn =>
-            "access_log is a terminal; this may impact performance. " .
-            "Consider redirecting to a file or setting access_log => undef for benchmarks."
-        );
+        $self->_startup_note(note =>
+            'access_log is a terminal; use a file when benchmarking');
     }
 
     # Log listening banner
     my $scheme = $self->{tls_enabled} ? 'https' : 'http';
-    if (@listen_entries == 1) {
-        my $spec = $listen_entries[0]{spec};
-        if ($spec->{type} eq 'unix') {
-            $self->_log(info => "PAGI Server listening on unix:$spec->{path} (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
-        } else {
-            $self->_log(info => "PAGI Server listening on $scheme://$spec->{host}:$spec->{port}/ (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
-        }
-    } else {
-        my @addrs;
-        for my $entry (@listen_entries) {
-            my $s = $entry->{spec};
-            if ($s->{type} eq 'unix') {
-                push @addrs, "unix:$s->{path}";
-            } else {
-                push @addrs, "$scheme://$s->{host}:$s->{port}/";
-            }
-        }
-        $self->_log(info => "PAGI Server listening on: " . join(', ', @addrs) . " (loop: $loop_class, max_conn: $max_conn, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
+    my @addrs;
+    for my $entry (@listen_entries) {
+        my $s = $entry->{spec};
+        push @addrs, $s->{type} eq 'unix'
+            ? "unix:$s->{path}"
+            : "$scheme://$s->{host}:$s->{port}/";
     }
+    $self->_log(info => $_) for $self->_startup_banner(join(', ', @addrs));
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
@@ -3247,20 +3410,12 @@ sub _listen_multiworker {
     }
 
     my $scheme = $self->{ssl} ? 'https' : 'http';
-    my $loop_class = ref($self->loop);
-    $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
     my $mode = $reuseport ? 'reuseport' : 'shared-socket';
-    my $max_conn = $self->effective_max_connections;
-    my $tls_status = $self->_tls_status_string;
-    my $http2_status = $self->_http2_status_string;
-    my $future_xs_status = $self->_future_xs_status_string;
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(warn =>
-            "access_log is a terminal; this may impact performance. " .
-            "Consider redirecting to a file or setting access_log => undef for benchmarks."
-        );
+        $self->_startup_note(note =>
+            'access_log is a terminal; use a file when benchmarking');
     }
 
     # Log listening banner for all listeners
@@ -3274,8 +3429,8 @@ sub _listen_multiworker {
             push @addrs, "$scheme://$s->{host}:$port/";
         }
     }
-    my $addr_str = join(', ', @addrs);
-    $self->_log(info => "PAGI Server (multi-worker, $mode) listening on $addr_str with $workers workers (loop: $loop_class, max_conn: $max_conn/worker, http2: $http2_status, tls: $tls_status, future_xs: $future_xs_status)");
+    my $where = join(', ', @addrs) . " with $workers workers ($mode)";
+    $self->_log(info => $_) for $self->_startup_banner($where, 'per worker');
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
@@ -3297,8 +3452,8 @@ sub _listen_multiworker {
     # Set up signal handlers for parent process AFTER forking
     # Note: Windows doesn't support Unix signals, so this is skipped there
     unless (WIN32) {
-        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown });
-        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown });
+        $loop->watch_signal(TERM => sub { $self->_initiate_multiworker_shutdown('TERM') });
+        $loop->watch_signal(INT  => sub { $self->_initiate_multiworker_shutdown('INT')  });
         $loop->watch_signal(HUP => sub { $self->_graceful_restart });
         $loop->watch_signal(TTIN => sub { $self->_increase_workers });
         $loop->watch_signal(TTOU => sub { $self->_decrease_workers });
@@ -3477,11 +3632,16 @@ sub _collect_inherited_fds {
 
 # Initiate graceful shutdown in multi-worker mode
 sub _initiate_multiworker_shutdown {
-    my ($self) = @_;
+    my ($self, $signal) = @_;
 
     return if $self->{shutting_down};
     $self->{shutting_down} = 1;
     $self->{running} = 0;
+
+    # See the single-worker handler: a silent graceful stop cannot be told
+    # apart from the process being killed.
+    $self->_log(info => "Received $signal, shutting down $self->{workers} workers")
+        if defined $signal;
 
     # Stop heartbeat monitoring — shutdown escalation timer handles stuck workers
     if ($self->{_heartbeat_check_timer}) {
@@ -3621,7 +3781,7 @@ sub _hot_restart {
             : ();
         exec($^X, $0, @args)
             or do {
-                warn "Hot restart exec failed: $!\n";
+                $self->_log(error => "Hot restart exec failed: $!");
                 POSIX::_exit(1);
             };
     }
@@ -3815,7 +3975,6 @@ sub _run_as_worker {
         extensions      => $self->{extensions},
         access_log      => $self->{access_log},
         log_level       => $self->{log_level},
-        quiet           => 1,  # Workers should be quiet
         timeout         => $self->{timeout},
         max_header_size  => $self->{max_header_size},
         max_header_count => $self->{max_header_count},
@@ -3872,7 +4031,7 @@ sub _run_as_worker {
                     $loop->stop;
                 })->on_fail(sub {
                     my ($error) = @_;
-                    $worker_server->_log(error => "Worker shutdown error: $error");
+                    $worker_server->_log(error => "shutdown error: $error");
                     $loop->stop;  # Still stop even on error
                 })
             );
@@ -4159,14 +4318,14 @@ sub _on_request_complete {
     if ($self->{_request_count} >= $self->{max_requests}) {
         return if $self->{_max_requests_shutdown_triggered};  # Prevent duplicate shutdowns
         $self->{_max_requests_shutdown_triggered} = 1;
-        $self->_log(info => "Worker $$: reached max_requests ($self->{max_requests}), shutting down");
+        $self->_log(info => "reached max_requests ($self->{max_requests}), shutting down");
         # Initiate graceful shutdown (finish current connections, then exit)
         $self->adopt_future(
             $self->shutdown->on_done(sub {
                 $self->loop->stop;
             })->on_fail(sub {
                 my ($error) = @_;
-                $self->_log(error => "Worker $$: max_requests shutdown error: $error");
+                $self->_log(error => "max_requests shutdown error: $error");
                 $self->loop->stop;  # Still stop even on error
             })
         );
@@ -4282,11 +4441,25 @@ async sub _run_lifespan_startup {
             else {
                 # auto: continue without lifespan. This matches Uvicorn/Hypercorn
                 # "auto"; an app may decline by returning on the lifespan scope or
-                # by dying on it. Include the raised message so a genuine startup
-                # failure masquerading as a decline is still visible.
-                my $msg = "Lifespan not supported, continuing without it";
-                $msg .= " (application raised: $detail)" if defined $detail;
-                $self->_log(info => $msg);
+                # by dying on it.
+                #
+                # Report it either way: an application whose lifespan handler is
+                # silently not being reached has nothing else to tell it apart
+                # from one that never had a handler. The raised message is kept
+                # because a genuine startup failure can wear a decline as a
+                # disguise -- that is the blind spot strict mode exists to close.
+                #
+                # The file and line Perl appends to a bare die are dropped: an
+                # assertion on the scope type is the idiomatic way to decline
+                # (the spec resolves a raise and a clean return identically), so
+                # a location here points at ordinary, correct code. Strict mode
+                # keeps them, because there the same raise is a fatal failure.
+                my $shown = $detail;
+                $shown =~ s/ at \S+ line \d+\.?\z// if defined $shown;
+
+                my $msg = 'not supported, continuing without it';
+                $msg .= " (application raised: $shown)" if defined $shown;
+                $self->_startup_note(lifespan => $msg);
                 $startup_complete->done({ success => 1, lifespan_supported => 0 });
             }
         }
