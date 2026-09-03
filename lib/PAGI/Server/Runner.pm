@@ -377,15 +377,25 @@ sub _resolve_mode {
 # production as well as development: confirming that a host did NOT come up in
 # development, wrapping every request in Lint, is worth more than confirming
 # that it did.
-sub _log_startup_summary {
+# Facts only the runner knows. They are handed to the server rather than printed
+# here, so startup reads as one aligned block instead of ragged lines from two
+# layers. Runner is not server-agnostic in this iteration; this is the trade.
+sub _startup_note {
+    my ($self, $label, $text) = @_;
+    push @{ $self->{_startup_notes} ||= [] }, [$label, $text];
+    return;
+}
+
+sub _record_startup_summary {
     my ($self, $middleware_note) = @_;
 
-    my $line = $self->mode . ' mode';
-    $line .= " ($self->{_mode_source})" if defined $self->{_mode_source};
-    $line .= ', serving ' . ($self->{app_spec} // 'unknown');
-    $line .= ", $middleware_note" if defined $middleware_note;
+    my $mode = $self->mode;
+    $mode .= " ($self->{_mode_source})" if defined $self->{_mode_source};
+    $mode .= ", $middleware_note"       if defined $middleware_note;
 
-    $self->_log(info => $line);
+    unshift @{ $self->{_startup_notes} ||= [] },
+        [serving => $self->{app_spec} // 'unknown'],
+        [mode    => $mode];
     return;
 }
 
@@ -512,7 +522,7 @@ sub prepare_app {
         }
     }
 
-    $self->_log_startup_summary($middleware_note);
+    $self->_record_startup_summary($middleware_note);
 
     $self->{app} = $app;
     return $app;
@@ -550,6 +560,9 @@ sub load_server {
 
     # Get server-specific options (passed from bin/pagi-server or similar)
     my %server_opts = %{$self->{server_options} // {}};
+
+    # Hand over what only the runner knows, for the startup block.
+    $server_opts{startup_notes} = $self->{_startup_notes} || [];
 
     # Handle access log
     # Production mode disables logging by default for performance
@@ -698,7 +711,7 @@ sub _configure_future_io {
     if ($configured) {
         # Report in non-production mode
         if ($self->mode ne 'production') {
-            $self->_log(debug => 'Future::IO configured for IO::Async');
+            $self->_startup_note('future.io' => 'configured for IO::Async');
         }
     }
     # If Future::IO::Impl::IOAsync not installed, that's fine - user just

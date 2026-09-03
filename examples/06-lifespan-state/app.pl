@@ -47,10 +47,7 @@ async sub app {
 
     return await handle_lifespan($scope, $receive, $send) if $scope->{type} eq 'lifespan';
     return await handle_http($scope, $receive, $send)      if $scope->{type} eq 'http';
-    # A scope this app does not serve -- lifespan, most often. Returning is
-    # the clean decline; dying is also legal but makes an ordinary startup
-    # look like a failure in the server's log.
-    return;
+    die "Unsupported scope type: $scope->{type}";
 }
 
 \&app;

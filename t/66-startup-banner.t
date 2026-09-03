@@ -43,15 +43,33 @@ subtest 'the spec version appears only when the spec is installed' => sub {
         'leaving a well-formed line');
 };
 
-subtest 'the capability list is one line, below' => sub {
+subtest 'the capabilities are the last note in the block' => sub {
     my $lines = banner_for();
 
-    is(scalar @$lines, 2, 'two lines: identity, then capabilities');
-    like($lines->[1], qr/\A\s+loop \S+/, 'the second is indented and starts with the loop');
-    like($lines->[1], qr/max_conn \d+/,     'max_conn is reported');
-    like($lines->[1], qr/http2 /,           'so is http2');
-    like($lines->[1], qr/tls /,             'and tls');
-    like($lines->[1], qr/future_xs /,       'and future_xs');
+    is(scalar @$lines, 2, 'identity, then one note, with nothing else contributed');
+
+    my $loop = $lines->[-1];
+    like($loop, qr/\A\s+loop\s+\S/, 'indented and labelled');
+    like($loop, qr/max_conn \d+/,      'max_conn is reported');
+    like($loop, qr/http2 /,            'so is http2');
+    like($loop, qr/tls /,              'and tls');
+    like($loop, qr/future_xs /,        'and future_xs');
+};
+
+subtest 'contributed notes are rendered above it, aligned' => sub {
+    my $server = PAGI::Server->new(
+        app           => $app,
+        startup_notes => [ [serving => './app.pl'], [mode => 'development (tty)'] ],
+    );
+    my @lines = $server->_startup_banner('http://127.0.0.1:5000/');
+
+    is(scalar @lines, 4, 'identity, the two notes, then the capabilities');
+    like($lines[1], qr/\A  serving\s+\.\/app\.pl\z/,     'what is being served leads');
+    like($lines[2], qr/\A  mode\s+development \(tty\)\z/, 'then the mode');
+
+    # One column, so the block scans -- which was the point of the exercise.
+    my @cols = map { /\A  \S+(\s+)/ ? length("  " . $&) : () } @lines[1 .. $#lines];
+    is(scalar(keys %{{ map { $_ => 1 } @cols }}), 1, 'every label pads to one width');
 };
 
 subtest 'multi-worker reports its connection limit per worker' => sub {

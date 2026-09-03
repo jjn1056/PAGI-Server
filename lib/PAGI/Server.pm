@@ -2335,6 +2335,10 @@ sub _init {
     # Establish the log destination and threshold before anything else, so
     # a problem found while validating the remaining parameters can be
     # reported through the channel the caller configured.
+    # Facts the runner knows and the server does not -- which application is
+    # being served, which mode resolved and why. Rendered in the startup block
+    # rather than printed separately, so startup reads as one thing.
+    $self->{startup_notes}    = delete $params->{startup_notes} // [];
     $self->{logger}           = delete $params->{logger};
     die "Invalid logger - must be a coderef taking one hashref\n"
         if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
@@ -2707,8 +2711,24 @@ sub _log {
 # Kept separate so a test can make the spec appear absent.
 sub _pagi_spec_version { return eval { require PAGI; PAGI->VERSION } }
 
-# The two banner lines: what is running and where, then what it can do. One
-# builder for all four listen shapes, which is what stops them drifting apart.
+# A fact worth showing in the startup block rather than on a ragged line of its
+# own. Workers never reach the banner -- it is emitted from _create_loop, which
+# the worker path does not call -- so they report immediately instead, keeping
+# their Worker N prefix.
+sub _startup_note {
+    my ($self, $label, $text) = @_;
+
+    # The label carries the subject inside the block ("lifespan  not supported");
+    # on its own line it has to be restored, or the message loses what it is about.
+    return $self->_log(info => "$label $text") if $self->{is_worker};
+
+    push @{ $self->{_startup_notes} ||= [] }, [$label, $text];
+    return;
+}
+
+# The startup block: what is running and where, then everything worth knowing
+# about it, aligned. One builder for all four listen shapes, which is what stops
+# them drifting apart.
 sub _startup_banner {
     my ($self, $where, $per_worker) = @_;
 
@@ -2723,15 +2743,24 @@ sub _startup_banner {
     my $max_conn = $self->effective_max_connections;
     $max_conn .= '/worker' if $per_worker;
 
-    return (
-        "$identity listening on $where",
-        sprintf('  loop %s, max_conn %s, http2 %s, tls %s, future_xs %s',
+    my @notes = (
+        @{ $self->{startup_notes} || [] },      # contributed by the runner
+        @{ $self->{_startup_notes} || [] },     # gathered during our own startup
+        ['loop', sprintf('%s, max_conn %s, http2 %s, tls %s, future_xs %s',
             $loop_class,
             $max_conn,
             $self->_http2_status_string,
             $self->_tls_status_string,
             $self->_future_xs_status_string,
-        ),
+        )],
+    );
+
+    my $width = 0;
+    for (@notes) { $width = length $_->[0] if length $_->[0] > $width }
+
+    return (
+        "$identity listening on $where",
+        map { sprintf('  %-*s  %s', $width, $_->[0], $_->[1]) } @notes,
     );
 }
 
@@ -3204,10 +3233,8 @@ async sub _listen_singleworker {
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(debug =>
-            "access_log is a terminal; this may impact performance. " .
-            "Consider redirecting to a file or setting access_log => undef for benchmarks."
-        );
+        $self->_startup_note(note =>
+            'access_log is a terminal; use a file when benchmarking');
     }
 
     # Log listening banner
@@ -3387,10 +3414,8 @@ sub _listen_multiworker {
 
     # Warn if access_log is a terminal (slow for benchmarks)
     if ($self->{access_log} && -t $self->{access_log}) {
-        $self->_log(debug =>
-            "access_log is a terminal; this may impact performance. " .
-            "Consider redirecting to a file or setting access_log => undef for benchmarks."
-        );
+        $self->_startup_note(note =>
+            'access_log is a terminal; use a file when benchmarking');
     }
 
     # Log listening banner for all listeners
@@ -4419,14 +4444,22 @@ async sub _run_lifespan_startup {
                 # by dying on it.
                 #
                 # Report it either way: an application whose lifespan handler is
-                # silently not being reached has nothing else to tell it apart from
-                # one that never had a handler. The raised message is included when
-                # there is one, because a genuine startup failure can wear a decline
-                # as a disguise -- but an application that declines by returning
-                # says so cleanly, without dressing an ordinary boot as an error.
-                my $msg = "Lifespan not supported, continuing without it";
-                $msg .= " (application raised: $detail)" if defined $detail;
-                $self->_log(info => $msg);
+                # silently not being reached has nothing else to tell it apart
+                # from one that never had a handler. The raised message is kept
+                # because a genuine startup failure can wear a decline as a
+                # disguise -- that is the blind spot strict mode exists to close.
+                #
+                # The file and line Perl appends to a bare die are dropped: an
+                # assertion on the scope type is the idiomatic way to decline
+                # (the spec resolves a raise and a clean return identically), so
+                # a location here points at ordinary, correct code. Strict mode
+                # keeps them, because there the same raise is a fatal failure.
+                my $shown = $detail;
+                $shown =~ s/ at \S+ line \d+\.?\z// if defined $shown;
+
+                my $msg = 'not supported, continuing without it';
+                $msg .= " (application raised: $shown)" if defined $shown;
+                $self->_startup_note(lifespan => $msg);
                 $startup_complete->done({ success => 1, lifespan_supported => 0 });
             }
         }

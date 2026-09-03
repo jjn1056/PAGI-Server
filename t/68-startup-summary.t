@@ -9,54 +9,46 @@ use PAGI::Server::Runner;
 # development, wrapping every request in Lint, looked exactly like one that had
 # not.
 
-sub summary_from {
-    my ($runner, %args) = @_;
-    my @lines;
-    local $SIG{__WARN__} = sub { push @lines, $_[0] };
-    $runner->{app_spec} = $args{app_spec} if exists $args{app_spec};
-    $runner->_log_startup_summary($args{middleware});
-    chomp @lines;
-    return $lines[0];
+# The runner no longer prints these; it hands them to the server, which renders
+# one aligned block. A fresh runner each time, because the notes accumulate.
+sub notes_for {
+    my (%args) = @_;
+    my $runner = PAGI::Server::Runner->new(env => $args{env});
+    $runner->{_mode_source} = $args{source};
+    $runner->{app_spec}     = $args{app_spec};
+    $runner->_record_startup_summary($args{middleware});
+    return { map { @$_ } @{ $runner->{_startup_notes} || [] } };
 }
 
 subtest 'the summary names the mode and what is being served' => sub {
-    my $runner = PAGI::Server::Runner->new(env => 'production');
-    $runner->{_mode_source} = '--env';
+    my $note = notes_for(env => 'production', source => '--env',
+                         app_spec => 'MyApp::Handler');
 
-    is(summary_from($runner, app_spec => 'MyApp::Handler'),
-        'production mode (--env), serving MyApp::Handler',
-        'production says so, which it previously never did');
+    is($note->{serving}, 'MyApp::Handler',  'the application is named');
+    is($note->{mode}, 'production (--env)', 'production says so, which it never did');
 };
 
 subtest 'it says how the mode was decided' => sub {
     # mode() resolves --env, then PAGI_ENV, then whether STDIN is a terminal.
     # The last one means anything without a terminal -- systemd, docker, cron,
     # a backgrounded shell -- silently becomes production.
-    my %cases = (
-        '--env'    => 'production mode (--env), serving ./app.pl',
-        'PAGI_ENV' => 'production mode (PAGI_ENV), serving ./app.pl',
-        'no tty'   => 'production mode (no tty), serving ./app.pl',
-    );
-
-    for my $source (sort keys %cases) {
-        my $runner = PAGI::Server::Runner->new(env => 'production');
-        $runner->{_mode_source} = $source;
-        is(summary_from($runner, app_spec => './app.pl'), $cases{$source},
-            "reports $source");
+    for my $source ('--env', 'PAGI_ENV', 'no tty') {
+        my $note = notes_for(env => 'production', source => $source,
+                             app_spec => './app.pl');
+        is($note->{mode}, "production ($source)", "reports $source");
     }
 };
 
 subtest 'development reports what it added to the stack' => sub {
-    my $runner = PAGI::Server::Runner->new(env => 'development');
-    $runner->{_mode_source} = 'tty';
-
-    is(summary_from($runner, app_spec => './app.pl', middleware => 'Lint enabled'),
-        'development mode (tty), serving ./app.pl, Lint enabled',
+    my $with = notes_for(env => 'development', source => 'tty',
+                         app_spec => './app.pl', middleware => 'Lint enabled');
+    is($with->{mode}, 'development (tty), Lint enabled',
         'so an added wrapper is never a surprise');
 
-    is(summary_from($runner, app_spec => './app.pl',
-                    middleware => 'default middleware disabled'),
-        'development mode (tty), serving ./app.pl, default middleware disabled',
+    my $without = notes_for(env => 'development', source => 'tty',
+                            app_spec => './app.pl',
+                            middleware => 'default middleware disabled');
+    is($without->{mode}, 'development (tty), default middleware disabled',
         'and neither is an absent one');
 };
 
