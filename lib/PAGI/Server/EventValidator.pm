@@ -3,7 +3,7 @@ package PAGI::Server::EventValidator;
 use strict;
 use warnings;
 
-our $VERSION = '0.002012';
+our $VERSION = '0.002013';
 
 use Carp qw(croak);
 use Encode ();

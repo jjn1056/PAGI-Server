@@ -1,5 +1,50 @@
 # Revision history for PAGI-Server
 
+0.002013 - 2026-09-03
+
+  Bug fixes
+  - Daemonizing no longer discards every diagnostic in the process.
+    _daemonize reopened STDERR on /dev/null and nothing named an
+    alternative, so `pagi-server -D` produced no diagnostics at all -- and
+    none from any distribution running on it. Production mode also
+    disables the access log by default, so a daemonized production server
+    wrote no log output whatsoever.
+  - log_level now reaches workers. Workers were started quiet, and all
+    request handling happens in workers, so `--log-level debug --workers N`
+    reported nothing from the processes actually serving traffic.
+  - The server's own most valuable diagnostics -- application errors after
+    a response started, connection errors, protocol anomalies, TLS
+    failures -- reported straight to STDERR. Twenty-two such sites now pass
+    through the server's logger, so log_level governs them and a replaced
+    sink sees them.
+
+  New
+  - --error-log FILE: where diagnostics go. Opened immediately after the
+    command line is parsed, so it captures app-loading failures and bind
+    errors, and the descriptor survives both --daemonize forks.
+  - PAGI::Server->new(logger => sub {...}): the destination is replaceable.
+    One hashref per message with level, message and category. A coderef
+    rather than a logging object because frameworks disagree about level
+    names -- Log::Dispatch has no 'fatal' and discards such a message
+    silently -- so the closure is where translation belongs. See
+    examples/13-custom-logging.
+  - Startup is one aligned block, led by the address, naming what is being
+    served and which mode resolved and why -- including in production,
+    which previously reported no mode at all. A graceful shutdown now says
+    so; Ctrl-C was silent, indistinguishable from being killed.
+
+  What may break
+  - `quiet` is deprecated. It was a second control over the same axis as
+    log_level and overrode it; it is now a spelling of
+    log_level => 'error', and an explicit log_level wins. Anything relying
+    on quiet suppressing a more verbose log_level should set log_level
+    directly.
+  - Tests that both quiet a server and assert on a warn-level diagnostic
+    now contradict themselves, because those diagnostics answer to the
+    threshold for the first time. Set log_level => 'warn' instead.
+  - Startup and shutdown message text changed. Anything matching on the old
+    banner, or on "PAGI development mode - ...", needs updating.
+
 0.002012 - 2026-09-01
 
   Conformance
