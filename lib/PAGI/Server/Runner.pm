@@ -358,10 +358,35 @@ or auto-detection based on TTY.
 
 sub mode {
     my ($self) = @_;
+    return ($self->_resolve_mode)[0];
+}
 
-    return $self->{env} if defined $self->{env};
-    return $ENV{PAGI_ENV} if defined $ENV{PAGI_ENV};
-    return -t STDIN ? 'development' : 'production';
+# The mode and what decided it, from one precedence chain so the two cannot
+# disagree. The source matters because the last rule -- whether STDIN is a
+# terminal -- silently makes production of anything without one: systemd,
+# docker, cron, CI, a backgrounded shell.
+sub _resolve_mode {
+    my ($self) = @_;
+
+    return ($self->{env},     '--env')    if defined $self->{env};
+    return ($ENV{PAGI_ENV},   'PAGI_ENV') if defined $ENV{PAGI_ENV};
+    return -t STDIN ? ('development', 'tty') : ('production', 'no tty');
+}
+
+# One line saying what is running, in which mode, and why that mode. Emitted in
+# production as well as development: confirming that a host did NOT come up in
+# development, wrapping every request in Lint, is worth more than confirming
+# that it did.
+sub _log_startup_summary {
+    my ($self, $middleware_note) = @_;
+
+    my $line = $self->mode . ' mode';
+    $line .= " ($self->{_mode_source})" if defined $self->{_mode_source};
+    $line .= ', serving ' . ($self->{app_spec} // 'unknown');
+    $line .= ", $middleware_note" if defined $middleware_note;
+
+    $self->_log(info => $line);
+    return;
 }
 
 =head2 load_app
@@ -472,15 +497,22 @@ sub prepare_app {
     # Wrap with mode middleware unless disabled
     my $use_middleware = $self->{default_middleware} // 1;
 
-    if ($use_middleware && $self->mode eq 'development') {
-        if (eval { require PAGI::Middleware::Lint; 1 }) {
+    my $middleware_note;
+    if ($self->mode eq 'development') {
+        if (!$use_middleware) {
+            # Worth saying: otherwise Lint's absence looks like a fault.
+            $middleware_note = 'default middleware disabled';
+        }
+        elsif (eval { require PAGI::Middleware::Lint; 1 }) {
             $app = PAGI::Middleware::Lint->new(strict => 1)->wrap($app);
-            $self->_log(info => 'PAGI development mode - Lint middleware enabled');
+            $middleware_note = 'Lint enabled';
         }
         else {
-            $self->_log(info => 'PAGI development mode - install PAGI-Tools for Lint middleware');
+            $middleware_note = 'Lint unavailable -- install PAGI-Tools';
         }
     }
+
+    $self->_log_startup_summary($middleware_note);
 
     $self->{app} = $app;
     return $app;
@@ -590,8 +622,10 @@ sub run {
     $self->_redirect_stderr_to_error_log;
 
     # Export resolved mode to environment so apps can check it
-    # (similar to Plack's PLACK_ENV)
-    $ENV{PAGI_ENV} = $self->mode;
+    # (similar to Plack's PLACK_ENV). Note what decided the mode first: after
+    # this assignment PAGI_ENV is always set, and would claim the credit.
+    (my $resolved_mode, $self->{_mode_source}) = $self->_resolve_mode;
+    $ENV{PAGI_ENV} = $resolved_mode;
 
     # Configure Future::IO for IO::Async if available
     # This enables Future::IO-based libraries (Async::Redis, etc.) and
