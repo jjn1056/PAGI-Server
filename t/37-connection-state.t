@@ -95,8 +95,8 @@ subtest 'on_disconnect callbacks' => sub {
     $conn->_mark_disconnected('timeout');
 
     is(scalar @calls, 2, 'both callbacks invoked');
-    is($calls[0], ['cb1', 'timeout'], 'cb1 called with reason');
-    is($calls[1], ['cb2', 'timeout'], 'cb2 called with reason');
+    is($calls[0], ['cb1', 'timeout', undef], 'cb1 called with reason');
+    is($calls[1], ['cb2', 'timeout', undef], 'cb2 called with reason');
 };
 
 # =============================================================================
@@ -369,17 +369,20 @@ subtest 'disconnect marks connection state before resuming parked drain waiters'
 };
 
 # =============================================================================
-# Test: response_complete accessor (SHOULD-level; unsupported -> undef)
+# Test: response_complete accessor (boolean; true only after clean completion)
 # =============================================================================
 
-subtest 'response_complete is undef (unsupported)' => sub {
+subtest 'response_complete is a boolean, true only after clean completion' => sub {
     my $conn = PAGI::Server::ConnectionState->new();
 
     ok($conn->can('response_complete'), 'response_complete method exists');
 
     my $result = eval { $conn->response_complete };
     ok(!$@, 'response_complete does not throw') or diag("error: $@");
-    is($result, undef, 'response_complete returns undef (unsupported)');
+    is($result, 0, 'response_complete returns 0 while active');
+
+    $conn->_mark_disconnected('client_closed');
+    is($conn->response_complete, 0, 'response_complete returns 0 after abnormal end');
 };
 
 # =============================================================================
@@ -444,6 +447,82 @@ subtest 'disconnect_future is cancellation-isolated' => sub {
         'direct cancel of an observer is harmless');
     is($conn->disconnect_future->get, 'client_closed',
         'and the signal survives it');
+};
+
+subtest 'response_complete is a boolean that becomes true only on clean completion' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    is($cs->response_complete, 0, 'false while active');
+    $cs->_mark_complete;
+    is($cs->response_complete, 1, 'true after clean completion');
+
+    my $cs2 = PAGI::Server::ConnectionState->new;
+    $cs2->_mark_disconnected('client_closed');
+    is($cs2->response_complete, 0, 'false after abnormal end');
+};
+
+subtest 'disconnect_detail is recorded and delivered as the second callback argument' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my @got;
+    $cs->on_disconnect(sub { push @got, [@_] });
+    is($cs->disconnect_detail, undef, 'undef while active');
+    $cs->_mark_disconnected('protocol_error', 'RSV1 set on data frame');
+    is($cs->disconnect_reason, 'protocol_error', 'token');
+    is($cs->disconnect_detail, 'RSV1 set on data frame', 'detail accessor');
+    is(\@got, [['protocol_error', 'RSV1 set on data frame']], 'callback got (reason, detail)');
+
+    my @late;
+    $cs->on_disconnect(sub { push @late, [@_] });
+    is(\@late, [['protocol_error', 'RSV1 set on data frame']], 'late registration gets both arguments');
+};
+
+subtest 'callbacks are released after terminal delivery' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my $cb = sub { 1 };
+    $cs->on_disconnect($cb);
+    $cs->on_complete($cb);
+    $cs->_mark_complete;
+    is(scalar @{$cs->{_callbacks}}, 0, 'on_disconnect list emptied');
+    is(scalar @{$cs->{_complete_callbacks}}, 0, 'on_complete list emptied');
+};
+
+subtest 'abort calls the teardown hook once, marks app_abort with detail, and is idempotent' => sub {
+    my @hook;
+    my $cs = PAGI::Server::ConnectionState->new(on_abort => sub { push @hook, [@_] });
+    my @cb;
+    $cs->on_disconnect(sub { push @cb, [@_] });
+    my $f = $cs->disconnect_future;
+
+    $cs->abort('quota exceeded after 42 bytes');
+    is(scalar @hook, 1, 'hook invoked once');
+    isa_ok($hook[0][0], ['PAGI::Server::ConnectionState'], 'hook receives the object');
+    is($hook[0][1], 'quota exceeded after 42 bytes', 'hook receives the detail');
+    ok(!$cs->is_connected, 'not connected');
+    is($cs->disconnect_reason, 'app_abort', 'token is app_abort');
+    is($cs->disconnect_detail, 'quota exceeded after 42 bytes', 'detail recorded');
+    ok($f->is_ready, 'disconnect_future resolved');
+    is($f->get, 'app_abort', 'resolved with the token');
+    is(\@cb, [['app_abort', 'quota exceeded after 42 bytes']], 'on_disconnect fired with both');
+
+    $cs->abort('again');
+    is(scalar @hook, 1, 'second abort is a no-op');
+    is($cs->disconnect_detail, 'quota exceeded after 42 bytes', 'first outcome preserved');
+};
+
+subtest 'abort after clean completion is a no-op that preserves completion' => sub {
+    my @hook;
+    my $cs = PAGI::Server::ConnectionState->new(on_abort => sub { push @hook, [@_] });
+    $cs->_mark_complete;
+    $cs->abort('too late');
+    is(scalar @hook, 0, 'hook not invoked');
+    is($cs->response_complete, 1, 'still complete');
+    is($cs->disconnect_reason, undef, 'still clean');
+};
+
+subtest 'abort without a hook still marks the state' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    $cs->abort;
+    is($cs->disconnect_reason, 'app_abort', 'marked');
+    is($cs->disconnect_detail, undef, 'no detail');
 };
 
 done_testing;

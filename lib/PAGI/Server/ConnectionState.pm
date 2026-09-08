@@ -84,6 +84,11 @@ sub new {
         # State (scalar refs - for internal consistency)
         _connected => \$connected,
         _reason    => \$reason,
+        _detail    => undef,        # free-text diagnostic for the abnormal end, or undef
+
+        # Optional teardown hook installed by the owning Connection: called as
+        # $hook->($self, $detail) exactly once, from abort(), while still active.
+        _on_abort  => $args{on_abort},
 
         # Distinguishes the two terminal states once _connected is false:
         # an abnormal disconnect (false) vs. a clean completion (true).
@@ -141,17 +146,15 @@ sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
 =head2 response_complete
 
-    my $done = $conn->response_complete;   # undef = unsupported, else 0 or 1
+    my $done = $conn->response_complete;   # 0 or 1
 
-Returns true once this request's response body has been fully sent, false
-while a response is still streaming or has not started, and C<undef> if the
-server does not track completion. This server does not currently track
-response-body completion, so this accessor always returns C<undef>. SHOULD-level
-per L<PAGI::Spec::Www/"Connection State">; test C<defined> before relying on it.
+Returns true (C<1>) once this request has reached the clean C<completed>
+terminal state, false (C<0>) while still active and false after an abnormal
+end. SHOULD-level per L<PAGI::Spec::Www/"Connection State">.
 
 =cut
 
-sub response_complete { return undef }
+sub response_complete { return $_[0]->{_completed} ? 1 : 0 }
 
 =head2 disconnect_reason
 
@@ -197,6 +200,21 @@ See L<PAGI::Spec::Www/"Standard Disconnect Reasons"> for the authoritative list.
 sub disconnect_reason {
     my $self = shift;
     return ${$self->{_reason}};
+}
+
+=head2 disconnect_detail
+
+    my $detail = $conn->disconnect_detail;   # String or undef
+
+Free-text diagnostic for an abnormal end, or C<undef>. Diagnostic only: never
+on the wire, never a branching key. See L<PAGI::Spec::Www/"Connection Object
+Interface">.
+
+=cut
+
+sub disconnect_detail {
+    my $self = shift;
+    return $self->{_detail};
 }
 
 =head2 disconnect_future
@@ -277,7 +295,7 @@ sub disconnect_future {
 =head2 on_disconnect
 
     $conn->on_disconnect(sub {
-        my ($reason) = @_;
+        my ($reason, $detail) = @_;
         # cleanup code
     });
 
@@ -289,10 +307,12 @@ Registers a callback to be invoked when disconnect occurs.
 
 =item * Callbacks are invoked in registration order
 
-=item * Callbacks receive the disconnect reason as the first argument
+=item * Callbacks receive the disconnect reason as the first argument and
+the disconnect detail (see L</disconnect_detail>, may be C<undef>) as the
+second
 
 =item * If registered after disconnect already occurred, callback is
-invoked immediately with the reason
+invoked immediately with the reason and detail
 
 =item * One callback's failure does not prevent other callbacks from
 being invoked
@@ -314,7 +334,7 @@ sub on_disconnect {
     # completion (on_disconnect means "something went wrong").
     return if $self->{_completed};
 
-    eval { $cb->(${$self->{_reason}}) };
+    eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
     $self->_log(error => "on_disconnect callback error: $@") if $@;
 }
 
@@ -389,30 +409,31 @@ State transitions occur in this order:
 =cut
 
 sub _mark_disconnected {
-    my ($self, $reason) = @_;
+    my ($self, $reason, $detail) = @_;
 
-    # Already disconnected - no-op (idempotent)
+    # Already terminal - no-op (idempotent)
     return unless ${$self->{_connected}};
 
     # 1. Update state
     ${$self->{_connected}} = 0;
     ${$self->{_reason}} = $reason // 'unknown';
+    $self->{_detail} = $detail;
 
     # 2. Resolve future if it exists (lazy - may not have been created)
     if ($self->{_future} && !$self->{_future}->is_ready) {
         $self->{_future}->done(${$self->{_reason}});
     }
 
-    # 3. Invoke callbacks
+    # 3. Invoke callbacks with (reason, detail)
     for my $cb (@{$self->{_callbacks}}) {
-        eval { $cb->(${$self->{_reason}}) };
+        eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
         $self->_log(error => "on_disconnect callback error: $@") if $@;
     }
 
-    # 4. Clear callbacks to release references. The request ended abnormally,
-    #    so on_complete callbacks never run.
+    # 4. Release both families
     $self->{_callbacks}          = [];
     $self->{_complete_callbacks} = [];
+    $self->{_on_abort}           = undef;
 }
 
 =head2 _mark_complete
@@ -453,6 +474,31 @@ sub _mark_complete {
     # Clear both lists to release references.
     $self->{_complete_callbacks} = [];
     $self->{_callbacks}          = [];
+    $self->{_on_abort}           = undef;
+}
+
+=head2 abort
+
+    $conn->abort($detail);
+
+Ends this scope's transport now (see L<PAGI::Spec::Www/"Connection Object
+Interface">): marks the scope abnormal with token C<app_abort>, records
+C<$detail> as C<disconnect_detail>, and asks the owning connection to tear
+the transport down without waiting for an in-flight write. Synchronous; no
+meaningful return value. A no-op once the scope has reached either terminal
+state.
+
+=cut
+
+sub abort {
+    my ($self, $detail) = @_;
+    return unless ${$self->{_connected}};
+
+    my $hook = delete $self->{_on_abort};
+    # State first, so the hook (and anything it resumes) observes app_abort.
+    $self->_mark_disconnected('app_abort', $detail);
+    $hook->($self, $detail) if $hook;
+    return;
 }
 
 # The server is passed in rather than reached for through _connection, which is
