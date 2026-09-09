@@ -1034,15 +1034,18 @@ sub _h2_dispatch_stream {
             # only as a defensive default for the theoretical case of a
             # stream with none.
             #
-            # A recorded reason of 'server_error' is NOT a client-gone signal:
-            # it means the SERVER caused the abnormal end (e.g. this very
-            # dispatch wrapper's own incomplete-response branch below marks
-            # server_error before resetting the stream with RST_STREAM
-            # INTERNAL_ERROR for a response left started-but-unfinished,
-            # including a trailers-declared response that never sent its
-            # trailers). Per the PAGI spec's incomplete-response section, the
-            # log carve-out exists only for "the client had already
-            # disconnected" -- so server-caused ends must still warn.
+            # A recorded reason of 'server_error' is NOT a "scope already
+            # ended" signal: it is what this very dispatch wrapper's
+            # incomplete-response branch below records before resetting the
+            # stream with RST_STREAM INTERNAL_ERROR, so it must still warn.
+            # Every other server-decided end (idle_timeout, keepalive_timeout,
+            # protocol_error, queue_overflow, server_shutdown, app_abort) marks
+            # the object with its own token BEFORE the app's pending receive is
+            # woken (State Transition Order), so by the time the app returns
+            # the scope has already ended with a reason of its own; those ends
+            # take the carve-out exactly like a client disconnect and do not
+            # warn. Despite the name, $client_gone therefore means "the scope
+            # already ended for a reason that is not ours".
             #
             # $stream_alive is entry-exists-AND-not-yet-closed, not merely
             # entry-exists: _h2_on_close marks $stream->{h2_closed} the
