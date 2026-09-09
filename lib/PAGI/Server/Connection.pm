@@ -2594,7 +2594,7 @@ sub _h2_create_sse_receive {
     # See _h2_scope_reason: this fallback must name whatever the stream's
     # connection_state was marked with, not a hardcoded 'client_closed'.
     my $sse_disconnect = sub {
-        return { type => 'sse.disconnect' } unless $weak_self;
+        return { type => 'sse.disconnect', reason => 'client_closed' } unless $weak_self;
         return {
             type   => 'sse.disconnect',
             reason => $weak_self->_h2_scope_reason($weak_self->{h2_streams}{$stream_id}),
