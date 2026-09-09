@@ -475,13 +475,16 @@ subtest 'Multiple concurrent WebSocket streams' => sub {
 # ============================================================
 # WebSocket rejection (no accept) over HTTP/2
 # ============================================================
-# Reversed deliberately (spec decision D11): websocket.close before accept is
-# out of sequence (Www.pod "Close - send event") -- the server fails the $send
-# Future instead of answering with a 403, and refusing a handshake is done with
-# an HTTP response. The app here does not refuse either, so the no-response
-# backstop is what the client sees.
-subtest 'websocket.close before accept over HTTP/2 fails the send' => sub {
+# Reversed deliberately (spec decisions D5/D11): the 403 no longer comes from
+# websocket.close. Www.pod "Close - send event" -- "Sent before accept it is an
+# out-of-sequence event and the server MUST fail the $send Future without
+# mutating state; refusing a handshake is done with an HTTP response." The
+# rejection this subtest is named for is still a 403, and it still reaches the
+# client; it is now the application's own refusal response. The failed close
+# mutating nothing is what makes that refusal possible afterwards.
+subtest 'Rejected WebSocket gets 403' => sub {
     my %response_headers;
+    my $body = '';
     my $send_error;
 
     my $app = async sub {
@@ -495,8 +498,20 @@ subtest 'websocket.close before accept over HTTP/2 fails the send' => sub {
                     reason => 'not allowed',
                 });
             }; $@ };
+
+            # The failed send left the handshake open, so the refusal that
+            # actually rejects this client still works.
+            await $send->({
+                type    => 'http.response.start',
+                status  => 403,
+                headers => [['content-type', 'text/plain']],
+            });
+            await $send->({ type => 'http.response.body', body => 'not allowed' });
         }
     };
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
 
@@ -506,15 +521,23 @@ subtest 'websocket.close before accept over HTTP/2 fails the send' => sub {
             $response_headers{$name} = $value;
             return 0;
         },
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $body .= $data;
+            return 0;
+        },
     );
 
     complete_h2_handshake($client, $client_sock);
-    # The app runs and rejects during open_ws_stream's exchange
+    # The app runs and refuses during open_ws_stream's exchange
     my $ws_stream_id = open_ws_stream($client, $client_sock);
 
-    like($send_error, qr/before websocket\.accept/, 'the send failed as out of sequence');
-    is($response_headers{':status'}, '500',
-        'no 403 is synthesized: the app produced no response, so the backstop answers');
+    like($send_error, qr/before websocket\.accept/,
+        'websocket.close before accept fails the send');
+    is($response_headers{':status'}, '403', 'Rejected WebSocket gets 403');
+    like($body, qr/not allowed/, 'and the refusal body reaches the client');
+    is(scalar(@warnings), 0, 'nothing was logged: the failed send mutated no state')
+        or diag("warnings: @warnings");
 
     $stream_io->close_now;
     $loop->remove($server);
