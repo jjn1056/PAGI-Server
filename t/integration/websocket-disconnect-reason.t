@@ -118,8 +118,10 @@ subtest 'queue overflow delivers reason=queue_overflow, code=1008' => sub {
 # _handle_disconnect push+resolve path the queue_overflow subtest above
 # already covers. The fallback must report whatever ws_disconnect_reason a
 # server-initiated close recorded (_handle_disconnect sets it before
-# closing), via _ws_disconnect_event, defaulting to '' only when nothing
-# was recorded.
+# closing), via _ws_disconnect_event, defaulting to 'client_closed' when
+# nothing was recorded: a drop with no close handshake is 1006 plus the
+# client_closed token (Www.pod 0.6 "Disconnect - receive event", normative
+# pairings; the 0.5 empty default was measured bug S4).
 subtest 'receive() fallback after close reports the recorded ws_disconnect_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(app => sub { });
     $conn->{closed} = 1;
@@ -133,7 +135,7 @@ subtest 'receive() fallback after close reports the recorded ws_disconnect_reaso
     is($event->{reason}, 'idle_timeout', "fallback reason is the recorded token, not ''");
 };
 
-subtest 'receive() fallback with no recorded reason still falls back to empty' => sub {
+subtest 'receive() fallback with no recorded reason reports client_closed (S4, Www 0.6)' => sub {
     my $conn = PAGI::Server::Connection->new(app => sub { });
     $conn->{closed} = 1;
 
@@ -141,7 +143,7 @@ subtest 'receive() fallback with no recorded reason still falls back to empty' =
     my $event = $receive->()->get;
 
     is($event->{code}, 1006, 'fallback code is still 1006');
-    is($event->{reason}, '', "fallback reason is '' when nothing was recorded");
+    is($event->{reason}, 'client_closed', "fallback reason is client_closed when nothing was recorded");
 };
 
 done_testing;
