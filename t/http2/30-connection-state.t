@@ -123,6 +123,58 @@ sub exchange_frames {
     }
 }
 
+# --- direct-h2 test harness (lifted from t/http2/22-denial-response.t), used
+# by the WebSocket/SSE subtests below: these need alpn_protocol => 'h2' rather
+# than the h2c upgrade path the harness above drives. ------------------------
+
+sub create_h2_connection {
+    my (%overrides) = @_;
+    socketpair(my $sock_a, my $sock_b, AF_UNIX, SOCK_STREAM, 0)
+        or die "socketpair: $!";
+    $sock_a->blocking(0);
+    $sock_b->blocking(0);
+    my $app    = $overrides{app}    // sub { };
+    my $server = $overrides{server} // create_test_server(app => $app);
+    my $stream = IO::Async::Stream->new(
+        read_handle  => $sock_a,
+        write_handle => $sock_a,
+        on_read      => sub { 0 },
+    );
+    my $conn = PAGI::Server::Connection->new(
+        stream        => $stream,
+        app           => $app,
+        protocol      => $protocol,
+        server        => $server,
+        h2_protocol   => $server->{http2_protocol},
+        alpn_protocol => 'h2',
+    );
+    $server->add_child($stream);
+    $conn->start;
+    return ($conn, $stream, $sock_b, $server);
+}
+
+sub complete_h2_handshake {
+    my ($client, $client_sock) = @_;
+    $loop->loop_once(0.1);
+    my $server_settings = '';
+    $client_sock->sysread($server_settings, 4096);
+    $client->send_connection_preface;
+    my $data = $client->mem_send;
+    $client_sock->syswrite($data);
+    $loop->loop_once(0.1);
+    $client->mem_recv($server_settings);
+    $loop->loop_once(0.1);
+    my $ack = '';
+    $client_sock->sysread($ack, 4096);
+    $client->mem_recv($ack) if length($ack);
+    my $client_ack = $client->mem_send;
+    $client_sock->syswrite($client_ack) if length($client_ack);
+    $loop->loop_once(0.1);
+    my $extra = '';
+    $client_sock->sysread($extra, 4096);
+    $client->mem_recv($extra) if length($extra);
+}
+
 use constant H2_CANCEL_CODE => 8;   # RST_STREAM error code CANCEL (RFC 9113)
 
 # =============================================================================
@@ -550,6 +602,94 @@ subtest 'h2: two concurrent streams have independent connection_state' => sub {
     is($H2CS::DUAL_CS_B->is_connected, 1, 'stream B: still is_connected true (held, untouched)');
     is($H2CS::DUAL_COMPLETE_B, 0, 'stream B: on_complete did NOT fire');
     is($H2CS::DUAL_DISCONNECT_B, undef, 'stream B: on_disconnect did NOT fire');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# Test 6: websocket -- RST before accept marks client_closed with an RST detail
+# =============================================================================
+
+subtest 'h2: websocket RST before accept marks client_closed with an RST detail' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $c = $scope->{'pagi.connection'};
+        $c->on_disconnect(sub { $r{cb} = [@_] });
+        await $receive->();
+        $r{parked} = 1;
+        my $ev = await $receive->();
+        $r{event} = $ev; $r{done} = 1;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = $client->submit_request(method => 'CONNECT', path => '/ws', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']], body => sub { undef });
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+    ok($r{parked}, 'app parked on receive');
+    $client->submit_rst_stream($sid, 8);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+    is($r{event}{type}, 'websocket.disconnect', 'event type');
+    is($r{event}{reason}, 'client_closed', 'event reason');
+    is($r{cb}[0], 'client_closed', 'object token agrees');
+    like($r{cb}[1], qr/RST_STREAM error code 8/, 'detail names the RST code');
+    $stream_io->close_now; $loop->remove($server);
+};
+
+# =============================================================================
+# Test 7: sse -- a completed decline is a clean end
+# =============================================================================
+# Www.pod "Meaning per scope": a decline (sse.http.response.*) is a clean end
+# even though sse.start was never sent -- on_complete fires, not on_disconnect,
+# and disconnect_reason stays undef. h2 never advances seq_state for an SSE
+# stream (only the plain-http send closure tracks that mirror), so this
+# exercises the sse_clean_end flag Task B2 sets at decline completion, not the
+# seq_state fallback the http control case in t/http2/17 relies on.
+
+subtest 'h2: sse completed decline is a clean end' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+        my $c = $scope->{'pagi.connection'};
+        $r{cs} = $c;
+        $c->on_complete(sub { $r{complete}++ });
+        $c->on_disconnect(sub { $r{disc} = [@_] });
+        await $receive->();   # sse.request
+        await $send->({ type => 'sse.http.response.start', status => 403,
+                         headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'sse.http.response.body', body => 'no', more => 0 });
+        return;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my %headers;
+    my $client = create_client(
+        on_header => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($headers{':status'}, '403', 'decline used the custom status');
+    ok($r{cs}, 'app captured a connection_state');
+    is($r{cs}->is_connected, 0, 'is_connected false after the completed decline');
+    is($r{cs}->disconnect_reason, undef, 'disconnect_reason undef -- a decline is a clean end');
+    is($r{complete}, 1, 'on_complete fired');
+    is($r{disc}, undef, 'on_disconnect did NOT fire');
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -185,6 +185,12 @@ subtest 'max_requests counts h1 SSE requests' => sub {
             if ($scope->{type} eq 'sse') {
                 await $send->({ type => 'sse.start', status => 200, headers => [] });
                 await $send->({ type => 'sse.send', event => 'msg', data => 'hi' });
+                # sse.close: a return without it is now an incomplete response
+                # (Www.pod 0.6 "Application Left a Response Incomplete"; PAGI-Server
+                # Task B2, D12) -- no chunked terminator would reach the wire, and
+                # _sse_request_over_fresh_connection would spin to its 5s deadline
+                # waiting for one that never comes.
+                await $send->({ type => 'sse.close' });
                 return;
             }
             await $send->({ type => 'http.response.start', status => 200, headers => [] });

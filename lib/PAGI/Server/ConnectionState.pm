@@ -27,7 +27,7 @@ PAGI::Server::ConnectionState - Connection state tracking for HTTP requests
 
     # Register a callback for an abnormal end (client gone, timeout, error)
     $conn->on_disconnect(sub {
-        my ($reason) = @_;
+        my ($reason, $detail) = @_;
         rollback();
     });
 
@@ -385,7 +385,7 @@ sub on_complete {
 
 =head2 _mark_disconnected
 
-    $conn->_mark_disconnected($reason);
+    $conn->_mark_disconnected($reason, $detail);
 
 B<Internal method> - Called by the server when disconnect is detected.
 

@@ -216,17 +216,19 @@ sub close_codes {
            extract_ws_frames($raw);
 }
 
-# App that accepts and immediately returns -- it never calls receive() at
-# all, so nothing ever drains the stream's receive_queue. Nothing about a
-# WebSocket app coroutine returning tears the h2 stream down by itself
-# (only an explicit close/END_STREAM does), so the stream stays open and
-# every flooded message lands in receive_queue for white-box inspection.
+# App that accepts and then holds forever without ever calling receive(), so
+# nothing ever drains the stream's receive_queue: every flooded message lands
+# in receive_queue for white-box inspection. It never returns -- an accepted
+# socket that returns without a closing handshake is now an incomplete
+# response (Www.pod 0.6 "Application Left a Response Incomplete"; PAGI-Server
+# Task B2), which would reset the stream out from under this test before it
+# ever gets to flood it.
 sub make_never_draining_app {
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'websocket';
         await $send->({ type => 'websocket.accept' });
-        return;
+        await Future->new;   # held open -- this test ends the stream itself
     };
 }
 

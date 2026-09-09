@@ -23,15 +23,17 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 #     stays alive: a clean end honors the "Connection: keep-alive" that
 #     sse.start advertised (design 11.6, ratified by John 2026-08-22), so the
 #     same socket serves the next request.
-# Both an explicit sse.close and a plain return must end the stream identically
-# on the wire (D3: keep return-to-end valid).
+# D12 (Www.pod 0.6 "Application Left a Response Incomplete") superseded D3 on
+# 2026-09-09: a plain return after sse.start with no sse.close is now an
+# incomplete response, not a clean end identical to sse.close.
 
 my $loop = IO::Async::Loop->new;
 
 sub create_server {
-    my ($app) = @_;
+    my ($app, %opts) = @_;
     my $server = PAGI::Server->new(
         app => $app, host => '127.0.0.1', port => 0, quiet => 1, shutdown_timeout => 1,
+        %opts,
     );
     $loop->add($server);
     $server->listen->get;
@@ -129,27 +131,37 @@ subtest 'sse.close ends the stream; send-after-close raises' => sub {
     $server->shutdown->get;
 };
 
-subtest 'return-to-end still terminates the stream (D3)' => sub {
+subtest 'return without sse.close is an incomplete response (D12, supersedes D3)' => sub {
+    my @events;
+    my ($cs, $complete, $disc);
+
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         return await serve_plain(@_) if ($scope->{type} // '') eq 'http';
+        $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { $complete++ });
+        $cs->on_disconnect(sub { $disc = [@_] });
         await $send->({ type => 'sse.start', status => 200,
                         headers => [ ['content-type', 'text/event-stream'] ] });
         await $send->({ type => 'sse.send', event => 'tick', data => 'R' });
-        return;   # no sse.close -- end by returning
+        return;   # no sse.close -- incomplete response (D12), not a clean end
     };
 
-    my $server = create_server($app);
+    my $server = create_server($app, logger => sub { push @events, $_[0] });
     my $port = $server->port;
     my ($sock, $wire, $eof) = sse_get($port);
 
-    like($wire, qr/data: R/, 'event delivered');
-    like($wire, qr/\r\n0\r\n\r\n/, 'returning framed the stream off with the chunked terminator');
-    ok(!$eof,                'connection stays alive on return (keep-alive honored)');
-    like(plain_request_on($sock, $port), qr/REUSED/,
-        'same socket serves an ordinary request after the stream ended by returning');
-    close $sock;
+    like($wire, qr/data: R/, 'event delivered before the incomplete return');
+    unlike($wire, qr/\r\n0\r\n\r\n\z/,
+        'no chunked terminator: the application never asserted completion');
+    ok($eof, 'connection closed, not kept alive, after an incomplete response');
+    is($disc->[0], 'server_error', 'on_disconnect fired with server_error');
+    ok(!$complete, 'on_complete did NOT fire');
 
+    my @errors = grep { ($_->{level} // '') eq 'error' } @events;
+    is(scalar(@errors), 1, 'exactly one error log line');
+
+    close $sock;
     $server->shutdown->get;
 };
 

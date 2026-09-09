@@ -315,7 +315,13 @@ subtest 'SSE chunked encoding properly terminated' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'test', data => 'hello' });
-        # App returns normally - server should send chunked terminator
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end. sse.close still honors keep-alive (design 11.6), so the
+        # chunked terminator this subtest checks for is unaffected.
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);

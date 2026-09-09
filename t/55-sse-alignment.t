@@ -823,7 +823,12 @@ subtest 'clean SSE end by returning: connection stays open and serves the next r
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', event => 'tick', data => 'one' });
-        return;   # clean end by returning
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
+        return;
     });
     my $port = $server->port;
 
@@ -946,6 +951,11 @@ subtest 'client Connection: close still closes after a clean SSE end (control)' 
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'five' });
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
         return;
     });
     my $port = $server->port;
