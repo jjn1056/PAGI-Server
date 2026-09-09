@@ -31,6 +31,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
+use Protocol::WebSocket::Frame;
 
 my $have_h2 = do {
     require PAGI::Server::Protocol::HTTP2;
@@ -534,6 +535,94 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
 # (f) websocket.close before accept
 # ============================================================
 
+# ============================================================
+# A WebSocket refusal's status must be 300 or above
+# ============================================================
+# Www.pod "Refusing the handshake": "A refusal's status MUST be 300 or above. A
+# 1xx or 2xx status is not a refusal ... the server MUST fail the $send Future
+# without transmitting anything or mutating state, on either transport." The
+# fail-don't-mutate half is what makes the accept afterwards succeed, so a
+# working socket is the proof that nothing was mutated.
+
+subtest 'a websocket refusal below 300 fails the send and leaves the handshake open' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();                       # websocket.connect
+        $r{err} = do { local $@;
+            eval { await $send->({ type => 'http.response.start', status => 200,
+                                   headers => [['content-type', 'text/plain']] }) }; $@ };
+        $r{started} = $scope->{'pagi.connection'}->response_started;
+        # Nothing was mutated, so the handshake is still open to an accept.
+        await $send->({ type => 'websocket.accept' });
+        my $msg = await $receive->();
+        $r{echoed} = $msg->{text};
+        await $send->({ type => 'websocket.send', text => "echo:" . ($msg->{text} // '') });
+        await $send->({ type => 'websocket.close' });
+        return;
+    };
+
+    my $server = create_server($app);
+    my ($sock, $pump, $wire) = h1_open($server->port, h1_request('websocket'));
+    $pump->(20);
+    like($$wire, qr{^HTTP/1\.1 101}, 'h1: the accept still completed the handshake');
+    unlike($$wire, qr{^HTTP/1\.1 200}m, 'h1: the failed start transmitted nothing');
+    print $sock Protocol::WebSocket::Frame->new(
+        buffer => 'ping-me', type => 'text', masked => 1)->to_bytes;
+    $pump->(25);
+    close $sock;
+    $server->shutdown->get;
+
+    like($r{err}, qr/refusal status must be 300 or above/, 'h1: the send failed on the status rule');
+    is($r{started}, 0, 'h1: nothing was mutated -- no response had started');
+    is($r{echoed}, 'ping-me', 'h1: the accepted socket carried a real message');
+    like($$wire, qr/echo:ping-me/, 'h1: and the reply reached the client');
+
+    SKIP: {
+        skip 'HTTP/2 not available', 4 unless $have_h2;
+        my %h2;
+        my $h2app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->();
+            $h2{err} = do { local $@;
+                eval { await $send->({ type => 'http.response.start', status => 200,
+                                       headers => [['content-type', 'text/plain']] }) }; $@ };
+            $h2{started} = $scope->{'pagi.connection'}->response_started;
+            await $send->({ type => 'websocket.accept' });
+            my $msg = await $receive->();
+            $h2{echoed} = $msg->{text};
+            await $send->({ type => 'websocket.send', text => "echo:" . ($msg->{text} // '') });
+            # End the socket cleanly: returning from an accepted socket without
+            # a closing handshake is an incomplete response and would log one.
+            await $send->({ type => 'websocket.close' });
+            return;
+        };
+
+        my ($conn, $stream_io, $client_sock, $server2) = create_h2_connection(app => $h2app);
+        my (%headers, $data);
+        $data = '';
+        my $client = create_client(
+            on_header          => sub { my (undef, $n, $v) = @_; $headers{lc $n} = $v; 0 },
+            on_data_chunk_recv => sub { my (undef, $d) = @_; $data .= $d; 0 },
+        );
+        complete_h2_handshake($client, $client_sock);
+        my $sid = h2_submit($client, $client_sock, 'websocket');
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 25);
+        $client->submit_data($sid, Protocol::WebSocket::Frame->new(
+            buffer => 'ping-me', type => 'text', masked => 1)->to_bytes, 0);
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 25);
+        $stream_io->close_now;
+        $loop->remove($server2);
+
+        like($h2{err}, qr/refusal status must be 300 or above/, 'h2: the send failed on the status rule');
+        is($h2{started}, 0, 'h2: nothing was mutated -- no response had started');
+        is($h2{echoed}, 'ping-me', 'h2: the accepted stream carried a real message');
+        like($data, qr/echo:ping-me/, 'h2: and the reply reached the client');
+    }
+};
+
 subtest 'websocket.close before accept fails the send and writes nothing' => sub {
     my %r;
     my $app = async sub {
@@ -698,7 +787,7 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 10 unless $have_h2;
+        skip 'HTTP/2 not available', 12 unless $have_h2;
         for my $kind (@SCOPES) {
             my %r;
             my $app = async sub {
@@ -724,6 +813,7 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
             is($r{conn}->response_complete, 1, "h2 $kind: response_complete is true");
             is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
             is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");
+            is($r{disconnect}, undef, "h2 $kind: on_disconnect never fired");
         }
     }
 };

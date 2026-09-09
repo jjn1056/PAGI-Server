@@ -1227,7 +1227,8 @@ subtest 'receive() fallback with no reachable stream state reports client_closed
 # _h2_on_body's max_body_size overrun branch delivers a scope-appropriate
 # disconnect for the sse and http arms, but excluded pre-accept websocket
 # streams: an accepted ws stream returns early at the top of _h2_on_body
-# (the `$stream->{is_websocket} && $stream->{ws_accepted}` guard) before
+# (the `$stream->{is_websocket} && _ws_handshake_accepted($stream->{seq_state})`
+# guard) before
 # ever reaching this size check, so `is_websocket` true at the overrun
 # branch always means pre-accept. Before this fix, that pre-accept case got
 # its 413 and stream-state deletion but no receive_queue event, so an app
@@ -1282,12 +1283,17 @@ subtest 'max_body_size 413 overrun on a pre-accept ws stream wakes pending recei
     }
     ok($dispatched, 'app consumed websocket.connect and parked on a second, pre-accept receive()')
         or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
-    ok(!$conn->{h2_streams}{$ws_stream_id}{ws_accepted}, 'stream is still pre-accept (ws_accepted false)');
+    # The send state is the accept fact since sub-spec 0.6 (there is no longer a
+    # separate flag): 'accepted' and 'closed' are the accepted states, and a
+    # stream still in the handshake is 'connecting'.
+    ok(!PAGI::Server::Connection::_ws_handshake_accepted(
+            $conn->{h2_streams}{$ws_stream_id}{seq_state}),
+        'stream is still pre-accept (send state is not accepted)');
 
     # Push body data past max_body_size (40 bytes) as raw h2 DATA -- for a
     # pre-accept ws stream this is accumulated as an ordinary request body
-    # (the ws-frame-parsing branch in _h2_on_body only runs once ws_accepted
-    # is true), so it drives the SAME max_body_size overrun branch the
+    # (the ws-frame-parsing branch in _h2_on_body only runs once the send state
+    # says accepted), so it drives the SAME max_body_size overrun branch the
     # sse/http arms use.
     send_stream_data($client, $client_sock, $ws_stream_id, ('X' x 100));
 

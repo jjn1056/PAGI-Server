@@ -74,6 +74,12 @@ for my $type (qw(websocket sse)) {
             $seen{done} = 1;
             return;   # no response: exercised elsewhere
         };
+        # This fixture returns without accepting, refusing, or starting a
+        # stream, so it provokes the scope's no-response backstop
+        # (Www.pod "Application Produced No Response") and its one error line.
+        # Asserted here so the suite's stderr carries only lines a test claims.
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
         my $server = create_server($app);
         drive(port => $server->port, request => ($type eq 'websocket' ? ws_request($server->port) : sse_request($server->port)),
               until => sub { $seen{done} }, close => 1);
@@ -81,6 +87,11 @@ for my $type (qw(websocket sse)) {
         is($seen{present}, 1, 'object present');
         is($seen{methods}, [], 'all nine methods present');
         is($seen{started_before}, 0, 'response_started false before any response');
+        my $backstop = $type eq 'websocket'
+            ? qr/returned without accepting the WebSocket or refusing the handshake/
+            : qr/returned without starting an SSE stream or a response/;
+        is(scalar(grep { $_ =~ $backstop } @warnings), 1,
+            'the no-response backstop logged exactly once') or diag("warnings: @warnings");
     };
 }
 

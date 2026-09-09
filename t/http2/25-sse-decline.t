@@ -163,19 +163,55 @@ subtest 'http.response.* returns a plain HTTP 404 (declines the stream)' => sub 
     like($body, qr/No such stream/, 'decline body delivered');
 };
 
-subtest 'multi-chunk decline body buffers until more=>0' => sub {
+# Reversed deliberately (spec decision D11), the sse twin of
+# t/http2/22's 'h2 refusal streams multiple body chunks': nothing is buffered
+# any more. Www.pod "Refusing the handshake", whose body semantics "Refusing
+# the stream" inherits -- "more => 1 streams under the transport's ordinary
+# body, flow-control, and framing rules ... Nothing is buffered specially" --
+# so the first chunk must be a DATA frame at the client before the terminal one
+# is sent. Written inline rather than through decline_request, which tears the
+# connection down before the test could look.
+subtest 'multi-chunk refusal body streams, it is not buffered' => sub {
+    my $gate = $loop->new_future;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'http.response.start', status => 401,
                         headers => [['x-deny', 'auth']] });
         await $send->({ type => 'http.response.body', body => 'go ',   more => 1 });
+        await $gate;
         await $send->({ type => 'http.response.body', body => 'away', more => 0 });
         return;
     };
-    my ($headers, $body) = decline_request(app => $app);
-    is($headers->{':status'}, '401', '401 status');
-    is($headers->{'x-deny'},  'auth', 'custom header present');
-    is($body, 'go away', 'body chunks concatenated before submission');
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my %headers;
+    my $body = '';
+    my $client = create_client(
+        on_header          => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+        on_data_chunk_recv => sub { my ($sid, $d)    = @_; $body .= $d;         return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($headers{':status'}, '401', '401 status');
+    is($headers{'x-deny'},  'auth', 'custom header present');
+    is($body, 'go ', 'the first chunk reaches the client before the terminal one is sent');
+
+    $gate->done;
+    exchange_frames($client, $client_sock, 20);
+    is($body, 'go away', 'the terminal chunk follows');
+
+    $stream_io->close_now;
+    $loop->remove($server);
 };
 
 subtest 'first-send-wins: stream after decline, and decline after stream, raise' => sub {
