@@ -274,23 +274,23 @@ my %expect = (
     # label                   => [ recv type,              recv reason,     term_send ]
     'h1 ws pre close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h1 ws mid close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
-    'h1 ws post'         => { pending => 1,                                              term => '-' },
+    'h1 ws post'         => { pending => 1, complete => 1,                                              term => '-' },
     'h1 ws acc close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h1 sse pre close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h1 sse mid close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
-    'h1 sse post'        => { pending => 1,                                              term => '-' },
+    'h1 sse post'        => { pending => 1, complete => 1,                                              term => '-' },
     'h2 ws pre rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws pre close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws mid rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
     'h2 ws mid close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
-    'h2 ws post'         => { pending => 1,                                              term => '-' },
+    'h2 ws post'         => { pending => 1, complete => 1,                                              term => '-' },
     'h2 ws acc rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws acc close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 sse pre rst'     => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h2 sse pre close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h2 sse mid rst'     => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
     'h2 sse mid close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
-    'h2 sse post'        => { pending => 1,                                              term => '-' },
+    'h2 sse post'        => { pending => 1, complete => 1,                                              term => '-' },
 
     # A completed closing handshake is a clean end regardless of the peer's
     # close code, and the peer's code and reason text are delivered as
@@ -314,7 +314,18 @@ sub check_cell {
     my %recv = $r->{recv} && $r->{recv} ne 'PENDING' ? map { split /=/, $_, 2 } split /,/, $r->{recv} : ();
     subtest $label => sub {
         if ($e->{pending}) {
+            # The app's own sample is taken at its timeout, while its scope is
+            # still running -- on h2 the stream had not closed yet, so that
+            # sample alone once certified a cell that did go on to deliver an
+            # event. Re-read the Future the app handed back, now that the
+            # runner has driven the scope's whole ending including transport
+            # teardown, so "delivers none" means never rather than not-yet.
             is($r->{recv}, 'PENDING', 'no event after a completed refusal');
+            ok($r->{parked_future} && !$r->{parked_future}->is_ready,
+                'still no event once the scope has fully ended')
+                or diag('late event: ' . join(',',
+                    map { "$_=" . ($r->{parked_future}->get->{$_} // '') }
+                    sort keys %{ $r->{parked_future}->get }));
         }
         else {
             is($recv{type},   $e->{type},   'event type');
@@ -325,10 +336,19 @@ sub check_cell {
         }
         is($r->{term_send} // '-', $e->{term}, 'terminal send settlement');
         is($r->{has_conn}, 1, 'pagi.connection present');
-        is($r->{on_complete} ? 1 : 0, $e->{complete} ? 1 : 0, 'on_complete fired')
-            if exists $e->{complete};
-        is($r->{on_disconnect} ? $r->{on_disconnect}[0] : undef, $e->{reason}, 'on_disconnect fired with the token')
-            if $e->{disconnect};
+        # Server Requirement 3: on_disconnect fires ONLY on an abnormal end and
+        # on_complete ONLY on a clean one, never both for the same scope. A row
+        # that states either expectation therefore states both.
+        if (exists $e->{complete}) {
+            is($r->{on_complete} ? 1 : 0, $e->{complete} ? 1 : 0, 'on_complete fired');
+            if ($e->{disconnect}) {
+                is($r->{on_disconnect} ? $r->{on_disconnect}[0] : undef, $e->{reason},
+                    'on_disconnect fired with the token');
+            }
+            else {
+                is($r->{on_disconnect}, undef, 'on_disconnect did not fire');
+            }
+        }
         is($warns, [], 'no spurious server log after the client went away (S5)');
     };
 }

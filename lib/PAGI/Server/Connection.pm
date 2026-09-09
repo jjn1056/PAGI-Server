@@ -868,23 +868,65 @@ sub _h2_ws_enqueue_disconnect {
     $self->_h2_wake_pending($stream);
 }
 
-# Did this h2 WebSocket stream reach a clean end? Only a completed closing
-# handshake on an accepted socket counts: the application sent
-# websocket.close (send state 'closed'), or the peer's Close frame validated
-# (ws_peer_closed). Www.pod "Meaning per scope".
+# Did this h2 WebSocket scope reach a clean end? Two ways, and Www.pod
+# "Meaning per scope" names both: the accepted socket completed a closing
+# handshake -- the application sent websocket.close (send state 'closed') or
+# the peer's Close frame validated (ws_peer_closed) -- or the server finished
+# its output of a refusal (send state 'denial_complete').
 #
-# The accept conjunct keeps a pre-accept websocket.close out of the clean
-# set -- the 0.5 send machine still admits that event from 'connecting', and
-# the h2 send closure answers it with a 403 rather than a Close frame. The
-# h1 twin at _handle_websocket_request's tail reads the same way.
+# The accept conjunct binds only the handshake half. It keeps a pre-accept
+# websocket.close out of the clean set: the 0.5 send machine still admits
+# that event from 'connecting', and the h2 send closure answers it with a 403
+# rather than a Close frame. The refusal half is deliberately outside it,
+# because a refusal never accepts. This is term for term the h1 twin at
+# _handle_websocket_request's tail.
 #
 # A close this server initiated -- a protocol violation, a queue overflow --
-# is deliberately NOT here: the spec calls it abnormal, and it names itself
-# in server_close_reason before the frame goes out (see _h2_ws_close).
+# is NOT here: the spec calls it abnormal, and it names itself in
+# server_close_reason before the frame goes out (see _h2_ws_close).
 sub _h2_ws_clean_end {
     my ($stream) = @_;
-    return 0 unless $stream->{ws_accepted};
-    return (($stream->{seq_state} // '') eq 'closed' || $stream->{ws_peer_closed}) ? 1 : 0;
+    my $seq = $stream->{seq_state} // '';
+    return 1 if $stream->{ws_accepted} && ($seq eq 'closed' || $stream->{ws_peer_closed});
+    return 1 if $seq eq 'denial_complete';
+    return 0;
+}
+
+# The standard token for an h2 scope that is ending without one of its own,
+# used by every site that synthesizes a disconnect event for a dying stream.
+# Www.pod "Agreement with disconnect events" makes this a MUST: whatever these
+# events say, the stream's connection_state says the same thing. Three
+# sources, most specific first.
+#
+#   server_close_reason -- a per-stream server-initiated teardown (idle
+#     timeout, keepalive timeout, protocol close, app_abort) named this one
+#     stream's reason before driving its close.
+#   _disconnect_reason -- the whole connection is going away, and
+#     _handle_disconnect marked every one of these objects with this token
+#     (read_error, write_error, server_shutdown, client_timeout,
+#     idle_timeout). A per-stream field cannot carry a connection-level fact,
+#     which is why these events used to say 'client_closed' while the objects
+#     said what actually happened.
+#   'client_closed' -- a bare transport drop, which names itself and no more.
+#
+# $stream may be gone by the time a parked receive resumes; the connection
+# fact still applies.
+sub _h2_scope_reason {
+    my ($self, $stream) = @_;
+    return ($stream && $stream->{server_close_reason})
+        // $self->{_disconnect_reason}
+        // 'client_closed';
+}
+
+# A refusal this scope carried to completion. Such a scope has ended cleanly
+# and delivers no disconnect event at all, so every site that would otherwise
+# synthesize one for a dying h2 stream asks here first (Www.pod "Disconnect -
+# receive event": "A normally completed refusal is the one ending that
+# delivers none"; "SSE Disconnect - receive event" says the same for sse).
+sub _h2_refusal_complete {
+    my ($stream) = @_;
+    my $seq = $stream->{seq_state} // '';
+    return $seq eq 'denial_complete' || $seq eq 'decline_complete' ? 1 : 0;
 }
 
 sub _h2_on_close {
@@ -966,21 +1008,20 @@ sub _h2_on_close {
     # Mark body complete to unblock any pending receive
     $stream->{body_complete} = 1;
 
-    # Enqueue disconnect event
+    # Enqueue disconnect event. A scope that completed a refusal delivers
+    # none on either protocol (_h2_refusal_complete): it ended cleanly, and
+    # the stream closing afterwards does not un-end it.
     if ($stream->{is_websocket}) {
         # Close without a WebSocket close handshake (RST_STREAM, timeout, ...):
         # abnormal closure per RFC 6455. Deduped -- a no-op if the close-frame
         # or bare-END_STREAM path already delivered the scope's one disconnect.
-        $self->_h2_ws_enqueue_disconnect($stream, 1006, $reason // 'client_closed');
+        $self->_h2_ws_enqueue_disconnect($stream, 1006, $reason // 'client_closed')
+            unless _h2_refusal_complete($stream);
     } elsif ($stream->{is_sse}) {
-        # A completed decline is a clean end and delivers no event at all
-        # (Www.pod "SSE Disconnect - receive event"), so the stream ending
-        # right after it must not synthesize one. Same test the h1 side
-        # makes against its own mirrored state.
         push @{$stream->{receive_queue}}, {
             type   => 'sse.disconnect',
             reason => $reason // 'client_closed',
-        } unless ($stream->{seq_state} // '') eq 'decline_complete';
+        } unless _h2_refusal_complete($stream);
     } else {
         push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
     }
@@ -2157,11 +2198,12 @@ sub _h2_create_websocket_receive {
     # tearing the stream down, so a receive() racing that teardown still
     # reports why.
     my $fallback_disconnect = sub {
-        my $ss = $weak_self && $weak_self->{h2_streams}{$stream_id};
+        return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
+            unless $weak_self;
         return {
             type   => 'websocket.disconnect',
             code   => 1006,
-            reason => ($ss && $ss->{server_close_reason}) // 'client_closed',
+            reason => $weak_self->_h2_scope_reason($weak_self->{h2_streams}{$stream_id}),
         };
     };
 
@@ -2549,10 +2591,13 @@ sub _h2_create_sse_receive {
 
     weaken(my $weak_self = $self);
 
+    # See _h2_scope_reason: this fallback must name whatever the stream's
+    # connection_state was marked with, not a hardcoded 'client_closed'.
     my $sse_disconnect = sub {
+        return { type => 'sse.disconnect' } unless $weak_self;
         return {
             type   => 'sse.disconnect',
-            reason => 'client_closed',
+            reason => $weak_self->_h2_scope_reason($weak_self->{h2_streams}{$stream_id}),
         };
     };
 
@@ -4073,7 +4118,10 @@ sub _try_handle_request {
 
     # Handle parse errors (malformed request, header too large)
     if ($request->{error}) {
-        # Mark connection as disconnected with protocol_error reason (PAGI spec compliance)
+        # Mark connection as disconnected with protocol_error reason (PAGI spec compliance).
+        # The parse message going to the client on the next line is also what
+        # the operator needs (Www.pod: disconnect_detail).
+        $self->{_disconnect_detail} = $request->{message} if defined $request->{message};
         $self->_handle_disconnect('protocol_error');
         $self->_send_error_response($request->{error}, $request->{message});
         $self->_close;
@@ -4414,6 +4462,7 @@ async sub _read_chunked_body {
 
     # Check for parse error (invalid chunk size)
     if (ref($data) eq 'HASH' && $data->{error}) {
+        $self->{_disconnect_detail} = $data->{message} // 'Bad Request';
         $self->_handle_disconnect('protocol_error');
         $self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
         $self->_close;
@@ -5068,6 +5117,12 @@ sub _handle_disconnect {
     # A clean completion is not an abnormal disconnect: don't surface its reason.
     my $is_completion = $COMPLETION_REASON{$reason};
 
+    # Why this whole connection is ending, for the sites that settle parked
+    # I/O after _handle_disconnect has already marked the objects. _close's
+    # h2 sweep reads it so its synthesized events name the same token the
+    # objects carry (Www.pod "Agreement with disconnect events").
+    $self->{_disconnect_reason} = $reason unless $is_completion;
+
     # The human-readable supplement to $reason, recorded by whichever site
     # detected the end (Www.pod: disconnect_detail). Taken once and handed to
     # every object marked below -- an h2 connection-level teardown marks many
@@ -5184,16 +5239,14 @@ sub _close {
             }
 
             $stream->{h2_closed} = 1;   # liveness for the dispatch wrapper (S5)
-            if ($stream->{body_pending} && !$stream->{body_pending}->is_ready) {
+            if ($stream->{body_pending} && !$stream->{body_pending}->is_ready
+                && !_h2_refusal_complete($stream)) {
                 # Www.pod "Agreement with disconnect events": this event's
-                # reason must match the token the stream's connection_state
-                # was (or will be) marked with. server_close_reason is set by
-                # every per-stream server-initiated teardown (idle timeout,
-                # keepalive timeout, app_abort) before it drives the close;
-                # 'client_closed' is only the right default when nothing
-                # server-side named a reason.
-                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $stream->{server_close_reason} // 'client_closed' }
-                          : $stream->{is_websocket} ? { type => 'websocket.disconnect', code => 1006, reason => $stream->{server_close_reason} // 'client_closed' }
+                # reason MUST match the token the stream's connection_state
+                # was (or will be) marked with. See _h2_scope_reason.
+                my $reason = $self->_h2_scope_reason($stream);
+                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $reason }
+                          : $stream->{is_websocket} ? { type => 'websocket.disconnect', code => 1006, reason => $reason }
                           :                           { type => 'http.disconnect' };
                 $stream->{body_pending}->done($event);
             }
