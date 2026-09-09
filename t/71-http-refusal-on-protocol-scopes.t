@@ -672,6 +672,210 @@ subtest 'websocket.close before accept fails the send and writes nothing' => sub
 };
 
 # ============================================================
+# (f2) no accept and no refusal: the no-response backstop
+# ============================================================
+# Www.pod "Meaning per scope" routes a websocket scope that neither accepts
+# nor refuses to "Application Produced No Response": the 500 backstop, one
+# error line, and server_error on the object -- but with the client already
+# gone the server MUST NOT synthesize a 500 and MUST NOT log an error.
+#
+# The h1 half of both arms is B4's code, exercised here against the rule
+# rather than against the websocket.close path that first needed it. The sse
+# scope's own backstop line is pinned by t/69 and is not repeated here.
+
+subtest 'websocket: an app that neither accepts nor refuses gets the 500 backstop, and nothing once the client has gone' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';   # decline lifespan
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { push @{$r{disconnect}}, [@_] });
+        $conn->on_complete(sub { $r{complete}++ });
+        await $receive->();                       # websocket.connect
+        $r{returned} = 1;
+        return;                                   # no accept, no refusal
+    };
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $server = create_server($app);
+    my ($wire, $eof) = h1_fetch($server->port, h1_request('websocket'), 30);
+    $server->shutdown->get;
+
+    like($wire, qr{^HTTP/1\.1 500}, 'h1: the backstop answered 500');
+    ok($eof, 'h1: and closed the connection so the client is not left waiting');
+    is(scalar(grep { /returned without accepting the WebSocket or refusing the handshake/ } @warnings), 1,
+        'h1: the backstop logged exactly once') or diag("warnings: @warnings");
+    is($r{disconnect}[0][0], 'server_error', 'h1: the object reports server_error');
+    is($r{complete}, undef, 'h1: on_complete did not fire');
+
+    # Client-gone carve-out: the app is parked when the client drops, so by
+    # the time it returns the scope has already ended with its own reason.
+    my %g;
+    my $released = $loop->new_future;
+    my $gone_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';   # decline lifespan
+        my $conn = $scope->{'pagi.connection'};
+        await $receive->();                       # websocket.connect
+        $g{parked} = 1;
+        await $released;
+        $g{reason} = $conn->disconnect_reason;
+        $g{returned} = 1;
+        return;                                   # still no accept, no refusal
+    };
+    my @gone_warnings;
+    local $SIG{__WARN__} = sub { push @gone_warnings, $_[0] };
+    my $server2 = create_server($gone_app);
+    my ($sock, $pump, $gone_wire) = h1_open($server2->port, h1_request('websocket'));
+    $pump->(20);
+    close $sock;                                  # client gone before the app returns
+    $loop->loop_once(0.05) for 1 .. 10;
+    $released->done;
+    $loop->loop_once(0.05) for 1 .. 20;
+    $server2->shutdown->get;
+
+    is($g{returned}, 1, 'h1 client gone: the app returned after the client had dropped');
+    is($g{reason}, 'client_closed', 'h1 client gone: the scope kept the reason it already had');
+    unlike($$gone_wire, qr{^HTTP/1\.1 500}, 'h1 client gone: no 500 was synthesized');
+    is(scalar(grep { /returned without accepting the WebSocket or refusing the handshake/ } @gone_warnings), 0,
+        'h1 client gone: nothing was logged') or diag("warnings: @gone_warnings");
+
+    SKIP: {
+        skip 'HTTP/2 not available', 7 unless $have_h2;
+
+        my %h2;
+        my $h2app = async sub {
+            my ($scope, $receive, $send) = @_;
+            my $conn = $scope->{'pagi.connection'};
+            $conn->on_disconnect(sub { push @{$h2{disconnect}}, [@_] });
+            $conn->on_complete(sub { $h2{complete}++ });
+            await $receive->();
+            return;
+        };
+        my @h2_warnings;
+        local $SIG{__WARN__} = sub { push @h2_warnings, $_[0] };
+        my ($headers) = h2_fetch(app => $h2app, kind => 'websocket');
+        is($headers->{':status'}, '500', 'h2: the backstop answered 500 on the stream');
+        is(scalar(grep { /returned without starting a response \(HTTP\/2 stream/ } @h2_warnings), 1,
+            'h2: the backstop logged exactly once') or diag("warnings: @h2_warnings");
+        is($h2{disconnect}[0][0], 'server_error', 'h2: the object reports server_error');
+        is($h2{complete}, undef, 'h2: on_complete did not fire');
+
+        # The client resets the stream while the app is parked: the scope has
+        # already ended, so nothing is synthesized and nothing is logged.
+        my %h2g;
+        my $h2released = $loop->new_future;
+        my $h2gone = async sub {
+            my ($scope, $receive, $send) = @_;
+            my $conn = $scope->{'pagi.connection'};
+            await $receive->();
+            $h2g{parked} = 1;
+            await $h2released;
+            $h2g{reason} = $conn->disconnect_reason;
+            $h2g{returned} = 1;
+            return;
+        };
+        my @h2g_warnings;
+        local $SIG{__WARN__} = sub { push @h2g_warnings, $_[0] };
+        my ($conn2, $stream_io, $client_sock, $server3) = create_h2_connection(app => $h2gone);
+        my %seen_headers;
+        my $client = create_client(
+            on_header => sub { my (undef, $n, $v) = @_; $seen_headers{lc $n} = $v; 0 });
+        complete_h2_handshake($client, $client_sock);
+        my $sid = h2_submit($client, $client_sock, 'websocket');
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 25);
+        $client->submit_rst_stream($sid, 8);      # CANCEL, while the app is parked
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 15);
+        $h2released->done;
+        exchange_frames($client, $client_sock, 20);
+        $stream_io->close_now;
+        $loop->remove($server3);
+
+        is($h2g{returned}, 1, 'h2 client gone: the app returned after the reset');
+        is($seen_headers{':status'}, undef, 'h2 client gone: no 500 was synthesized');
+        is(scalar(grep { /returned without starting a response \(HTTP\/2 stream/ } @h2g_warnings), 0,
+            'h2 client gone: nothing was logged') or diag("warnings: @h2g_warnings");
+    }
+};
+
+# ============================================================
+# (f3) abort before accept
+# ============================================================
+# Www.pod "Connection Object Interface": abort "is valid on every scope,
+# before or after websocket.accept ... Before accept or start it ends the
+# handshake with no HTTP response: the client observes a failed connection,
+# not a status". The server "MUST NOT log an incomplete-response or
+# no-response error for an aborted scope", so the backstop above must not
+# fire here -- neither its 500 nor its log line.
+
+subtest 'abort before accept ends the handshake with no response and no error line' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';   # decline lifespan
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { push @{$r{disconnect}}, [@_] });
+        $conn->on_complete(sub { $r{complete}++ });
+        await $receive->();                       # websocket.connect
+        $conn->abort('nope');
+        $r{reason}    = $conn->disconnect_reason;
+        $r{detail}    = $conn->disconnect_detail;
+        $r{started}   = $conn->response_started;
+        $r{connected} = $conn->is_connected;
+        $r{returned}  = 1;
+        return;
+    };
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $server = create_server($app);
+    my ($wire, $eof) = h1_fetch($server->port, h1_request('websocket'), 30);
+    $server->shutdown->get;
+
+    is($r{returned}, 1, 'h1: the app returned after aborting');
+    is($wire, '', 'h1: the client observes a failed connection, not a status');
+    ok($eof, 'h1: the handshake was ended by closing the transport');
+    is($r{reason}, 'app_abort', 'h1: disconnect_reason is app_abort');
+    is($r{detail}, 'nope', 'h1: disconnect_detail carries the application string');
+    is($r{started}, 0, 'h1: no response was started');
+    is($r{connected}, 0, 'h1: is_connected is false');
+    is(scalar @{$r{disconnect} // []}, 1, 'h1: on_disconnect fired exactly once');
+    is($r{complete}, undef, 'h1: on_complete did not fire');
+    is(scalar(@warnings), 0, 'h1: an aborted scope logs no error at all')
+        or diag("warnings: @warnings");
+
+    SKIP: {
+        skip 'HTTP/2 not available', 7 unless $have_h2;
+        my %h2;
+        my $h2app = async sub {
+            my ($scope, $receive, $send) = @_;
+            my $conn = $scope->{'pagi.connection'};
+            $conn->on_disconnect(sub { push @{$h2{disconnect}}, [@_] });
+            $conn->on_complete(sub { $h2{complete}++ });
+            await $receive->();
+            $conn->abort('nope');
+            $h2{reason} = $conn->disconnect_reason;
+            $h2{detail} = $conn->disconnect_detail;
+            $h2{returned} = 1;
+            return;
+        };
+        my @h2_warnings;
+        local $SIG{__WARN__} = sub { push @h2_warnings, $_[0] };
+        my ($headers, $body, $close_code) = h2_fetch(app => $h2app, kind => 'websocket');
+
+        is($h2{returned}, 1, 'h2: the app returned after aborting');
+        is($close_code, 8, 'h2: the stream was reset with CANCEL, not INTERNAL_ERROR');
+        is($headers->{':status'}, undef, 'h2: no status reached the client');
+        is($h2{reason}, 'app_abort', 'h2: disconnect_reason is app_abort');
+        is($h2{detail}, 'nope', 'h2: disconnect_detail carries the application string');
+        is($h2{complete}, undef, 'h2: on_complete did not fire');
+        is(scalar(@h2_warnings), 0, 'h2: an aborted scope logs no error at all')
+            or diag("warnings: @h2_warnings");
+    }
+};
+
+# ============================================================
 # (g) HTTP response events after the scope has been established
 # ============================================================
 
