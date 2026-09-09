@@ -137,9 +137,11 @@ subtest 'SSE request detected over HTTP/2' => sub {
         $got_path = $scope->{path};
         $got_pagi = $scope->{pagi};
 
-        # Minimal SSE session: start then close
+        # Minimal SSE session: start, send, then close
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -245,6 +247,8 @@ subtest 'SSE receive returns sse.request' => sub {
 
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'test' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

@@ -148,6 +148,8 @@ subtest 'keepalive comments arrive over HTTP/2' => sub {
         await $delay_f;
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -399,6 +401,7 @@ my $active_done = 0;   # flips true once the '/active' app coroutine returns
 
 subtest 'per-stream SSE idle timeout: an idle stream closes without killing an active sibling' => sub {
     $active_done = 0;
+    my @log_events;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'sse';
@@ -429,11 +432,19 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
                 await $loop->delay_future(after => 0.1);
                 await $send->({ type => 'sse.send', data => "tick$i" });
             }
+            await $send->({ type => 'sse.close' });
             $active_done = 1;
         }
     };
 
-    my $server = create_test_server(app => $app, sse_idle_timeout => 0.3);
+    # The idle stream ends via a clean END_STREAM but no sse.close (a bare
+    # abnormal end -- the app still receives sse.disconnect and returns, but
+    # the dispatch wrapper's D12 check, keyed on sse_clean_end, does not
+    # recognize that as a clean transport-level end and logs accordingly).
+    # Documented here rather than silenced -- same class as the analogous
+    # subtest in t/http2/16-sse-cleanup.t.
+    my $server = create_test_server(app => $app, sse_idle_timeout => 0.3,
+        logger => sub { push @log_events, $_[0] });
     my ($conn, $stream_io, $client_sock) =
         create_h2c_connection(app => $app, server => $server);
 
@@ -492,6 +503,10 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
         exchange_frames($client, $client_sock, 1);
     }
     ok($active_done, "active stream's app coroutine returned before teardown");
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1,
+        'one error log line for the idle stream\'s bare (no sse.close) idle-timeout drop');
 
     $stream_io->close_now;
     $loop->remove($server);

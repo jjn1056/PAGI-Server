@@ -695,4 +695,121 @@ subtest 'h2: sse completed decline is a clean end' => sub {
     $loop->remove($server);
 };
 
+# =============================================================================
+# Test 8: sse -- a stream abandoned after sse.start with no sse.close is an
+# incomplete response (D12), and its sse.close counterpart is a clean end
+# =============================================================================
+# Www.pod "Application Left a Response Incomplete": RST_STREAM (INTERNAL_ERROR),
+# on_disconnect('server_error'), on_complete does not fire, one error log line.
+# h2 SSE streams never advance seq_state (only the plain-HTTP send closure's
+# advance() does), so this exercises the sse_started flag fix (review C1)
+# directly -- without it this subtest hangs forever with the stream still open.
+
+use constant H2_INTERNAL_ERROR_CODE => 2;   # NGHTTP2_INTERNAL_ERROR (RFC 9113 section 7)
+
+subtest 'h2: sse abandoned after sse.start with no sse.close is an incomplete response (D12)' => sub {
+    my %r;
+    my @events;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+        my $c = $scope->{'pagi.connection'};
+        $r{cs} = $c;
+        $c->on_complete(sub { $r{complete}++ });
+        $c->on_disconnect(sub { $r{disc} = [@_] });
+        await $receive->();   # sse.request
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'one' });
+        await $send->({ type => 'sse.send', data => 'two' });
+        $r{returned} = 1;
+        return;   # no sse.close -- incomplete response (D12)
+    };
+    my $server = create_test_server(app => $app, logger => sub { push @events, $_[0] });
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+
+    my (%headers, %closed);
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+        on_stream_close => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok($r{returned}, 'app returned without sse.close');
+    is($headers{':status'}, '200', 'sse.start was delivered before the reset');
+    ok(exists $closed{$stream_id}, 'client observed the stream close');
+    is($closed{$stream_id}, H2_INTERNAL_ERROR_CODE,
+        'stream reset with RST_STREAM INTERNAL_ERROR, not a clean END_STREAM');
+    ok($r{cs}, 'app captured a connection_state');
+    is($r{cs}->is_connected, 0, 'is_connected false');
+    is($r{cs}->disconnect_reason, 'server_error', 'disconnect_reason is server_error');
+    is($r{complete}, undef, 'on_complete did NOT fire');
+    ok(defined $r{disc}, 'on_disconnect fired');
+    is($r{disc}[0], 'server_error', 'on_disconnect reason is server_error');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @events;
+    is(scalar(@errors), 1, 'exactly one error log line');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+subtest 'h2: sse ended with sse.close is a clean end (D12 counterpart)' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+        my $c = $scope->{'pagi.connection'};
+        $r{cs} = $c;
+        $c->on_complete(sub { $r{complete}++ });
+        $c->on_disconnect(sub { $r{disc} = [@_] });
+        await $receive->();   # sse.request
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'one' });
+        await $send->({ type => 'sse.close' });
+        $r{returned} = 1;
+        return;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my (%headers, %closed);
+    my $client = create_client(
+        on_header       => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+        on_stream_close => sub { my ($sid, $error_code) = @_; $closed{$sid} = $error_code; return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+
+    my $stream_id = $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok($r{returned}, 'app returned after sse.close');
+    is($headers{':status'}, '200', 'sse.start was delivered');
+    ok(exists $closed{$stream_id}, 'client observed the stream close');
+    is($closed{$stream_id}, 0, 'stream ended with a clean END_STREAM, not an RST');
+    ok($r{cs}, 'app captured a connection_state');
+    is($r{cs}->is_connected, 0, 'is_connected false');
+    is($r{cs}->disconnect_reason, undef, 'disconnect_reason undef -- a clean end');
+    is($r{complete}, 1, 'on_complete fired');
+    is($r{disc}, undef, 'on_disconnect did NOT fire');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

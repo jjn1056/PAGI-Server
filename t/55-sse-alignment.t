@@ -282,6 +282,7 @@ subtest 'SSE UTF-8 wire encoding: keepalive comment is UTF-8-encoded on the wire
         await $loop->delay_future(after => 0.5);
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
     };
 
     my $server = create_server($test_app);
@@ -358,6 +359,7 @@ subtest 'SSE keepalive: unencodable comment fails the send Future at arm time, n
         await $loop->delay_future(after => 0.5);
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
     };
 
     my $server = create_server($test_app);
@@ -818,7 +820,7 @@ sub reuse_server {
     });
 }
 
-subtest 'clean SSE end by returning: connection stays open and serves the next request' => sub {
+subtest 'clean SSE end via sse.close (one send, then close): connection stays open and serves the next request' => sub {
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
@@ -946,7 +948,7 @@ subtest 'SSE keepalive from the finished stream does not leak into the next requ
     $server->shutdown->get;
 };
 
-subtest 'client Connection: close still closes after a clean SSE end (control)' => sub {
+subtest 'client Connection: close still closes after a clean SSE end via sse.close (control)' => sub {
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
@@ -978,6 +980,11 @@ subtest 'HTTP/1.0 still closes after a clean SSE end (control)' => sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'six' });
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
         return;
     });
     my $port = $server->port;

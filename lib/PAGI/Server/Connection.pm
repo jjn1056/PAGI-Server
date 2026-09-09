@@ -1025,9 +1025,11 @@ sub _h2_dispatch_stream {
             # is_connected would swallow every exception thrown after a
             # fully-delivered response. An abnormal end has a
             # disconnect_reason; a clean completion leaves it undef.
-            # Streams with no connection_state (WebSocket/SSE) fall back to
-            # a liveness fact ($stream_alive below) that is true if and
-            # only if nghttp2 still owns the stream.
+            # Every stream (http, websocket, sse) attaches a connection_state
+            # today, so $cs is always defined here; the $stream_alive fallback
+            # below (true if and only if nghttp2 still owns the stream) exists
+            # only as a defensive default for the theoretical case of a
+            # stream with none.
             #
             # A recorded reason of 'server_error' is NOT a client-gone signal:
             # it means the SERVER caused the abnormal end (e.g. this very
@@ -1108,15 +1110,25 @@ sub _h2_dispatch_stream {
                 if ($started && !$clean) {
                     # Started but never ended cleanly: an incomplete response
                     # (Www.pod "Application Left a Response Incomplete").
+                    # Mark and log regardless; only reach into nghttp2 (RST)
+                    # if the stream is still live -- $stream_alive is the
+                    # same entry-exists-AND-not-h2_closed fact the sibling
+                    # arms above rely on, and skipping the RST when it is
+                    # false avoids resetting a stream id nghttp2 has already
+                    # forgotten (undefined behavior at the C level; observed
+                    # as a crash on process exit in practice, not merely
+                    # theoretical here).
                     $self->_log(error => $error
                         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
                         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
                     $cs->_mark_disconnected('server_error') if $cs;
-                    eval {
-                        $weak_self->{h2_session}->submit_rst_stream(
-                            $stream_id, _h2_rst_error_code());
-                        $weak_self->_h2_write_pending;
-                    };
+                    if ($stream_alive) {
+                        eval {
+                            $weak_self->{h2_session}->submit_rst_stream(
+                                $stream_id, _h2_rst_error_code());
+                            $weak_self->_h2_write_pending;
+                        };
+                    }
                 }
                 elsif ($clean) {
                     # Clean end -- a completed closing handshake (websocket),
@@ -2686,6 +2698,11 @@ sub _h2_create_sse_send {
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
             $ss->{response_started} = 1;
+            # Consulted by _h2_dispatch_stream's D12 incomplete-response arm
+            # (Www.pod "Application Left a Response Incomplete") to tell a
+            # started-but-never-closed stream apart from one that never
+            # started at all.
+            $ss->{sse_started} = 1;
 
             my $status = $event->{status} // 200;
             my $headers = $event->{headers} // [];
@@ -3032,12 +3049,18 @@ sub _h2_process_ws_frames {
             $self->{h2_session}->resume_stream($stream_id);
             # No _h2_write_pending — inside feed(); flushed by _h2_process_data
 
+            # A completed closing handshake is a clean end regardless of the
+            # peer's close code (Www.pod "Meaning per scope"). Marked BEFORE
+            # _h2_ws_enqueue_disconnect: that call can wake a parked receive()
+            # and resume the app synchronously (Future::AsyncAwait resumes
+            # inline off ->done), and the resumed app may return and reach
+            # _h2_dispatch_stream's post-await check before this line would
+            # otherwise have run.
+            $stream->{ws_close_clean} = 1;
+
             # Peer's Close frame: its own code (1005 default when the frame
             # carried none) and reason text (Www.pod "Disconnect - receive event").
             $self->_h2_ws_enqueue_disconnect($stream, $code, $reason);
-            # A completed closing handshake is a clean end regardless of the
-            # peer's close code (Www.pod "Meaning per scope").
-            $stream->{ws_close_clean} = 1;
         }
         elsif ($opcode == 9) {
             # Ping — respond with pong. Queued, not an application send.
@@ -4901,10 +4924,18 @@ sub _handle_disconnect {
     $self->_cancel_drain_waiters($reason);
 
     # Record the abnormal reason so the WebSocket disconnect event reports it
-    # (instead of the old empty string). SSE tracks its own reason at the
-    # detection sites via sse_disconnect_reason.
+    # (instead of the old empty string). Same for SSE: some detection sites
+    # (e.g. the idle timer) already set sse_disconnect_reason before calling
+    # in here, but every other abnormal reason (app_abort, server_error,
+    # write_error, keepalive_timeout, server_shutdown, protocol_error, ...)
+    # had no writer here, silently reporting client_closed instead -- a
+    # Www.pod "Agreement with disconnect events" violation once an sse scope
+    # carries a pagi.connection object whose own disconnect_reason must match.
     if ($self->{websocket_mode} && !$is_completion) {
         $self->{ws_disconnect_reason} = $reason;
+    }
+    elsif ($self->{sse_mode} && !$is_completion) {
+        $self->{sse_disconnect_reason} = $reason;
     }
 
     # Determine disconnect event type based on mode
@@ -4986,8 +5017,15 @@ sub _close {
 
             $stream->{h2_closed} = 1;   # liveness for the dispatch wrapper (S5)
             if ($stream->{body_pending} && !$stream->{body_pending}->is_ready) {
-                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => 'client_closed' }
-                          : $stream->{is_websocket} ? { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
+                # Www.pod "Agreement with disconnect events": this event's
+                # reason must match the token the stream's connection_state
+                # was (or will be) marked with. server_close_reason is set by
+                # every per-stream server-initiated teardown (idle timeout,
+                # keepalive timeout, app_abort) before it drives the close;
+                # 'client_closed' is only the right default when nothing
+                # server-side named a reason.
+                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $stream->{server_close_reason} // 'client_closed' }
+                          : $stream->{is_websocket} ? { type => 'websocket.disconnect', code => 1006, reason => $stream->{server_close_reason} // 'client_closed' }
                           :                           { type => 'http.disconnect' };
                 $stream->{body_pending}->done($event);
             }
@@ -5074,7 +5112,17 @@ sub _close {
     $self->{receive_futures} = [];
 
     if ($self->{stream}) {
-        $self->{stream}->close_when_empty;
+        # abort() MUST NOT wait for an in-flight write to drain, since that
+        # write may be blocked by the peer (Www.pod "Connection Object
+        # Interface"): close_when_empty does wait, so _h1_abort_hook sets
+        # _close_now to route an app_abort teardown through close_now
+        # instead. Every other reason keeps close_when_empty (flush what's
+        # already queued, then close).
+        if ($self->{_close_now}) {
+            $self->{stream}->close_now;
+        } else {
+            $self->{stream}->close_when_empty;
+        }
     }
 }
 
@@ -5099,8 +5147,11 @@ sub _handle_disconnect_and_close {
 
 # Teardown hook handed to every h1 ConnectionState: the object has already
 # marked itself app_abort when this runs. Close the transport without waiting
-# for any in-flight write: _handle_disconnect settles pending I/O and, because
-# the object is already terminal, its own _mark_disconnected is a no-op.
+# for any in-flight write to drain -- that write may be blocked by the peer
+# (Www.pod "Connection Object Interface"), so _close_now routes _close to
+# close_now instead of its default close_when_empty. _handle_disconnect
+# settles pending I/O and, because the object is already terminal, its own
+# _mark_disconnected is a no-op.
 sub _h1_abort_hook {
     my ($self) = @_;
     weaken(my $weak_self = $self);
@@ -5108,6 +5159,7 @@ sub _h1_abort_hook {
         my ($cs, $detail) = @_;
         return unless $weak_self && !$weak_self->{closed};
         $weak_self->{_abort_detail} = $detail;
+        $weak_self->{_close_now} = 1;
         $weak_self->_handle_disconnect_and_close('app_abort');
     };
 }
@@ -5959,18 +6011,23 @@ async sub _handle_websocket_request {
         if ($self->{websocket_accepted} && !$self->{close_sent} && !$self->{close_received} && !$self->{closed}) {
             # App returned from an accepted socket without a closing handshake:
             # an incomplete response (design 4.7, D13). Close with 1011, report
-            # server_error, log; never a clean end.
-            $self->_send_close_frame(1011, '');   # flushed by _close's close_when_empty before the socket closes
-            $self->{close_sent} = 1;
+            # server_error, log; never a clean end. _send_close_frame already
+            # sets close_sent and ws_disconnect_code; flushed by _close's
+            # close_when_empty before the socket closes.
+            $self->_send_close_frame(1011, '');
             $self->{ws_disconnect_reason} = 'server_error';
-            $self->{ws_disconnect_code}   = 1011;
-            $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake")
-                unless $self->{closed};
+            $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
             $self->_handle_disconnect_and_close('server_error');
             return;
         }
+        # Keyed on ws_close_clean rather than close_sent||close_received: only
+        # the app's own websocket.close and a received peer Close frame set
+        # that flag, so a server-initiated protocol close (which also sets
+        # close_sent, via _send_close_frame) can never satisfy this guard --
+        # robust by construction rather than by the ordering that currently
+        # marks the connection_state abnormal before this tail ever runs.
         $cs->_mark_complete
-            if ($self->{websocket_accepted} && ($self->{close_sent} || $self->{close_received}))
+            if ($self->{websocket_accepted} && $self->{ws_close_clean})
             || ($self->{ws_refusal_completed});
     }
 

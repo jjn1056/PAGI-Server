@@ -160,6 +160,8 @@ subtest 'complete SSE session with named events, id, and comment' => sub {
             data  => "line1\nline2\nline3",
             id    => '3',
         });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -242,6 +244,8 @@ subtest 'SSE data events arrive incrementally in DATA frames' => sub {
                 data => "event$i",
             });
         }
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -302,6 +306,8 @@ subtest 'SSE with custom status and headers' => sub {
         });
 
         await $send->({ type => 'sse.send', data => 'custom' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

@@ -200,6 +200,13 @@ subtest 'connection close during SSE does not crash' => sub {
         eval {
             await $send->({ type => 'sse.send', data => 'third' });
         };
+
+        # Wait for the disconnect to be recorded rather than returning
+        # immediately: a bare return here, before the transport is known
+        # gone, would race the incomplete-response check (Www.pod 0.6
+        # "Application Left a Response Incomplete", D12) against the
+        # connection's own abnormal-end processing.
+        await $scope->{'pagi.connection'}->disconnect_future;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -329,9 +336,16 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
         });
         $sse_started = 1;
 
-        # Nothing else to do: the client will overrun max_body_size and the
-        # server tears the stream down without this app ever calling
-        # receive() at all.
+        # Hold the stream open: returning here would leave an incomplete
+        # response (Www.pod 0.6 "Application Left a Response Incomplete",
+        # D12) and the dispatch wrapper would RST it immediately, before
+        # this test ever gets to drive the max_body_size overrun. The
+        # overrun itself ends the stream; the app never calls receive().
+        # disconnect_future rather than a bare Future->new: the connection's
+        # own abort/disconnect processing resolves it, so no coroutine is
+        # left dangling (and no crash at process exit) if this stream
+        # somehow outlives the subtest.
+        await $scope->{'pagi.connection'}->disconnect_future;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
@@ -503,6 +517,7 @@ subtest 'max_body_size 413 with SSE app parked on receive() before any send: no 
 subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
     my $sse_started = 0;
     my $disconnect_event;
+    my @log_events;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -517,9 +532,16 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
         $disconnect_event = $event;
     };
 
+    # The idle timeout ends the stream with no sse.close (a bare abnormal
+    # end, clean END_STREAM but no WS-style closing handshake to mark) --
+    # the app still receives sse.disconnect and returns, but the dispatch
+    # wrapper's D12 check (keyed on sse_clean_end, which only sse.close
+    # sets) does not recognize that as a clean transport-level end and
+    # logs accordingly. Documented here rather than silenced.
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
         app              => $app,
         sse_idle_timeout => 0.3,
+        logger           => sub { push @log_events, $_[0] },
     );
 
     my $client = create_client();
@@ -553,6 +575,10 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
     is($disconnect_event->{reason}, 'idle_timeout',
         "Reason is 'idle_timeout', not misattributed to 'client_closed'")
         if $disconnect_event;
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1,
+        'one error log line for the bare (no sse.close) idle-timeout drop');
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -104,6 +104,8 @@ subtest 'first-send-wins: stream after decline, and decline after stream, raise'
         await $send->({ type => 'sse.start', status => 200 });
         eval { await $send->({ type => 'sse.http.response.start', status => 404, headers => [] }); 1 }
             or $after_start_raised = 1;
+        await $send->({ type => 'sse.close' });
+        return;
     };
     my $s2 = create_server($app2);
     sse_get($s2->port);

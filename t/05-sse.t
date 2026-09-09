@@ -124,6 +124,8 @@ subtest 'SSE scope type is sse' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'test', data => 'done' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -179,6 +181,8 @@ subtest 'SSE multi-line data formatting' => sub {
             event => 'multiline',
             data  => "line1\nline2\nline3",
         });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -410,6 +414,8 @@ subtest 'SSE id and retry fields' => sub {
             id    => 'msg-123',
             retry => 5000,
         });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -470,6 +476,8 @@ subtest 'SSE app-supplied Cache-Control and Date are preserved' => sub {
         });
 
         await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -562,6 +570,8 @@ subtest 'SSE with POST method' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'echo', data => $body_received });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);

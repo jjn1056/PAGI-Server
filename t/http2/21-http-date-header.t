@@ -132,6 +132,8 @@ subtest 'HTTP/2 SSE response also includes a Date header (same as HTTP/1.1)' => 
         await $receive->();
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

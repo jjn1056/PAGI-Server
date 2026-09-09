@@ -43,6 +43,13 @@ async sub app {
         await $send->({ type => 'sse.send', %$msg });
     }
 
+    # Explicit sse.close: the scope's one way to end a started stream cleanly
+    # (Www.pod 0.6 "Application Left a Response Incomplete"). Skip it if the
+    # client already disconnected -- the response was not fully delivered, so
+    # asserting completion would be false (Www.pod: an application that stops
+    # early because its client disconnected MUST NOT send the terminal event).
+    await $send->({ type => 'sse.close' }) unless $disconnect->is_ready;
+
     $disconnect->cancel if $disconnect->can('cancel') && !$disconnect->is_ready;
 }
 

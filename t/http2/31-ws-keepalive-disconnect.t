@@ -495,6 +495,12 @@ subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 interval
     is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
         'no disconnect event while pongs were answered');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport, rather than yanking it out from under a still
+    # -healthy app.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -505,8 +511,17 @@ subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 interval
 # ============================================================
 subtest 'withheld pong times out exactly one disconnect; sibling GET still serves' => sub {
     my @events;
+    my @log_events;
     my $app = make_keepalive_router_app('/ws' => \@events);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # A keepalive timeout ends the stream with no WS closing handshake at
+    # all (a bare abnormal drop, RFC 6455 code 1006) -- the app still
+    # receives websocket.disconnect and returns, satisfying its own
+    # Www.pod obligation, but the dispatch wrapper's D13 check (keyed on
+    # ws_close_clean, which only a closing handshake sets) does not
+    # recognize that as a clean transport-level end and logs accordingly.
+    # Documented here rather than silenced.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
 
     my $ws_stream_id;
     my $ws_data = '';
@@ -570,6 +585,10 @@ subtest 'withheld pong times out exactly one disconnect; sibling GET still serve
     is($get_headers{':status'}, '200', 'sibling GET stream still gets a response');
     is($get_body, 'sibling-ok', 'sibling GET stream still gets its body');
 
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1,
+        'one error log line for the bare (no closing handshake) keepalive-timeout drop');
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -613,6 +632,12 @@ subtest 'keepalive on one stream does not leak pings to a sibling WS stream' => 
     ok($a_saw_ping, 'stream A (keepalive enabled) received at least one ping');
     is(ping_count($b_data), 0, 'stream B (no keepalive) received zero ping frames');
     is(length($b_data), 0, 'stream B received no DATA at all (nothing else to send)');
+
+    # End both scopes cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $a_stream_id, 'close:1000,done');
+    send_ws_text($client, $client_sock, $b_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -672,6 +697,11 @@ subtest 'interval => 0 stops further pings' => sub {
         'no-timeout keepalive delivered zero disconnect events');
     is([map { $_->{type} } @events], ['websocket.connect'],
         'the only app-visible event was the opening websocket.connect');
+
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -734,6 +764,11 @@ subtest 'a second keepalive event supersedes the first: the ping cadence changes
     is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
         'no disconnect while re-arming keepalive (old pong-timer state did not wedge)');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -778,6 +813,11 @@ subtest 'an inbound ws ping frame is answered with a pong carrying its payload' 
         if @pongs;
     is(ping_count($ws_data), 0, 'server sent no pings of its own (no keepalive armed)');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -789,8 +829,13 @@ subtest 'an inbound ws ping frame is answered with a pong carrying its payload' 
 subtest 'a keepalive timeout on one armed stream leaves its ponging sibling working' => sub {
     my @events_a;
     my @events_b;
+    my @log_events;
     my $app = make_keepalive_router_app('/ws/a' => \@events_a, '/ws/b' => \@events_b);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # Stream A's keepalive timeout ends it with no WS closing handshake (a
+    # bare abnormal drop, RFC 6455 code 1006) -- see the withheld-pong
+    # subtest above for why that logs. Documented here rather than silenced.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
 
     my ($a_stream_id, $b_stream_id);
     my $a_data = '';
@@ -857,6 +902,15 @@ subtest 'a keepalive timeout on one armed stream leaves its ponging sibling work
         }
     }
     ok($echoed, 'stream B round-tripped a text message after A timed out');
+
+    # A already ended (its own timeout). End B's scope cleanly (Www.pod
+    # "Meaning per scope") too before tearing down the raw transport.
+    send_ws_text($client, $client_sock, $b_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1,
+        "one error log line for stream A's bare (no closing handshake) keepalive-timeout drop");
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -1018,8 +1072,16 @@ subtest 'peer Close with empty payload delivers exactly one disconnect, code 100
 # ============================================================
 subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' => sub {
     @WS_EVENTS = ();
+    my @log_events;
     my $app = make_ws_app();
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # A bare END_STREAM (no WS closing handshake at all) is precisely the
+    # abnormal drop this subtest names -- the app still receives
+    # websocket.disconnect and returns, but the dispatch wrapper's D13
+    # check (keyed on ws_close_clean, which only a closing handshake sets)
+    # does not recognize that as a clean transport-level end and logs
+    # accordingly. Documented here rather than silenced.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -1036,6 +1098,9 @@ subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' =>
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'client_closed', "reason is 'client_closed'");
     }
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1, 'one error log line for the bare (no closing handshake) END_STREAM drop');
 
     $stream_io->close_now;
     $loop->remove($server);
