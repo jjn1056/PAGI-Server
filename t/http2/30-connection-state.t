@@ -644,11 +644,11 @@ subtest 'h2: websocket RST before accept marks client_closed with an RST detail'
 # =============================================================================
 # Test 7: sse -- a completed decline is a clean end
 # =============================================================================
-# Www.pod "Meaning per scope": a decline (sse.http.response.*) is a clean end
+# Www.pod "Meaning per scope": a decline (http.response.*) is a clean end
 # even though sse.start was never sent -- on_complete fires, not on_disconnect,
 # and disconnect_reason stays undef. h2 never advances seq_state for an SSE
 # stream (only the plain-http send closure tracks that mirror), so this
-# exercises the decline_complete validator state (B2b) reached at decline completion, not the
+# exercises the refusal_complete validator state (B2b) reached at refusal completion, not the
 # seq_state fallback the http control case in t/http2/17 relies on.
 
 subtest 'h2: sse completed decline is a clean end' => sub {
@@ -661,9 +661,9 @@ subtest 'h2: sse completed decline is a clean end' => sub {
         $c->on_complete(sub { $r{complete}++ });
         $c->on_disconnect(sub { $r{disc} = [@_] });
         await $receive->();   # sse.request
-        await $send->({ type => 'sse.http.response.start', status => 403,
+        await $send->({ type => 'http.response.start', status => 403,
                          headers => [['content-type', 'text/plain']] });
-        await $send->({ type => 'sse.http.response.body', body => 'no', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'no', more => 0 });
         return;
     };
     my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);

@@ -52,8 +52,8 @@ BEGIN {
 #                      RSV1 set (a server-detected protocol violation)
 #   drops:      close (socket EOF)   rst (h2 only: RST_STREAM CANCEL)
 #
-# The refusal cases still send websocket.http.response.* / sse.http.response.*;
-# Task B4 switches those names to http.response.*.
+# The refusal cases answer the scope with ordinary http.response.* events
+# (Www.pod "Refusing the handshake" / "Refusing the stream").
 
 use PAGI::Server;
 use PAGI::Server::Connection;
@@ -93,7 +93,6 @@ sub rsv1_frame {
 
 sub make_app {
     my ($type, $case, $r) = @_;
-    my $prefix = $type eq 'ws' ? 'websocket.http.response' : 'sse.http.response';
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq ($type eq 'ws' ? 'websocket' : 'sse');
@@ -109,9 +108,9 @@ sub make_app {
 
         if ($ACCEPTS{$case}) { await $send->({ type => q{websocket.accept} }); $r->{accepted} = 1 }
         if (!$ACCEPTS{$case} && $case ne q{pre}) {
-            await $send->({ type => "$prefix.start", status => 403,
+            await $send->({ type => 'http.response.start', status => 403,
                             headers => [['content-type', 'text/plain']] });
-            await $send->({ type => "$prefix.body", body => 'chunk-1',
+            await $send->({ type => 'http.response.body', body => 'chunk-1',
                             more => $case eq 'mid' ? 1 : 0 });
             $r->{sent_body1} = 1;
         }
@@ -131,7 +130,7 @@ sub make_app {
         $r->{parked_future} = $rf unless $rf->is_ready;
 
         if ($case eq 'mid') {
-            my $sf = $send->({ type => "$prefix.body", body => 'tail', more => 0 });
+            my $sf = $send->({ type => 'http.response.body', body => 'tail', more => 0 });
             await Future->wait_any($sf->without_cancel, $loop->delay_future(after => 1));
             $r->{term_send} = !$sf->is_ready ? 'PENDING'
                             : $sf->is_failed ? 'FAILED:' . ($sf->failure)[0] : 'resolved';

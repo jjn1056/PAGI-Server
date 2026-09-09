@@ -303,8 +303,8 @@ for my $row (@matrix) {
 
             if ($scope->{type} eq 'sse') {
                 # Decline cleanly so the client isn't left hanging.
-                await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-                await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+                await $send->({ type => 'http.response.start', status => 204, headers => [] });
+                await $send->({ type => 'http.response.body', body => '', more => 0 });
             }
             else {
                 await $receive->();
@@ -346,8 +346,8 @@ subtest 'h2: two Accept headers, only the second carries the range -> sse' => su
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         $got_scope_type = $scope->{type};
-        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-        await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+        await $send->({ type => 'http.response.start', status => 204, headers => [] });
+        await $send->({ type => 'http.response.body', body => '', more => 0 });
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

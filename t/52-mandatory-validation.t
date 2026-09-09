@@ -200,9 +200,9 @@ my $sse_app = async sub {
         if ($path eq '/sse-send-before-start') {
             my $err = do { local $@; eval { await $send->({ type => 'sse.send', data => 'early' }) }; $@ };
             # decline with the error so the client can read it as a plain response
-            await $send->({ type => 'sse.http.response.start', status => 200, headers => [['content-type','text/plain']] });
+            await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
             ($err //= 'NO-ERROR') =~ s/\n/ /g;
-            await $send->({ type => 'sse.http.response.body', body => $err, more => 0 });
+            await $send->({ type => 'http.response.body', body => $err, more => 0 });
             return;
         }
         if ($path eq '/sse-newline-event') {
@@ -222,9 +222,9 @@ my $sse_app = async sub {
             return;
         }
         if ($path eq '/sse-send-after-decline-complete') {
-            await $send->({ type => 'sse.http.response.start', status => 200, headers => [['content-type','text/plain']] });
-            await $send->({ type => 'sse.http.response.body', body => 'done', more => 0 });
-            my $err = do { local $@; eval { await $send->({ type => 'sse.http.response.body', body => 'extra', more => 0 }) }; $@ };
+            await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
+            await $send->({ type => 'http.response.body', body => 'done', more => 0 });
+            my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => 'extra', more => 0 }) }; $@ };
             $SseAfterDeclineComplete::ERR = $err;   # observed via package var after request
             return;
         }
@@ -264,8 +264,8 @@ $sse_get->('/sse-send-after-close');
 like( $SseAfterClose::ERR // '', qr/after sse\.close/,
     'sse.send after sse.close fails' );
 $sse_get->('/sse-send-after-decline-complete');
-like( $SseAfterDeclineComplete::ERR // '', qr/decline response already complete/,
-    'sse.http.response.body after a completed decline fails, not silently swallowed' );
+like( $SseAfterDeclineComplete::ERR // '', qr/refusal already complete/,
+    'http.response.body after a completed refusal fails, not silently swallowed' );
 
 # The positive assertion behind dropping the fresh-client workaround: one raw
 # socket -- literally one file descriptor -- performs an SSE exchange and then
@@ -415,10 +415,10 @@ my $ws_denial_complete_app = async sub {
     my ($scope, $receive, $send) = @_;
     if ($scope->{type} eq 'websocket') {
         my $e = await $receive->();   # websocket.connect
-        await $send->({ type => 'websocket.http.response.start', status => 403,
+        await $send->({ type => 'http.response.start', status => 403,
                         headers => [['content-type','text/plain']] });
-        await $send->({ type => 'websocket.http.response.body', body => 'no', more => 0 });
-        my $err = do { local $@; eval { await $send->({ type => 'websocket.http.response.body', body => 'extra', more => 0 }) }; $@ };
+        await $send->({ type => 'http.response.body', body => 'no', more => 0 });
+        my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => 'extra', more => 0 }) }; $@ };
         ($WsDenialComplete::ERR = $err // 'NO-ERROR') =~ s/\n/ /g;
         return;
     }
@@ -432,8 +432,8 @@ $ws_denial_complete_server->listen->get;
 SKIP: {
     skip "Cannot connect", 1 unless $ws_handshake_and_drain->($ws_denial_complete_server->port);
 
-    like( $WsDenialComplete::ERR // '', qr/denial response already complete/,
-        'websocket.http.response.body after a completed denial raises, not silently swallowed' );
+    like( $WsDenialComplete::ERR // '', qr/refusal already complete/,
+        'http.response.body after a completed refusal raises, not silently swallowed' );
 }
 $ws_denial_complete_server->shutdown->get;
 

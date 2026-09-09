@@ -1,0 +1,804 @@
+use strict;
+use warnings;
+use Test2::V0;
+use IO::Async::Loop;
+use IO::Async::Stream;
+use IO::Socket::INET;
+use Future::AsyncAwait;
+use MIME::Base64 ();
+use File::Temp ();
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Socket qw(AF_UNIX SOCK_STREAM);
+
+plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+
+# ============================================================
+# Test: refusing a handshake or a stream is an ordinary HTTP response
+# ============================================================
+# PAGI::Spec::Www, "Refusing the handshake" and "Refusing the stream": until
+# the application sends websocket.accept or sse.start, the scope is an
+# ordinary HTTP exchange and the application MAY answer it with
+# http.response.start / .body / .trailers, "with exactly the semantics those
+# events have on an http scope". On the wire the refusal's status, headers and
+# body are identical to the same response on an http scope, apart from the
+# connection-lifecycle headers the server owns.
+#
+# Every case below runs on both transports and both scope types. The http
+# scope is the reference: the same application events are replayed against a
+# plain request and the two wires are compared.
+
+use PAGI::Server;
+use PAGI::Server::Connection;
+use PAGI::Server::Protocol::HTTP1;
+
+my $have_h2 = do {
+    require PAGI::Server::Protocol::HTTP2;
+    PAGI::Server::Protocol::HTTP2->available ? 1 : 0;
+};
+
+my $loop     = IO::Async::Loop->new;
+my $protocol = PAGI::Server::Protocol::HTTP1->new;
+
+# ============================================================
+# HTTP/1.1 harness (shape borrowed from t/69)
+# ============================================================
+
+sub create_server {
+    my ($app, %opts) = @_;
+    my $server = PAGI::Server->new(
+        app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+        shutdown_timeout => 1, %opts,
+    );
+    $loop->add($server);
+    $server->listen->get;
+    return $server;
+}
+
+sub h1_request {
+    my ($kind, $path) = @_;
+    $path //= '/r';
+    return "GET $path HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+         . "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "
+         . MIME::Base64::encode_base64('0123456789abcdef', '') . "\r\n\r\n"
+        if $kind eq 'websocket';
+    return "GET $path HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n"
+        if $kind eq 'sse';
+    return "GET $path HTTP/1.1\r\nHost: x\r\n\r\n";
+}
+
+# Open a socket, send $request, and pump the loop, accumulating everything the
+# server writes. Returns the still-open socket and a reader closure so a test
+# can inspect the wire part-way through.
+sub h1_open {
+    my ($port, $request) = @_;
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5)
+        or die "connect: $!";
+    print $sock $request;
+    $sock->blocking(0);
+    my $wire = '';
+    my $eof  = 0;
+    my $pump = sub {
+        my ($rounds) = @_;
+        for (1 .. ($rounds // 20)) {
+            $loop->loop_once(0.05);
+            my $buf;
+            my $n = sysread($sock, $buf, 65536);
+            if (defined $n) { $n ? ($wire .= $buf) : ($eof = 1) }
+        }
+        return $wire;
+    };
+    return ($sock, $pump, \$wire, \$eof);
+}
+
+sub h1_fetch {
+    my ($port, $request, $rounds) = @_;
+    my ($sock, $pump, $wire, $eof) = h1_open($port, $request);
+    $pump->($rounds // 30);
+    close $sock;
+    return ($$wire, $$eof);
+}
+
+# Split an h1 wire into (status line, [header lines], body).
+sub h1_parse {
+    my ($wire) = @_;
+    my ($head, $body) = split /\r\n\r\n/, $wire, 2;
+    $head //= ''; $body //= '';
+    my @lines = split /\r\n/, $head;
+    my $status = shift(@lines) // '';
+    return ($status, \@lines, $body);
+}
+
+# The comparable part of a response: everything but the headers whose value the
+# connection lifecycle owns (the spec's stated exception) and the Date header,
+# whose value is a clock reading.
+sub comparable_headers {
+    my ($lines) = @_;
+    return [sort grep { !/^(?:connection|keep-alive|date|server|transfer-encoding):/i } @$lines];
+}
+
+# ============================================================
+# HTTP/2 harness (shape borrowed from t/http2/22)
+# ============================================================
+
+sub create_h2_connection {
+    my (%o) = @_;
+    socketpair(my $sock_a, my $sock_b, AF_UNIX, SOCK_STREAM, 0) or die "socketpair: $!";
+    $sock_a->blocking(0);
+    $sock_b->blocking(0);
+    my $app    = $o{app} // sub { };
+    my $server = $o{server} // do {
+        my $s = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0,
+            quiet => 1, http2 => 1);
+        $loop->add($s);
+        $s;
+    };
+    my $stream = IO::Async::Stream->new(
+        read_handle => $sock_a, write_handle => $sock_a, on_read => sub { 0 });
+    my $conn = PAGI::Server::Connection->new(
+        stream => $stream, app => $app, protocol => $protocol, server => $server,
+        h2_protocol => $server->{http2_protocol}, alpn_protocol => 'h2',
+    );
+    $server->add_child($stream);
+    $conn->start;
+    return ($conn, $stream, $sock_b, $server);
+}
+
+sub create_client {
+    my (%o) = @_;
+    require Net::HTTP2::nghttp2::Session;
+    return Net::HTTP2::nghttp2::Session->new_client(callbacks => {
+        on_begin_headers   => sub { 0 },
+        on_header          => $o{on_header}          // sub { 0 },
+        on_frame_recv      => sub { 0 },
+        on_data_chunk_recv => $o{on_data_chunk_recv} // sub { 0 },
+        on_stream_close    => $o{on_stream_close}    // sub { 0 },
+    });
+}
+
+sub complete_h2_handshake {
+    my ($client, $client_sock) = @_;
+    $loop->loop_once(0.1);
+    my $settings = '';
+    $client_sock->sysread($settings, 4096);
+    $client->send_connection_preface;
+    $client_sock->syswrite($client->mem_send);
+    $loop->loop_once(0.1);
+    $client->mem_recv($settings);
+    $loop->loop_once(0.1);
+    my $ack = '';
+    $client_sock->sysread($ack, 4096);
+    $client->mem_recv($ack) if length($ack);
+    my $out = $client->mem_send;
+    $client_sock->syswrite($out) if length($out);
+    $loop->loop_once(0.1);
+    my $extra = '';
+    $client_sock->sysread($extra, 4096);
+    $client->mem_recv($extra) if length($extra);
+}
+
+sub exchange_frames {
+    my ($client, $client_sock, $rounds) = @_;
+    for (1 .. ($rounds // 20)) {
+        $loop->loop_once(0.05);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+    }
+}
+
+sub h2_submit {
+    my ($client, $client_sock, $kind, $path) = @_;
+    $path //= '/r';
+    if ($kind eq 'websocket') {
+        return $client->submit_request(
+            method => 'CONNECT', path => $path, scheme => 'https', authority => 'localhost',
+            headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+            body => sub { return undef },
+        );
+    }
+    if ($kind eq 'sse') {
+        return $client->submit_request(
+            method => 'GET', path => $path, scheme => 'http', authority => 'localhost',
+            headers => [['accept', 'text/event-stream']],
+        );
+    }
+    return $client->submit_request(
+        method => 'GET', path => $path, scheme => 'http', authority => 'localhost',
+        headers => [],
+    );
+}
+
+# One h2 request, driven to completion. Returns headers, body and the
+# RST_STREAM/close error code the client observed.
+sub h2_fetch {
+    my (%a) = @_;
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $a{app});
+    my (%headers, $body, $close_code);
+    $body = '';
+    my $client = create_client(
+        on_header          => sub { my (undef, $n, $v) = @_; $headers{lc $n} = $v; 0 },
+        on_data_chunk_recv => sub { my (undef, $d) = @_; $body .= $d; 0 },
+        on_stream_close    => sub { my (undef, $c) = @_; $close_code = $c; 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    h2_submit($client, $client_sock, $a{kind}, $a{path});
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, $a{rounds} // 25);
+    $a{after}->($client, $client_sock) if $a{after};
+    $stream_io->close_now;
+    $loop->remove($server);
+    return (\%headers, $body, $close_code);
+}
+
+my @SCOPES = qw(websocket sse);
+
+# Refusal statuses: a WebSocket refusal MUST be 300 or above; an SSE refusal
+# may use any status. 404 works on both, so the http reference response is the
+# same one for each scope.
+my $STATUS = 404;
+
+# ============================================================
+# (a) complete-body refusal: identical on the wire to an http response
+# ============================================================
+
+subtest 'a complete-body refusal is the same response an http scope would send' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->() if $scope->{type} ne 'sse';
+        await $send->({ type => 'http.response.start', status => $STATUS,
+                        headers => [['content-type', 'text/plain'],
+                                    ['x-refusal', 'yes'],
+                                    ['content-length', 6]] });
+        await $send->({ type => 'http.response.body', body => 'gone.\n' =~ s/\\n/\n/r });
+        return;
+    };
+    my $server = create_server($app);
+    my $port   = $server->port;
+
+    my ($ref_wire) = h1_fetch($port, h1_request('http'));
+    my ($ref_status, $ref_headers, $ref_body) = h1_parse($ref_wire);
+    is($ref_status, "HTTP/1.1 $STATUS Not Found", 'reference http response status');
+
+    for my $kind (@SCOPES) {
+        my ($wire) = h1_fetch($port, h1_request($kind));
+        my ($status, $headers, $body) = h1_parse($wire);
+        is($status, $ref_status, "h1 $kind refusal: same status line");
+        is(comparable_headers($headers), comparable_headers($ref_headers),
+            "h1 $kind refusal: same headers apart from the ones the connection owns");
+        is($body, $ref_body, "h1 $kind refusal: same body");
+    }
+    $server->shutdown->get;
+
+    SKIP: {
+        skip 'HTTP/2 not available', 6 unless $have_h2;
+        my ($ref_h, $ref_b) = h2_fetch(app => $app, kind => 'http');
+        for my $kind (@SCOPES) {
+            my ($h, $b) = h2_fetch(app => $app, kind => $kind);
+            is($h->{':status'}, $ref_h->{':status'}, "h2 $kind refusal: same status");
+            is($h->{'x-refusal'}, 'yes', "h2 $kind refusal: app header present");
+            is($b, $ref_b, "h2 $kind refusal: same body");
+        }
+    }
+};
+
+# ============================================================
+# (b) streamed refusal: nothing is buffered
+# ============================================================
+# "more => 1 streams under the transport's ordinary body, flow-control, and
+# framing rules ... Nothing is buffered specially." The app parks between
+# chunks on a Future the test resolves, so the first chunk must already be
+# readable at the client when the second has not yet been sent.
+
+subtest 'a streamed refusal delivers its first chunk before the terminal one' => sub {
+    for my $kind (@SCOPES) {
+        my $gate = $loop->new_future;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->() if $scope->{type} ne 'sse';
+            await $send->({ type => 'http.response.start', status => $STATUS,
+                            headers => [['content-type', 'text/plain']] });
+            await $send->({ type => 'http.response.body', body => 'first', more => 1 });
+            await $gate;
+            await $send->({ type => 'http.response.body', body => 'last', more => 0 });
+            return;
+        };
+        my $server = create_server($app);
+        my ($sock, $pump, $wire) = h1_open($server->port, h1_request($kind));
+        $pump->(25);
+        like($$wire, qr/\r\n\r\n5\r\nfirst\r\n/,
+            "h1 $kind: the first chunk is on the wire before the terminal one is sent");
+        unlike($$wire, qr/last/, "h1 $kind: the terminal chunk has not been sent yet");
+        $gate->done;
+        $pump->(25);
+        like($$wire, qr/4\r\nlast\r\n0\r\n\r\n\z/,
+            "h1 $kind: the terminal chunk and the chunked terminator follow");
+        close $sock;
+        $server->shutdown->get;
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 4 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my $gate = $loop->new_future;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $receive->() if $scope->{type} ne 'sse';
+                await $send->({ type => 'http.response.start', status => $STATUS,
+                                headers => [['content-type', 'text/plain']] });
+                await $send->({ type => 'http.response.body', body => 'first', more => 1 });
+                await $gate;
+                await $send->({ type => 'http.response.body', body => 'last', more => 0 });
+                return;
+            };
+            my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+            my $body = '';
+            my $client = create_client(
+                on_data_chunk_recv => sub { my (undef, $d) = @_; $body .= $d; 0 });
+            complete_h2_handshake($client, $client_sock);
+            h2_submit($client, $client_sock, $kind);
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 25);
+            is($body, 'first', "h2 $kind: the first DATA frame arrived before the terminal chunk");
+            $gate->done;
+            exchange_frames($client, $client_sock, 25);
+            is($body, 'firstlast', "h2 $kind: the terminal chunk follows");
+            $stream_io->close_now;
+            $loop->remove($server);
+        }
+    }
+};
+
+# ============================================================
+# (c) file refusal
+# ============================================================
+
+subtest 'a refusal may answer with a file body' => sub {
+    my $tmp = File::Temp->new(SUFFIX => '.txt');
+    print {$tmp} "from-a-file";
+    $tmp->flush;
+    my $path = $tmp->filename;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->() if $scope->{type} ne 'sse';
+        await $send->({ type => 'http.response.start', status => $STATUS,
+                        headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', file => $path });
+        return;
+    };
+    my $server = create_server($app);
+    for my $kind (@SCOPES) {
+        my ($wire) = h1_fetch($server->port, h1_request($kind));
+        like($wire, qr/from-a-file/, "h1 $kind: the file body was delivered");
+    }
+    $server->shutdown->get;
+
+    SKIP: {
+        skip 'HTTP/2 not available', 2 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my (undef, $body) = h2_fetch(app => $app, kind => $kind);
+            like($body, qr/from-a-file/, "h2 $kind: the file body was delivered");
+        }
+    }
+};
+
+# ============================================================
+# (d) abandoned refusal: an incomplete response
+# ============================================================
+# Www.pod "Application Left a Response Incomplete" names the refusal case
+# first: the terminal framing is never synthesized, the transport is
+# terminated so the client observes truncation, and the object reports
+# server_error.
+
+subtest 'a refusal abandoned before its terminal event is an incomplete response' => sub {
+    for my $kind (@SCOPES) {
+        my %r;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->() if $scope->{type} ne 'sse';
+            my $conn = $scope->{'pagi.connection'};
+            $conn->on_disconnect(sub { $r{disconnect} = [@_] });
+            $conn->on_complete(sub { $r{complete}++ });
+            await $send->({ type => 'http.response.start', status => $STATUS,
+                            headers => [['content-type', 'text/plain']] });
+            await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+            $r{returned} = 1;
+            return;   # no terminal body
+        };
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        my $server = create_server($app);
+        my ($wire, $eof) = h1_fetch($server->port, h1_request($kind), 40);
+        $server->shutdown->get;
+
+        like($wire, qr/7\r\npartial\r\n/, "h1 $kind: the chunk that was sent reached the client");
+        unlike($wire, qr/0\r\n\r\n\z/, "h1 $kind: no chunked terminator was synthesized");
+        ok($eof, "h1 $kind: the connection was closed so the truncation is observable");
+        is($r{complete}, undef, "h1 $kind: on_complete did not fire");
+        is($r{disconnect}[0], 'server_error', "h1 $kind: on_disconnect reported server_error");
+        ok((scalar grep { /incomplete response/i } @warnings),
+            "h1 $kind: the incomplete response was logged") or diag("warnings: @warnings");
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 12 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my %r;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $receive->() if $scope->{type} ne 'sse';
+                my $conn = $scope->{'pagi.connection'};
+                $conn->on_disconnect(sub { $r{disconnect} = [@_] });
+                $conn->on_complete(sub { $r{complete}++ });
+                await $send->({ type => 'http.response.start', status => $STATUS,
+                                headers => [['content-type', 'text/plain']] });
+                await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+                return;
+            };
+            my @warnings;
+            local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+            my (undef, $body, $close_code) = h2_fetch(app => $app, kind => $kind, rounds => 40);
+            is($body, 'partial', "h2 $kind: the chunk that was sent reached the client");
+            is($close_code, 2, "h2 $kind: the stream was reset with INTERNAL_ERROR");
+            is($r{complete}, undef, "h2 $kind: on_complete did not fire");
+            is($r{disconnect}[0], 'server_error', "h2 $kind: on_disconnect reported server_error");
+            ok((scalar grep { /incomplete|without ending the scope cleanly/i } @warnings),
+                "h2 $kind: the incomplete response was logged") or diag("warnings: @warnings");
+            ok(defined $r{disconnect}[1], "h2 $kind: disconnect_detail says more than the token");
+        }
+    }
+};
+
+# ============================================================
+# (e) abandoned refusal with the client already gone
+# ============================================================
+# The client-gone carve-out: the request already ended abnormally with its own
+# reason, so the server MUST NOT log an incomplete-response error.
+
+subtest 'an abandoned refusal is not logged once the client has already gone' => sub {
+    for my $kind (@SCOPES) {
+        my %r;
+        my $released = $loop->new_future;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->() if $scope->{type} ne 'sse';
+            await $send->({ type => 'http.response.start', status => $STATUS,
+                            headers => [['content-type', 'text/plain']] });
+            await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+            $r{parked} = 1;
+            await $released;         # still running when the client drops
+            $r{returned} = 1;
+            return;
+        };
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        my $server = create_server($app);
+        my ($sock, $pump) = h1_open($server->port, h1_request($kind));
+        $pump->(25);
+        close $sock;                 # client gone
+        $loop->loop_once(0.05) for 1 .. 10;
+        $released->done;
+        $loop->loop_once(0.05) for 1 .. 20;
+        $server->shutdown->get;
+
+        is($r{returned}, 1, "h1 $kind: the app returned after the client had gone");
+        ok(!(scalar grep { /incomplete response/i } @warnings),
+            "h1 $kind: no incomplete-response error was logged") or diag("warnings: @warnings");
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 4 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my %r;
+            my $released = $loop->new_future;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $receive->() if $scope->{type} ne 'sse';
+                await $send->({ type => 'http.response.start', status => $STATUS,
+                                headers => [['content-type', 'text/plain']] });
+                await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+                $r{parked} = 1;
+                await $released;
+                $r{returned} = 1;
+                return;
+            };
+            my @warnings;
+            local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+            my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+            my $client = create_client();
+            complete_h2_handshake($client, $client_sock);
+            my $sid = h2_submit($client, $client_sock, $kind);
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 25);
+            # The client resets the stream while the app is still parked.
+            $client->submit_rst_stream($sid, 8);   # CANCEL
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 15);
+            $released->done;
+            exchange_frames($client, $client_sock, 20);
+            $stream_io->close_now;
+            $loop->remove($server);
+
+            is($r{returned}, 1, "h2 $kind: the app returned after the client had gone");
+            ok(!(scalar grep { /incomplete|without ending the scope cleanly/i } @warnings),
+                "h2 $kind: no incomplete-response error was logged") or diag("warnings: @warnings");
+        }
+    }
+};
+
+# ============================================================
+# (f) websocket.close before accept
+# ============================================================
+
+subtest 'websocket.close before accept fails the send and writes nothing' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        my $conn = $scope->{'pagi.connection'};
+        $r{err} = do { local $@; eval { await $send->({ type => 'websocket.close' }) }; $@ };
+        $r{started} = $conn->response_started;
+        $r{done} = 1;
+        return;
+    };
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $server = create_server($app);
+    my ($wire) = h1_fetch($server->port, h1_request('websocket'), 30);
+    $server->shutdown->get;
+
+    like($r{err}, qr/before websocket\.accept/, 'h1: the send failed as out of sequence');
+    is($r{started}, 0, 'h1: nothing was mutated -- no response had started');
+    unlike($wire, qr{^HTTP/1\.1 403}, 'h1: no 403 was written');
+    # The app then produced no response at all, so "Application Produced No
+    # Response" applies: the 500 backstop, and one error line naming it.
+    like($wire, qr{^HTTP/1\.1 500}, 'h1: the no-response backstop answered instead');
+    is(scalar(grep { /without accepting the WebSocket or refusing the handshake/ } @warnings), 1,
+        'h1: the backstop logged exactly once') or diag("warnings: @warnings");
+
+    SKIP: {
+        skip 'HTTP/2 not available', 4 unless $have_h2;
+        my @h2_warnings;
+        local $SIG{__WARN__} = sub { push @h2_warnings, $_[0] };
+        my %h2;
+        my $h2app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->();
+            my $conn = $scope->{'pagi.connection'};
+            $h2{err} = do { local $@; eval { await $send->({ type => 'websocket.close' }) }; $@ };
+            $h2{started} = $conn->response_started;
+            return;
+        };
+        my ($headers) = h2_fetch(app => $h2app, kind => 'websocket');
+        like($h2{err}, qr/before websocket\.accept/, 'h2: the send failed as out of sequence');
+        is($h2{started}, 0, 'h2: nothing was mutated -- no response had started');
+        isnt($headers->{':status'}, '403', 'h2: no 403 was written');
+        is(scalar(grep { /returned without starting a response/ } @h2_warnings), 1,
+            'h2: the backstop logged exactly once') or diag("warnings: @h2_warnings");
+    }
+};
+
+# ============================================================
+# (g) HTTP response events after the scope has been established
+# ============================================================
+
+subtest 'http.response.start after accept or after sse.start fails, leaving the scope intact' => sub {
+    my %r;
+    my $ws_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();                       # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        $r{ws_err} = do { local $@;
+            eval { await $send->({ type => 'http.response.start', status => 500 }) }; $@ };
+        await $send->({ type => 'websocket.send', text => 'still-here' });
+        await $send->({ type => 'websocket.close' });
+        return;
+    };
+    my $server = create_server($ws_app);
+    my ($wire) = h1_fetch($server->port, h1_request('websocket'), 40);
+    $server->shutdown->get;
+    like($r{ws_err}, qr/after websocket\.accept/, 'h1 websocket: the send failed');
+    like($wire, qr{^HTTP/1\.1 101}, 'h1 websocket: the established socket is intact');
+    like($wire, qr/still-here/, 'h1 websocket: and still carries application frames');
+
+    my $sse_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start' });
+        $r{sse_err} = do { local $@;
+            eval { await $send->({ type => 'http.response.start', status => 500 }) }; $@ };
+        await $send->({ type => 'sse.send', data => 'still-here' });
+        await $send->({ type => 'sse.close' });
+        return;
+    };
+    my $server2 = create_server($sse_app);
+    my ($wire2) = h1_fetch($server2->port, h1_request('sse'), 40);
+    $server2->shutdown->get;
+    like($r{sse_err}, qr/after sse\.start/, 'h1 sse: the send failed');
+    like($wire2, qr{^HTTP/1\.1 200}, 'h1 sse: the started stream is intact');
+    like($wire2, qr/data: still-here/, 'h1 sse: and still carries events');
+
+    SKIP: {
+        skip 'HTTP/2 not available', 6 unless $have_h2;
+        my %h2;
+        my $h2_ws_app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->();
+            await $send->({ type => 'websocket.accept' });
+            $h2{ws_err} = do { local $@;
+                eval { await $send->({ type => 'http.response.start', status => 500 }) }; $@ };
+            await $send->({ type => 'websocket.send', text => 'still-here' });
+            await $send->({ type => 'websocket.close' });
+            return;
+        };
+        my ($h, $b) = h2_fetch(app => $h2_ws_app, kind => 'websocket');
+        like($h2{ws_err}, qr/after websocket\.accept/, 'h2 websocket: the send failed');
+        is($h->{':status'}, '200', 'h2 websocket: the established stream is intact');
+        like($b, qr/still-here/, 'h2 websocket: and still carries application frames');
+
+        my $h2_sse_app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $send->({ type => 'sse.start' });
+            $h2{sse_err} = do { local $@;
+                eval { await $send->({ type => 'http.response.start', status => 500 }) }; $@ };
+            await $send->({ type => 'sse.send', data => 'still-here' });
+            await $send->({ type => 'sse.close' });
+            return;
+        };
+        my ($h2h, $h2b) = h2_fetch(app => $h2_sse_app, kind => 'sse');
+        like($h2{sse_err}, qr/after sse\.start/, 'h2 sse: the send failed');
+        is($h2h->{':status'}, '200', 'h2 sse: the started stream is intact');
+        like($h2b, qr/data: still-here/, 'h2 sse: and still carries events');
+    }
+};
+
+# ============================================================
+# (h) a completed refusal is a clean end
+# ============================================================
+
+subtest 'a completed refusal is a clean end that delivers no disconnect event' => sub {
+    for my $kind (@SCOPES) {
+        my %r;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->() if $scope->{type} ne 'sse';
+            my $conn = $scope->{'pagi.connection'};
+            $conn->on_disconnect(sub { $r{disconnect} = [@_] });
+            $conn->on_complete(sub { $r{complete}++ });
+            await $send->({ type => 'http.response.start', status => $STATUS,
+                            headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+            await $send->({ type => 'http.response.body', body => 'nope' });
+            my $parked = $receive->();
+            await Future->wait_any($parked->without_cancel, $loop->delay_future(after => 0.4));
+            $r{parked_ready} = $parked->is_ready ? 1 : 0;
+            # A receive() left parked by a completed refusal outlives this
+            # sub; hand it to the caller so the suspended async sub behind it
+            # is not reaped mid-run.
+            $r{parked_future} = $parked unless $parked->is_ready;
+            # The object reaches its terminal state when the application
+            # returns, so it is read from out here, not from inside the app.
+            $r{conn} = $conn;
+            $r{done} = 1;
+            return;
+        };
+        my $server = create_server($app);
+        my ($wire, $eof) = h1_fetch($server->port, h1_request($kind), 40);
+        $loop->loop_once(0.05) for 1 .. 10;
+        $server->shutdown->get;
+
+        is($r{done}, 1, "h1 $kind: the app ran to completion");
+        is($r{parked_ready}, 0, "h1 $kind: a receive() after the refusal stays pending");
+        is($r{conn}->response_complete, 1, "h1 $kind: response_complete is true");
+        is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason is undef");
+        is($r{complete}, 1, "h1 $kind: on_complete fired exactly once");
+        is($r{disconnect}, undef, "h1 $kind: on_disconnect never fired");
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 10 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my %r;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $receive->() if $scope->{type} ne 'sse';
+                my $conn = $scope->{'pagi.connection'};
+                $conn->on_disconnect(sub { $r{disconnect} = [@_] });
+                $conn->on_complete(sub { $r{complete}++ });
+                await $send->({ type => 'http.response.start', status => $STATUS,
+                                headers => [['content-type', 'text/plain']] });
+                await $send->({ type => 'http.response.body', body => 'nope' });
+                my $parked = $receive->();
+                await Future->wait_any($parked->without_cancel, $loop->delay_future(after => 0.4));
+                $r{parked_ready} = $parked->is_ready ? 1 : 0;
+                $r{parked_future} = $parked unless $parked->is_ready;
+                $r{conn} = $conn;
+                $r{done} = 1;
+                return;
+            };
+            h2_fetch(app => $app, kind => $kind, rounds => 40);
+            is($r{done}, 1, "h2 $kind: the app ran to completion");
+            is($r{parked_ready}, 0, "h2 $kind: a receive() after the refusal stays pending");
+            is($r{conn}->response_complete, 1, "h2 $kind: response_complete is true");
+            is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
+            is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");
+        }
+    }
+};
+
+# ============================================================
+# Step 8: the connection closes after a refusal (D-A-I10)
+# ============================================================
+
+subtest 'a completed h1 refusal says Connection: close and closes the socket' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->() if $scope->{type} ne 'sse';
+        await $send->({ type => 'http.response.start', status => $STATUS,
+                        headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        return;
+    };
+    my $server = create_server($app);
+    for my $kind (@SCOPES) {
+        my ($sock, $pump, $wire, $eof) = h1_open($server->port, h1_request($kind));
+        $pump->(25);
+        like($$wire, qr/^connection:\s*close\r$/mi,
+            "h1 $kind: the refusal carries Connection: close");
+        # A pipelined follow-up request must not be served on this socket.
+        print $sock h1_request('http', '/second');
+        $pump->(25);
+        ok($$eof, "h1 $kind: the socket reached EOF");
+        my @statuses = ($$wire =~ m{^HTTP/1\.1 (\d+)}mg);
+        is(scalar(@statuses), 1, "h1 $kind: exactly one response was served, not a pipelined second");
+        close $sock;
+    }
+    $server->shutdown->get;
+};
+
+subtest 'a completed h2 refusal ends its stream and leaves the connection usable' => sub {
+    skip_all 'HTTP/2 not available' unless $have_h2;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->() if $scope->{type} ne 'sse';
+        await $send->({ type => 'http.response.start', status => $STATUS,
+                        headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => $scope->{type} });
+        return;
+    };
+
+    for my $kind (@SCOPES) {
+        my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+        my (%closed, $body);
+        $body = '';
+        my $client = create_client(
+            on_data_chunk_recv => sub { my (undef, $d) = @_; $body .= $d; 0 },
+            on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; 0 },
+        );
+        complete_h2_handshake($client, $client_sock);
+        my $refusal_id = h2_submit($client, $client_sock, $kind);
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 25);
+        # No error code: the refusal ended the server's half of the stream
+        # normally. A websocket refusal answers an extended CONNECT whose
+        # request body this client deliberately leaves open, so nghttp2
+        # reports no client-side stream close at all for it; an sse refusal
+        # reports 0. Either way, nothing abnormal.
+        ok(!$closed{$refusal_id}, "h2 $kind: the refusal's stream ended with no error code");
+
+        # A sibling stream on the same connection still works.
+        my $sibling_id = h2_submit($client, $client_sock, 'http', '/sibling');
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock, 25);
+        is($closed{$sibling_id}, 0, "h2 $kind: a sibling stream on the same connection still works");
+        like($body, qr/http/, "h2 $kind: and the sibling's own response arrived");
+
+        $stream_io->close_now;
+        $loop->remove($server);
+    }
+};
+
+done_testing;

@@ -44,50 +44,50 @@ my $loop = IO::Async::Loop->new;
 my @cases = (
     {
         name   => 'application sent websocket.close on an accepted socket',
-        stream => { ws_accepted => 1, seq_state => 'closed' },
+        stream => { seq_state => 'closed' },
         clean  => 1,
     },
     {
         name   => 'peer Close frame validated on an accepted socket',
-        stream => { ws_accepted => 1, seq_state => 'accepted', ws_peer_closed => 1 },
+        stream => { seq_state => 'accepted', ws_peer_closed => 1 },
         clean  => 1,
     },
     {
         name   => 'server-detected protocol violation closed the socket',
-        stream => { ws_accepted => 1, seq_state => 'accepted',
+        stream => { seq_state => 'accepted',
                     server_close_reason => 'protocol_error',
                     server_close_detail => 'RSV bits must be 0' },
         clean  => 0,
     },
     {
         name   => 'bounded inbound queue overflowed and the server closed',
-        stream => { ws_accepted => 1, seq_state => 'accepted',
+        stream => { seq_state => 'accepted',
                     server_close_reason => 'queue_overflow',
                     server_close_detail => 'inbound message queue at 100' },
         clean  => 0,
     },
     {
         name   => 'accepted socket with no close of any kind',
-        stream => { ws_accepted => 1, seq_state => 'accepted' },
+        stream => { seq_state => 'accepted' },
         clean  => 0,
     },
     {
         name   => 'refusal carried to completion',
-        stream => { ws_accepted => 0, seq_state => 'denial_complete' },
+        stream => { seq_state => 'refusal_complete' },
         clean  => 1,
     },
     {
         name   => 'refusal started but never finished',
-        stream => { ws_accepted => 0, seq_state => 'denial' },
+        stream => { seq_state => 'refusing' },
         clean  => 0,
     },
     {
-        # advance_websocket still admits websocket.close from 'connecting';
-        # the h2 send closure answers it with a 403, not a Close frame, so it
-        # is not a completed handshake. This is what the ws_accepted conjunct
-        # is for.
-        name   => 'pre-accept websocket.close',
-        stream => { ws_accepted => 0, seq_state => 'closed' },
+        # The send state alone now says whether the handshake completed:
+        # advance_websocket rejects websocket.close before accept, so 'closed'
+        # is reachable only from 'accepted' and no separate accept flag is
+        # kept. A scope still in the handshake is never a clean end.
+        name   => 'still connecting',
+        stream => { seq_state => 'connecting' },
         clean  => 0,
     },
     {
@@ -108,12 +108,12 @@ subtest 'the classifier reads the stream, not the object' => sub {
     # Both halves of a clean end must be sufficient on their own, and neither
     # may be confused for the other.
     ok(PAGI::Server::Connection::_h2_ws_clean_end(
-        { ws_accepted => 1, seq_state => 'closed' }), 'send half alone is enough');
+        { seq_state => 'closed' }), 'send half alone is enough');
     ok(PAGI::Server::Connection::_h2_ws_clean_end(
-        { ws_accepted => 1, seq_state => 'accepted', ws_peer_closed => 1 }),
+        { seq_state => 'accepted', ws_peer_closed => 1 }),
         'receive half alone is enough');
     ok(!PAGI::Server::Connection::_h2_ws_clean_end(
-        { ws_accepted => 1, seq_state => 'accepted', close_received => 1 }),
+        { seq_state => 'accepted', close_received => 1 }),
         'close_received is NOT the receive half: it is set before the frame validates');
 };
 
@@ -158,7 +158,6 @@ sub drive_h2_on_close {
 
 subtest 'a server protocol close on an unmarked object ends abnormally' => sub {
     my $got = drive_h2_on_close(
-        ws_accepted         => 1,
         seq_state           => 'accepted',
         server_close_reason => 'protocol_error',
         server_close_detail => 'RSV bits must be 0',
@@ -172,7 +171,7 @@ subtest 'a server protocol close on an unmarked object ends abnormally' => sub {
 };
 
 subtest 'a completed closing handshake on an unmarked object ends cleanly' => sub {
-    my $got = drive_h2_on_close(ws_accepted => 1, seq_state => 'closed');
+    my $got = drive_h2_on_close(seq_state => 'closed');
 
     is($got->{seen}{complete}, 1, 'on_complete fired once');
     ok(!$got->{seen}{disconnect}, 'on_disconnect did not fire');
@@ -181,7 +180,7 @@ subtest 'a completed closing handshake on an unmarked object ends cleanly' => su
 };
 
 subtest 'a completed refusal on an unmarked object ends cleanly and delivers no event' => sub {
-    my $got = drive_h2_on_close(ws_accepted => 0, seq_state => 'denial_complete');
+    my $got = drive_h2_on_close(seq_state => 'refusal_complete');
 
     is($got->{seen}{complete}, 1, 'on_complete fired once');
     ok(!$got->{seen}{disconnect}, 'on_disconnect did not fire');

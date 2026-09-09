@@ -475,19 +475,26 @@ subtest 'Multiple concurrent WebSocket streams' => sub {
 # ============================================================
 # WebSocket rejection (no accept) over HTTP/2
 # ============================================================
-subtest 'WebSocket rejection over HTTP/2' => sub {
+# Reversed deliberately (spec decision D11): websocket.close before accept is
+# out of sequence (Www.pod "Close - send event") -- the server fails the $send
+# Future instead of answering with a 403, and refusing a handshake is done with
+# an HTTP response. The app here does not refuse either, so the no-response
+# backstop is what the client sees.
+subtest 'websocket.close before accept over HTTP/2 fails the send' => sub {
     my %response_headers;
+    my $send_error;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
 
         if ($scope->{type} eq 'websocket') {
-            # Reject by sending close without accept
-            await $send->({
-                type   => 'websocket.close',
-                code   => 1008,
-                reason => 'not allowed',
-            });
+            $send_error = do { local $@; eval {
+                await $send->({
+                    type   => 'websocket.close',
+                    code   => 1008,
+                    reason => 'not allowed',
+                });
+            }; $@ };
         }
     };
 
@@ -505,8 +512,9 @@ subtest 'WebSocket rejection over HTTP/2' => sub {
     # The app runs and rejects during open_ws_stream's exchange
     my $ws_stream_id = open_ws_stream($client, $client_sock);
 
-    # Server should respond with 403 when rejecting before accept
-    is($response_headers{':status'}, '403', 'Rejected WebSocket gets 403');
+    like($send_error, qr/before websocket\.accept/, 'the send failed as out of sequence');
+    is($response_headers{':status'}, '500',
+        'no 403 is synthesized: the app produced no response, so the backstop answers');
 
     $stream_io->close_now;
     $loop->remove($server);

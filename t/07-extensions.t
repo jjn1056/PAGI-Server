@@ -394,8 +394,8 @@ subtest 'WebSocket scopes do not advertise fullflush even when configured' => su
 
         my $scope = $conn->_create_websocket_scope($request);
         is($scope->{type}, 'websocket', 'built a websocket scope');
-        ok(exists $scope->{extensions}{'websocket.http.response'},
-            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{'websocket.http.response'},
+            'refusing a handshake is not an extension: nothing is advertised for it');
         ok(!exists $scope->{extensions}{fullflush},
             'websocket scope must NOT advertise fullflush (no validator arm for it)');
     };
@@ -423,8 +423,8 @@ subtest 'WebSocket scopes do not advertise fullflush even when configured' => su
 
         my $scope = $conn->_h2_create_websocket_scope(1, $stream_state);
         is($scope->{type}, 'websocket', 'built a websocket scope');
-        ok(exists $scope->{extensions}{'websocket.http.response'},
-            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{'websocket.http.response'},
+            'refusing a handshake is not an extension: nothing is advertised for it');
         ok(!exists $scope->{extensions}{fullflush},
             'websocket scope must NOT advertise fullflush (no validator arm for it)');
     };

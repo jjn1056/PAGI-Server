@@ -289,10 +289,10 @@ subtest 'HTTP/2 WebSocket denial response includes a Date header' => sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();  # websocket.connect
         await $send->({
-            type => 'websocket.http.response.start', status => 401,
+            type => 'http.response.start', status => 401,
             headers => [['x-deny', 'auth']],
         });
-        await $send->({ type => 'websocket.http.response.body', body => 'nope' });
+        await $send->({ type => 'http.response.body', body => 'nope' });
         return;
     };
 
@@ -315,18 +315,21 @@ subtest 'HTTP/2 WebSocket denial response includes a Date header' => sub {
     $client_sock->syswrite($client->mem_send);
     pump($client, $client_sock, sub { defined $headers{':status'} && $headers{':status'} eq '401' });
 
-    is($headers{':status'}, '401', 'custom denial status used');
-    ok(defined $headers{date}, 'HTTP/2 WebSocket denial response carries a Date header');
+    is($headers{':status'}, '401', 'custom refusal status used');
+    ok(defined $headers{date}, 'HTTP/2 WebSocket refusal response carries a Date header');
 
     $stream_io->close_now;
     $loop->remove($server);
 };
 
-subtest 'HTTP/2 WebSocket bare-403 fallback includes a Date header' => sub {
+# websocket.close before accept is now out of sequence, so the app produces no
+# response at all and the server's own 500 backstop answers the client. Every
+# server-generated response still carries a Date header.
+subtest 'HTTP/2 WebSocket no-response backstop includes a Date header' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();  # websocket.connect
-        await $send->({ type => 'websocket.close' });
+        eval { await $send->({ type => 'websocket.close' }) };
         return;
     };
 
@@ -347,23 +350,23 @@ subtest 'HTTP/2 WebSocket bare-403 fallback includes a Date header' => sub {
         body    => sub { return undef },
     );
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock, sub { defined $headers{':status'} && $headers{':status'} eq '403' });
+    pump($client, $client_sock, sub { defined $headers{':status'} && $headers{':status'} eq '500' });
 
-    is($headers{':status'}, '403', 'bare websocket.close still gives 403');
-    ok(defined $headers{date}, 'HTTP/2 WebSocket bare-403 response carries a Date header');
+    is($headers{':status'}, '500', 'the no-response backstop answers, not a 403');
+    ok(defined $headers{date}, 'HTTP/2 WebSocket backstop response carries a Date header');
 
     $stream_io->close_now;
     $loop->remove($server);
 };
 
-subtest 'HTTP/2 SSE decline response includes a Date header' => sub {
+subtest 'HTTP/2 SSE refusal response includes a Date header' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({
-            type => 'sse.http.response.start', status => 404,
+            type => 'http.response.start', status => 404,
             headers => [['content-type', 'text/plain']],
         });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

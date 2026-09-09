@@ -37,8 +37,8 @@ sub create_server {
 
         if ($scope->{type} eq 'sse') {
             # Decline cleanly so the client isn't left hanging.
-            await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-            await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+            await $send->({ type => 'http.response.start', status => 204, headers => [] });
+            await $send->({ type => 'http.response.body', body => '', more => 0 });
         }
         else {
             await $receive->();
@@ -1031,25 +1031,32 @@ subtest 'SSE app that returns without any response: 500 and close, never a silen
     $server->shutdown->get;
 };
 
-subtest 'SSE decline that starts but never sends its terminal body: closes, does not hang' => sub {
+subtest 'SSE refusal that starts but never sends its terminal body: closes, does not hang' => sub {
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-        return;   # the terminal sse.http.response.body never comes
+        await $send->({ type => 'http.response.start', status => 204, headers => [] });
+        return;   # the terminal http.response.body never comes
     });
     my $port = $server->port;
 
     my $sock = sse_socket($port);
     SKIP: {
-        skip "Cannot connect", 2 unless $sock;
+        skip "Cannot connect", 4 unless $sock;
 
+        # A refusal is an ordinary HTTP response (Www.pod "Refusing the
+        # stream"), so its accepted start has committed status and headers and
+        # they go on the wire -- exactly as on an http scope. Abandoning it is
+        # an incomplete response: the chunked terminator is never synthesized
+        # and the connection must not be kept alive.
         my ($wire, $eof) = read_until($sock, undef, 3);
-        ok($eof, 'an unfinished decline closes the connection rather than hanging');
-        like($wire, qr{^HTTP/1\.1 500}, 'and reports the incomplete response as a 500');
-        unlike($wire, qr/204/, 'the never-completed decline status was not sent');
+        ok($eof, 'an unfinished refusal closes the connection rather than hanging');
+        like($wire, qr{^HTTP/1\.1 204}, 'the committed status reached the client');
+        unlike($wire, qr/0\r\n\r\n\z/, 'no chunked terminator was synthesized');
+        ok((scalar grep { /incomplete response/i } @warnings),
+            'the incomplete response was logged') or diag("warnings: @warnings");
         close $sock;
     }
 

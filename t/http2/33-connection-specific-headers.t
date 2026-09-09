@@ -467,10 +467,10 @@ subtest 'HTTP/2 WebSocket denial response strips connection-specific headers' =>
         my ($scope, $receive, $send) = @_;
         await $receive->();  # websocket.connect
         await $send->({
-            type => 'websocket.http.response.start', status => 401,
+            type => 'http.response.start', status => 401,
             headers => [['connection', 'keep-alive'], ['transfer-encoding', 'chunked'], ['x-deny', 'auth']],
         });
-        await $send->({ type => 'websocket.http.response.body', body => 'nope' });
+        await $send->({ type => 'http.response.body', body => 'nope' });
         return;
     };
 
@@ -514,10 +514,10 @@ subtest 'HTTP/2 SSE decline response strips connection-specific headers' => sub 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({
-            type => 'sse.http.response.start', status => 404,
+            type => 'http.response.start', status => 404,
             headers => [['connection', 'keep-alive'], ['transfer-encoding', 'chunked'], ['content-type', 'text/plain']],
         });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

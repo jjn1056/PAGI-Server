@@ -18,11 +18,11 @@ BEGIN {
 }
 
 # ============================================================
-# Test: Declining an SSE request over HTTP/2 (sse.http.response.*)
+# Test: Declining an SSE request over HTTP/2 (http.response.*)
 # ============================================================
 # Before sse.start, an application may DECLINE the stream and return a
-# normal HTTP response (404/401/204/...) via sse.http.response.start /
-# sse.http.response.body. First-send-wins: a stream event after a decline,
+# normal HTTP response (404/401/204/...) via http.response.start /
+# http.response.body. First-send-wins: a stream event after a decline,
 # and a decline after sse.start, MUST raise.
 
 use PAGI::Server::Connection;
@@ -149,12 +149,12 @@ sub decline_request {
     return (\%headers, $body);
 }
 
-subtest 'sse.http.response.* returns a plain HTTP 404 (declines the stream)' => sub {
+subtest 'http.response.* returns a plain HTTP 404 (declines the stream)' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 404,
+        await $send->({ type => 'http.response.start', status => 404,
                         headers => [['content-type', 'text/plain']] });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
         return;
     };
     my ($headers, $body) = decline_request(app => $app);
@@ -166,10 +166,10 @@ subtest 'sse.http.response.* returns a plain HTTP 404 (declines the stream)' => 
 subtest 'multi-chunk decline body buffers until more=>0' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 401,
+        await $send->({ type => 'http.response.start', status => 401,
                         headers => [['x-deny', 'auth']] });
-        await $send->({ type => 'sse.http.response.body', body => 'go ',   more => 1 });
-        await $send->({ type => 'sse.http.response.body', body => 'away', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'go ',   more => 1 });
+        await $send->({ type => 'http.response.body', body => 'away', more => 0 });
         return;
     };
     my ($headers, $body) = decline_request(app => $app);
@@ -183,24 +183,24 @@ subtest 'first-send-wins: stream after decline, and decline after stream, raise'
 
     my $app1 = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 404, headers => [] });
+        await $send->({ type => 'http.response.start', status => 404, headers => [] });
         eval { await $send->({ type => 'sse.send', data => 'x' }); 1 } or $after_decline_raised = 1;
-        await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+        await $send->({ type => 'http.response.body', body => '', more => 0 });
         return;
     };
     decline_request(app => $app1);
-    ok($after_decline_raised, 'sse.send after sse.http.response.start raised');
+    ok($after_decline_raised, 'sse.send after http.response.start raised');
 
     my $app2 = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
-        eval { await $send->({ type => 'sse.http.response.start', status => 404, headers => [] }); 1 }
+        eval { await $send->({ type => 'http.response.start', status => 404, headers => [] }); 1 }
             or $after_start_raised = 1;
         await $send->({ type => 'sse.close' });
         return;
     };
     decline_request(app => $app2);
-    ok($after_start_raised, 'sse.http.response.start after sse.start raised');
+    ok($after_start_raised, 'http.response.start after sse.start raised');
 };
 
 # ============================================================

@@ -165,7 +165,6 @@ sub _validate_http_response_trailers {
 
 sub validate_websocket_send {
     my ($event, $opts) = @_;
-    my $ext = ($opts && $opts->{extensions}) || {};
     my $type = $event->{type} // '';
 
     if ($type eq 'websocket.accept') {
@@ -180,15 +179,20 @@ sub validate_websocket_send {
     elsif ($type eq 'websocket.keepalive') {
         _validate_websocket_keepalive($event);
     }
-    elsif ($type eq 'websocket.http.response.start') {
-        croak "Extension not enabled: websocket.http.response"
-            unless exists $ext->{'websocket.http.response'};
-        _validate_ws_denial_start($event);
-    }
-    elsif ($type eq 'websocket.http.response.body') {
-        croak "Extension not enabled: websocket.http.response"
-            unless exists $ext->{'websocket.http.response'};
-        _validate_ws_denial_body($event);
+    elsif ($type eq 'http.response.start' || $type eq 'http.response.body'
+        || $type eq 'http.response.trailers') {
+        # Refusing the handshake is an ordinary HTTP response on this scope,
+        # "with exactly the semantics those events have on an http scope"
+        # (Www.pod "Refusing the handshake"), so the rules are the http ones
+        # rather than a parallel set.
+        validate_http_send($event, $opts);
+        # Www.pod "Refusing the handshake": 101 is the HTTP/1.1 acceptance and
+        # any HTTP/2 2xx answer to the CONNECT opens the tunnel (RFC 8441
+        # section 5), so a refusal's status is 300 or above.
+        if ($type eq 'http.response.start' && defined $event->{status}
+            && _is_nonneg_int($event->{status}) && $event->{status} < 300) {
+            croak "WebSocket refusal status must be 300 or above (got $event->{status})";
+        }
     }
     else {
         croak "Unrecognized event type '$type' for websocket protocol";
@@ -240,30 +244,6 @@ sub _validate_websocket_keepalive {
     }
 }
 
-sub _validate_ws_denial_start {
-    my ($event) = @_;
-
-    # status is required (Int)
-    croak "websocket.http.response.start requires 'status' field"
-        unless exists $event->{status};
-    croak "websocket.http.response.start 'status' must be a non-negative integer"
-        unless _is_nonneg_int($event->{status});
-
-    # headers must be a valid tuple list if present
-    validate_headers($event->{headers}, 'websocket.http.response.start')
-        if exists $event->{headers} && defined $event->{headers};
-}
-
-sub _validate_ws_denial_body {
-    my ($event) = @_;
-
-    # more must be 0 or 1 if present
-    if (exists $event->{more} && defined $event->{more}) {
-        croak "websocket.http.response.body 'more' must be 0 or 1"
-            unless _is_bool01($event->{more});
-    }
-}
-
 # =============================================================================
 # SSE Event Validation
 # =============================================================================
@@ -288,11 +268,14 @@ sub validate_sse_send {
     elsif ($type eq 'sse.close') {
         _validate_sse_close($event);
     }
-    elsif ($type eq 'sse.http.response.start') {
-        _validate_sse_decline_start($event);
-    }
-    elsif ($type eq 'sse.http.response.body') {
-        _validate_sse_decline_body($event);
+    elsif ($type eq 'http.response.start' || $type eq 'http.response.body'
+        || $type eq 'http.response.trailers') {
+        # Refusing the stream is an ordinary HTTP response on this scope,
+        # "with exactly the semantics those events have on an http scope"
+        # (Www.pod "Refusing the stream"). Unlike a WebSocket refusal it may
+        # carry any status, 200 included: the scope is distinguished from a
+        # stream by the event that answers it, not by the status.
+        validate_http_send($event, $opts);
     }
     elsif ($type eq 'http.fullflush') {
         croak "Extension not enabled: fullflush"
@@ -302,26 +285,6 @@ sub validate_sse_send {
         croak "Unrecognized event type '$type' for sse protocol";
     }
     return;
-}
-
-sub _validate_sse_decline_start {
-    my ($event) = @_;
-
-    croak "sse.http.response.start requires 'status' field"
-        unless exists $event->{status} && defined $event->{status};
-    croak "sse.http.response.start 'status' must be a non-negative integer"
-        unless _is_nonneg_int($event->{status});
-    validate_headers($event->{headers}, 'sse.http.response.start')
-        if exists $event->{headers} && defined $event->{headers};
-}
-
-sub _validate_sse_decline_body {
-    my ($event) = @_;
-
-    if (exists $event->{more} && defined $event->{more}) {
-        croak "sse.http.response.body 'more' must be 0 or 1"
-            unless _is_bool01($event->{more});
-    }
 }
 
 sub _validate_sse_close {
@@ -497,19 +460,29 @@ sub advance_http {
     croak "cannot send '$type' during http response phase '$state'";
 }
 
+# The refusal branch of both machines below abbreviates advance_http: it
+# answers 'refusal_complete' for any terminal-looking body or trailers event,
+# because it cannot see whether the start declared trailers, and because a
+# send the http machine goes on to reject must leave no state behind. A caller
+# that also runs advance_http for the refusal (the server's send closures do,
+# through the delegated HTTP send path) takes that machine's answer as the
+# fact: 'refusal_complete' exactly when the response it is has completed.
 sub advance_websocket {
     my ($state, $event) = @_;
     my $type = $event->{type} // '';
 
     croak "cannot send '$type' after websocket.close"
         if $state eq 'closed';
-    croak "cannot send '$type': denial response already complete"
-        if $state eq 'denial_complete';
+    croak "cannot send '$type': refusal already complete"
+        if $state eq 'refusal_complete';
 
     if ($state eq 'connecting') {
         return 'accepted' if $type eq 'websocket.accept';
-        return 'closed' if $type eq 'websocket.close';
-        return 'denial' if $type eq 'websocket.http.response.start';
+        # Www.pod "Refusing the handshake": websocket.accept and the refusal's
+        # http.response.start are the only handshake choices and are mutually
+        # exclusive. websocket.close is not one of them -- sent before accept
+        # it is out of sequence ("Close - send event").
+        return 'refusing' if $type eq 'http.response.start';
         croak "cannot send '$type' before websocket.accept";
     }
 
@@ -519,12 +492,11 @@ sub advance_websocket {
         croak "cannot send '$type' after websocket.accept";
     }
 
-    if ($state eq 'denial') {
-        if ($type eq 'websocket.http.response.body') {
-            my $more = $event->{more} // 0;
-            return $more ? 'denial' : 'denial_complete';
-        }
-        croak "cannot send '$type' after websocket.http.response.start";
+    if ($state eq 'refusing') {
+        return _http_body_is_terminal($event) ? 'refusal_complete' : 'refusing'
+            if $type eq 'http.response.body';
+        return 'refusal_complete' if $type eq 'http.response.trailers';
+        croak "cannot send '$type' after http.response.start";
     }
 
     croak "cannot send '$type' in websocket state '$state'";
@@ -538,31 +510,28 @@ sub advance_sse {
         return 'closed' if $type eq 'sse.close';
         croak "cannot send '$type' after sse.close";
     }
-    croak "cannot send '$type': decline response already complete"
-        if $state eq 'decline_complete';
+    croak "cannot send '$type': refusal already complete"
+        if $state eq 'refusal_complete';
 
     if ($state eq 'initial') {
         return 'streaming' if $type eq 'sse.start';
-        return 'declining' if $type eq 'sse.http.response.start';
+        return 'refusing' if $type eq 'http.response.start';
         croak "cannot send '$type' before sse.start";
     }
 
     if ($state eq 'streaming') {
         return 'streaming' if $type eq 'sse.send' || $type eq 'sse.comment' || $type eq 'sse.keepalive' || $type eq 'http.fullflush';
         return 'closed' if $type eq 'sse.close';
-        croak "cannot decline with sse.http.response.start after sse.start"
-            if $type eq 'sse.http.response.start';
         croak "cannot send duplicate sse.start"
             if $type eq 'sse.start';
         croak "cannot send '$type' after sse.start";
     }
 
-    if ($state eq 'declining') {
-        if ($type eq 'sse.http.response.body') {
-            my $more = $event->{more} // 0;
-            return $more ? 'declining' : 'decline_complete';
-        }
-        croak "cannot send '$type' after sse.http.response.start";
+    if ($state eq 'refusing') {
+        return _http_body_is_terminal($event) ? 'refusal_complete' : 'refusing'
+            if $type eq 'http.response.body';
+        return 'refusal_complete' if $type eq 'http.response.trailers';
+        croak "cannot send '$type' after http.response.start";
     }
 
     croak "cannot send '$type' in sse state '$state'";
@@ -573,13 +542,13 @@ sub advance_sse {
 my %STARTED = (
     http      => { started => 1, started_t => 1, started_i => 1, started_t_i => 1,
                    awaiting_trailers => 1, complete => 1 },
-    websocket => { accepted => 1, denial => 1, denial_complete => 1, closed => 1 },
-    sse       => { streaming => 1, declining => 1, decline_complete => 1, closed => 1 },
+    websocket => { accepted => 1, refusing => 1, refusal_complete => 1, closed => 1 },
+    sse       => { streaming => 1, refusing => 1, refusal_complete => 1, closed => 1 },
 );
 my %SEND_CLEAN = (
     http      => { complete => 1 },
-    websocket => { denial_complete => 1, closed => 1 },
-    sse       => { decline_complete => 1, closed => 1 },
+    websocket => { refusal_complete => 1, closed => 1 },
+    sse       => { refusal_complete => 1, closed => 1 },
 );
 
 sub scope_started {
@@ -670,21 +639,32 @@ with C<"Unrecognized event type '$type' for http protocol">.
 =head2 validate_websocket_send($event, $opts)
 
 Validates WebSocket send events: C<websocket.accept>, C<websocket.send>,
-C<websocket.close>, C<websocket.keepalive>, C<websocket.http.response.start>,
-C<websocket.http.response.body>. C<$opts> is an optional hash reference of
-the form C<< { extensions => \%scope_extensions } >>; the two
-C<websocket.http.response.*> types croak with
-C<"Extension not enabled: websocket.http.response"> unless
-C<$opts-E<gt>{extensions}{'websocket.http.response'}> exists. Any other
-event type croaks with C<"Unrecognized event type '$type' for websocket protocol">.
+C<websocket.close>, C<websocket.keepalive>, and the three HTTP response
+events C<http.response.start>, C<http.response.body> and
+C<http.response.trailers> that refuse the handshake. The refusal events are
+delegated to C<validate_http_send>, so their rules are the C<http> scope's
+own; nothing gates them, because refusing a handshake is not an extension
+(PAGI::Spec::Www, "Refusing the handshake"). One rule is added on top: an
+C<http.response.start> whose C<status> is below C<300> croaks with
+C<"WebSocket refusal status must be 300 or above (got $status)"> -- C<101>
+is the HTTP/1.1 acceptance and any HTTP/2 C<2xx> answer to the C<CONNECT>
+opens the tunnel, so neither is a refusal. C<$opts> is an optional hash
+reference of the form C<< { extensions => \%scope_extensions } >>, passed
+through to C<validate_http_send>. Any other event type croaks with
+C<"Unrecognized event type '$type' for websocket protocol">.
 
 =head2 validate_sse_send($event, $opts)
 
 Validates SSE send events: C<sse.start>, C<sse.send>, C<sse.comment>,
-C<sse.keepalive>, C<sse.close>, C<sse.http.response.start>,
-C<sse.http.response.body>, C<http.fullflush>. C<$opts> is an optional hash
-reference of the form C<< { extensions => \%scope_extensions } >>;
-C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
+C<sse.keepalive>, C<sse.close>, C<http.fullflush>, and the three HTTP
+response events C<http.response.start>, C<http.response.body> and
+C<http.response.trailers> that refuse the stream. As on a C<websocket>
+scope the refusal events are delegated to C<validate_http_send> and nothing
+gates them, but no status rule applies: an SSE refusal may carry any status,
+C<200> included (PAGI::Spec::Www, "Refusing the stream"). C<$opts> is an
+optional hash reference of the form
+C<< { extensions => \%scope_extensions } >>; C<http.fullflush> croaks with
+C<"Extension not enabled: fullflush"> unless
 C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
 with C<"Unrecognized event type '$type' for sse protocol">.
 
@@ -733,53 +713,64 @@ any event once C<complete> (C<"cannot send '<type>': response already complete">
 
 Pure send-sequence transition function for the WebSocket family. Does not
 validate event shape; call C<validate_websocket_send> separately first.
-States: C<connecting>, C<accepted>, C<denial>, C<denial_complete>, C<closed>.
-Starting state is C<connecting>.
+States: C<connecting>, C<accepted>, C<refusing>, C<refusal_complete>,
+C<closed>. Starting state is C<connecting>.
 
 From C<connecting>: C<websocket.accept> advances to C<accepted>;
-C<websocket.close> advances to C<closed>; C<websocket.http.response.start>
-(a denial) advances to C<denial>. From C<accepted>: C<websocket.send> and
-C<websocket.keepalive> keep C<accepted>; C<websocket.close> advances to
-C<closed>. From C<denial>: C<websocket.http.response.body> with a true
-C<more> field keeps C<denial>; a terminal body chunk advances to
-C<denial_complete>.
+C<http.response.start> (refusing the handshake) advances to C<refusing>.
+Those are the only two handshake choices and they are mutually exclusive.
+From C<accepted>: C<websocket.send> and C<websocket.keepalive> keep
+C<accepted>; C<websocket.close> advances to C<closed>. From C<refusing>:
+C<http.response.body> with a true C<more> field keeps C<refusing>; a
+terminal body chunk (C<more> false or absent, or a C<file>/C<fh> body) and
+C<http.response.trailers> advance to C<refusal_complete>.
 
-Croaks: C<websocket.send>/C<websocket.keepalive> before accept
-(C<"cannot send '<type>' before websocket.accept">); any denial or accept
-event once C<accepted> (C<"cannot send '<type>' after websocket.accept">);
-any non-body event once denial has started
-(C<"cannot send '<type>' after websocket.http.response.start">); any event
-once C<closed> (C<"cannot send '<type>' after websocket.close">, including a
+C<refusal_complete> here abbreviates C<advance_http>: this machine cannot
+see whether the start declared trailers, and a refusal send the http
+machine goes on to reject must leave no state behind. A caller that runs
+C<advance_http> for the refusal as well -- the server's send closures do,
+through the delegated HTTP send path -- takes that machine's answer as the
+fact, and reports C<refusal_complete> exactly when the response it is has
+reached C<complete>.
+
+Croaks: C<websocket.send>/C<websocket.keepalive>, and C<websocket.close>,
+before accept (C<"cannot send '<type>' before websocket.accept"> -- a
+pre-accept close is out of sequence, refusing is done with an HTTP
+response); any refusal or accept event once C<accepted>
+(C<"cannot send '<type>' after websocket.accept">); any non-body,
+non-trailers event once a refusal has started
+(C<"cannot send '<type>' after http.response.start">); any event once
+C<closed> (C<"cannot send '<type>' after websocket.close">, including a
 second C<websocket.close> - unlike SSE, WebSocket close is not idempotent);
-any event once C<denial_complete>
-(C<"cannot send '<type>': denial response already complete">).
+any event once C<refusal_complete>
+(C<"cannot send '<type>': refusal already complete">).
 
 =head2 advance_sse($state, $event)
 
 Pure send-sequence transition function for the SSE family. Does not
 validate event shape; call C<validate_sse_send> separately first. States:
-C<initial>, C<streaming>, C<declining>, C<decline_complete>, C<closed>.
+C<initial>, C<streaming>, C<refusing>, C<refusal_complete>, C<closed>.
 Starting state is C<initial>.
 
 From C<initial>: C<sse.start> advances to C<streaming>;
-C<sse.http.response.start> (a decline) advances to C<declining>. From
+C<http.response.start> (refusing the stream) advances to C<refusing>. From
 C<streaming>: C<sse.send>, C<sse.comment>, C<sse.keepalive>, and
 C<http.fullflush> keep C<streaming>; C<sse.close> advances to C<closed>.
-From C<declining>:
-C<sse.http.response.body> with a true C<more> field keeps C<declining>; a
-terminal body chunk advances to C<decline_complete>. From C<closed>,
-C<sse.close> is idempotent and stays C<closed>.
+From C<refusing>: C<http.response.body> with a true C<more> field keeps
+C<refusing>; a terminal body chunk and C<http.response.trailers> advance to
+C<refusal_complete>, with the same abbreviation
+C<advance_websocket> documents. From C<closed>, C<sse.close> is idempotent
+and stays C<closed>.
 
-Croaks: any event in C<initial> other than C<sse.start>/decline start
-(C<"cannot send '<type>' before sse.start">); a decline start after
-C<sse.start> (C<"cannot decline with sse.http.response.start after sse.start">);
-a duplicate C<sse.start> (C<"cannot send duplicate sse.start">); any other
-event once C<streaming> (C<"cannot send '<type>' after sse.start">); any
-non-body event once declining has started
-(C<"cannot send '<type>' after sse.http.response.start">); any event other
+Croaks: any event in C<initial> other than C<sse.start>/a refusal start
+(C<"cannot send '<type>' before sse.start">); a refusal start, or any other
+event, once C<streaming> (C<"cannot send '<type>' after sse.start">); a
+duplicate C<sse.start> (C<"cannot send duplicate sse.start">); any
+non-body, non-trailers event once a refusal has started
+(C<"cannot send '<type>' after http.response.start">); any event other
 than C<sse.close> once C<closed> (C<"cannot send '<type>' after sse.close">);
-any event once C<decline_complete>
-(C<"cannot send '<type>': decline response already complete">).
+any event once C<refusal_complete>
+(C<"cannot send '<type>': refusal already complete">).
 
 =head2 scope_started($kind, $state)
 
@@ -790,14 +781,14 @@ C<advance_*> function last returned. Returns 1 or 0; an undefined C<$state>
 is false. Croaks with C<"unknown scope kind '<kind>'"> for any other kind.
 
 Started states are, for C<http>, everything past C<initial>; for
-C<websocket>, C<accepted>, C<denial>, C<denial_complete> and C<closed>; for
-C<sse>, C<streaming>, C<declining>, C<decline_complete> and C<closed>.
+C<websocket>, C<accepted>, C<refusing>, C<refusal_complete> and C<closed>;
+for C<sse>, C<streaming>, C<refusing>, C<refusal_complete> and C<closed>.
 
 =head2 scope_send_clean($kind, $state)
 
 True once the application's send side has reached a clean terminal state:
 the terminal http body or trailers (C<complete>), a completed refusal
-(C<denial_complete> / C<decline_complete>), C<websocket.close> or
+(C<refusal_complete>), C<websocket.close> or
 C<sse.close> (C<closed>). C<$kind> and C<$state> are as for
 C<scope_started>, and the same croak applies.
 
@@ -838,7 +829,7 @@ character. Returns C<$name> unchanged on success.
 
 Validates a C<headers> field shared by every event shape that carries one
 (C<http.response.start>, C<http.response.trailers>, C<websocket.accept>,
-C<websocket.http.response.start>, C<sse.http.response.start>, C<sse.start>).
+C<sse.start>).
 C<$event_type> is the event type string used in croak messages. Croaks
 unless C<$headers> is an array reference of 2-element array references,
 each holding a defined, non-reference name and value; each name and value

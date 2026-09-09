@@ -36,6 +36,19 @@ sub _validate_header_value { PAGI::Server::EventValidator::check_header_value($_
 
 sub _validate_header_name  { PAGI::Server::EventValidator::check_header_name($_[0]) }
 
+# The one-line supplement an application exception makes for disconnect_detail
+# (Www.pod: "a short human-readable supplement to the reason"): the message
+# without Perl's " at FILE line N." tail and without any trailing stack lines.
+# The full text still goes to the log at every site that has one.
+sub _detail_from_error {
+    my ($error) = @_;
+    my ($first) = split /\n/, ($error // '');
+    return undef unless defined $first;
+    $first =~ s/ at \S+ line \d+\.?\s*\z//;
+    $first =~ s/\s+\z//;
+    return length $first ? $first : undef;
+}
+
 # =============================================================================
 # HTTP/2 connection-specific header stripping (RFC 9113 section 8.2.2, design
 # doc section 13.3)
@@ -262,11 +275,6 @@ sub new {
         _disconnect_handled => 0,
         # WebSocket state
         websocket_frame   => undef,  # Protocol::WebSocket::Frame for parsing
-        # The one websocket lifecycle fact h1_seq cannot supply:
-        # advance_websocket reaches 'closed' from 'connecting' too (a
-        # websocket.close before accept, which this server answers with 403),
-        # so the state alone cannot say whether the handshake completed.
-        websocket_accepted => 0,
         # SSE state
         sse_disconnect_reason => undef,  # Reason for SSE disconnect (client_closed, write_error, etc.)
         ws_disconnect_reason  => undef,  # Standard reason token for the app-facing websocket.disconnect event
@@ -393,7 +401,7 @@ sub start {
                 }
 
                 # If in WebSocket mode, process WebSocket frames
-                if ($weak_self->{websocket_accepted}) {
+                if (_ws_handshake_accepted($weak_self->{h1_seq})) {
                     $weak_self->_process_websocket_frames;
                     return;
                 }
@@ -411,7 +419,8 @@ sub start {
                 # Log the error and close the connection gracefully
                 $self->_log(error => "PAGI connection error: $error");
                 return 0 unless $weak_self;
-                $weak_self->_handle_disconnect_and_close('server_error');
+                $weak_self->_handle_disconnect_and_close('server_error',
+                    _detail_from_error($error));
             }
             return 0;
         },
@@ -673,7 +682,6 @@ sub _h2_on_request {
         seq_state => ($is_websocket ? 'connecting' : 'initial'),
         is_websocket => $is_websocket,
         is_sse       => $is_sse,
-        ws_accepted  => 0,   # see websocket_accepted in new(): not in seq_state
         ws_frame     => undef,   # Protocol::WebSocket::Frame for parsing
         ws_connect_sent => 0,
         ws_disconnect_delivered => 0,   # True once the scope's single websocket.disconnect has been queued
@@ -722,7 +730,7 @@ sub _h2_on_body {
     my $stream = $self->{h2_streams}{$stream_id};
     return unless $stream;
 
-    if ($stream->{is_websocket} && $stream->{ws_accepted}) {
+    if ($stream->{is_websocket} && _ws_handshake_accepted($stream->{seq_state})) {
         # WebSocket: DATA frames contain raw WebSocket frames
         $self->_h2_process_ws_frames($stream_id, $stream, $data) if length($data);
 
@@ -797,7 +805,7 @@ sub _h2_on_body {
                 };
             } elsif ($stream->{is_websocket}) {
                 # An accepted ws stream returns early at the top of this sub
-                # (the ws_accepted guard above), so is_websocket true here
+                # (the accepted-handshake guard above), so is_websocket true here
                 # always means pre-accept. Deliver the scope's single
                 # websocket.disconnect (Www.pod "Disconnect - receive
                 # event": server-detected abnormal close is code 1006 plus
@@ -868,18 +876,26 @@ sub _h2_ws_enqueue_disconnect {
     $self->_h2_wake_pending($stream);
 }
 
+# The application completed the handshake: it sent websocket.accept. The send
+# state says so on its own, on either transport -- advance_websocket reaches
+# 'closed' only from 'accepted' (a websocket.close before accept is out of
+# sequence, Www.pod "Close - send event"), and every other state is either the
+# open handshake or a refusal. $state is h1_seq or the stream's seq_state.
+sub _ws_handshake_accepted {
+    my ($state) = @_;
+    $state //= '';
+    return ($state eq 'accepted' || $state eq 'closed') ? 1 : 0;
+}
+
 # Did this h2 WebSocket scope reach a clean end? Two ways, and Www.pod
 # "Meaning per scope" names both: the accepted socket completed a closing
 # handshake -- the application sent websocket.close (send state 'closed') or
 # the peer's Close frame validated (ws_peer_closed) -- or the server finished
-# its output of a refusal (send state 'denial_complete').
+# its output of a refusal (send state 'refusal_complete').
 #
-# The accept conjunct binds only the handshake half. It keeps a pre-accept
-# websocket.close out of the clean set: the 0.5 send machine still admits
-# that event from 'connecting', and the h2 send closure answers it with a 403
-# rather than a Close frame. The refusal half is deliberately outside it,
-# because a refusal never accepts. This is term for term the h1 twin at
-# _handle_websocket_request's tail.
+# The accept conjunct binds only the handshake half; the refusal half is
+# deliberately outside it, because a refusal never accepts. This is term for
+# term the h1 twin at _handle_websocket_request's tail.
 #
 # A close this server initiated -- a protocol violation, a queue overflow --
 # is NOT here: the spec calls it abnormal, and it names itself in
@@ -887,8 +903,8 @@ sub _h2_ws_enqueue_disconnect {
 sub _h2_ws_clean_end {
     my ($stream) = @_;
     my $seq = $stream->{seq_state} // '';
-    return 1 if $stream->{ws_accepted} && ($seq eq 'closed' || $stream->{ws_peer_closed});
-    return 1 if $seq eq 'denial_complete';
+    return 1 if _ws_handshake_accepted($seq) && ($seq eq 'closed' || $stream->{ws_peer_closed});
+    return 1 if $seq eq 'refusal_complete';
     return 0;
 }
 
@@ -925,8 +941,7 @@ sub _h2_scope_reason {
 # delivers none"; "SSE Disconnect - receive event" says the same for sse).
 sub _h2_refusal_complete {
     my ($stream) = @_;
-    my $seq = $stream->{seq_state} // '';
-    return $seq eq 'denial_complete' || $seq eq 'decline_complete' ? 1 : 0;
+    return (($stream->{seq_state} // '') eq 'refusal_complete') ? 1 : 0;
 }
 
 sub _h2_on_close {
@@ -998,7 +1013,8 @@ sub _h2_on_close {
         if ($clean && !$error_code) {
             $cs->_mark_complete;
         } elsif (!$error_code) {
-            $cs->_mark_disconnected($reason // 'server_error', $detail);
+            $cs->_mark_disconnected($reason // 'server_error',
+                $detail // 'stream ended before the response completed');
         } else {
             $cs->_mark_disconnected($reason // 'client_closed',
                 $detail // sprintf('RST_STREAM error code %d', $error_code));
@@ -1165,7 +1181,8 @@ sub _h2_dispatch_stream {
                 # callbacks synchronously, and they must observe
                 # response_started true.
                 $cs->_mark_response_started if $cs;
-                $cs->_mark_disconnected('server_error') if $cs;
+                $cs->_mark_disconnected('server_error',
+                    $error ? _detail_from_error($error) : 'no response was started') if $cs;
                 eval {
                     $weak_self->{h2_session}->submit_response($stream_id,
                         status  => 500,
@@ -1184,13 +1201,22 @@ sub _h2_dispatch_stream {
                 # can reach. Ask each scope the same two questions against
                 # its own mirrored state instead (Www.pod "Meaning per
                 # scope": D12 for sse, D13-equivalent for websocket).
-                my ($started, $clean, $verb) = $stream_state->{is_websocket}
-                    ? ($stream_state->{ws_accepted},
-                       _h2_ws_clean_end($stream_state),
-                       'WebSocket accept')
-                    : (_sse_stream_started($stream_state->{seq_state}),
-                       PAGI::Server::EventValidator::scope_send_clean('sse', $stream_state->{seq_state}),
-                       'sse.start');
+                #
+                # "Started" is scope_started, not the streaming branch alone:
+                # Www.pod counts a refusal's http.response.start as the
+                # scope's start, and a refusal abandoned before its terminal
+                # event is an incomplete response exactly like an abandoned
+                # stream ("Application Left a Response Incomplete" names the
+                # refusal case first).
+                my $seq_now = $stream_state->{seq_state};
+                my $kind    = $stream_state->{is_websocket} ? 'websocket' : 'sse';
+                my $started = PAGI::Server::EventValidator::scope_started($kind, $seq_now);
+                my $clean   = $stream_state->{is_websocket}
+                            ? _h2_ws_clean_end($stream_state)
+                            : PAGI::Server::EventValidator::scope_send_clean('sse', $seq_now);
+                my $verb    = (($seq_now // '') eq 'refusing') ? 'http.response.start'
+                            : $stream_state->{is_websocket}    ? 'WebSocket accept'
+                            :                                    'sse.start';
                 if ($started && !$clean) {
                     # Started but never ended cleanly: an incomplete response
                     # (Www.pod "Application Left a Response Incomplete").
@@ -1205,7 +1231,9 @@ sub _h2_dispatch_stream {
                     $self->_log(error => $error
                         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
                         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
-                    $cs->_mark_disconnected('server_error') if $cs;
+                    $cs->_mark_disconnected('server_error',
+                        $error ? _detail_from_error($error)
+                                : "started with $verb but never ended cleanly") if $cs;
                     if ($stream_alive) {
                         eval {
                             $weak_self->{h2_session}->submit_rst_stream(
@@ -1215,20 +1243,17 @@ sub _h2_dispatch_stream {
                     }
                 }
                 elsif ($clean) {
-                    # Clean end -- a completed closing handshake (websocket),
-                    # or sse.close / a completed decline (sse). _h2_on_close
+                    # Clean end -- a completed closing handshake, sse.close,
+                    # or a completed refusal on either scope. _h2_on_close
                     # ordinarily marks this already; mark here too in case
                     # this coroutine resumed first -- idempotent.
                     $cs->_mark_complete if $cs;
                     $self->_log(error => "PAGI application error after $verb ended cleanly (HTTP/2 stream $stream_id): $error")
                         if $error;
                 }
-                # else ($started false, $clean false): a completed websocket
-                # denial. ws_accepted is false for it and the closing-handshake
-                # facts are false too, so nothing happens here yet -- Task B4
-                # routes denials through this arm. (SSE has no such gap: a
-                # completed decline reaches 'decline_complete', which
-                # scope_send_clean already calls a clean end.)
+                # else ($started false, $clean false): the application never
+                # accepted, never started a stream, and never refused. The
+                # !response_started arm above has already answered that case.
             }
             elsif ($cs && (($stream_state->{seq_state} // 'complete') ne 'complete')) {
                 # Response started but never finished: the app either
@@ -1254,7 +1279,11 @@ sub _h2_dispatch_stream {
                 # 'client_closed' if it got there first. _mark_disconnected
                 # is idempotent -- first mark wins -- so marking here first
                 # guarantees the app observes server_error.
-                $cs->_mark_disconnected('server_error');
+                $cs->_mark_disconnected('server_error',
+                    $error ? _detail_from_error($error)
+                            : (($stream_state->{seq_state} // '') eq 'awaiting_trailers'
+                                ? 'trailers were declared but never sent'
+                                : 'response started but never completed'));
                 eval {
                     $weak_self->{h2_session}->submit_rst_stream(
                         $stream_id, _h2_rst_error_code());
@@ -1446,7 +1475,22 @@ sub _h2_create_receive {
 }
 
 sub _h2_create_send {
-    my ($self, $stream_id, $stream_state) = @_;
+    my ($self, $stream_id, $stream_state, %opt) = @_;
+
+    # Refusing a websocket handshake or an sse stream delegates its wire work
+    # here so the response is identical to the same response on an http scope
+    # (Www.pod "Refusing the handshake" / "Refusing the stream"). That scope's
+    # lifecycle belongs to its own send machine, so this closure publishes its
+    # http state into the caller's scalar instead of over the stream's
+    # seq_state. The h1 twin, _create_send, takes the same option.
+    my $refusal_seq = $opt{refusal_seq};
+
+    # Publish the closure-local $seq where the scope's owner reads it: the
+    # stream for an http scope, the refusing scope's own send closure for a
+    # refusal.
+    my $publish_seq = $refusal_seq
+        ? sub { $$refusal_seq = $_[1] }
+        : sub { $_[0]->{seq_state} = $_[1] if $_[0] };
 
     weaken(my $weak_self = $self);
 
@@ -1668,7 +1712,7 @@ sub _h2_create_send {
         my ($ss, $event) = @_;
         my $seq_before = $seq;
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-        $ss->{seq_state} = $seq if $ss;
+        $publish_seq->($ss, $seq);
         return $seq_before;
     };
 
@@ -1700,7 +1744,7 @@ sub _h2_create_send {
         if (!$ok) {
             return if $err eq $STREAM_GONE;   # client reset: quiet no-op
             $seq = $seq_before;                # recoverable, per contract
-            $ss->{seq_state} = $seq if $ss;
+            $publish_seq->($ss, $seq);
             die $err;
         }
         $finish_body_stream->();
@@ -1739,7 +1783,7 @@ sub _h2_create_send {
         # advances so the lifecycle (completion, post-complete raises) matches GET.
         if ($is_head && ($type eq 'http.response.body' || $type eq 'http.response.trailers')) {
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-            $ss->{seq_state} = $seq if $ss;
+            $publish_seq->($ss, $seq);
             if ($seq eq 'complete' && !$ss->{h2_head_finished}) {
                 $ss->{h2_head_finished} = 1;
                 $weak_self->{h2_session}->submit_response($stream_id,
@@ -1770,7 +1814,7 @@ sub _h2_create_send {
         if ($type eq 'http.response.trailers') {
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-            $ss->{seq_state} = $seq if $ss;
+            $publish_seq->($ss, $seq);
 
             # Empty/absent headers still calls submit_trailer with [] --
             # trailers were declared and must still terminate the response.
@@ -1835,7 +1879,7 @@ sub _h2_create_send {
             if (!$ok) {
                 my $err = $@;
                 $seq = $seq_before;
-                $ss->{seq_state} = $seq if $ss;
+                $publish_seq->($ss, $seq);
                 die $err;
             }
 
@@ -1972,7 +2016,7 @@ sub _h2_create_send {
         # block above, the file arm, the fh arm, and here — each has
         # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-        $ss->{seq_state} = $seq if $ss;
+        $publish_seq->($ss, $seq);
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -2157,7 +2201,7 @@ sub _h2_create_websocket_scope {
         subprotocols => \@subprotocols,
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => do {
-            my %ext = (%{$self->_get_extensions_for_scope}, 'websocket.http.response' => {});
+            my %ext = %{$self->_get_extensions_for_scope};
             # fullflush has no validate_websocket_send arm; advertising it here
             # would lie to the app (design 13.2).
             delete $ext{fullflush};
@@ -2210,6 +2254,17 @@ sub _h2_create_websocket_receive {
     return sub {
         return Future->done($fallback_disconnect->())
             unless $weak_self;
+
+        # A completed refusal delivers no events at all (Www.pod "Disconnect -
+        # receive event"), so a receive() made after one must not be answered
+        # with a synthesized websocket.disconnect. Park instead, as the h1 twin
+        # does. Read from $stream_state rather than h2_streams: the entry is
+        # reclaimed a tick after the stream closes, and the scope-level fact
+        # outlives it. The refusal's terminal event runs inside the app's own
+        # send, so no receive() can be in flight past this test.
+        return $weak_self->{server}->loop->new_future
+            if _h2_refusal_complete($stream_state);
+
         return Future->done($fallback_disconnect->())
             if $weak_self->{closed};
 
@@ -2265,6 +2320,11 @@ sub _h2_create_websocket_send {
 
     weaken(my $weak_self = $self);
     my $seq = 'connecting';
+
+    # Refusing the handshake goes out through the ordinary HTTP send path;
+    # $refusal_http_seq is where that closure publishes its http state.
+    my $refusal_send;
+    my $refusal_http_seq = 'initial';
 
     # Data callback for nghttp2's streaming response (the same pull-based
     # data-provider model _h2_create_send/_h2_create_sse_send already use).
@@ -2338,15 +2398,15 @@ sub _h2_create_websocket_send {
 
         my $type = $event->{type} // '';
 
-        # Once the machine has recorded the connection closed or the denial
+        # Once the machine has recorded the connection closed or the refusal
         # response complete, the machine decides what happens next -- both
-        # 'closed' and 'denial_complete' have no idempotent case, so any
+        # 'closed' and 'refusal_complete' have no idempotent case, so any
         # further send always raises -- not the stream-gone check below.
         # h2_streams entries for a finished stream are reclaimed
         # asynchronously by _h2_on_close (websocket.close itself triggers
         # this via END_STREAM, same mechanism as the h2 HTTP/SSE closures),
         # so by the time a post-close send arrives $ss may already be gone.
-        my $already_closed = ($seq eq 'closed' || $seq eq 'denial_complete');
+        my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
         # A doomed-but-still-present entry (h2_closed set but not yet
@@ -2357,34 +2417,59 @@ sub _h2_create_websocket_send {
 
         return if $weak_self->{closed} && !$already_closed;
 
-        # websocket.http.response is always available on this path (the
-        # scope advertises it unconditionally; see
-        # _h2_create_websocket_scope), unlike connection-level extensions
-        # such as fullflush.
         PAGI::Server::EventValidator::validate_websocket_send(
-            $event, { extensions => { %{$weak_self->{extensions}}, 'websocket.http.response' => {} } });
+            $event, { extensions => $weak_self->{extensions} });
+        my $seq_before = $seq;
         $seq = PAGI::Server::EventValidator::advance_websocket($seq, $event);
         $ss->{seq_state} = $seq if $ss;
+
+        if ($type =~ /^http\.response\./) {
+            # Refusing the handshake (Www.pod): the wire response is identical
+            # to the same response on an http scope, so that path writes it.
+            # advance_websocket has already rejected an HTTP event after
+            # websocket.accept. See the h1 twin in _create_websocket_send for
+            # why the delegate's own http state is the fact about completion.
+            $refusal_send //= $weak_self->_h2_create_send($stream_id, $ss,
+                refusal_seq => \$refusal_http_seq);
+            my $ok = eval { await $refusal_send->($event); 1 };
+            my $error = $@;
+            $seq = ($refusal_http_seq eq 'complete') ? 'refusal_complete' : 'refusing';
+            $ss->{seq_state} = $seq if $ss;
+            die $error unless $ok;
+            return;
+        }
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
 
-            # HTTP/2 WebSocket: respond with 200 (not 101)
+            # HTTP/2 WebSocket: respond with 200 (not 101). Header building is
+            # advance-then-rollback (the file's D1 pattern), like the h1 twin:
+            # a subprotocol or header that fails byte validation must leave no
+            # state behind, and the send state is now the only record of
+            # whether the handshake completed.
             my @headers;
-            if (my $subprotocol = $event->{subprotocol}) {
-                $subprotocol = _validate_subprotocol($subprotocol);
-                push @headers, ['sec-websocket-protocol', $subprotocol];
+            my $built = eval {
+                if (my $subprotocol = $event->{subprotocol}) {
+                    $subprotocol = _validate_subprotocol($subprotocol);
+                    push @headers, ['sec-websocket-protocol', $subprotocol];
+                }
+                if (my $extra = $event->{headers}) {
+                    push @headers, map {
+                        [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
+                    } @$extra;
+                }
+                # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
+                # transfer-encoding, etc. before submission.
+                @headers = @{ $weak_self->_h2_strip_connection_headers(\@headers) };
+                1;
+            };
+            unless ($built) {
+                my $error = $@;
+                $seq = $seq_before;
+                $ss->{seq_state} = $seq if $ss;
+                die $error;
             }
-            if (my $extra = $event->{headers}) {
-                push @headers, map {
-                    [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
-                } @$extra;
-            }
-            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
-            # transfer-encoding, etc. before submission.
-            @headers = @{ $weak_self->_h2_strip_connection_headers(\@headers) };
 
-            $ss->{ws_accepted} = 1;
             $ss->{response_started} = 1;
             $ss->{ws_frame} = Protocol::WebSocket::Frame->new(
                 max_payload_size => $weak_self->{max_ws_frame_size},
@@ -2411,7 +2496,7 @@ sub _h2_create_websocket_send {
             }
         }
         elsif ($type eq 'websocket.send') {
-            return unless $ss->{ws_accepted};
+            return unless _ws_handshake_accepted($ss->{seq_state});
 
             my $frame;
             if (defined $event->{text}) {
@@ -2461,51 +2546,9 @@ sub _h2_create_websocket_send {
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
-        elsif ($type eq 'websocket.http.response.start') {
-            return if $ss->{ws_accepted};
-            return if $ss->{ws_denial_started};
-            $ss->{ws_denial_started} = 1;
-            $ss->{ws_denial_status}  = $event->{status} // 403;
-            $ss->{ws_denial_headers} = [
-                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
-                    @{$event->{headers} // []}
-            ];
-            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
-            # transfer-encoding, etc. before submission.
-            $ss->{ws_denial_headers} = $weak_self->_h2_strip_connection_headers($ss->{ws_denial_headers});
-            $ss->{ws_denial_body} = '';
-        }
-        elsif ($type eq 'websocket.http.response.body') {
-            return unless $ss->{ws_denial_started};
-            return if $ss->{response_started};
-            $ss->{ws_denial_body} .= $event->{body} // '';
-            return if $event->{more};   # more chunks coming — keep buffering
-
-            $ss->{response_started} = 1;
-            unless (grep { lc($_->[0]) eq 'date' } @{$ss->{ws_denial_headers}}) {
-                push @{$ss->{ws_denial_headers}}, ['date', $weak_self->{protocol}->format_date];
-            }
-            $weak_self->{h2_session}->submit_response($stream_id,
-                status  => $ss->{ws_denial_status},
-                headers => $ss->{ws_denial_headers},
-                body    => $ss->{ws_denial_body},
-            );
-            $weak_self->_h2_write_pending;
-        }
         elsif ($type eq 'websocket.close') {
-            if (!$ss->{ws_accepted}) {
-                # Reject: send 403
-                $weak_self->{h2_session}->submit_response($stream_id,
-                    status  => 403,
-                    headers => [
-                        ['content-type', 'text/plain'],
-                        ['date', $weak_self->{protocol}->format_date],
-                    ],
-                    body    => 'Forbidden',
-                );
-                $weak_self->_h2_write_pending;
-                return;
-            }
+            # A close before accept is already rejected by advance_websocket,
+            # so the handshake is known complete here.
 
             # Close frame + END_STREAM, and release this stream's keepalive
             # (_h2_ws_close does both). Runs outside feed(), so flush here.
@@ -2514,7 +2557,7 @@ sub _h2_create_websocket_send {
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'websocket.keepalive') {
-            return unless $ss->{ws_accepted};
+            return unless _ws_handshake_accepted($ss->{seq_state});
 
             my $interval = $event->{interval} // 0;
             my $timeout  = $event->{timeout};
@@ -2603,6 +2646,13 @@ sub _h2_create_sse_receive {
 
     return sub {
         return Future->done($sse_disconnect->()) unless $weak_self;
+
+        # A completed refusal delivers no events at all; see the twin in
+        # _h2_create_websocket_receive for why this is read from
+        # $stream_state and why it is safe to test only here.
+        return $weak_self->{server}->loop->new_future
+            if _h2_refusal_complete($stream_state);
+
         return Future->done($sse_disconnect->()) if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
@@ -2700,6 +2750,11 @@ sub _h2_create_sse_send {
     # stays closure-local.
     my $streaming_started = 0;
 
+    # Refusing the stream goes out through the ordinary HTTP send path;
+    # $refusal_http_seq is where that closure publishes its http state.
+    my $refusal_send;
+    my $refusal_http_seq = 'initial';
+
     # Data callback for nghttp2's streaming response. Pulls from the per-stream
     # queue; SSE responses stay open, so this never signals EOF (returns eof=0),
     # or undef to defer when the queue is empty.
@@ -2763,14 +2818,14 @@ sub _h2_create_sse_send {
         my $type = $event->{type} // '';
 
         # Once the machine has already recorded this stream as closed --
-        # either an app-initiated sse.close or a completed decline response
+        # either an app-initiated sse.close or a completed refusal response
         # -- the machine, not the stream-gone check below, decides what
         # happens next: idempotent no-op for a repeat sse.close, croak for
-        # anything else (decline_complete has no idempotent case; it croaks
+        # anything else (refusal_complete has no idempotent case; it croaks
         # unconditionally). h2_streams entries for a closed stream are
         # reclaimed asynchronously by _h2_on_close, so by the time a
         # post-close send arrives $ss may already be gone.
-        my $already_closed = ($seq eq 'closed' || $seq eq 'decline_complete');
+        my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
         # A doomed-but-still-present entry (h2_closed set but not yet
@@ -2789,6 +2844,22 @@ sub _h2_create_sse_send {
             $event, { extensions => $weak_self->{extensions} });
         $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
         $ss->{seq_state} = $seq if $ss;
+
+        if ($type =~ /^http\.response\./) {
+            # Refusing the stream (Www.pod): identical on the wire to the same
+            # response on an http scope, so that path writes it. The stream's
+            # keepalive and idle timers cannot be armed here -- advance_sse
+            # never admits sse.keepalive before sse.start -- so there is
+            # nothing to release beyond what _h2_on_close already does.
+            $refusal_send //= $weak_self->_h2_create_send($stream_id, $ss,
+                refusal_seq => \$refusal_http_seq);
+            my $ok = eval { await $refusal_send->($event); 1 };
+            my $error = $@;
+            $seq = ($refusal_http_seq eq 'complete') ? 'refusal_complete' : 'refusing';
+            $ss->{seq_state} = $seq if $ss;
+            die $error unless $ok;
+            return;
+        }
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -2932,50 +3003,6 @@ sub _h2_create_sse_send {
             $weak_self->{sse_disconnect_reason} = $event->{reason}
                 if defined $event->{reason};
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
-        }
-        elsif ($type eq 'sse.http.response.start') {
-            # A decline-after-start attempt is already rejected by advance_sse.
-            return if $ss->{sse_decline_started};   # idempotent
-            $ss->{sse_decline_started} = 1;
-            $ss->{sse_decline_status}  = $event->{status} // 200;
-            $ss->{sse_decline_headers} = [
-                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
-                    @{$event->{headers} // []}
-            ];
-            # RFC 9113 8.2.2 / design 13.3 — strip app-supplied connection,
-            # transfer-encoding, etc. before submission.
-            $ss->{sse_decline_headers} = $weak_self->_h2_strip_connection_headers($ss->{sse_decline_headers});
-            $ss->{sse_decline_body} = '';
-        }
-        elsif ($type eq 'sse.http.response.body') {
-            return unless $ss->{sse_decline_started};
-            return if $ss->{response_started};
-            $ss->{sse_decline_body} .= $event->{body} // '';
-            return if $event->{more};   # more chunks coming — keep buffering
-
-            # Defensive: the send-sequence state machine never permits
-            # sse.keepalive before sse.start, so neither timer can actually be
-            # armed here -- stopped anyway for the same every-closure-path
-            # discipline the other SSE/WS stop sites follow.
-            $weak_self->_h2_stop_sse_keepalive($ss);
-            $weak_self->_h2_stop_sse_idle_timer($ss);
-
-            $ss->{response_started} = 1;
-            unless (grep { lc($_->[0]) eq 'date' } @{$ss->{sse_decline_headers}}) {
-                push @{$ss->{sse_decline_headers}}, ['date', $weak_self->{protocol}->format_date];
-            }
-            # A completed decline is a clean end (Www.pod "Meaning per
-            # scope"): no event stream was ever started, so it is not gated
-            # on the streaming branch the way the D12 incomplete-response
-            # check is. seq_state is already 'decline_complete' -- the mirror
-            # above runs before this arm, so _h2_on_close sees it even if
-            # submit_response closes the stream synchronously.
-            $weak_self->{h2_session}->submit_response($stream_id,
-                status  => $ss->{sse_decline_status},
-                headers => $ss->{sse_decline_headers},
-                body    => $ss->{sse_decline_body},
-            );
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'http.fullflush') {
@@ -3310,7 +3337,7 @@ sub _h2_start_ws_keepalive {
             return unless $weak_self;
             return if $weak_self->{closed};
             return unless $weak_ss;
-            return unless $weak_ss->{ws_accepted};
+            return unless _ws_handshake_accepted($weak_ss->{seq_state});
 
             # Queued, not an application send (no transport_state watermark
             # poke) -- this timer callback runs outside feed(), so resume
@@ -3971,7 +3998,7 @@ sub _start_ws_keepalive {
         on_tick  => sub {
             return unless $weak_self;
             return if $weak_self->{closed};
-            return unless $weak_self->{websocket_accepted};
+            return unless _ws_handshake_accepted($weak_self->{h1_seq});
 
             # Send ping frame
             my $ping = Protocol::WebSocket::Frame->new(
@@ -4251,6 +4278,7 @@ async sub _handle_request {
         # Notify server that request completed (for max_requests tracking)
         $self->{server}->_on_request_complete if $self->{server};
         # Always close connection after exception (3.2) - don't try keep-alive
+        $self->{_disconnect_detail} //= _detail_from_error($error);
         $self->_handle_disconnect('server_error');
         $self->_close;
         return;
@@ -4269,6 +4297,7 @@ async sub _handle_request {
         }
         $self->_write_access_log;
         $self->{server}->_on_request_complete if $self->{server};
+        $self->{_disconnect_detail} //= 'no response was started';
         $self->_handle_disconnect('server_error');
         $self->_close;
         return;
@@ -4289,6 +4318,9 @@ async sub _handle_request {
         }
         $self->_write_access_log;
         $self->{server}->_on_request_complete if $self->{server};
+        $self->{_disconnect_detail} //= (($self->{h1_seq} // '') eq 'awaiting_trailers')
+            ? 'trailers were declared but never sent'
+            : 'response started but never completed';
         $self->_handle_disconnect_and_close('server_error');
         return;
     }
@@ -4662,15 +4694,19 @@ sub _create_receive {
 }
 
 sub _create_send {
-    my ($self, $request) = @_;
+    my ($self, $request, %opt) = @_;
 
     my $chunked = 0;
     my $expects_trailers = 0;
     my $seq = 'initial';
-    # Publish the closure-local $seq on $self so the app-return path in
-    # _handle_request can tell a completed response from one the app left
-    # incomplete (see the mirror contract at every $seq assignment below).
-    $self->{h1_seq} = $seq;
+    # Refusing a websocket handshake or an sse stream is an ordinary HTTP
+    # response and delegates its wire work here, so that on the wire it is
+    # identical to the same response on an http scope (Www.pod "Refusing the
+    # handshake" / "Refusing the stream"). Such a scope's lifecycle belongs to
+    # its own send machine, so this closure publishes its http state into the
+    # caller's scalar instead of over the connection's h1_seq, and it adds the
+    # Connection: close a refusal carries.
+    my $refusal_seq = $opt{refusal_seq};
     my $is_head_request = ($request->{method} // '') eq 'HEAD';
     my $http_version = $request->{http_version} // '1.1';
     my $is_http10 = ($http_version eq '1.0');
@@ -4688,6 +4724,15 @@ sub _create_send {
 
     weaken(my $weak_self = $self);
 
+    # Publish the closure-local $seq where the scope's owner reads it, so the
+    # app-return path can tell a completed response from one the app left
+    # incomplete: the connection for an http scope, the refusing scope's own
+    # send closure for a refusal.
+    my $publish_seq = $refusal_seq
+        ? sub { $$refusal_seq = $_[0] }
+        : sub { $weak_self->{h1_seq} = $_[0] if $weak_self };
+    $publish_seq->($seq);
+
     return async sub  {
         my ($event) = @_;
         return Future->done unless $weak_self;
@@ -4704,7 +4749,7 @@ sub _create_send {
             $event, { extensions => $weak_self->{extensions} });
         my $seq_before_advance = $seq;
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-        $weak_self->{h1_seq} = $seq;
+        $publish_seq->($seq);
 
         if ($type eq 'http.response.start') {
             $weak_self->{response_started} = 1;
@@ -4752,7 +4797,7 @@ sub _create_send {
                     if (!$has_content_length) {
                         # No Content-Length means we can't do keep-alive
                         push @final_headers, ['connection', 'close'];
-                    } elsif ($client_wants_keepalive) {
+                    } elsif ($client_wants_keepalive && !$refusal_seq) {
                         # HTTP/1.0 client requested keep-alive and we can honor it
                         # Must explicitly acknowledge with Connection: keep-alive
                         push @final_headers, ['connection', 'keep-alive'];
@@ -4760,6 +4805,16 @@ sub _create_send {
                 }
             } else {
                 $chunked = !$has_content_length;
+            }
+
+            # Www.pod "Refusing the handshake"/"Refusing the stream": on
+            # HTTP/1.1 the server closes the connection after a refusal and
+            # the response carries Connection: close, so a pooling client does
+            # not reuse the socket. Appended rather than replacing, because a
+            # refusal that answers with 426 Upgrade Required already carries
+            # the server-supplied 'upgrade' token above and needs both.
+            if ($refusal_seq && !grep { lc($_->[0]) eq 'connection' && lc($_->[1]) eq 'close' } @final_headers) {
+                push @final_headers, ['connection', 'close'];
             }
 
             my $response = $weak_self->{protocol}->serialize_response_start(
@@ -4822,7 +4877,7 @@ sub _create_send {
                 } or do {
                     my $error = $@;
                     $seq = $seq_before_advance;
-                    $weak_self->{h1_seq} = $seq;
+                    $publish_seq->($seq);
                     die $error;
                 };
             }
@@ -4838,7 +4893,7 @@ sub _create_send {
                 } or do {
                     my $error = $@;
                     $seq = $seq_before_advance;
-                    $weak_self->{h1_seq} = $seq;
+                    $publish_seq->($seq);
                     die $error;
                 };
             }
@@ -4903,7 +4958,7 @@ sub _create_send {
                 # its return value, which is what makes advance-then-rollback
                 # safe.
                 $seq = $seq_before_advance;
-                $weak_self->{h1_seq} = $seq;
+                $publish_seq->($seq);
                 die "http.response.trailers requires chunked framing (response declared content-length)\n";
             }
 
@@ -5084,11 +5139,11 @@ sub _scope_disconnect_event {
     my $seq  = $self->{h1_seq} // '';
 
     if ($kind eq 'websocket') {
-        return undef if $seq eq 'denial_complete';
+        return undef if $seq eq 'refusal_complete';
         return $self->_ws_disconnect_event;
     }
     if ($kind eq 'sse') {
-        return undef if $seq eq 'decline_complete';
+        return undef if $seq eq 'refusal_complete';
         return {
             type   => 'sse.disconnect',
             reason => $self->{sse_disconnect_reason} // 'client_closed',
@@ -5538,11 +5593,13 @@ async sub _handle_sse_request {
     my $send = $self->_create_sse_send($request);
 
     my $app_failed = 0;
+    my $app_error;
     eval {
         await $self->{app}->($scope, $receive, $send);
     };
 
     if (my $error = $@) {
+        $app_error = $error;
         # If SSE not yet started, send HTTP error
         if (!_sse_stream_started($self->{h1_seq})) {
             $self->_send_error_response(500, "Internal Server Error");
@@ -5571,7 +5628,10 @@ async sub _handle_sse_request {
         # above.
         $self->_log(error => "PAGI application returned after sse.start without sse.close")
             unless $self->{closed} || $app_failed;
-        $self->{current_connection_state}->_mark_disconnected('server_error')
+        my $sse_detail = $app_failed ? _detail_from_error($app_error)
+                       : 'sse.start without sse.close';
+        $self->{_disconnect_detail} //= $sse_detail;
+        $self->{current_connection_state}->_mark_disconnected('server_error', $sse_detail)
             if $self->{current_connection_state};
         $self->_write_access_log;
         $self->{server}->_on_request_complete if $self->{server};
@@ -5579,18 +5639,45 @@ async sub _handle_sse_request {
         return;
     }
 
+    # A refusal (Www.pod "Refusing the stream") answers this scope with an
+    # ordinary HTTP response instead of a stream, and it ends the connection
+    # either way. Completed, it is a clean end and its response already
+    # carried Connection: close, so keep-alive is not on offer. Abandoned
+    # before its terminal event, it is an incomplete response under
+    # "Application Left a Response Incomplete": no terminator is synthesized
+    # and the connection must not serve another request.
+    my $refusal_state = $self->{h1_seq} // '';
+    if ($refusal_state eq 'refusing' || $refusal_state eq 'refusal_complete') {
+        $self->_stop_sse_idle_timer;
+        if ($refusal_state eq 'refusing') {
+            $self->_flush_pending_headers;   # no terminator follows these
+            # Client-already-gone carve-out, as everywhere else: a request
+            # that already ended abnormally is not an application error.
+            $self->_log(error => "PAGI application returned with an incomplete response")
+                unless $self->{closed} || $app_failed;
+            $self->_write_access_log;
+            $self->{server}->_on_request_complete if $self->{server};
+            $self->{_disconnect_detail} //= 'refusal started but never completed';
+            $self->_handle_disconnect_and_close('server_error');
+            return;
+        }
+        $self->{current_connection_state}->_mark_complete
+            if $self->{current_connection_state};
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
+        $self->_handle_disconnect_and_close('session_complete');
+        return;
+    }
+
     # End the stream (no-op if an explicit sse.close already finished it).
     $self->_finish_sse_stream('stream_complete');
 
     # The application produced no response at all: no sse.start, and no
-    # completed decline. That is the same protocol error the plain HTTP path
-    # reports, and it must never reach the keep-alive branch below -- the
-    # client is still waiting for a response, so handing it back a connection
-    # with zero bytes written would hang it until the idle timeout, or forever
-    # when timeout => 0. A COMPLETED decline set response_started and closed
-    # the connection itself, so it never lands here; a decline that started
-    # but never sent its terminal body does, and its buffered headers are
-    # about to be discarded, so it is equally unanswerable.
+    # refusal. That is the same protocol error the plain HTTP path reports,
+    # and it must never reach the keep-alive branch below -- the client is
+    # still waiting for a response, so handing it back a connection with zero
+    # bytes written would hang it until the idle timeout, or forever when
+    # timeout => 0. Both refusal outcomes were answered above.
     if (!_sse_stream_started($self->{h1_seq}) && !$self->{response_started}) {
         unless ($self->{closed}) {
             $self->_log(error => "PAGI application returned without starting an SSE stream or a response");
@@ -5599,6 +5686,7 @@ async sub _handle_sse_request {
         $self->_write_access_log;
         # Notify server that request completed (for max_requests tracking)
         $self->{server}->_on_request_complete if $self->{server};
+        $self->{_disconnect_detail} //= 'no response was started';
         $self->_handle_disconnect_and_close('server_error');
         return;
     }
@@ -5612,10 +5700,10 @@ async sub _handle_sse_request {
     # "request" completes here, when the stream ends, not at sse.start.
     $self->{server}->_on_request_complete if $self->{server};
 
-    # Design section 11.6: a CLEAN end -- a stream that never started, a
-    # completed decline, or a started stream properly ended with sse.close
-    # (the D12 branch above already intercepted a bare return with no
-    # sse.close, which is never clean) -- honors the "Connection: keep-alive"
+    # Design section 11.6: a CLEAN end -- a stream that never started, or a
+    # started stream properly ended with sse.close (the D12 branch above
+    # already intercepted a bare return with no sse.close, which is never
+    # clean; both refusal outcomes closed the connection above) -- honors the "Connection: keep-alive"
     # header the server itself emitted on sse.start; the terminator is written
     # above and the connection returns to ordinary request handling.
     # Keep-alive still yields to the usual overrides: an application
@@ -5639,7 +5727,7 @@ async sub _handle_sse_request {
 # True once the application sent sse.start: the streaming branch of the
 # sse send-state machine ('streaming', and 'closed' once sse.close has
 # gone out -- advance_sse only reaches 'closed' from 'streaming'). The
-# refusal branch ('declining', 'decline_complete') is a response but not
+# refusal branch ('refusing', 'refusal_complete') is a response but not
 # a stream, so it is deliberately excluded: the chunked terminator, the
 # D12 incomplete-response check and the stream-scoped send guards all
 # apply to a started stream only.
@@ -5681,7 +5769,6 @@ sub _finish_sse_stream {
 #
 #   SSE stream flags   sse_finished, sse_finish_reason,
 #                      sse_disconnect_reason
-#   SSE decline state  sse_decline_started/status/headers/body
 #   SSE timers/writer  sse_keepalive_timer + comment, sse_idle_timer,
 #                      sse_keepalive_writer (closes over this stream's framing)
 #   Response state     handling_request, response_started, h1_seq,
@@ -5709,9 +5796,6 @@ sub _reset_after_sse_stream {
     $self->{sse_finished}          = 0;
     $self->{sse_finish_reason}     = undef;
     $self->{sse_disconnect_reason} = undef;
-    delete @{$self}{qw(
-        sse_decline_started sse_decline_status sse_decline_headers sse_decline_body
-    )};
 
     # Mirrors the keep-alive reset in _handle_request.
     $self->{handling_request}         = 0;
@@ -5823,15 +5907,21 @@ sub _create_sse_receive {
     };
 
     return sub {
+        # A completed refusal delivers no events at all (Www.pod "SSE
+        # Disconnect - receive event"): a receive() call made after the
+        # refusal response has already finished must not be answered with a
+        # synthesized sse.disconnect -- nothing abnormal happened. Park
+        # instead; the app has already gotten its answer (the refusal
+        # response) and has nothing further to receive. Asked ahead of the
+        # transport test, because the refusal is a fact about the scope: the
+        # connection closes when the application returns, not at the terminal
+        # event, so the app may well still be running against a live socket.
+        # The websocket receive parks the same way, and so does the h2 side of
+        # both.
+        return $weak_self->{server}->loop->new_future
+            if $weak_self && ($weak_self->{h1_seq} // '') eq 'refusal_complete';
+
         if ($stream_over->()) {
-            # A completed decline delivers no events at all (spec): a
-            # receive() call made after the decline response has already
-            # finished must not be answered with a synthesized
-            # sse.disconnect -- nothing abnormal happened. Park instead;
-            # the app has already gotten its answer (the decline response)
-            # and has nothing further to receive.
-            return $weak_self->{server}->loop->new_future
-                if $weak_self && ($weak_self->{h1_seq} // '') eq 'decline_complete';
             return Future->done($sse_disconnect->());
         }
 
@@ -5980,6 +6070,12 @@ sub _create_sse_send {
     weaken(my $weak_self = $self);
     my $seq = 'initial';
 
+    # Refusing the stream is an ordinary HTTP response on this scope (Www.pod
+    # "Refusing the stream"); see the twin in _create_websocket_send for why
+    # the http send path writes it and why $refusal_http_seq is the fact.
+    my $refusal_send;
+    my $refusal_http_seq = 'initial';
+
     return async sub  {
         my ($event) = @_;
         return Future->done unless $weak_self;
@@ -5988,13 +6084,13 @@ sub _create_sse_send {
 
         # Once the machine has already recorded this stream as closed --
         # either an app-initiated sse.close (which closes the transport as a
-        # side effect of ending the stream) or a completed decline response
+        # side effect of ending the stream) or a completed refusal response
         # (whose finalize branch also closes the transport as a side
         # effect) -- the machine, not the transport-closed check below,
         # decides what happens next: idempotent no-op for a repeat
-        # sse.close, croak for anything else (decline_complete has no
+        # sse.close, croak for anything else (refusal_complete has no
         # idempotent case; it croaks unconditionally).
-        my $already_closed = ($seq eq 'closed' || $seq eq 'decline_complete');
+        my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         # Transport already gone for reasons other than our own close (a real
         # client disconnect): sends are a silent no-op.
@@ -6009,6 +6105,20 @@ sub _create_sse_send {
             $event, { extensions => $weak_self->{extensions} });
         $seq = PAGI::Server::EventValidator::advance_sse($seq, $event);
         $weak_self->{h1_seq} = $seq;
+
+        if ($type =~ /^http\.response\./) {
+            # Refusing the stream (Www.pod): identical on the wire to the same
+            # response on an http scope, so that path writes it. advance_sse
+            # has already rejected an HTTP event after sse.start.
+            $refusal_send //= $weak_self->_create_send($request,
+                refusal_seq => \$refusal_http_seq);
+            my $ok = eval { await $refusal_send->($event); 1 };
+            my $error = $@;
+            $seq = ($refusal_http_seq eq 'complete') ? 'refusal_complete' : 'refusing';
+            $weak_self->{h1_seq} = $seq;
+            die $error unless $ok;
+            return;
+        }
 
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
@@ -6122,62 +6232,6 @@ sub _create_sse_send {
                 if defined $event->{reason};
             $weak_self->_finish_sse_stream($event->{reason} // 'app_closed');
         }
-        elsif ($type eq 'sse.http.response.start') {
-            # Decline the SSE stream and return a normal HTTP response. Valid only
-            # before sse.start; namespaced under sse. (mirrors websocket.http.response.*).
-            # A decline-after-start attempt, and a repeat sse.http.response.start,
-            # are already rejected by advance_sse (the 'declining' state only
-            # accepts sse.http.response.body).
-            $weak_self->{sse_decline_started} = 1;
-            $weak_self->{sse_decline_status}  = $event->{status} // 200;
-            $weak_self->{sse_decline_headers} = [
-                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
-                    @{$event->{headers} // []}
-            ];
-            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
-            # strip any app-supplied values before submission.
-            $weak_self->{sse_decline_headers} = $weak_self->_h1_strip_connection_headers($weak_self->{sse_decline_headers});
-            $weak_self->{sse_decline_body} = '';
-        }
-        elsif ($type eq 'sse.http.response.body') {
-            return unless $weak_self->{sse_decline_started};
-            return if $weak_self->{response_started};
-            $weak_self->{sse_decline_body} .= $event->{body} // '';
-            return if $event->{more};   # more chunks coming — keep buffering
-
-            my $status  = $weak_self->{sse_decline_status};
-            my $body    = $weak_self->{sse_decline_body};
-            my @headers = (
-                @{$weak_self->{sse_decline_headers}},
-                ['content-length', length $body],
-            );
-            unless (grep { lc($_->[0]) eq 'date' } @headers) {
-                push @headers, ['date', $weak_self->{protocol}->format_date];
-            }
-            # This response is always followed by closing the connection; tell
-            # a keep-alive-pooling client so it doesn't reuse a dead socket.
-            unless (grep { lc($_->[0]) eq 'connection' } @headers) {
-                push @headers, ['connection', 'close'];
-            }
-            my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
-            $response .= $body;
-            $weak_self->{stream}->write($response);
-            $weak_self->{response_started} = 1;
-            $weak_self->{response_status}  = $status;   # access log
-            # Declined: close the connection (no event stream was started).
-            # The send closure mirrored h1_seq to 'decline_complete' before
-            # this arm ran, so _handle_disconnect and a later receive() both
-            # know this closure is a completed decline, not an abnormal end
-            # -- per the spec, a decline delivers no events at all, so
-            # neither may synthesize sse.disconnect for it.
-            # Also mark BEFORE teardown: a completed decline is a clean end
-            # (Www.pod "Meaning per scope"), and _mark_complete must win the
-            # race against _handle_disconnect_and_close's own (idempotent)
-            # _mark_disconnected below.
-            $weak_self->{current_connection_state}->_mark_complete
-                if $weak_self->{current_connection_state};
-            $weak_self->_handle_disconnect_and_close('client_closed');
-        }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush.
             # validate_sse_send (called above, unconditionally) already
@@ -6218,12 +6272,53 @@ async sub _handle_websocket_request {
         await $self->{app}->($scope, $receive, $send);
     };
 
+    my $app_failed = 0;
     if (my $error = $@) {
-        # If handshake not yet done, send HTTP error
-        if (!$self->{websocket_accepted}) {
+        # If neither the handshake nor a refusal response has begun, answer
+        # with an HTTP error; once a refusal has started there is no room on
+        # the wire for a second response.
+        if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
             $self->_send_error_response(500, "Internal Server Error");
         }
         $self->_log(error => "PAGI application error (WebSocket): $error");
+        $app_failed = 1;
+    }
+
+    # A refusal abandoned before its terminal event is an incomplete response
+    # (Www.pod "Application Left a Response Incomplete", which names the
+    # refusal case first): no terminator is synthesized, the connection ends,
+    # and the scope reports server_error. A completed refusal falls through to
+    # the clean-end mark below.
+    if (($self->{h1_seq} // '') eq 'refusing') {
+        $self->_flush_pending_headers;   # no terminator follows these
+        $self->_log(error => "PAGI application returned with an incomplete response")
+            unless $self->{closed} || $app_failed;
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
+        $self->{_disconnect_detail} //= 'refusal started but never completed';
+        $self->_handle_disconnect_and_close('server_error');
+        return;
+    }
+
+    # Www.pod "Meaning per scope": returning from a websocket scope without
+    # websocket.accept or a refusal is governed by "Application Produced No
+    # Response" -- the 500 backstop, its log, and its client-gone carve-out,
+    # exactly as on an http or sse scope. Until sub-spec 0.6 a pre-accept
+    # websocket.close answered such a client with a 403; that event is now out
+    # of sequence, so nothing else covers this path and the client would be
+    # left waiting. _send_error_response is a no-op once a response started,
+    # so an exception already answered above cannot produce a second one.
+    if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
+        unless ($self->{closed}) {
+            $self->_log(error => "PAGI application returned without accepting the WebSocket or refusing the handshake")
+                unless $app_failed;
+            $self->_send_error_response(500, "Internal Server Error");
+        }
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
+        $self->{_disconnect_detail} //= 'no response was started';
+        $self->_handle_disconnect_and_close('server_error');
+        return;
     }
 
     # Write access log entry (logs at connection close with total duration)
@@ -6231,7 +6326,7 @@ async sub _handle_websocket_request {
     $self->{server}->_on_request_complete if $self->{server};
 
     if (my $cs = $self->{current_connection_state}) {
-        if ($self->{websocket_accepted} && !$self->{close_sent} && !$self->{close_received} && !$self->{closed}) {
+        if (_ws_handshake_accepted($self->{h1_seq}) && !$self->{close_sent} && !$self->{close_received} && !$self->{closed}) {
             # App returned from an accepted socket without a closing handshake:
             # an incomplete response (design 4.7, D13). Close with 1011, report
             # server_error, log; never a clean end. _send_close_frame already
@@ -6240,6 +6335,7 @@ async sub _handle_websocket_request {
             $self->_send_close_frame(1011, '');
             $self->{ws_disconnect_reason} = 'server_error';
             $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
+            $self->{_disconnect_detail} //= 'accepted socket left without a closing handshake';
             $self->_handle_disconnect_and_close('server_error');
             return;
         }
@@ -6251,9 +6347,9 @@ async sub _handle_websocket_request {
         # than by the ordering that currently marks the connection_state
         # abnormal before this tail ever runs.
         $cs->_mark_complete
-            if ($self->{websocket_accepted}
+            if (_ws_handshake_accepted($self->{h1_seq})
                 && (($self->{h1_seq} // '') eq 'closed' || $self->{ws_peer_closed}))
-            || (($self->{h1_seq} // '') eq 'denial_complete');
+            || (($self->{h1_seq} // '') eq 'refusal_complete');
     }
 
     # Close connection after WebSocket session ends
@@ -6310,7 +6406,7 @@ sub _create_websocket_scope {
         # Optimized: avoid hash copy when state is empty (common case)
         state        => keys %{$self->{state}} ? { %{$self->{state}} } : {},
         extensions   => do {
-            my %ext = (%{$self->_get_extensions_for_scope}, 'websocket.http.response' => {});
+            my %ext = %{$self->_get_extensions_for_scope};
             # fullflush has no validate_websocket_send arm; advertising it here
             # would lie to the app (design 13.2).
             delete $ext{fullflush};
@@ -6357,12 +6453,12 @@ sub _create_websocket_receive {
         # already finished must not be answered with a synthesized
         # websocket.disconnect -- nothing abnormal happened. Park instead;
         # the app has already gotten its answer (the refusal response) and
-        # has nothing further to receive. The sse decline parks the same way,
+        # has nothing further to receive. The sse refusal parks the same way,
         # and so does the h2 side of both. This is the only site that needs
         # the test: the refusal terminal runs inside the app's own send, so
         # no receive() can be in flight past it.
         return $weak_self->{server}->loop->new_future
-            if $weak_self && ($weak_self->{h1_seq} // '') eq 'denial_complete';
+            if $weak_self && ($weak_self->{h1_seq} // '') eq 'refusal_complete';
 
         # $weak_self is known live here, so the fallback can report the
         # abnormal reason a server-initiated close recorded (idle timeout,
@@ -6389,7 +6485,7 @@ sub _create_websocket_receive {
             }
 
             # If not in WebSocket mode yet (waiting for accept), wait
-            while (!$weak_self->{websocket_accepted} && !$weak_self->{closed}) {
+            while (!_ws_handshake_accepted($weak_self->{h1_seq}) && !$weak_self->{closed}) {
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
@@ -6435,13 +6531,22 @@ sub _create_websocket_send {
     weaken(my $weak_self = $self);
     my $seq = 'connecting';
 
+    # Refusing the handshake is an ordinary HTTP response on this scope
+    # (Www.pod "Refusing the handshake"), so it goes out through the ordinary
+    # HTTP send path rather than a second implementation of one. That closure
+    # runs the http send machine; $refusal_http_seq is where it publishes it,
+    # and it is the fact about whether the refusal completed -- advance_websocket
+    # abbreviates that question (see its POD).
+    my $refusal_send;
+    my $refusal_http_seq = 'initial';
+
     return async sub  {
         my ($event) = @_;
         return Future->done unless $weak_self;
 
-        # Once the machine has recorded the connection closed or the denial
+        # Once the machine has recorded the connection closed or the refusal
         # response complete, the machine decides what happens next -- both
-        # 'closed' and 'denial_complete' have no idempotent case, so any
+        # 'closed' and 'refusal_complete' have no idempotent case, so any
         # further send always raises -- not the transport-closed check below.
         # Only app-initiated terminals get this carve-out: websocket.close
         # itself flips {closed} synchronously via _handle_disconnect_and_close
@@ -6451,7 +6556,7 @@ sub _create_websocket_send {
         # violation, not a benign transport no-op. A real client disconnect
         # with no app-initiated terminal in play still falls through to the
         # plain no-op below.
-        my $already_closed = ($seq eq 'closed' || $seq eq 'denial_complete');
+        my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         return Future->done if $weak_self->{closed} && !$already_closed;
 
@@ -6462,13 +6567,32 @@ sub _create_websocket_send {
 
         # Mandatory event validation and sequencing (PAGI spec compliance).
         # Order per spec: transport-closed no-op check above runs first.
-        # websocket.http.response is always available on this path (the scope
-        # advertises it unconditionally; see _create_websocket_scope), unlike
-        # connection-level extensions such as fullflush.
         PAGI::Server::EventValidator::validate_websocket_send(
-            $event, { extensions => { %{$weak_self->{extensions}}, 'websocket.http.response' => {} } });
+            $event, { extensions => $weak_self->{extensions} });
+        my $seq_before = $seq;
         $seq = PAGI::Server::EventValidator::advance_websocket($seq, $event);
         $weak_self->{h1_seq} = $seq;
+
+        if ($type =~ /^http\.response\./) {
+            # Refusing the handshake (Www.pod): the wire response is identical
+            # to the same response on an http scope, so it is that path that
+            # writes it. advance_websocket has already rejected an HTTP event
+            # after websocket.accept, so reaching here means the handshake is
+            # still open.
+            $refusal_send //= $weak_self->_create_send($request,
+                refusal_seq => \$refusal_http_seq);
+            my $ok = eval { await $refusal_send->($event); 1 };
+            my $error = $@;
+            # The http machine inside the delegate is the authority on whether
+            # the refusal completed: it knows whether the start declared
+            # trailers, and it rolls its own state back for a send it rejects
+            # (an unopenable file, undeclared trailers), which must leave no
+            # state behind here either.
+            $seq = ($refusal_http_seq eq 'complete') ? 'refusal_complete' : 'refusing';
+            $weak_self->{h1_seq} = $seq;
+            die $error unless $ok;
+            return;
+        }
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -6479,45 +6603,58 @@ sub _create_websocket_send {
             # sha1_base64 doesn't add padding, but WebSocket requires it
             $accept_key .= '=' while length($accept_key) % 4;
 
-            my @headers = (
-                "HTTP/1.1 101 Switching Protocols\r\n",
-                "Upgrade: websocket\r\n",
-                "Connection: Upgrade\r\n",
-                "Sec-WebSocket-Accept: $accept_key\r\n",
-            );
+            # Build and write the handshake under advance-then-rollback (the
+            # file's D1 pattern): an app-supplied subprotocol or header that
+            # fails byte validation must leave no state behind, and the send
+            # state is now the only record of whether the handshake completed.
+            # Without the rollback a rejected accept would read as an accepted
+            # socket, and the client would get no response at all.
+            my $ok = eval {
+                my @headers = (
+                    "HTTP/1.1 101 Switching Protocols\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Accept: $accept_key\r\n",
+                );
 
-            # Add subprotocol if specified (with validation)
-            if (my $subprotocol = $event->{subprotocol}) {
-                $subprotocol = _validate_subprotocol($subprotocol);
-                push @headers, "Sec-WebSocket-Protocol: $subprotocol\r\n";
-            }
-
-            # Add custom headers if specified (with CRLF injection validation).
-            # The server's own "Connection: Upgrade" line above is untouched
-            # (RFC 6455 requires it) -- strip the app's extra headers the same
-            # way every other h1 response-header path already does, so an
-            # app-supplied connection/transfer-encoding value can't duplicate
-            # or contradict it on the wire.
-            if (my $extra_headers = $event->{headers}) {
-                $extra_headers = $weak_self->_h1_strip_connection_headers($extra_headers);
-                for my $h (@$extra_headers) {
-                    my ($name, $value) = @$h;
-                    $name = _validate_header_name($name);
-                    $value = _validate_header_value($value);
-                    push @headers, "$name: $value\r\n";
+                # Add subprotocol if specified (with validation)
+                if (my $subprotocol = $event->{subprotocol}) {
+                    $subprotocol = _validate_subprotocol($subprotocol);
+                    push @headers, "Sec-WebSocket-Protocol: $subprotocol\r\n";
                 }
+
+                # Add custom headers if specified (with CRLF injection
+                # validation). The server's own "Connection: Upgrade" line
+                # above is untouched (RFC 6455 requires it) -- strip the app's
+                # extra headers the same way every other h1 response-header
+                # path already does, so an app-supplied
+                # connection/transfer-encoding value can't duplicate or
+                # contradict it on the wire.
+                if (my $extra_headers = $event->{headers}) {
+                    $extra_headers = $weak_self->_h1_strip_connection_headers($extra_headers);
+                    for my $h (@$extra_headers) {
+                        my ($name, $value) = @$h;
+                        $name = _validate_header_name($name);
+                        $value = _validate_header_value($value);
+                        push @headers, "$name: $value\r\n";
+                    }
+                }
+
+                push @headers, "\r\n";
+
+                $weak_self->{stream}->write(join('', @headers));
+                1;
+            };
+            unless ($ok) {
+                my $error = $@;
+                $seq = $seq_before;
+                $weak_self->{h1_seq} = $seq;
+                die $error;
             }
 
-            push @headers, "\r\n";
-
-            $weak_self->{stream}->write(join('', @headers));
-
-            # Switch to WebSocket mode. websocket_accepted is the one fact
-            # the validator's send state cannot supply: advance_websocket
-            # reaches 'closed' from 'connecting' too (a websocket.close
-            # before accept), so the state alone cannot say whether the
-            # handshake was ever completed.
-            $weak_self->{websocket_accepted} = 1;
+            # Switch to WebSocket mode. h1_seq is already 'accepted' -- the
+            # mirror above runs before this arm, so _ws_handshake_accepted is
+            # true for every reader from here on.
             $weak_self->{websocket_frame} = Protocol::WebSocket::Frame->new(
                 max_payload_size => $weak_self->{max_ws_frame_size},
             );
@@ -6536,7 +6673,7 @@ sub _create_websocket_send {
             }
         }
         elsif ($type eq 'websocket.send') {
-            return unless $weak_self->{websocket_accepted};
+            return unless _ws_handshake_accepted($weak_self->{h1_seq});
 
             # --- BACKPRESSURE CHECK ---
             if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
@@ -6567,63 +6704,10 @@ sub _create_websocket_send {
             $weak_self->{stream}->write($bytes);
             $weak_self->_notify_transport_write;
         }
-        elsif ($type eq 'websocket.http.response.start') {
-            # Custom handshake denial (websocket.http.response extension). Only
-            # valid before accept; buffer the response head until the body
-            # arrives.
-            return if $weak_self->{websocket_accepted};
-            return if $weak_self->{ws_denial_started};
-            $weak_self->{ws_denial_started} = 1;
-            $weak_self->{ws_denial_status}  = $event->{status} // 403;
-            $weak_self->{ws_denial_headers} = [
-                map { [_validate_header_name($_->[0]), _validate_header_value($_->[1])] }
-                    @{$event->{headers} // []}
-            ];
-            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
-            # strip any app-supplied values before submission.
-            $weak_self->{ws_denial_headers} = $weak_self->_h1_strip_connection_headers($weak_self->{ws_denial_headers});
-            $weak_self->{ws_denial_body} = '';
-        }
-        elsif ($type eq 'websocket.http.response.body') {
-            return unless $weak_self->{ws_denial_started};
-            return if $weak_self->{response_started};
-            $weak_self->{ws_denial_body} .= $event->{body} // '';
-            return if $event->{more};   # more chunks coming — keep buffering
-
-            my $status  = $weak_self->{ws_denial_status};
-            my $body    = $weak_self->{ws_denial_body};
-            my @headers = (
-                @{$weak_self->{ws_denial_headers}},
-                ['content-length', length $body],
-            );
-            unless (grep { lc($_->[0]) eq 'date' } @headers) {
-                push @headers, ['date', $weak_self->{protocol}->format_date];
-            }
-            my $response = $weak_self->{protocol}->serialize_response_start($status, \@headers, 0);
-            $response .= $body;
-            $weak_self->{stream}->write($response);
-            $weak_self->{response_started} = 1;
-            $weak_self->{response_status}  = $status;   # access log
-            # Handshake rejected: close like the bare-403 path (no upgrade).
-            # The send closure mirrored h1_seq to 'denial_complete' before
-            # this arm ran; _handle_websocket_request's tail reads it so a
-            # completed refusal reports a clean end (on_complete), not
-            # on_disconnect.
-            # Also mark BEFORE teardown: a completed refusal is a clean end
-            # (Www.pod "Meaning per scope"), and _mark_complete must win the
-            # race against _handle_disconnect_and_close's own (idempotent)
-            # _mark_disconnected below -- mirrors the completed-decline
-            # site's ordering.
-            $weak_self->{current_connection_state}->_mark_complete
-                if $weak_self->{current_connection_state};
-            $weak_self->_handle_disconnect_and_close('client_closed');
-        }
         elsif ($type eq 'websocket.close') {
-            # If not accepted yet, send 403 Forbidden
-            if (!$weak_self->{websocket_accepted}) {
-                $weak_self->_send_error_response(403, 'Forbidden');
-                return;
-            }
+            # A close before accept is already rejected by advance_websocket
+            # ("cannot send 'websocket.close' before websocket.accept"), so
+            # the handshake is known complete here.
 
             # Send close frame
             my $code = $event->{code} // 1000;
@@ -6647,7 +6731,7 @@ sub _create_websocket_send {
             }
         }
         elsif ($type eq 'websocket.keepalive') {
-            return unless $weak_self->{websocket_accepted};
+            return unless _ws_handshake_accepted($weak_self->{h1_seq});
 
             my $interval = $event->{interval} // 0;
             my $timeout = $event->{timeout};
@@ -6667,7 +6751,7 @@ sub _create_websocket_send {
 sub _process_websocket_frames {
     my ($self) = @_;
 
-    return unless $self->{websocket_accepted};
+    return unless _ws_handshake_accepted($self->{h1_seq});
     return if $self->{closed};
 
     # Reset WebSocket idle timer on receive activity

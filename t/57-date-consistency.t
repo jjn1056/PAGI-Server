@@ -113,14 +113,14 @@ subtest 'h1 SSE decline: app-supplied Date is not duplicated' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({
-            type    => 'sse.http.response.start',
+            type    => 'http.response.start',
             status  => 404,
             headers => [
                 [ 'content-type', 'text/plain' ],
                 [ 'Date',         $APP_DATE ],
             ],
         });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
     };
 
     my $server = create_server($app);
@@ -154,14 +154,14 @@ subtest 'h1 WebSocket denial: app-supplied Date is not duplicated' => sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();   # websocket.connect
         await $send->({
-            type    => 'websocket.http.response.start',
+            type    => 'http.response.start',
             status  => 401,
             headers => [
                 [ 'content-type', 'application/json' ],
                 [ 'Date',         $APP_DATE ],
             ],
         });
-        await $send->({ type => 'websocket.http.response.body', body => '{"error":"unauthorized"}' });
+        await $send->({ type => 'http.response.body', body => '{"error":"unauthorized"}' });
         return;
     };
 

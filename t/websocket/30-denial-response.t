@@ -88,10 +88,10 @@ sub raw_ws_upgrade_and_read {
 }
 
 # ---------------------------------------------------------------------------
-# Test: custom HTTP 401 denial response (websocket.http.response extension)
+# Test: custom HTTP 401 refusal response (Www.pod "Refusing the handshake")
 # ---------------------------------------------------------------------------
 
-subtest 'websocket.http.response.start/.body sends custom 401' => sub {
+subtest 'http.response.start/.body sends custom 401' => sub {
     my $captured_scope;
 
     my $app = async sub {
@@ -118,7 +118,7 @@ subtest 'websocket.http.response.start/.body sends custom 401' => sub {
         my $connect = await $receive->();    # websocket.connect
 
         await $send->({
-            type    => 'websocket.http.response.start',
+            type    => 'http.response.start',
             status  => 401,
             headers => [
                 ['content-type', 'application/json'],
@@ -126,7 +126,7 @@ subtest 'websocket.http.response.start/.body sends custom 401' => sub {
             ],
         });
         await $send->({
-            type => 'websocket.http.response.body',
+            type => 'http.response.body',
             body => '{"error":"unauthorized"}',
         });
         return;
@@ -147,8 +147,8 @@ subtest 'websocket.http.response.start/.body sends custom 401' => sub {
         }
 
         ok(
-            $captured_scope && $captured_scope->{extensions}{'websocket.http.response'},
-            'extension websocket.http.response advertised on ws scope',
+            $captured_scope && !$captured_scope->{extensions}{'websocket.http.response'},
+            'refusing a handshake is not an extension: nothing is advertised for it',
         );
 
         like(
