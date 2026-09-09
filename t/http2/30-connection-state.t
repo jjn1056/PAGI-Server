@@ -648,7 +648,7 @@ subtest 'h2: websocket RST before accept marks client_closed with an RST detail'
 # even though sse.start was never sent -- on_complete fires, not on_disconnect,
 # and disconnect_reason stays undef. h2 never advances seq_state for an SSE
 # stream (only the plain-http send closure tracks that mirror), so this
-# exercises the sse_clean_end flag Task B2 sets at decline completion, not the
+# exercises the decline_complete validator state (B2b) reached at decline completion, not the
 # seq_state fallback the http control case in t/http2/17 relies on.
 
 subtest 'h2: sse completed decline is a clean end' => sub {
@@ -702,7 +702,7 @@ subtest 'h2: sse completed decline is a clean end' => sub {
 # Www.pod "Application Left a Response Incomplete": RST_STREAM (INTERNAL_ERROR),
 # on_disconnect('server_error'), on_complete does not fire, one error log line.
 # h2 SSE streams never advance seq_state (only the plain-HTTP send closure's
-# advance() does), so this exercises the sse_started flag fix (review C1)
+# advance() does), so this exercises the streaming-state check that replaced sse_started (review C1, B2b)
 # directly -- without it this subtest hangs forever with the stream still open.
 
 use constant H2_INTERNAL_ERROR_CODE => 2;   # NGHTTP2_INTERNAL_ERROR (RFC 9113 section 7)
