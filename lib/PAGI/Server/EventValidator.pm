@@ -568,6 +568,32 @@ sub advance_sse {
     croak "cannot send '$type' in sse state '$state'";
 }
 
+# The lifecycle questions every scope kind answers the same way, phrased
+# once over the states the advance_* functions return.
+my %STARTED = (
+    http      => { started => 1, started_t => 1, started_i => 1, started_t_i => 1,
+                   awaiting_trailers => 1, complete => 1 },
+    websocket => { accepted => 1, denial => 1, denial_complete => 1, closed => 1 },
+    sse       => { streaming => 1, declining => 1, decline_complete => 1, closed => 1 },
+);
+my %SEND_CLEAN = (
+    http      => { complete => 1 },
+    websocket => { denial_complete => 1, closed => 1 },
+    sse       => { decline_complete => 1, closed => 1 },
+);
+
+sub scope_started {
+    my ($kind, $state) = @_;
+    my $t = $STARTED{$kind} or croak "unknown scope kind '$kind'";
+    return $t->{$state // ''} ? 1 : 0;
+}
+
+sub scope_send_clean {
+    my ($kind, $state) = @_;
+    my $t = $SEND_CLEAN{$kind} or croak "unknown scope kind '$kind'";
+    return $t->{$state // ''} ? 1 : 0;
+}
+
 sub advance_lifespan {
     my ($state, $event) = @_;
     my $type = $event->{type} // '';
@@ -754,6 +780,30 @@ non-body event once declining has started
 than C<sse.close> once C<closed> (C<"cannot send '<type>' after sse.close">);
 any event once C<decline_complete>
 (C<"cannot send '<type>': decline response already complete">).
+
+=head2 scope_started($kind, $state)
+
+True once the application has sent the scope's start event, or the start of
+its refusal: the moment the scope's response has begun. C<$kind> is
+C<http>, C<websocket> or C<sse>; C<$state> is the state that scope's
+C<advance_*> function last returned. Returns 1 or 0; an undefined C<$state>
+is false. Croaks with C<"unknown scope kind '<kind>'"> for any other kind.
+
+Started states are, for C<http>, everything past C<initial>; for
+C<websocket>, C<accepted>, C<denial>, C<denial_complete> and C<closed>; for
+C<sse>, C<streaming>, C<declining>, C<decline_complete> and C<closed>.
+
+=head2 scope_send_clean($kind, $state)
+
+True once the application's send side has reached a clean terminal state:
+the terminal http body or trailers (C<complete>), a completed refusal
+(C<denial_complete> / C<decline_complete>), C<websocket.close> or
+C<sse.close> (C<closed>). C<$kind> and C<$state> are as for
+C<scope_started>, and the same croak applies.
+
+A websocket scope is also cleanly ended when the B<peer> sent the Close
+frame, which is a receive-side fact this module never sees; callers OR that
+in themselves.
 
 =head2 advance_lifespan($state, $event)
 

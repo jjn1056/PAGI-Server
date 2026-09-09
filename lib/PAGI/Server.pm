@@ -4610,7 +4610,9 @@ async sub _drain_connections {
 
     # Also close long-lived connections (SSE, WebSocket) immediately
     # These never become "idle" so would wait for full timeout otherwise
-    my @longlived = grep { $_->{sse_mode} || $_->{websocket_mode} } values %{$self->{connections}};
+    my @longlived = grep {
+        ($_->{scope_kind} // '') eq 'sse' || $_->{websocket_accepted}
+    } values %{$self->{connections}};
     for my $conn (@longlived) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }

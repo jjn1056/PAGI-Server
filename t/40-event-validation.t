@@ -592,4 +592,31 @@ subtest 'advance_lifespan phases' => sub {
     like( dies { $adv->('finished', { type => 'lifespan.startup.complete' }) }, qr/during lifespan phase 'finished'/, 'anything after finished');
 };
 
+subtest 'scope_started and scope_send_clean read the validator state' => sub {
+    my $started = \&PAGI::Server::EventValidator::scope_started;
+    my $clean   = \&PAGI::Server::EventValidator::scope_send_clean;
+    # websocket
+    ok(!$started->('websocket', 'connecting'), 'ws connecting: not started');
+    ok( $started->('websocket', $_), "ws $_: started") for qw(accepted denial denial_complete closed);
+    ok(!$clean->('websocket', $_),   "ws $_: not a clean send-side end") for qw(connecting accepted denial);
+    ok( $clean->('websocket', $_),   "ws $_: clean send-side end") for qw(denial_complete closed);
+    # sse
+    ok(!$started->('sse', 'initial'), 'sse initial: not started');
+    ok( $started->('sse', $_), "sse $_: started") for qw(streaming declining decline_complete closed);
+    ok(!$clean->('sse', $_),   "sse $_: not a clean send-side end") for qw(initial streaming declining);
+    ok( $clean->('sse', $_),   "sse $_: clean send-side end") for qw(decline_complete closed);
+    # http (delegates to the existing terminal notion)
+    ok(!$started->('http', 'initial'), 'http initial: not started');
+    ok( $started->('http', $_), "http $_: started")
+        for qw(started started_t started_i started_t_i awaiting_trailers complete);
+    ok( $clean->('http', 'complete'), 'http complete: clean');
+    ok(!$clean->('http', $_), "http $_: not a clean send-side end")
+        for qw(initial started started_t started_i started_t_i awaiting_trailers);
+    # every state advance_* can return is classified
+    ok(!$started->('websocket', undef), 'undef state: not started');
+    ok(!$clean->('sse', undef), 'undef state: not clean');
+    like(dies { $started->('bogus', 'x') }, qr/unknown scope kind/, 'unknown kind dies');
+    like(dies { $clean->('bogus', 'x') }, qr/unknown scope kind/, 'unknown kind dies for send_clean');
+};
+
 done_testing;
