@@ -211,4 +211,84 @@ subtest 'clean peer close delivers exactly one websocket.disconnect' => sub {
     $server->shutdown->get;
 };
 
+# =============================================================================
+# The same "exactly one" property before websocket.accept.
+#
+# A client that drops during the handshake ends a websocket scope just as
+# surely as one that drops after it, and Www.pod "Disconnect - receive event"
+# says so explicitly: the event is delivered "before as well as after
+# websocket.accept", with code 1006 and the standard token. This case reaches
+# the disconnect through a different path -- the pre-accept parking loop in
+# _create_websocket_receive rather than the frame processor -- so the queue
+# discriminator above is checked here too: the event must arrive once, and
+# must not also be left sitting in receive_queue.
+# =============================================================================
+
+subtest 'pre-accept client drop delivers exactly one websocket.disconnect' => sub {
+    my @seen;
+    my $parked = 0;
+
+    my $test_app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        await $receive->();          # websocket.connect
+        $parked = 1;
+        push @seen, await $receive->();   # parks until the client drops
+        # No accept, no refusal: the client left mid-handshake.
+    };
+
+    my $server = PAGI::Server->new(
+        app        => $test_app,
+        host       => '127.0.0.1',
+        port       => 0,
+        quiet      => 1,
+        access_log => undef,
+    );
+    $loop->add($server);
+    $server->listen->get;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1',
+        PeerPort => $server->port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+
+    SKIP: {
+        skip "Cannot connect to server", 5 unless $sock;
+
+        print $sock "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
+                  . "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                  . "Sec-WebSocket-Version: 13\r\n\r\n";
+        $sock->flush;
+
+        my $deadline = time + 3;
+        $loop->loop_once(0.05) while !$parked && time < $deadline;
+        ok($parked, 'app parked on receive() before accepting');
+
+        my ($conn) = values %{$server->{connections}};
+        ok($conn, 'captured Connection object for white-box inspection');
+
+        close $sock;
+
+        $deadline = time + 3;
+        $loop->loop_once(0.05) while !@seen && time < $deadline;
+
+        is(scalar(@seen), 1, 'app received exactly one event');
+        if (@seen) {
+            is($seen[0]{type}, 'websocket.disconnect',
+                'a websocket scope reports websocket.disconnect, not http.disconnect');
+            is($seen[0]{code}, 1006, 'code 1006 (abnormal closure, no close handshake)');
+            is($seen[0]{reason}, 'client_closed', "reason is the 'client_closed' token");
+        }
+
+        $deadline = time + 3;
+        $loop->loop_once(0.05) while exists $server->{connections}{refaddr($conn)} && time < $deadline;
+        is(scalar(@{$conn->{receive_queue}}), 0, 'no leftover ghost event in receive_queue');
+    }
+
+    $server->shutdown->get;
+};
+
 done_testing;

@@ -69,10 +69,17 @@ my $app = async sub {
         await $send->({ type => 'http.response.start', status => 200,
                         headers => [['content-type','text/plain']] });
         await $send->({ type => 'http.response.body', body => 'bye', more => 0 });
+        # http.disconnect is delivered "if receive is called after a response
+        # has been sent OR after the HTTP connection has been closed" (Www.pod
+        # "Disconnect - receive event"), so on a completed response it arrives
+        # at once and does NOT by itself mean the transport went away. This
+        # subtest is about what a send does once it HAS: wait for the test to
+        # confirm the server saw the client's EOF before probing.
         while (1) {
             my $e = await $receive->();
             last if $e->{type} eq 'http.disconnect';
         }
+        await $PostClose::CLIENT_GONE;
         $PostClose::RESULT = do {
             local $@;
             eval { await $send->({ type => 'http.response.bod', body => 'zombie' }); 'resolved' }
@@ -120,6 +127,13 @@ is( $get->('/ok')->content, 'NO-ERROR', 'a conforming app is unaffected' );
     );
     ok($sock, 'raw socket connected for /post-close') or last;
     $sock->blocking(0);
+    # Resolved below, once the server has actually torn this connection down;
+    # the app awaits it before probing (see the /post-close arm above).
+    $PostClose::CLIENT_GONE = Future->new;
+    # The pooled Net::Async::HTTP client above still holds its own keep-alive
+    # connection, so "this socket's connection is gone" has to be asked about
+    # this socket's entry specifically, not about the table being empty.
+    my %pre_existing = %{ $server->{connections} };
 
     print $sock "GET /post-close HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n";
 
@@ -135,6 +149,21 @@ is( $get->('/ok')->content, 'NO-ERROR', 'a conforming app is unaffected' );
     like( $wire, qr/bye/, 'post-close response delivered' );
 
     shutdown($sock, 1) or die "shutdown: $!";   # signal disconnect to the server
+
+    # Let the server observe the EOF and mark the connection closed before
+    # releasing the app's probe. Without this the probe can run while the
+    # transport is still open, where a malformed event is an ordinary
+    # validation error rather than the post-close no-op under test.
+    my ($this_conn) = grep { !exists $pre_existing{$_} } keys %{ $server->{connections} };
+    my $closed_deadline = time + 5;
+    while (defined $this_conn && time < $closed_deadline) {
+        last if !exists $server->{connections}{$this_conn};
+        $loop->loop_once(0.05);
+    }
+    ok(defined $this_conn && !exists $server->{connections}{$this_conn},
+        'server saw the client go away');
+    $PostClose::CLIENT_GONE->done;
+
     my $probe_deadline = time + 5;
     while (time < $probe_deadline) {
         last if defined $PostClose::RESULT;

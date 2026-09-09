@@ -105,14 +105,8 @@ subtest 'h1 websocket: client drop before accept marks client_closed on the obje
     $loop->loop_once(0.05) for 1 .. 20;
     $server->shutdown->get;
     is($r{done}, 1, 'app finished');
-    {
-        # S1, fixed in B3: pre-accept drop still delivers http.disconnect
-        # (the scope-kind-aware event type is Task B3's fix), not
-        # websocket.disconnect.
-        my $todo = todo('S1, fixed in B3');
-        is($r{event}{type}, 'websocket.disconnect', 'websocket.disconnect on a websocket scope (S1)');
-        is($r{event}{reason}, 'client_closed', 'event reason');
-    }
+    is($r{event}{type}, 'websocket.disconnect', 'websocket.disconnect on a websocket scope (S1)');
+    is($r{event}{reason}, 'client_closed', 'event reason');
     is($r{reason}, 'client_closed', 'object reason agrees');
     is($r{connected}, 0, 'not connected');
     is($r{cb}[0], 'client_closed', 'on_disconnect fired with the token');

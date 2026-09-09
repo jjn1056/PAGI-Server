@@ -335,6 +335,7 @@ sub close_codes {
 # used to prove the h2 connection/session keeps serving other streams
 # regardless of what happens to a WS stream's keepalive.
 our %WS_DISCONNECT_OBJECT_REASON;
+our %WS_DISCONNECT_OBJECT_DETAIL;
 
 sub make_keepalive_router_app {
     my (%path_events) = @_;
@@ -396,6 +397,7 @@ sub make_keepalive_router_app {
                 # construction -- reading it here proves that, not just
                 # trusts it.
                 $WS_DISCONNECT_OBJECT_REASON{$scope->{path}} = $c->disconnect_reason;
+                $WS_DISCONNECT_OBJECT_DETAIL{$scope->{path}} = $c->disconnect_detail;
                 last;
             }
         }
@@ -605,6 +607,10 @@ subtest 'withheld pong times out exactly one disconnect; sibling GET still serve
 
     is($WS_DISCONNECT_OBJECT_REASON{'/ws'}, 'keepalive_timeout',
         'pagi.connection agrees with the event: keepalive_timeout, read at the moment the app received it');
+    # The token says what happened; disconnect_detail says which timeout
+    # it was (Www.pod: disconnect_detail supplements the standard reason).
+    like($WS_DISCONNECT_OBJECT_DETAIL{'/ws'}, qr/^no pong within \d+(\.\d+)?s$/,
+        'disconnect_detail names the keepalive timeout that fired');
 
     my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
     is(scalar(@errors), 0,
@@ -1174,8 +1180,10 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 # than through the primary enqueue+dedup path the subtests above already
 # cover. The fallback must report whatever server_close_reason a
 # server-initiated per-stream teardown recorded, as long as the stream's
-# own state (its h2_streams entry) is still reachable, defaulting to ''
-# when it is not.
+# own state (its h2_streams entry) is still reachable, defaulting to the
+# 'client_closed' token when it is not (Www.pod "Disconnect - receive
+# event": an abnormal drop with no close handshake pairs 1006 with the
+# standard token for the condition, never with an empty reason).
 subtest 'receive() fallback after connection close reports the recorded server_close_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
@@ -1193,7 +1201,7 @@ subtest 'receive() fallback after connection close reports the recorded server_c
         "fallback reason is the recorded token, not ''");
 };
 
-subtest 'receive() fallback with no reachable stream state still falls back to empty reason' => sub {
+subtest 'receive() fallback with no reachable stream state reports client_closed' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
         protocol => $protocol,
@@ -1205,7 +1213,8 @@ subtest 'receive() fallback with no reachable stream state still falls back to e
     my $event = $receive->()->get;
 
     is($event->{code}, 1006, 'fallback code is still 1006');
-    is($event->{reason}, '', "fallback reason is '' when no stream state is reachable");
+    is($event->{reason}, 'client_closed',
+        "fallback reason is 'client_closed' when no stream state is reachable");
 };
 
 # ============================================================
