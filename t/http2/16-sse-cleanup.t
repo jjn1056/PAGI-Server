@@ -517,6 +517,7 @@ subtest 'max_body_size 413 with SSE app parked on receive() before any send: no 
 subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
     my $sse_started = 0;
     my $disconnect_event;
+    my $object_reason;
     my @log_events;
 
     my $app = async sub {
@@ -530,14 +531,17 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
         # ends this stream.
         my $event = await $receive->();
         $disconnect_event = $event;
+        $object_reason = $scope->{'pagi.connection'}->disconnect_reason;
     };
 
-    # The idle timeout ends the stream with no sse.close (a bare abnormal
-    # end, clean END_STREAM but no WS-style closing handshake to mark) --
-    # the app still receives sse.disconnect and returns, but the dispatch
-    # wrapper's D12 check (keyed on sse_clean_end, which only sse.close
-    # sets) does not recognize that as a clean transport-level end and
-    # logs accordingly. Documented here rather than silenced.
+    # The idle timer records its own token (server_close_reason=idle_timeout)
+    # BEFORE it ends the stream with a clean END_STREAM, so _h2_on_close's
+    # zero-error-code arm attributes both the queued sse.disconnect event and
+    # the connection_state object to 'idle_timeout' -- and, because the
+    # object then disagrees with $client_gone's 'server_error' exclusion,
+    # the dispatch wrapper's D12 incomplete-response arm never runs for this
+    # stream: no RST_STREAM into a stream _h2_on_close already closed, and no
+    # error log blaming the application for a teardown the server initiated.
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
         app              => $app,
         sse_idle_timeout => 0.3,
@@ -575,10 +579,12 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
     is($disconnect_event->{reason}, 'idle_timeout',
         "Reason is 'idle_timeout', not misattributed to 'client_closed'")
         if $disconnect_event;
+    is($object_reason, 'idle_timeout',
+        'pagi.connection agrees with the event: idle_timeout, not server_error');
 
     my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
-    is(scalar(@errors), 1,
-        'one error log line for the bare (no sse.close) idle-timeout drop');
+    is(scalar(@errors), 0,
+        'no error log line: the idle timer is a server-initiated close, not an incomplete response');
 
     $stream_io->close_now;
     $loop->remove($server);

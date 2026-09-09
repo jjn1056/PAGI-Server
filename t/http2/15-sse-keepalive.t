@@ -402,6 +402,7 @@ my $active_done = 0;   # flips true once the '/active' app coroutine returns
 subtest 'per-stream SSE idle timeout: an idle stream closes without killing an active sibling' => sub {
     $active_done = 0;
     my @log_events;
+    my $idle_object_reason;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'sse';
@@ -416,6 +417,7 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
             # background delay that would outlive the test's own teardown
             # and get abandoned.
             await $receive->();
+            $idle_object_reason = $scope->{'pagi.connection'}->disconnect_reason;
         }
         elsif ($scope->{path} eq '/active') {
             # First send immediately (no delay), so this stream already has
@@ -438,11 +440,13 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
     };
 
     # The idle stream ends via a clean END_STREAM but no sse.close (a bare
-    # abnormal end -- the app still receives sse.disconnect and returns, but
-    # the dispatch wrapper's D12 check, keyed on sse_clean_end, does not
-    # recognize that as a clean transport-level end and logs accordingly).
-    # Documented here rather than silenced -- same class as the analogous
-    # subtest in t/http2/16-sse-cleanup.t.
+    # abnormal end). The idle timer records its own server_close_reason
+    # (idle_timeout) BEFORE driving the close, so _h2_on_close attributes
+    # both the queued sse.disconnect event and the connection_state object
+    # to idle_timeout -- and because the object then disagrees with
+    # $client_gone's 'server_error' exclusion, the dispatch wrapper's D12
+    # incomplete-response check never runs for this stream: no error log,
+    # same class as the analogous subtest in t/http2/16-sse-cleanup.t.
     my $server = create_test_server(app => $app, sse_idle_timeout => 0.3,
         logger => sub { push @log_events, $_[0] });
     my ($conn, $stream_io, $client_sock) =
@@ -504,9 +508,12 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
     }
     ok($active_done, "active stream's app coroutine returned before teardown");
 
+    is($idle_object_reason, 'idle_timeout',
+        'idle stream\'s pagi.connection agrees with the event: idle_timeout, not server_error');
+
     my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
-    is(scalar(@errors), 1,
-        'one error log line for the idle stream\'s bare (no sse.close) idle-timeout drop');
+    is(scalar(@errors), 0,
+        'no error log line: the idle timer is a server-initiated close, not an incomplete response');
 
     $stream_io->close_now;
     $loop->remove($server);

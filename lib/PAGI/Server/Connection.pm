@@ -720,6 +720,13 @@ sub _h2_on_body {
         if ($eof) {
             # END_STREAM with no close handshake (bare END_STREAM): abnormal
             # closure per RFC 6455 (Www.pod "Disconnect - receive event").
+            # Mark BEFORE enqueueing (Www.pod "State Transition Order": the
+            # object's state transitions 1-4 MUST precede step 5, delivering
+            # the event) -- enqueue can wake a parked receive() and resume
+            # the app synchronously, and it must observe the object already
+            # terminal.
+            $stream->{connection_state}->_mark_disconnected('client_closed')
+                if $stream->{connection_state};
             $self->_h2_ws_enqueue_disconnect($stream, 1006, 'client_closed');
         }
         return;
@@ -765,12 +772,14 @@ sub _h2_on_body {
 
             # Unblock a pending receive() instead of leaving it hanging
             # forever: mark the body complete, queue this scope's disconnect
-            # event, drive connection_state (http scopes only -- sse/ws
-            # scopes never attach one, per spec), then wake body_pending.
-            # Order matters: the queued event must land BEFORE the wake so a
-            # parked receive() sees it (both h2 receive closures check the
-            # queue first on resume), and all of this must happen BEFORE the
-            # delete below, after which the stream state is unreachable.
+            # event, drive connection_state (every scope type attaches one,
+            # since B2), then wake body_pending. Order matters: the queued
+            # event must land BEFORE the wake so a parked receive() sees it
+            # (both h2 receive closures check the queue first on resume),
+            # the $cs mark below must land BEFORE the wake too (Www.pod
+            # "State Transition Order": steps 1-4 precede step 5), and all
+            # of this must happen BEFORE the delete below, after which the
+            # stream state is unreachable.
             $stream->{body_complete} = 1;
             if ($stream->{is_sse}) {
                 push @{$stream->{receive_queue}}, {
@@ -902,18 +911,12 @@ sub _h2_on_close {
     # server_close_reason: a server-initiated per-stream teardown (idle
     # timeout, keepalive timeout, ...) records its own token here BEFORE
     # driving the close, so it takes precedence over the generic
-    # 'client_closed' fallback below in the queued disconnect events pushed
-    # further down -- that part is operative today, since WebSocket
+    # 'client_closed' / 'server_error' fallbacks below -- in both the
+    # zero-error-code and nonzero-error-code $cs marks (outcomes 2 and 3),
+    # and in the queued disconnect events pushed further down. WebSocket
     # keepalive timeout and SSE idle timeout are exactly the writers of this
-    # token and both stream types push a queued disconnect. The
-    # nonzero-error-code $cs mark below also consults $reason, but that arm
-    # is a forward guard, not yet operative: WebSocket/SSE streams (this
-    # token's only current writers) never attach a connection_state, so no
-    # $cs-bearing stream sets server_close_reason today -- this exists for
-    # when a server-initiated per-stream teardown reaches a stream that does
-    # carry one. The zero-error-code arms above are untouched either way:
-    # they distinguish a clean completion from an incomplete response, not
-    # a server-initiated abnormal close, so they never consult this token.
+    # token, and both stream types attach a connection_state (since B2), so
+    # the $cs mark and the queued event agree on the same reason.
     my $reason = $stream->{server_close_reason};
     my $detail = $stream->{server_close_detail};
     if (my $cs = $stream->{connection_state}) {
@@ -923,7 +926,7 @@ sub _h2_on_close {
         if ($clean && !$error_code) {
             $cs->_mark_complete;
         } elsif (!$error_code) {
-            $cs->_mark_disconnected('server_error');
+            $cs->_mark_disconnected($reason // 'server_error', $detail);
         } else {
             $cs->_mark_disconnected($reason // 'client_closed',
                 $detail // sprintf('RST_STREAM error code %d', $error_code));
@@ -2925,6 +2928,12 @@ sub _h2_process_ws_frames {
             if (grep { $_ } @$rsv) {
                 $self->_h2_ws_close($stream_id, 1002, 'RSV bits must be 0');
                 # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                # object's state transitions 1-4 MUST precede step 5, delivering the
+                # event -- enqueue can wake a parked receive() and resume the app
+                # synchronously, and it must observe the object already terminal.
+                $stream->{connection_state}->_mark_disconnected('protocol_error')
+                    if $stream->{connection_state};
                 $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
                 return;
             }
@@ -2935,6 +2944,12 @@ sub _h2_process_ws_frames {
         if (($opcode >= 3 && $opcode <= 7) || ($opcode >= 11 && $opcode <= 15)) {
             $self->_h2_ws_close($stream_id, 1002, 'Reserved opcode');
             # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+            # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+            # object's state transitions 1-4 MUST precede step 5, delivering the
+            # event -- enqueue can wake a parked receive() and resume the app
+            # synchronously, and it must observe the object already terminal.
+            $stream->{connection_state}->_mark_disconnected('protocol_error')
+                if $stream->{connection_state};
             $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
             return;
         }
@@ -2944,6 +2959,12 @@ sub _h2_process_ws_frames {
         if (($opcode == 8 || $opcode == 9 || $opcode == 10) && length($bytes) > 125) {
             $self->_h2_ws_close($stream_id, 1002, 'Control frame too large');
             # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+            # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+            # object's state transitions 1-4 MUST precede step 5, delivering the
+            # event -- enqueue can wake a parked receive() and resume the app
+            # synchronously, and it must observe the object already terminal.
+            $stream->{connection_state}->_mark_disconnected('protocol_error')
+                if $stream->{connection_state};
             $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
             return;
         }
@@ -2954,6 +2975,12 @@ sub _h2_process_ws_frames {
             unless (defined $text) {
                 $self->_h2_ws_close($stream_id, 1007, 'Invalid UTF-8');
                 # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                # object's state transitions 1-4 MUST precede step 5, delivering the
+                # event -- enqueue can wake a parked receive() and resume the app
+                # synchronously, and it must observe the object already terminal.
+                $stream->{connection_state}->_mark_disconnected('protocol_error')
+                    if $stream->{connection_state};
                 $self->_h2_ws_enqueue_disconnect($stream, 1007, 'protocol_error');
                 return;
             }
@@ -2961,6 +2988,12 @@ sub _h2_process_ws_frames {
             # and pairing h1 enforces (Www.pod pins 1008 <-> queue_overflow).
             if (@{$stream->{receive_queue}} >= $self->{max_receive_queue}) {
                 $self->_h2_ws_close($stream_id, 1008, 'Message queue overflow');
+                # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                # object's state transitions 1-4 MUST precede step 5, delivering the
+                # event -- enqueue can wake a parked receive() and resume the app
+                # synchronously, and it must observe the object already terminal.
+                $stream->{connection_state}->_mark_disconnected('queue_overflow')
+                    if $stream->{connection_state};
                 $self->_h2_ws_enqueue_disconnect($stream, 1008, 'queue_overflow');
                 return;
             }
@@ -2975,6 +3008,12 @@ sub _h2_process_ws_frames {
             # and pairing h1 enforces (Www.pod pins 1008 <-> queue_overflow).
             if (@{$stream->{receive_queue}} >= $self->{max_receive_queue}) {
                 $self->_h2_ws_close($stream_id, 1008, 'Message queue overflow');
+                # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                # object's state transitions 1-4 MUST precede step 5, delivering the
+                # event -- enqueue can wake a parked receive() and resume the app
+                # synchronously, and it must observe the object already terminal.
+                $stream->{connection_state}->_mark_disconnected('queue_overflow')
+                    if $stream->{connection_state};
                 $self->_h2_ws_enqueue_disconnect($stream, 1008, 'queue_overflow');
                 return;
             }
@@ -2995,6 +3034,12 @@ sub _h2_process_ws_frames {
             if (length($bytes) == 1) {
                 $self->_h2_ws_close($stream_id, 1002, 'Invalid close frame');
                 # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                # object's state transitions 1-4 MUST precede step 5, delivering the
+                # event -- enqueue can wake a parked receive() and resume the app
+                # synchronously, and it must observe the object already terminal.
+                $stream->{connection_state}->_mark_disconnected('protocol_error')
+                    if $stream->{connection_state};
                 $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
                 return;
             }
@@ -3017,6 +3062,12 @@ sub _h2_process_ws_frames {
                 unless ($valid_code) {
                     $self->_h2_ws_close($stream_id, 1002, 'Invalid close code');
                     # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                    # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                    # object's state transitions 1-4 MUST precede step 5, delivering the
+                    # event -- enqueue can wake a parked receive() and resume the app
+                    # synchronously, and it must observe the object already terminal.
+                    $stream->{connection_state}->_mark_disconnected('protocol_error')
+                        if $stream->{connection_state};
                     $self->_h2_ws_enqueue_disconnect($stream, 1002, 'protocol_error');
                     return;
                 }
@@ -3028,6 +3079,12 @@ sub _h2_process_ws_frames {
                     unless (defined $decoded) {
                         $self->_h2_ws_close($stream_id, 1007, 'Invalid UTF-8 in close reason');
                         # Server-initiated protocol close (Www.pod: RFC code + 'protocol_error').
+                        # Mark BEFORE enqueueing (Www.pod "State Transition Order"): the
+                        # object's state transitions 1-4 MUST precede step 5, delivering the
+                        # event -- enqueue can wake a parked receive() and resume the app
+                        # synchronously, and it must observe the object already terminal.
+                        $stream->{connection_state}->_mark_disconnected('protocol_error')
+                            if $stream->{connection_state};
                         $self->_h2_ws_enqueue_disconnect($stream, 1007, 'protocol_error');
                         return;
                     }
@@ -3218,10 +3275,19 @@ sub _h2_start_ws_pong_timeout {
                 # Record why this stream is ending BEFORE the teardown: this
                 # is a server-initiated close, not the client going away, and
                 # _h2_on_close prefers this token over its hardcoded fallback
-                # for the $cs marking (the queued disconnect event below is
-                # already correct via the first-wins dedup, but the $cs mark
-                # only happens in _h2_on_close, downstream of this RST).
+                # for the $cs marking, should _h2_on_close still be the one
+                # to apply it (it's idempotent, so it's a no-op once the
+                # explicit mark below has already run).
                 $weak_ss->{server_close_reason} = 'keepalive_timeout';
+
+                # Mark the object BEFORE enqueueing (Www.pod "State
+                # Transition Order": steps 1-4 MUST precede step 5,
+                # delivering the event). The enqueue below wakes a parked
+                # receive() and can resume the app synchronously; it must
+                # observe the object already terminal, not learn the reason
+                # only later when _h2_on_close eventually runs.
+                $weak_ss->{connection_state}->_mark_disconnected('keepalive_timeout')
+                    if $weak_ss->{connection_state};
 
                 # RFC 6455 section 7.4.1: 1006 MUST NOT be set as the status
                 # code of a Close control frame -- it means "the connection
