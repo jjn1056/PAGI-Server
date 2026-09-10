@@ -1023,8 +1023,14 @@ sub _h2_on_close {
         if ($clean && !$error_code) {
             $cs->_mark_complete;
         } elsif (!$error_code) {
-            $cs->_mark_disconnected($reason // 'server_error',
-                $detail // 'stream ended before the response completed');
+            # Record the token on the stream before marking, so the events
+            # queued below (through _h2_scope_reason) carry the same reason
+            # as the object (spec: Agreement with disconnect events). An
+            # earlier server-decided token (idle timeout, abort) still wins.
+            $stream->{server_close_reason} //= 'server_error';
+            $stream->{server_close_detail} //= 'stream ended before the response completed';
+            $cs->_mark_disconnected($stream->{server_close_reason},
+                $stream->{server_close_detail});
         } else {
             $cs->_mark_disconnected($self->_h2_scope_reason($stream),
                 $detail // sprintf('RST_STREAM error code %d', $error_code));
