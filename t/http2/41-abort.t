@@ -359,4 +359,78 @@ subtest 'sse stream: abort resets with CANCEL instead of ending the stream' => s
     $loop->remove($server);
 };
 
+# ============================================================
+# 4. abort after a completed response
+# ============================================================
+# "abort after either terminal outcome is a no-op that preserves that
+# outcome." t/72 pins this for HTTP/1.1; this is its HTTP/2 twin. The clean
+# end is marked when the application returns, so the test holds the object and
+# aborts from outside, after the response is complete -- and a sibling stream
+# on the same connection proves the late abort reached nothing else either.
+
+subtest 'abort after a completed response is a no-op that preserves the completion' => sub {
+    my (%r, @log);
+    my $sib_gate = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $c     = $scope->{'pagi.connection'};
+        my $which = $scope->{path} eq '/done' ? 'done' : 'sib';
+        $r{"${which}_conn"} = $c;
+        $c->on_disconnect(sub { push @{$r{"${which}_disc"}}, [@_] });
+        $c->on_complete(sub { $r{"${which}_complete"}++ });
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type', 'text/plain']] });
+        if ($which eq 'done') {
+            await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+            $r{done_returned} = 1;
+            return;
+        }
+        await $send->({ type => 'http.response.body', body => 'sib-1', more => 1 });
+        $r{sib_started} = 1;
+        await $sib_gate;
+        await $send->({ type => 'http.response.body', body => 'sib-2', more => 0 });
+        $r{sib_done} = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server)
+        = create_h2_connection(app => $app, logger => sub { push @log, $_[0] });
+    my (%data, %closed);
+    my $client = create_client(
+        on_data_chunk_recv => sub { my ($sid, $d) = @_; $data{$sid} .= $d; 0 },
+        on_stream_close    => sub { my ($sid, $c) = @_; $closed{$sid} = $c; 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    my $dsid = submit_http($client, '/done');
+    my $ssid = submit_http($client, '/sibling');
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 25);
+
+    ok($r{done_returned} && $r{sib_started}, 'one stream completed, the other is mid-body');
+    is($r{done_conn}->response_complete, 1, 'the finished scope ended cleanly');
+    is($closed{$dsid}, 0, 'its stream ended with END_STREAM');
+
+    $r{done_conn}->abort('too late');
+    exchange_frames($client, $client_sock, 20);
+
+    is($r{done_conn}->response_complete, 1, 'response_complete is still true after the abort');
+    is($r{done_conn}->disconnect_reason, undef, 'no disconnect reason was recorded');
+    is($r{done_complete}, 1, 'on_complete had fired, exactly once');
+    is($r{done_disc}, undef, 'on_disconnect never fired');
+    is($closed{$dsid}, 0, 'the stream still reports its clean END_STREAM, not a CANCEL');
+    is($closed{$ssid}, undef, 'the sibling stream was untouched by the late abort');
+    is($r{sib_conn}->is_connected, 1, 'the sibling scope is still connected');
+
+    $sib_gate->done;
+    exchange_frames($client, $client_sock, 20);
+    ok($r{sib_done}, 'the sibling ran to completion after the late abort');
+    is($data{$ssid}, 'sib-1sib-2', 'and delivered its whole body');
+    is($closed{$ssid}, 0, 'the sibling stream ended with END_STREAM, not a reset');
+    is($r{sib_conn}->response_complete, 1, 'the sibling scope ended cleanly');
+    is(errors_in(\@log), [], 'nothing was logged');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

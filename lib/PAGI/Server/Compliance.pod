@@ -195,6 +195,24 @@ incomplete response and takes the same path any abandoned HTTP response takes:
 C<server_error>, no synthesized terminal framing, the connection closed on
 HTTP/1.1 and the stream reset on HTTP/2.
 
+B<What a completed refusal retains: nothing of its own.> Once the refusal's
+terminal body or trailers event has gone out and the application has returned,
+the application coroutine is collected, a C<receive()> Future the application
+left parked is collected with it, and the scope hash is released -- on both
+transports. There is no watcher, timer or queued event left behind for a scope
+that ended cleanly.
+
+The one thing that does keep a scope alive is the application itself. An
+application suspended on a Future nobody will ever resolve has not returned, so
+its coroutine is still live, and through it so is its scope -- and dropping the
+connection does not free either, because the retention is the application's,
+not the server's. That is the case L<PAGI::Spec::Www> describes under "The
+Problem", and it is documented here rather than worked around: a server cannot
+distinguish an application waiting on a slow backend from one waiting forever.
+The consequence for a framework is the parked C<receive()> above: after a
+completed refusal it never resolves, so a "drain until disconnect" receive loop
+must terminate on C<on_complete> / C<response_complete> instead.
+
 Internally, the send-sequence states a refusal passes through are named
 C<refusing> and C<refusal_complete> on both the websocket and the sse state
 machine. Refusals are covered end to end by C<t/71-http-refusal-on-protocol-scopes.t>
@@ -527,11 +545,18 @@ with C<RST_STREAM> (C<CANCEL>). See L</"Aborting a Scope">.
 
 =item * B<The application abandoned an accepted socket> -- it returned
 without sending C<websocket.close> and without a closing handshake having
-completed. That is an incomplete response, not a clean end. The connection
-object reports C<server_error>, the server logs one error line naming the
-condition, and the stream is reset with C<RST_STREAM> rather than closed with
-a Close frame; the C<1011> Close frame described for HTTP/1.1 below is that
-transport's form of the same rule.
+completed. That is an incomplete response, not a clean end. The server sends
+a Close frame with code C<1011> and then ends the stream (the Close frame
+rides a C<DATA> frame carrying C<END_STREAM>, exactly as the application's
+own C<websocket.close> does), the connection object reports C<server_error>,
+and one error line names the condition. C<code> is C<1011> and C<reason> is
+C<server_error> -- the same wire form and the same tokens HTTP/1.1 produces
+for this case, because L<PAGI::Spec::Www/"Application Left a Response
+Incomplete"> names one rule for both transports: the Close frame is the
+WebSocket analog of C<RST_STREAM> C<INTERNAL_ERROR>, so an accepted socket
+gets the frame rather than the reset. A refusal abandoned before its terminal
+body B<is> reset with C<RST_STREAM>: no socket was ever accepted, so it is an
+ordinary incomplete HTTP/2 response.
 
 =back
 
@@ -680,10 +705,18 @@ application left incomplete is C<server_error>.
 On HTTP/2 each stream carries its own C<pagi.connection>, tracked
 independently of every other stream multiplexed on the same connection: one
 stream completing does not affect another still in flight. A stream reaches
-its terminal state exactly once, when the stream closes -- a response whose
-terminal event completed with no HTTP/2 error code on the stream is a clean
-completion; an early close or a nonzero error code is an abnormal disconnect
-(reason C<client_closed>). A whole-connection teardown (server shutdown,
+its terminal state exactly once, and not always when the stream closes: an
+end the server decides is recorded the moment it is decided, which for a
+scope the application left incomplete or never answered is when the
+application returns, before the Close frame or C<RST_STREAM> goes out. When
+the stream close is what settles it, a response whose terminal event
+completed with no HTTP/2 error code is a clean completion; a nonzero error
+code is an abnormal disconnect with reason C<client_closed>, since only the
+peer resets a stream this server has not already accounted for; and an early
+close carrying no error code is the server's own doing, so it reports
+C<server_error> rather than blaming the client. Whichever path settles it,
+the reason the object carries and the reason in the scope's disconnect event
+are the same token. A whole-connection teardown (server shutdown,
 socket error) sweeps every still-open stream's connection state with the
 connection-level disconnect reason, so a stream mid-response when the
 connection dies still reports why.

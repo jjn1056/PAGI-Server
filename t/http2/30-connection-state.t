@@ -721,6 +721,15 @@ subtest 'h2: sse abandoned after sse.start with no sse.close is an incomplete re
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'one' });
         await $send->({ type => 'sse.send', data => 'two' });
+        # Parked, deliberately not awaited: it is still outstanding when the
+        # app returns, which is how the scope's disconnect event is observed
+        # on a path the application walked away from. Www.pod "Meaning per
+        # scope", Agreement with disconnect events, makes it a MUST that the
+        # event's reason and the object's disconnect_reason are the same
+        # token. Held in %r because nothing else holds it once the app
+        # returns.
+        $r{parked} = $receive->();
+        $r{parked}->on_done(sub { $r{event} = $_[0] });
         $r{returned} = 1;
         return;   # no sse.close -- incomplete response (D12)
     };
@@ -755,6 +764,13 @@ subtest 'h2: sse abandoned after sse.start with no sse.close is an incomplete re
     is($r{complete}, undef, 'on_complete did NOT fire');
     ok(defined $r{disc}, 'on_disconnect fired');
     is($r{disc}[0], 'server_error', 'on_disconnect reason is server_error');
+
+    ok($r{event}, 'the parked receive resolved with the scope disconnect event');
+    is($r{event}{type}, 'sse.disconnect', 'it is an sse.disconnect') if $r{event};
+    is($r{event}{reason}, 'server_error', 'the event reason is server_error') if $r{event};
+    is($r{event}{reason}, $r{cs}->disconnect_reason,
+        'the event reason and the object disconnect_reason are the same token')
+        if $r{event};
 
     my @errors = grep { ($_->{level} // '') eq 'error' } @events;
     is(scalar(@errors), 1, 'exactly one error log line');

@@ -1002,7 +1002,17 @@ sub _h2_on_close {
     # and in the queued disconnect events pushed further down. WebSocket
     # keepalive timeout and SSE idle timeout are exactly the writers of this
     # token, and both stream types attach a connection_state (since B2), so
-    # the $cs mark and the queued event agree on the same reason.
+    # the $cs mark and the queued event agree on the same reason. The
+    # dispatch wrapper's own server-decided ends (no response started, a
+    # scope left incomplete) write it too, for the same reason.
+    #
+    # Every site below that needs "what token is this scope ending with"
+    # asks _h2_scope_reason rather than spelling the fallback chain out
+    # again: it is the one answer to that question, and it adds the
+    # connection-level _disconnect_reason term that a per-stream field
+    # cannot carry. The zero-error-code $cs mark is the one exception --
+    # an early end with no h2 error code is the server's own doing, so its
+    # fallback is 'server_error', not 'client_closed'.
     my $reason = $stream->{server_close_reason};
     my $detail = $stream->{server_close_detail};
     if (my $cs = $stream->{connection_state}) {
@@ -1016,7 +1026,7 @@ sub _h2_on_close {
             $cs->_mark_disconnected($reason // 'server_error',
                 $detail // 'stream ended before the response completed');
         } else {
-            $cs->_mark_disconnected($reason // 'client_closed',
+            $cs->_mark_disconnected($self->_h2_scope_reason($stream),
                 $detail // sprintf('RST_STREAM error code %d', $error_code));
         }
     }
@@ -1031,12 +1041,12 @@ sub _h2_on_close {
         # Close without a WebSocket close handshake (RST_STREAM, timeout, ...):
         # abnormal closure per RFC 6455. Deduped -- a no-op if the close-frame
         # or bare-END_STREAM path already delivered the scope's one disconnect.
-        $self->_h2_ws_enqueue_disconnect($stream, 1006, $reason // 'client_closed')
+        $self->_h2_ws_enqueue_disconnect($stream, 1006, $self->_h2_scope_reason($stream))
             unless _h2_refusal_complete($stream);
     } elsif ($stream->{is_sse}) {
         push @{$stream->{receive_queue}}, {
             type   => 'sse.disconnect',
-            reason => $reason // 'client_closed',
+            reason => $self->_h2_scope_reason($stream),
         } unless _h2_refusal_complete($stream);
     } else {
         push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
@@ -1180,9 +1190,21 @@ sub _h2_dispatch_stream {
                 # it started FIRST: _mark_disconnected fires on_disconnect
                 # callbacks synchronously, and they must observe
                 # response_started true.
+                #
+                # Name the reason on the stream state first, the way every
+                # other server-decided per-stream end does (keepalive
+                # timeout, sse idle timeout, protocol close, abort). This is
+                # the fact _h2_on_close and both receive fallbacks read
+                # through _h2_scope_reason when they synthesize this scope's
+                # disconnect event; without it they fall back to
+                # 'client_closed' and the event contradicts the object, which
+                # Www.pod "Agreement with disconnect events" forbids.
+                my $no_response_detail = $error ? _detail_from_error($error)
+                                               : 'no response was started';
+                $stream_state->{server_close_reason} //= 'server_error';
+                $stream_state->{server_close_detail} //= $no_response_detail;
                 $cs->_mark_response_started if $cs;
-                $cs->_mark_disconnected('server_error',
-                    $error ? _detail_from_error($error) : 'no response was started') if $cs;
+                $cs->_mark_disconnected('server_error', $no_response_detail) if $cs;
                 eval {
                     $weak_self->{h2_session}->submit_response($stream_id,
                         status  => 500,
@@ -1220,21 +1242,69 @@ sub _h2_dispatch_stream {
                 if ($started && !$clean) {
                     # Started but never ended cleanly: an incomplete response
                     # (Www.pod "Application Left a Response Incomplete").
-                    # Mark and log regardless; only reach into nghttp2 (RST)
-                    # if the stream is still live -- $stream_alive is the
-                    # same entry-exists-AND-not-h2_closed fact the sibling
-                    # arms above rely on, and skipping the RST when it is
-                    # false avoids resetting a stream id nghttp2 has already
+                    # Mark and log regardless; only reach into nghttp2 (RST,
+                    # or the Close frame below) if the stream is still live
+                    # -- $stream_alive is the same
+                    # entry-exists-AND-not-h2_closed fact the sibling arms
+                    # above rely on, and skipping the write when it is false
+                    # avoids touching a stream id nghttp2 has already
                     # forgotten (undefined behavior at the C level; observed
                     # as a crash on process exit in practice, not merely
                     # theoretical here).
+                    my $incomplete_detail = $error
+                        ? _detail_from_error($error)
+                        : "started with $verb but never ended cleanly";
                     $self->_log(error => $error
                         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
                         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
-                    $cs->_mark_disconnected('server_error',
-                        $error ? _detail_from_error($error)
-                                : "started with $verb but never ended cleanly") if $cs;
-                    if ($stream_alive) {
+                    # The scope is ending for this server's own reason, so it
+                    # names itself on the stream state BEFORE the mark, the
+                    # way the keepalive, idle-timeout, protocol-close and
+                    # abort paths do. _h2_on_close and both receive fallbacks
+                    # read this through _h2_scope_reason when they synthesize
+                    # the scope's disconnect event; without it they say
+                    # 'client_closed' while this object says 'server_error',
+                    # which Www.pod "Agreement with disconnect events"
+                    # forbids (the event's reason and the object's
+                    # disconnect_reason MUST be the same token).
+                    $stream_state->{server_close_reason} //= 'server_error';
+                    $stream_state->{server_close_detail} //= $incomplete_detail;
+                    $cs->_mark_disconnected('server_error', $incomplete_detail) if $cs;
+
+                    if ($stream_state->{is_websocket} && _ws_handshake_accepted($seq_now)) {
+                        # An accepted socket the application walked away from
+                        # (D13). Www.pod "Application Left a Response
+                        # Incomplete" names one wire form for both
+                        # transports: "On an accepted WebSocket the server
+                        # sends a Close frame with code 1011 ... and then
+                        # closes the transport (the stream, on HTTP/2)". So
+                        # this is the h1 tail's twin, not an RST: _h2_ws_close
+                        # queues the Close frame and sets ws_eof_pending, so
+                        # the data callback puts END_STREAM on that same
+                        # chunk -- exactly what the application's own
+                        # websocket.close does. An RST here would instead tell
+                        # the peer nothing about why the session ended.
+                        #
+                        # A refusal abandoned mid-response is NOT this case
+                        # (no socket was ever accepted, so there is no Close
+                        # frame to send); it falls through to the RST below,
+                        # which is what the spec prescribes for an incomplete
+                        # response on any ordinary HTTP/2 stream.
+                        if ($stream_alive) {
+                            eval {
+                                $weak_self->_h2_ws_close($stream_id, 1011, '', 'server_error');
+                                $weak_self->_h2_write_pending;
+                            };
+                        }
+                        # The scope's one disconnect event, carrying the code
+                        # that just went out on the wire and the token this
+                        # object was marked with. Deduped by
+                        # _h2_ws_enqueue_disconnect, so if _h2_on_close
+                        # already delivered one this is a no-op; queued after
+                        # the mark above, per the State Transition Order.
+                        $self->_h2_ws_enqueue_disconnect($stream_state, 1011, 'server_error');
+                    }
+                    elsif ($stream_alive) {
                         eval {
                             $weak_self->{h2_session}->submit_rst_stream(
                                 $stream_id, _h2_rst_error_code());
