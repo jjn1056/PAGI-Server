@@ -519,4 +519,66 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
     $loop->remove($server);
 };
 
+# ============================================================
+# The idle timer marks the object before it wakes the application
+# ============================================================
+# Www.pod "State Transition Order": the connection object MUST be terminal,
+# with this scope's own token, before the disconnect event resumes a parked
+# receive(). The idle timer therefore records, marks and enqueues in one
+# step rather than leaving the mark to _h2_on_close. The probe below is an
+# await-then-check: everything it reads is read synchronously on the tick
+# that resumed it, so a mark that moved after the wake shows up as an undef
+# reason and an on_disconnect callback that has not run yet.
+subtest 'h2 SSE idle timeout: the object is terminal when the app wakes' => sub {
+    my %probe;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+
+        await $receive->();
+        await $send->({ type => 'sse.start', status => 200 });
+
+        my $conn = $scope->{'pagi.connection'};
+        $probe{callback_fired} = 0;
+        $conn->on_disconnect(sub { $probe{callback_fired} = 1 });
+
+        # Sends nothing further: only the per-stream idle timer can end this
+        # stream, and its sse.disconnect is what resumes this receive().
+        $probe{event}            = await $receive->();
+        $probe{reason_at_wake}   = $conn->disconnect_reason;
+        $probe{detail_at_wake}   = $conn->disconnect_detail;
+        $probe{fired_at_wake}    = $probe{callback_fired};
+        $probe{connected_at_wake} = $conn->is_connected ? 1 : 0;
+        $probe{done}             = 1;
+    };
+
+    my $server = create_test_server(app => $app, sse_idle_timeout => 0.3);
+    my ($conn, $stream_io, $client_sock) =
+        create_h2c_connection(app => $app, server => $server);
+
+    my $stream_id;
+    my $client = create_client;
+    h2c_handshake($client, $client_sock);
+    open_sse_stream_tracked($client, $client_sock, '/idle', \$stream_id);
+
+    # Idle timeout is 0.3s. Ceiling 5s is a >= 16x margin.
+    my $deadline = Time::HiRes::time() + 5;
+    while (Time::HiRes::time() < $deadline && !$probe{done}) {
+        exchange_frames($client, $client_sock, 1);
+    }
+
+    ok($probe{done}, 'the parked receive() was resumed by the idle timeout');
+    is($probe{event}{type}, 'sse.disconnect', 'the event that resumed it is sse.disconnect');
+    is($probe{event}{reason}, 'idle_timeout', 'the event names idle_timeout');
+    is($probe{reason_at_wake}, 'idle_timeout',
+        'disconnect_reason already reads idle_timeout on the tick that resumed the app');
+    is($probe{detail_at_wake}, 'no traffic for 0.3s',
+        'disconnect_detail already carries the idle timer\'s own words');
+    is($probe{connected_at_wake}, 0, 'the object is already terminal at the wake');
+    is($probe{fired_at_wake}, 1, 'on_disconnect had already fired before the app resumed');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

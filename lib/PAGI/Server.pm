@@ -4610,10 +4610,7 @@ async sub _drain_connections {
 
     # Also close long-lived connections (SSE, WebSocket) immediately
     # These never become "idle" so would wait for full timeout otherwise
-    my @longlived = grep {
-        ($_->{scope_kind} // '') eq 'sse'
-            || PAGI::Server::Connection::_ws_handshake_accepted($_->{h1_seq})
-    } values %{$self->{connections}};
+    my @longlived = grep { $_->is_long_lived } values %{$self->{connections}};
     for my $conn (@longlived) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }
