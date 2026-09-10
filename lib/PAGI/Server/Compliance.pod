@@ -24,7 +24,7 @@ management, and 71% WebSocket RFC 6455 compliance.
 
 =item * B<Event Loop>: EV with kqueue (macOS) or epoll (Linux)
 
-=item * B<Test Date>: February 2026
+=item * B<Test Date>: February 2026 (protocol and security suites); September 2026 (PAGI 0.6 conformance suites)
 
 =back
 
@@ -42,7 +42,19 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
+    | PAGI 0.6 conformance      |    72 |     72 |      0 |
     +---------------------------+-------+--------+--------+
+
+The PAGI 0.6 conformance row is the sum of the suites that pin the
+sub-spec's connection-state, refusal, terminal-event and abort rules on
+both transports: C<t/69-connection-state-protocol-scopes.t> (8),
+C<t/70-protocol-disconnect-matrix.t> (22 cells, each asserting event type,
+reason token, terminal-send settlement, and object/event agreement),
+C<t/71-http-refusal-on-protocol-scopes.t> (13), C<t/72-abort.t> (5),
+C<t/73-denial-retention.t> (4), C<t/74-h2-ws-clean-end.t> (5),
+C<t/http2/30-connection-state.t> (9), C<t/http2/41-abort.t> (4) and
+C<t/http2/42-d13-incomplete-session.t> (2). The full recursive suite
+(C<prove -lr t/>) is 151 files and 985 assertions.
 
 =head1 PAGI SPECIFICATION SUPPORT
 
@@ -74,8 +86,8 @@ State (pagi.connection)">).
 stream is refused with an ordinary HTTP response (C<http.response.start> /
 C<.body> / C<.trailers>) sent before C<websocket.accept> or C<sse.start>,
 through the ordinary HTTP response path, on both HTTP/1.1 and HTTP/2. This is
-not an extension and nothing advertises it (see L</"Refusing a Handshake or a
-Stream">).
+not an extension and nothing advertises it (see
+L<PAGI::Spec::Www/"Refusing the handshake"> and L</"PAGI SPECIFICATION RULINGS">).
 
 =item * B<WebSocket over HTTP/2> (RFC 8441 Extended CONNECT), including
 per-stream C<websocket.keepalive> (see L</"WebSocket over HTTP/2 (RFC
@@ -145,115 +157,88 @@ rule removes only C<fullflush>, the one extension WebSocket cannot honor --
 except a key named C<tls>, which the server itself injects on TLS
 connections and removes on non-TLS ones regardless of what was configured.
 
-Refusing a WebSocket handshake or an SSE stream is B<not> an extension under
-sub-spec 0.6, so there is nothing to advertise or detect: no scope, on either
-transport, carries a C<websocket.http.response> or C<sse.http.response> key,
-and an application refuses by sending C<http.response.start> unconditionally.
+Refusing a WebSocket handshake or an SSE stream is not an extension under
+sub-spec 0.6, so no scope carries a C<websocket.http.response> or
+C<sse.http.response> key on either transport.
 
-=head2 Refusing a Handshake or a Stream
+=head1 PAGI SPECIFICATION RULINGS
 
-An application refuses a WebSocket handshake or an SSE stream by sending an
-ordinary HTTP response B<before> C<websocket.accept> or C<sse.start>:
-C<http.response.start>, then C<http.response.body>, and C<http.response.trailers>
-when it declared C<trailers =E<gt> 1>. There are no protocol-prefixed refusal
-events. The refusal travels the C<http> scope's own response path with the
-C<http> scope's own semantics, on both HTTP/1.1 and HTTP/2 -- C<more =E<gt> 1>
-streams the body chunk by chunk rather than buffering it, and a C<file> or
-C<fh> body and trailers are all available. Nothing about a refusal is buffered
-until the application finishes.
+L<PAGI::Spec::Www> 0.6 leaves a small number of behaviours to the server. This
+section records, in one place, how PAGI::Server decides each of them, so that a
+framework or application built on this server knows what it will observe. Each
+ruling names the spec text that leaves it open and the test that pins the
+choice. Nothing here restates a rule the spec already makes; for those, read
+the spec.
 
-C<websocket.accept> and a refusal's C<http.response.start> are the two mutually
-exclusive answers to a handshake. C<websocket.close> is not one of them: sent
-before C<websocket.accept> it is out of sequence and fails the C<$send> Future
-with C<"cannot send 'websocket.close' before websocket.accept">, leaving the
-scope's state unchanged. The bare C<403> the server used to synthesize for that
-case is gone; an application that neither accepts nor refuses reaches the
-no-response backstop below instead.
+=over 4
 
-A WebSocket refusal's status MUST be C<300> or above -- C<101> is the accept and
-C<200> opens the tunnel on HTTP/2, so neither can be a refusal. An
-C<http.response.start> on a websocket scope with a status below C<300> fails the
-send with C<"WebSocket refusal status must be 300 or above (got $status)">. An
-SSE refusal carries B<any> status, C<200> included: an SSE request is an ordinary
-GET, and answering it with a plain C<200 text/html> page instead of an event
-stream is a legitimate response rather than an error.
+=item * B<C<receive()> after a completed refusal parks.>
+L<PAGI::Spec::Www/"Meaning per scope"> says what a C<receive()> call returns
+after a completed refusal is unspecified. PAGI::Server returns a Future that
+never resolves, on both transports, because the scope ended cleanly and there
+is no event left to deliver. A "drain until disconnect" receive loop will
+therefore hang on a refused handshake or stream; a framework must end such a
+scope on C<on_complete> / C<response_complete>. Pinned by the C<post> rows of
+C<t/70-protocol-disconnect-matrix.t> and by C<t/73-denial-retention.t>, which
+also shows that the parked Future, the application coroutine and the scope
+are all released once the application returns.
 
-A B<completed> refusal is a clean end, not a disconnect. C<on_complete> fires,
-C<response_complete> is true, C<disconnect_reason> stays C<undef>, C<on_disconnect>
-never fires, and no C<websocket.disconnect> or C<sse.disconnect> is delivered --
-nothing abnormal happened. A C<receive()> made after the refusal has completed
-therefore parks rather than resolving with a synthesized disconnect: the
-application has already had its answer. On HTTP/1.1 a refusal carries
-C<Connection: close> and the server closes the connection once the response is
-written, because no event stream or socket was ever established for it to keep
-alive; on HTTP/2 the refusal simply ends its own stream and the connection, and
-every other stream on it, is unaffected.
+=item * B<Further C<receive()> calls after the disconnect event re-synthesize
+it.> The spec delivers a scope's disconnect event once. PAGI::Server queues it
+exactly once, and a C<receive()> made after the transport has closed does not
+hang: on a websocket or sse scope it resolves again with a
+C<websocket.disconnect> / C<sse.disconnect> carrying the code and reason the
+closure recorded, and on an http scope with C<http.disconnect>. Pinned by
+C<t/61-pending-io-at-disconnect.t> and C<t/http2/40-pending-io-at-disconnect.t>.
 
-An B<incomplete> refusal -- C<http.response.start> sent but the terminal body or
-trailers event never sent, because the application returned or raised -- is an
-incomplete response and takes the same path any abandoned HTTP response takes:
-C<server_error>, no synthesized terminal framing, the connection closed on
-HTTP/1.1 and the stream reset on HTTP/2.
+=item * B<An accepted WebSocket the application abandoned, on HTTP/2, gets the
+1011 Close frame and then C<END_STREAM>, not a reset.>
+L<PAGI::Spec::Www/"Application Left a Response Incomplete"> says the server
+sends a Close frame with code C<1011> and then closes the transport ("the
+stream, on HTTP/2"). PAGI::Server sends the frame in a C<DATA> frame that
+carries C<END_STREAM>, exactly as the application's own C<websocket.close>
+does, because an C<RST_STREAM> issued after the frame could discard it. A
+refusal abandoned before its terminal body, by contrast, is reset with
+C<RST_STREAM> C<INTERNAL_ERROR>: no socket was accepted, so it is an ordinary
+incomplete HTTP/2 response. Pinned by C<t/http2/42-d13-incomplete-session.t>.
 
-B<What a completed refusal retains: nothing of its own.> Once the refusal's
-terminal body or trailers event has gone out and the application has returned,
-the application coroutine is collected, a C<receive()> Future the application
-left parked is collected with it, and the scope hash is released -- on both
-transports. There is no watcher, timer or queued event left behind for a scope
-that ended cleanly.
+=item * B<No wait for the peer's Close after a server-sent 1011.> The spec
+allows the server to wait "no longer than its ordinary close timeout" for the
+peer's Close. PAGI::Server flushes the frame and ends the transport at once
+on both transports; it does not arm a timer for the peer's reply. Pinned on
+HTTP/1.1 by C<t/69-connection-state-protocol-scopes.t> (the 1011 frame on
+the wire) and on HTTP/2 by C<t/http2/42-d13-incomplete-session.t>.
 
-The one thing that does keep a scope alive is the application itself. An
-application suspended on a Future nobody will ever resolve has not returned, so
-its coroutine is still live, and through it so is its scope -- and dropping the
-connection does not free either, because the retention is the application's,
-not the server's. That is the case L<PAGI::Spec::Www> describes under "The
-Problem", and it is documented here rather than worked around: a server cannot
-distinguish an application waiting on a slow backend from one waiting forever.
-The consequence for a framework is the parked C<receive()> above: after a
-completed refusal it never resolves, so a "drain until disconnect" receive loop
-must terminate on C<on_complete> / C<response_complete> instead.
+=item * B<C<RST_STREAM> error codes.> Where the spec says "e.g.", PAGI::Server
+uses C<CANCEL> for an C<abort> (the application is no longer interested in
+the stream) and C<INTERNAL_ERROR> for an incomplete or unanswered response.
+Pinned by C<t/http2/41-abort.t> and C<t/http2/24-incomplete-response.t>.
 
-Internally, the send-sequence states a refusal passes through are named
-C<refusing> and C<refusal_complete> on both the websocket and the sse state
-machine. Refusals are covered end to end by C<t/71-http-refusal-on-protocol-scopes.t>
-on both transports, and their retention behaviour by C<t/73-denial-retention.t>.
+=item * B<C<disconnect_detail> contents.> The spec makes the detail a SHOULD
+with an unspecified format. PAGI::Server supplies one on every server-detected
+abnormal end: the violated rule for C<protocol_error>, the queue limit for
+C<queue_overflow>, the elapsed interval for C<keepalive_timeout> and
+C<idle_timeout>, the byte limit for C<body_too_large>, the OS error text for
+C<read_error> and C<write_error>, the C<RST_STREAM> error code for an HTTP/2
+C<client_closed>, the application's exception message or a one-line
+description for C<server_error>, and the application's own string for
+C<app_abort>. Pinned across C<t/69>, C<t/71>, C<t/72> and C<t/http2/31>.
 
-=head2 Aborting a Scope
+=item * B<Error logging.> The spec says the server SHOULD log an incomplete
+response or a missing response at error level. PAGI::Server logs exactly one
+line per such scope, names the condition and the transport, and logs nothing
+when the client had already disconnected or the application ended the scope
+with C<abort>. Every conformance suite above asserts the exact count of such
+lines, so an unasserted line is a test failure.
 
-C<< $scope->{'pagi.connection'}->abort($detail) >> asks the server to end the
-scope's transport now. It is available on every scope type on both transports,
-returns immediately, and is B<not> awaitable: it does not wait for an in-flight
-write to drain. On HTTP/1.1 the transport is closed outright rather than after
-the write queue empties, so a peer that has stopped reading cannot hold the
-connection open. On HTTP/2 the scope's own stream is reset with C<RST_STREAM>
-(error code C<CANCEL>); every other stream multiplexed on that connection is
-unaffected.
+=item * B<Access log for an aborted handshake.> An C<abort> before
+C<websocket.accept> or C<sse.start> produces no HTTP status, and the access
+log records the status field as C<->. Observed in C<t/72-abort.t> row 1.
 
-An abort produces no HTTP response of its own. Before C<websocket.accept> or
-C<sse.start> the client observes a failed connection, not a status. On an
-accepted socket no Close frame is sent, and on a started SSE stream no
-end-of-stream marker is written -- an abort is an abnormal end, and synthesizing
-terminal framing the application never sent would misreport it as a clean one.
+=back
 
-The application observes the ordinary abnormal-end sequence with the token
-C<app_abort> and C<$detail> as C<disconnect_detail>: C<on_disconnect> fires once
-with C<('app_abort', $detail)>, C<on_complete> never fires, a pending
-C<receive()> resolves with the scope's disconnect event
-(C<websocket.disconnect> with code C<1006>, or C<sse.disconnect>, reason
-C<app_abort>), and sends issued after the abort resolve as post-close no-ops
-rather than failing. The server logs no incomplete-response or no-response error
-for an aborted scope, and a second C<abort> after either terminal outcome is a
-no-op. Coverage is C<t/72-abort.t> (HTTP/1.1) and C<t/http2/41-abort.t> (HTTP/2).
-
-=head2 Application Produced No Response
-
-An application that returns from a websocket scope without accepting or refusing,
-or from an sse scope without starting a stream or refusing, has produced no
-response at all. On both transports the server logs one error line naming the
-condition and synthesizes the C<500> backstop if the client is still connected;
-if the client had already disconnected there is nothing new to report and no
-line is logged. An aborted scope is never logged this way -- the application
-did answer, by ending the transport.
+Behaviours the spec fixes are not listed here; the relevant sections below
+say what this server does and which test proves it, and the spec says why.
 
 =head1 HTTP/1.1 COMPLIANCE
 
@@ -541,22 +526,15 @@ C<reason> is C<queue_overflow>.
 =item * B<The application aborted the scope.> C<code> is C<1006> and
 C<reason> is C<app_abort>; C<disconnect_detail> carries the string the
 application passed to C<abort>. No Close frame is sent -- the stream is reset
-with C<RST_STREAM> (C<CANCEL>). See L</"Aborting a Scope">.
+with C<RST_STREAM> (C<CANCEL>). See L</"Connection State (pagi.connection)">.
 
 =item * B<The application abandoned an accepted socket> -- it returned
 without sending C<websocket.close> and without a closing handshake having
-completed. That is an incomplete response, not a clean end. The server sends
-a Close frame with code C<1011> and then ends the stream (the Close frame
-rides a C<DATA> frame carrying C<END_STREAM>, exactly as the application's
-own C<websocket.close> does), the connection object reports C<server_error>,
+completed. The server sends a Close frame with code C<1011> in a C<DATA>
+frame carrying C<END_STREAM>, the connection object reports C<server_error>,
 and one error line names the condition. C<code> is C<1011> and C<reason> is
-C<server_error> -- the same wire form and the same tokens HTTP/1.1 produces
-for this case, because L<PAGI::Spec::Www/"Application Left a Response
-Incomplete"> names one rule for both transports: the Close frame is the
-WebSocket analog of C<RST_STREAM> C<INTERNAL_ERROR>, so an accepted socket
-gets the frame rather than the reset. A refusal abandoned before its terminal
-body B<is> reset with C<RST_STREAM>: no socket was ever accepted, so it is an
-ordinary incomplete HTTP/2 response.
+C<server_error>, as on HTTP/1.1 (see L</"PAGI SPECIFICATION RULINGS"> for the
+frame-then-C<END_STREAM> choice).
 
 =back
 
@@ -566,7 +544,8 @@ was still deciding. It is never an C<http.disconnect>: the scope's type
 decides the event's type, not how far the handshake got.
 
 A B<completed refusal> delivers no disconnect event at all, on this transport
-or on HTTP/1.1: it is a clean end (see L</"Refusing a Handshake or a Stream">).
+or on HTTP/1.1: it is a clean end, and a C<receive()> after it parks (see
+L</"PAGI SPECIFICATION RULINGS">).
 
 "Exactly one" above is a property of the receive queue, not a hard cap on
 what any number of C<receive()> calls can ever return. Once the stream's
@@ -669,57 +648,40 @@ in the first place (see "HTTP/2 Trailers" above).
 =head2 Connection State (pagi.connection)
 
 PAGI exposes connection-lifecycle introspection to applications through the
-C<pagi.connection> scope key (see L<PAGI::Spec::Www/"Connection State">):
-C<is_connected>, C<disconnect_reason>, C<disconnect_detail>, C<on_disconnect>
-(fires on an abnormal end only, with C<($reason, $detail)>), C<on_complete>
-(fires on a clean end only), C<disconnect_future>, C<response_started>,
-C<response_complete>, and C<abort>. Exactly one of C<on_disconnect> /
-C<on_complete> fires per scope; a scope ends in one of two terminal states,
-B<completed> (clean) or B<disconnected> (abnormal), never both.
-
-The object is present on B<every> scope -- C<http>, C<websocket> and C<sse> --
-on both HTTP/1.1 and HTTP/2, and every accessor is implemented on all three.
-The protocol scopes keep their own disconnect events as well; the object and
-the event always agree on the reason, and the object is marked before the
-event is delivered, so an application woken by its C<receive()> reads the
-final state rather than a transitional one. Coverage:
-C<t/69-connection-state-protocol-scopes.t> for the interface and the HTTP/1.1
-endings, C<t/70-protocol-disconnect-matrix.t> for the full scope-by-ending
-matrix on both transports.
-
-C<abort($detail)> ends the scope's transport immediately with the reason
-C<app_abort>; see L</"Aborting a Scope">, with coverage in C<t/72-abort.t> and
-C<t/http2/41-abort.t>.
-
-C<disconnect_reason> is one of the standard tokens of
-L<PAGI::Spec::Www/"Standard Disconnect Reasons">, and the pairings this server
-produces are normative: a bare transport drop with no closing handshake is
-C<client_closed> (never an empty reason) and, on a websocket scope, code
-C<1006>; a peer Close frame passes the peer's own code and text through
-unchanged; a keepalive pong timeout is C<1006> / C<keepalive_timeout>; a
-server-detected framing or protocol violation is C<1002> (or C<1007> for
-invalid UTF-8) / C<protocol_error>; a receive-queue overflow is C<1008> /
-C<queue_overflow>; an C<abort> is C<1006> / C<app_abort>; and a response the
-application left incomplete is C<server_error>.
+C<pagi.connection> scope key (see L<PAGI::Spec::Www/"Connection State">).
+PAGI::Server provides the object on B<every> scope -- C<http>, C<websocket>
+and C<sse> -- on both HTTP/1.1 and HTTP/2, with every accessor the sub-spec
+requires: C<is_connected>, C<disconnect_reason>, C<disconnect_detail>,
+C<on_disconnect> (abnormal end only, called with C<($reason, $detail)>),
+C<on_complete> (clean end only), C<disconnect_future>, C<response_started>,
+C<response_complete> (a boolean: C<1> after a clean end, C<0> otherwise), and
+C<abort($detail)>. Exactly one of C<on_disconnect> / C<on_complete> fires per
+scope. The object is marked before any pending C<receive()> is resumed, and the
+reason it carries is the same token the scope's disconnect event carries, on
+every ending the server decides. Coverage: C<t/69-connection-state-protocol-scopes.t>
+(interface and HTTP/1.1 endings), C<t/70-protocol-disconnect-matrix.t> (every
+scope type against every ending, both transports, agreement asserted per
+cell), C<t/http2/30-connection-state.t>.
 
 On HTTP/2 each stream carries its own C<pagi.connection>, tracked
 independently of every other stream multiplexed on the same connection: one
-stream completing does not affect another still in flight. A stream reaches
-its terminal state exactly once, and not always when the stream closes: an
-end the server decides is recorded the moment it is decided, which for a
-scope the application left incomplete or never answered is when the
-application returns, before the Close frame or C<RST_STREAM> goes out. When
-the stream close is what settles it, a response whose terminal event
-completed with no HTTP/2 error code is a clean completion; a nonzero error
-code is an abnormal disconnect with reason C<client_closed>, since only the
-peer resets a stream this server has not already accounted for; and an early
-close carrying no error code is the server's own doing, so it reports
-C<server_error> rather than blaming the client. Whichever path settles it,
-the reason the object carries and the reason in the scope's disconnect event
-are the same token. A whole-connection teardown (server shutdown,
-socket error) sweeps every still-open stream's connection state with the
-connection-level disconnect reason, so a stream mid-response when the
-connection dies still reports why.
+stream completing does not affect another still in flight. An ending the
+server decides (an abandoned response, a protocol close, a timeout, an
+C<abort>) is recorded the moment it is decided; an ending the peer causes is
+recorded when the stream closes, as C<client_closed> for a reset or a bare
+C<END_STREAM>. A whole-connection teardown (server shutdown, socket error)
+records the connection-level reason on every still-open stream, so a stream
+mid-response when the connection dies still reports why.
+
+C<abort($detail)> ends the scope's transport immediately, on every scope type
+and both transports, with reason C<app_abort> and C<$detail> as
+C<disconnect_detail>: HTTP/1.1 closes the socket without waiting for the write
+queue to drain, HTTP/2 resets only that stream. No Close frame and no
+end-of-stream marker are written, a pending C<receive()> resolves with the
+scope's disconnect event, later sends are post-close no-ops, and nothing is
+logged. Coverage: C<t/72-abort.t> (HTTP/1.1, including a send parked on
+backpressure that resolves rather than blocking the abort) and
+C<t/http2/41-abort.t> (HTTP/2, including a sibling stream that survives).
 
 C<disconnect_future> follows the three possible states at the moment it is
 first called: while the request is still in flight it returns a fresh,
@@ -727,7 +689,8 @@ pending Future that resolves later if the connection disconnects
 abnormally; after an abnormal disconnect it returns a Future already
 resolved with the disconnect reason; after a clean completion it returns a
 Future that is deliberately left pending forever, since a clean completion
-has no disconnect reason to resolve it with.
+has no disconnect reason to resolve it with. Every call returns its own
+cancellation-isolated observer.
 
 B<Socket errors:> a C<sysread>/C<syswrite> failure on the underlying socket
 (other than a clean EOF, which is C<client_closed>) reports C<read_error> /
@@ -738,52 +701,20 @@ write's completion independently of the connection's other timeouts
 (C<timeout>, C<request_timeout>), so a stalled write is only ever caught,
 if at all, by one of those.
 
-B<Application Left a Response Incomplete:> when a scope has started its
-response but its terminal event never arrives, because the application
-returned early or raised an error, PAGI::Server forces an abnormal closure
-rather than synthesizing terminal framing that was never sent. Each scope type
-has its own terminal event, and each is required:
-
-=over 4
-
-=item * C<http> -- the final body chunk (C<more =E<gt> 0>), a C<file>/C<fh>
-body, or (having declared C<trailers =E<gt> 1>) the trailers event, after
-C<http.response.start>.
-
-=item * C<websocket> -- a completed closing handshake after
-C<websocket.accept>. Returning from an accepted socket without one is
-incomplete; on HTTP/1.1 the server closes with a C<1011> Close frame.
-
-=item * C<sse> -- C<sse.close> after C<sse.start>. It is the B<only> clean end
-of a started stream: a plain return without it is an incomplete response, not
-a clean one, and the server does not write the chunked terminator for it.
-
-=item * Any scope refusing a handshake or a stream -- the refusal's own
-terminal C<http.response.body> or C<http.response.trailers>, after
-C<http.response.start>.
-
-=back
-
-On HTTP/1.1 the connection closes with no terminal framing and is not kept
-alive or reused for pipelining. On HTTP/2 the stream is reset with
-C<RST_STREAM> (C<INTERNAL_ERROR>); other streams multiplexed on the same
-connection are unaffected. Either way C<on_disconnect> fires with reason
-C<server_error> (never C<on_complete>), and the server logs one error line
-unless the client had already disconnected first, in which case there is
-nothing new to report.
-
-C<response_complete()> -- the synchronous companion to C<on_complete> -- is a
-boolean on every scope: C<1> once the scope has ended cleanly, C<0> before
-that and after an abnormal end. It is no longer the C<undef> "unsupported"
-signal; C<response_started>, C<on_complete> and C<disconnect_future> are
-supported alongside it.
-
-B<Implementation note.> Each scope's send-sequence state is a single
-lifecycle state derived from the outbound event validator's per-scope state
-machine, mirrored for C<websocket> and C<sse> exactly as it already was for
-C<http>. The ten hand-maintained boolean flags that previously tracked accept,
-denial, decline, start and close facts in parallel with that machine are gone,
-so a scope's stage and the events it will accept can no longer disagree.
+B<Incomplete responses:> when a scope has started its response but its
+terminal event never arrives, because the application returned early or
+raised, PAGI::Server forces an abnormal end rather than synthesizing terminal
+framing that was never sent, on every scope type: the terminal body or
+trailers for an HTTP response or a refusal, C<sse.close> for a started SSE
+stream, a closing handshake for an accepted WebSocket (see
+L<PAGI::Spec::Www/"Application Left a Response Incomplete">). On HTTP/1.1 the
+connection closes with no terminal framing and is not reused; on HTTP/2 the
+stream is reset with C<RST_STREAM> C<INTERNAL_ERROR>, or ended after a C<1011>
+Close frame for an accepted socket; other streams on the connection are
+unaffected. C<on_disconnect> fires with C<server_error>, C<on_complete> never
+fires, and one error line is logged unless the client had already gone.
+Coverage: C<t/69>, C<t/55-sse-alignment.t>, C<t/http2/24-incomplete-response.t>,
+C<t/http2/30>, C<t/http2/42>.
 
 =head2 Enabling HTTP/2
 
@@ -1045,12 +976,11 @@ case: the scope was a websocket scope from the start, so it receives
 C<websocket.disconnect> with C<1006> / C<client_closed>, never an
 C<http.disconnect>. A B<completed refusal>, by contrast, delivers no
 disconnect event at all -- it is a clean end, and a C<receive()> after it
-parks (see L</"Refusing a Handshake or a Stream">).
+parks (see L</"PAGI SPECIFICATION RULINGS">).
 
 An application that returns from an B<accepted> socket without a closing
-handshake has left the response incomplete. The server closes with a C<1011>
-Close frame, reports C<server_error> on the connection object and to
-C<on_disconnect>, and logs one error line; C<on_complete> never fires.
+handshake gets a C<1011> Close frame, C<server_error> on the connection
+object, and one error line; C<on_complete> never fires.
 
 As with HTTP/2, "exactly one" is a property of the receive queue, not a hard
 cap on what any number of C<receive()> calls can return: once the connection
