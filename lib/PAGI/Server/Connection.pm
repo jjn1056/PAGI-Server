@@ -1226,6 +1226,9 @@ sub _h2_dispatch_stream {
                         detail => $no_response_detail);
                     $cs->_mark_response_started if $cs;
                     $cs->_mark_disconnected('server_error', $no_response_detail) if $cs;
+                    # The stream may already be gone (a zero-error close marked it
+                    # server_error and the entry is doomed-but-present); nghttp2 must
+                    # not be asked to answer a stream it has released.
                     eval {
                         $weak_self->{h2_session}->submit_response($stream_id,
                             status  => 500,
@@ -1236,7 +1239,7 @@ sub _h2_dispatch_stream {
                             body    => "Internal Server Error\n",
                         );
                         $weak_self->_h2_write_pending;
-                    };
+                    } if $stream_alive;
                 }
                 elsif ($stream_state->{is_websocket} || $stream_state->{is_sse}) {
                     # The generic incomplete-response test below is keyed on the
