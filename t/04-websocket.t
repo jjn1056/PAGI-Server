@@ -298,7 +298,7 @@ subtest 'WebSocket scope type is websocket' => sub {
 
     is($scope_type, 'websocket', 'Scope type is websocket');
     is($pagi->{version}, '0.5', 'WebSocket scope uses core PAGI version 0.5');
-    is($pagi->{spec_version}, '0.5', 'WebSocket scope reports spec_version 0.5');
+    is($pagi->{spec_version}, '0.6', 'WebSocket scope reports spec_version 0.6');
 
     $server->shutdown->get;
 };

@@ -1,5 +1,60 @@
 # Revision history for PAGI-Server
 
+0.002014 - UNRELEASED
+
+  Specification
+  - Implements HTTP/WebSocket/SSE sub-spec 0.6 (PAGI 0.002009); scopes report
+    spec_version '0.6'. The core PAGI version key is unchanged at '0.5'.
+    See PAGI::Upgrading.
+
+  Connection state
+  - pagi.connection on websocket and sse scopes on HTTP/1.1 and HTTP/2, with
+    abort($detail), disconnect_detail, response_complete as a boolean, and
+    on_disconnect callbacks receiving (reason, detail). New reason app_abort.
+  - Accepted-socket clean end is a completed closing handshake; a bare drop
+    is client_closed on both transports (was an empty reason on h2 socket
+    close).
+  - sse.close is the only clean end of a started SSE stream; returning
+    without it is an incomplete response, not a clean end.
+
+  Refusals
+  - Refusing a handshake or stream is an ordinary HTTP response: http.response.*
+    before websocket.accept or sse.start, through the ordinary HTTP path
+    (streams when more => 1; file/fh/trailers allowed). websocket.http.response.*
+    and sse.http.response.* removed; the websocket.http.response extension is
+    no longer advertised; websocket.close before accept fails. A websocket
+    refusal's status must be 300 or above; an sse refusal may carry any status.
+
+  Bug fixes (measured against 0.002013)
+  - h1: a pre-accept WebSocket disconnect delivered http.disconnect.
+  - h1: receive() after a completed refusal delivered a disconnect.
+  - h2: a completed SSE refusal delivered sse.disconnect client_closed.
+  - h2: a completed WebSocket denial was marked server_error rather than a
+    clean end.
+  - h2: a bare socket close reported an empty websocket.disconnect reason.
+  - h2: spurious "returned without starting a response" after the client left.
+  - h1: receive() after a completed HTTP response parked instead of resolving
+    with http.disconnect.
+  - h2: nine server-detected protocol closes (1002/1007/1008, queue overflow)
+    were reported as a clean end.
+  - h2: server-initiated WebSocket ends (keepalive and idle timeouts, protocol
+    closes) woke the application's pending receive before the connection
+    object was marked, so the object could read server_error.
+  - h2: a stream closed with no error code was marked server_error regardless
+    of the recorded reason (idle timeout), which could issue RST_STREAM on a
+    stream nghttp2 no longer tracked.
+  - h2: connection-level teardown delivered client_closed to parked receives
+    while the object carried the real reason.
+  - h2: an incomplete SSE stream or refusal was not reset or reported.
+
+  Internal
+  - One lifecycle state per scope: the validator's per-scope state machine is
+    mirrored for websocket and sse as it was for http; ten hand-maintained
+    flags removed.
+  - websocket.accept builds and writes under advance-then-rollback, so an
+    accept rejected by subprotocol or header validation does not leave the
+    scope reading as accepted.
+
 0.002013 - 2026-09-03
 
   Bug fixes

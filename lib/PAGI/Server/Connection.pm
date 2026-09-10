@@ -1369,7 +1369,7 @@ sub _h2_create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -2184,7 +2184,7 @@ sub _h2_create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => '2',
         scheme       => $self->_get_ws_scheme,
@@ -2604,7 +2604,7 @@ sub _h2_create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -4426,7 +4426,7 @@ sub _create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -5845,7 +5845,7 @@ sub _create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -6388,7 +6388,7 @@ sub _create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.5',
+            spec_version => '0.6',
         },
         http_version => $request->{http_version},
         scheme       => $self->_get_ws_scheme,
@@ -7121,21 +7121,22 @@ closes that connection, which only ever carries the one SSE stream.
 =head2 Connection Reuse after an SSE Stream (HTTP/1.1)
 
 C<sse.start> advertises C<Connection: keep-alive>, and the server honors it.
-When an HTTP/1.1 SSE stream ends B<cleanly> -- the application returns, or it
-sends C<sse.close> -- the server writes the chunked terminator, resets the
-per-request state the stream accumulated, and hands the connection back to
-ordinary keep-alive request handling, including serving any request already
-pipelined in the read buffer. A pooled client (browser, C<Net::Async::HTTP>,
-curl) can therefore reuse the same socket for its next request, which matters
-for the short POST-SSE-exchange pattern used by fetch-event-source and
-datastar.
+An HTTP/1.1 SSE stream ends B<cleanly> only when the application sends
+C<sse.close>; a plain return without it leaves the response incomplete. On
+C<sse.close> the server writes the chunked terminator, resets the per-request
+state the stream accumulated, and hands the connection back to ordinary
+keep-alive request handling, including serving any request already pipelined
+in the read buffer. A pooled client (browser, C<Net::Async::HTTP>, curl) can
+therefore reuse the same socket for its next request, which matters for the
+short POST-SSE-exchange pattern used by fetch-event-source and datastar.
 
 Keep-alive yields to the usual overrides, each of which closes the connection
 the same way it does outside SSE: a client C<Connection: close>, HTTP/1.0
-semantics, server shutdown, an application exception, and any B<abnormal> end
-(client disconnect, idle timeout, write error). An abnormal end is also the
-only thing that delivers C<sse.disconnect> to the application; a clean end
-never does.
+semantics, server shutdown, an application exception, a completed refusal, and
+any B<abnormal> end (client disconnect, idle timeout, write error, C<abort>,
+or a stream abandoned without C<sse.close>). An abnormal end is also the only
+thing that delivers C<sse.disconnect> to the application; a clean end never
+does.
 
 Ending the stream is decoupled from the application returning. After
 C<sse.close> the application keeps running against a live transport, and any

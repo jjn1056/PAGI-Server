@@ -185,7 +185,10 @@ Standard reason strings:
 
 =item * C<server_shutdown> - Server shutting down gracefully
 
-=item * C<server_error> - Unhandled server-side error aborted the request
+=item * C<server_error> - Unhandled server-side error aborted the request, or
+the application left its response incomplete
+
+=item * C<app_abort> - The application called L</abort> on this scope
 
 =item * C<body_too_large> - Request body exceeded limit
 
@@ -519,9 +522,10 @@ __END__
 
 =head1 USAGE
 
-The server provides one instance per HTTP request, in the scope under the
-C<pagi.connection> key (MUST-level for C<http> scopes; WebSocket and SSE
-scopes use their own disconnect events instead):
+The server provides one instance per scope, in the scope under the
+C<pagi.connection> key. It is present on every scope type -- C<http>,
+C<websocket> and C<sse> -- on both HTTP/1.1 and HTTP/2; the protocol scopes
+carry it in addition to their own disconnect events, and the two always agree:
 
     async sub app {
         my ($scope, $receive, $send) = @_;
