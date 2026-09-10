@@ -1170,7 +1170,7 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 };
 
 # ============================================================
-# receive() fallback prefers a recorded server_close_reason over ''
+# receive() fallback prefers a recorded end_reason over ''
 # (design section 6.1's transport-neutral disconnect reasons)
 # ============================================================
 # White-box: exercises _h2_create_websocket_receive's OWN fallback branch
@@ -1178,18 +1178,18 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 # $weak_self->{closed} is already true (e.g. a whole-connection teardown,
 # such as a server shutdown, racing an already-pending receive()), rather
 # than through the primary enqueue+dedup path the subtests above already
-# cover. The fallback must report whatever server_close_reason a
+# cover. The fallback must report whatever end_reason a
 # server-initiated per-stream teardown recorded, as long as the stream's
 # own state (its h2_streams entry) is still reachable, defaulting to the
 # 'client_closed' token when it is not (Www.pod "Disconnect - receive
 # event": an abnormal drop with no close handshake pairs 1006 with the
 # standard token for the condition, never with an empty reason).
-subtest 'receive() fallback after connection close reports the recorded server_close_reason, not empty' => sub {
+subtest 'receive() fallback after connection close reports the recorded end_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
         protocol => $protocol,
     );
-    $conn->{h2_streams}{7} = { server_close_reason => 'keepalive_timeout' };
+    $conn->{h2_streams}{7} = { end_reason => 'keepalive_timeout' };
     $conn->{closed} = 1;
 
     my $receive = $conn->_h2_create_websocket_receive(7, $conn->{h2_streams}{7});

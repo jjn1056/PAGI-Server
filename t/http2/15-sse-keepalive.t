@@ -440,7 +440,7 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
     };
 
     # The idle stream ends via a clean END_STREAM but no sse.close (a bare
-    # abnormal end). The idle timer records its own server_close_reason
+    # abnormal end). The idle timer records its own end_reason
     # (idle_timeout) BEFORE driving the close, so _h2_on_close attributes
     # both the queued sse.disconnect event and the connection_state object
     # to idle_timeout -- and because the object then disagrees with

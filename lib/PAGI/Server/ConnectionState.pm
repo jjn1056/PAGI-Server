@@ -150,7 +150,7 @@ sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
 Returns true (C<1>) once this request has reached the clean C<completed>
 terminal state, false (C<0>) while still active and false after an abnormal
-end. SHOULD-level per L<PAGI::Spec::Www/"Connection State">.
+end. Required by L<PAGI::Spec::Www/"Connection Object Interface"> (sub-spec 0.6).
 
 =cut
 

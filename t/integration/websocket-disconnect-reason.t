@@ -109,23 +109,23 @@ subtest 'queue overflow delivers reason=queue_overflow, code=1008' => sub {
 };
 
 # ============================================================
-# receive() fallback prefers the recorded ws_disconnect_reason over ''
+# receive() fallback prefers the recorded end_reason over ''
 # ============================================================
 # White-box: exercises _create_websocket_receive's OWN fallback branch
 # directly -- the code path a receive() call takes when it resolves after
 # {closed} is already true (a server-initiated close, e.g. idle timeout,
 # racing an already-pending receive()), rather than through the primary
 # _handle_disconnect push+resolve path the queue_overflow subtest above
-# already covers. The fallback must report whatever ws_disconnect_reason a
+# already covers. The fallback must report whatever end_reason a
 # server-initiated close recorded (_handle_disconnect sets it before
 # closing), via _ws_disconnect_event, defaulting to 'client_closed' when
 # nothing was recorded: a drop with no close handshake is 1006 plus the
 # client_closed token (Www.pod 0.6 "Disconnect - receive event", normative
 # pairings; the 0.5 empty default was measured bug S4).
-subtest 'receive() fallback after close reports the recorded ws_disconnect_reason, not empty' => sub {
+subtest 'receive() fallback after close reports the recorded end_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(app => sub { });
     $conn->{closed} = 1;
-    $conn->{ws_disconnect_reason} = 'idle_timeout';
+    $conn->{end_reason} = 'idle_timeout';
 
     my $receive = $conn->_create_websocket_receive;
     my $event = $receive->()->get;

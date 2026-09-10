@@ -513,7 +513,7 @@ subtest 'max_body_size 413 with SSE app parked on receive() before any send: no 
 # stream is the server's own per-stream idle timer. The stream ends via a
 # clean END_STREAM (design section 11.3's "end THIS stream only"), which
 # _h2_on_close's error-code-0 arms must attribute to 'idle_timeout' via
-# server_close_reason, not the generic 'client_closed' fallback.
+# end_reason, not the generic 'client_closed' fallback.
 subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
     my $sse_started = 0;
     my $disconnect_event;
@@ -534,7 +534,7 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
         $object_reason = $scope->{'pagi.connection'}->disconnect_reason;
     };
 
-    # The idle timer records its own token (server_close_reason=idle_timeout)
+    # The idle timer records its own token (end_reason=idle_timeout)
     # BEFORE it ends the stream with a clean END_STREAM, so _h2_on_close's
     # zero-error-code arm attributes both the queued sse.disconnect event and
     # the connection_state object to 'idle_timeout' -- and, because the

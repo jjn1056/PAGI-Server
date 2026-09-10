@@ -275,10 +275,10 @@ sub new {
         _disconnect_handled => 0,
         # WebSocket state
         websocket_frame   => undef,  # Protocol::WebSocket::Frame for parsing
-        # SSE state
-        sse_disconnect_reason => undef,  # Reason for SSE disconnect (client_closed, write_error, etc.)
-        ws_disconnect_reason  => undef,  # Standard reason token for the app-facing websocket.disconnect event
-        ws_disconnect_code    => undef,  # Wire close code for that event (defaults to 1006, abnormal closure)
+        # How this connection's current scope ended (see _record_end)
+        end_reason => undef,  # Standard token for a server-decided or server-observed abnormal end
+        end_detail => undef,  # Free-text supplement to end_reason
+        end_code   => undef,  # WebSocket close code the disconnect event carries (1006 by default)
         # Keepalive state (protocol-level ping/pong for WebSocket, comments for SSE)
         ws_keepalive_timer  => undef,  # Periodic timer for sending WebSocket pings
         ws_pong_timeout     => undef,  # Timeout timer for pong response
@@ -420,7 +420,7 @@ sub start {
                 $self->_log(error => "PAGI connection error: $error");
                 return 0 unless $weak_self;
                 $weak_self->_handle_disconnect_and_close('server_error',
-                    _detail_from_error($error));
+                    detail => _detail_from_error($error));
             }
             return 0;
         },
@@ -447,13 +447,13 @@ sub start {
             # The errno IO::Async hands us, rendered the way the operator
             # will read it in a log line (Www.pod: disconnect_detail).
             local $! = $errno;
-            $weak_self->_handle_disconnect_and_close('read_error', "$!");
+            $weak_self->_handle_disconnect_and_close('read_error', detail => "$!");
         },
         on_write_error => sub {
             my ($s, $errno) = @_;
             return unless $weak_self;
             local $! = $errno;
-            $weak_self->_handle_disconnect_and_close('write_error', "$!");
+            $weak_self->_handle_disconnect_and_close('write_error', detail => "$!");
         },
     );
 }
@@ -483,7 +483,7 @@ sub _start_idle_timer {
             # Close idle connection
             my $reason = $weak_self->{_served_a_request} ? 'keepalive_timeout' : 'idle_timeout';
             $weak_self->_handle_disconnect_and_close($reason,
-                "no traffic for $weak_self->{timeout}s");
+                detail => "no traffic for $weak_self->{timeout}s");
         },
     );
     $self->{idle_timer} = $timer;
@@ -898,8 +898,8 @@ sub _ws_handshake_accepted {
 # term the h1 twin at _handle_websocket_request's tail.
 #
 # A close this server initiated -- a protocol violation, a queue overflow --
-# is NOT here: the spec calls it abnormal, and it names itself in
-# server_close_reason before the frame goes out (see _h2_ws_close).
+# is NOT here: the spec calls it abnormal, and it records its own reason
+# before the frame goes out (see _h2_ws_close).
 sub _h2_ws_clean_end {
     my ($stream) = @_;
     my $seq = $stream->{seq_state} // '';
@@ -908,30 +908,35 @@ sub _h2_ws_clean_end {
     return 0;
 }
 
+# How this scope ended. $scope is the h1 connection ($self) or an h2 stream
+# hash. First-wins: the first server-decided reason recorded (idle_timeout,
+# app_abort, protocol_error, ...) is never overwritten by a later, less
+# specific one (server_error, client_closed). Www.pod "Meaning per scope",
+# "Agreement with disconnect events": the connection object, the disconnect
+# event, and the receive fallbacks all read this one record.
+sub _record_end {
+    my ($self, $scope, %end) = @_;
+    $scope->{end_reason} //= $end{reason} if defined $end{reason};
+    $scope->{end_detail} //= $end{detail} if defined $end{detail};
+    $scope->{end_code}   //= $end{code}   if defined $end{code};
+    return;
+}
+
+sub _end_reason { my ($self, $scope) = @_; return $scope->{end_reason} // 'client_closed' }
+sub _end_detail { my ($self, $scope) = @_; return $scope->{end_detail} }
+sub _end_code   { my ($self, $scope) = @_; return $scope->{end_code} // 1006 }
+
 # The standard token for an h2 scope that is ending without one of its own,
 # used by every site that synthesizes a disconnect event for a dying stream.
 # Www.pod "Agreement with disconnect events" makes this a MUST: whatever these
-# events say, the stream's connection_state says the same thing. Three
-# sources, most specific first.
+# events say, the stream's connection_state says the same thing.
 #
-#   server_close_reason -- a per-stream server-initiated teardown (idle
-#     timeout, keepalive timeout, protocol close, app_abort) named this one
-#     stream's reason before driving its close.
-#   _disconnect_reason -- the whole connection is going away, and
-#     _handle_disconnect marked every one of these objects with this token
-#     (read_error, write_error, server_shutdown, client_timeout,
-#     idle_timeout). A per-stream field cannot carry a connection-level fact,
-#     which is why these events used to say 'client_closed' while the objects
-#     said what actually happened.
-#   'client_closed' -- a bare transport drop, which names itself and no more.
-#
-# $stream may be gone by the time a parked receive resumes; the connection
-# fact still applies.
+# $stream may be gone by the time a parked receive resumes; the connection's
+# own record answers then, and a connection-level end records its reason onto
+# every stream still open before any of this is asked.
 sub _h2_scope_reason {
     my ($self, $stream) = @_;
-    return ($stream && $stream->{server_close_reason})
-        // $self->{_disconnect_reason}
-        // 'client_closed';
+    return $self->_end_reason($stream // $self);
 }
 
 # A refusal this scope carried to completion. Such a scope has ended cleanly
@@ -994,27 +999,23 @@ sub _h2_on_close {
     # Both marks are idempotent, so a stream the dispatch wrapper already
     # marked (e.g. server_error before its own RST) keeps that first reason.
     #
-    # server_close_reason: a server-initiated per-stream teardown (idle
-    # timeout, keepalive timeout, ...) records its own token here BEFORE
-    # driving the close, so it takes precedence over the generic
-    # 'client_closed' / 'server_error' fallbacks below -- in both the
-    # zero-error-code and nonzero-error-code $cs marks (outcomes 2 and 3),
-    # and in the queued disconnect events pushed further down. WebSocket
-    # keepalive timeout and SSE idle timeout are exactly the writers of this
-    # token, and both stream types attach a connection_state (since B2), so
-    # the $cs mark and the queued event agree on the same reason. The
-    # dispatch wrapper's own server-decided ends (no response started, a
-    # scope left incomplete) write it too, for the same reason.
+    # A server-initiated per-stream teardown (idle timeout, keepalive
+    # timeout, ...) records its own token BEFORE driving the close, so it
+    # takes precedence over the generic 'client_closed' / 'server_error'
+    # fallbacks below -- in both the zero-error-code and nonzero-error-code
+    # $cs marks (outcomes 2 and 3), and in the queued disconnect events
+    # pushed further down. WebSocket keepalive timeout and SSE idle timeout
+    # are exactly the writers of that token, and both stream types attach a
+    # connection_state, so the $cs mark and the queued event agree on the
+    # same reason. The dispatch wrapper's own server-decided ends (no
+    # response started, a scope left incomplete) record it too, for the same
+    # reason.
     #
     # Every site below that needs "what token is this scope ending with"
-    # asks _h2_scope_reason rather than spelling the fallback chain out
-    # again: it is the one answer to that question, and it adds the
-    # connection-level _disconnect_reason term that a per-stream field
-    # cannot carry. The zero-error-code $cs mark is the one exception --
-    # an early end with no h2 error code is the server's own doing, so its
-    # fallback is 'server_error', not 'client_closed'.
-    my $reason = $stream->{server_close_reason};
-    my $detail = $stream->{server_close_detail};
+    # asks the ending record rather than spelling a fallback out again. The
+    # zero-error-code $cs mark is the one exception -- an early end with no
+    # h2 error code is the server's own doing, so its fallback is
+    # 'server_error', not 'client_closed'.
     if (my $cs = $stream->{connection_state}) {
         my $clean = $stream->{is_websocket}
                   ? _h2_ws_clean_end($stream)
@@ -1024,16 +1025,17 @@ sub _h2_on_close {
             $cs->_mark_complete;
         } elsif (!$error_code) {
             # Record the token on the stream before marking, so the events
-            # queued below (through _h2_scope_reason) carry the same reason
-            # as the object (spec: Agreement with disconnect events). An
-            # earlier server-decided token (idle timeout, abort) still wins.
-            $stream->{server_close_reason} //= 'server_error';
-            $stream->{server_close_detail} //= 'stream ended before the response completed';
-            $cs->_mark_disconnected($stream->{server_close_reason},
-                $stream->{server_close_detail});
+            # queued below carry the same reason as the object (spec:
+            # Agreement with disconnect events). An earlier server-decided
+            # token (idle timeout, abort) still wins.
+            $self->_record_end($stream, reason => 'server_error',
+                detail => 'stream ended before the response completed');
+            $cs->_mark_disconnected($self->_end_reason($stream),
+                $self->_end_detail($stream));
         } else {
-            $cs->_mark_disconnected($self->_h2_scope_reason($stream),
-                $detail // sprintf('RST_STREAM error code %d', $error_code));
+            $cs->_mark_disconnected($self->_end_reason($stream),
+                $self->_end_detail($stream)
+                    // sprintf('RST_STREAM error code %d', $error_code));
         }
     }
 
@@ -1197,18 +1199,18 @@ sub _h2_dispatch_stream {
                 # callbacks synchronously, and they must observe
                 # response_started true.
                 #
-                # Name the reason on the stream state first, the way every
-                # other server-decided per-stream end does (keepalive
-                # timeout, sse idle timeout, protocol close, abort). This is
-                # the fact _h2_on_close and both receive fallbacks read
-                # through _h2_scope_reason when they synthesize this scope's
-                # disconnect event; without it they fall back to
-                # 'client_closed' and the event contradicts the object, which
-                # Www.pod "Agreement with disconnect events" forbids.
+                # Record the reason on the stream first, the way every other
+                # server-decided per-stream end does (keepalive timeout, sse
+                # idle timeout, protocol close, abort). This is the fact
+                # _h2_on_close and both receive fallbacks read when they
+                # synthesize this scope's disconnect event; without it they
+                # fall back to 'client_closed' and the event contradicts the
+                # object, which Www.pod "Agreement with disconnect events"
+                # forbids.
                 my $no_response_detail = $error ? _detail_from_error($error)
                                                : 'no response was started';
-                $stream_state->{server_close_reason} //= 'server_error';
-                $stream_state->{server_close_detail} //= $no_response_detail;
+                $weak_self->_record_end($stream_state, reason => 'server_error',
+                    detail => $no_response_detail);
                 $cs->_mark_response_started if $cs;
                 $cs->_mark_disconnected('server_error', $no_response_detail) if $cs;
                 eval {
@@ -1228,7 +1230,7 @@ sub _h2_dispatch_stream {
                 # http state name 'complete', which neither of these scopes
                 # can reach. Ask each scope the same two questions against
                 # its own mirrored state instead (Www.pod "Meaning per
-                # scope": D12 for sse, D13-equivalent for websocket).
+                # scope": a stream abandoned without its own clean end).
                 #
                 # "Started" is scope_started, not the streaming branch alone:
                 # Www.pod counts a refusal's http.response.start as the
@@ -1264,22 +1266,22 @@ sub _h2_dispatch_stream {
                         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
                         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
                     # The scope is ending for this server's own reason, so it
-                    # names itself on the stream state BEFORE the mark, the
+                    # records that reason on the stream BEFORE the mark, the
                     # way the keepalive, idle-timeout, protocol-close and
                     # abort paths do. _h2_on_close and both receive fallbacks
-                    # read this through _h2_scope_reason when they synthesize
-                    # the scope's disconnect event; without it they say
-                    # 'client_closed' while this object says 'server_error',
-                    # which Www.pod "Agreement with disconnect events"
-                    # forbids (the event's reason and the object's
-                    # disconnect_reason MUST be the same token).
-                    $stream_state->{server_close_reason} //= 'server_error';
-                    $stream_state->{server_close_detail} //= $incomplete_detail;
+                    # read the record when they synthesize the scope's
+                    # disconnect event; without it they say 'client_closed'
+                    # while this object says 'server_error', which Www.pod
+                    # "Agreement with disconnect events" forbids (the event's
+                    # reason and the object's disconnect_reason MUST be the
+                    # same token).
+                    $self->_record_end($stream_state, reason => 'server_error',
+                        detail => $incomplete_detail);
                     $cs->_mark_disconnected('server_error', $incomplete_detail) if $cs;
 
                     if ($stream_state->{is_websocket} && _ws_handshake_accepted($seq_now)) {
-                        # An accepted socket the application walked away from
-                        # (D13). Www.pod "Application Left a Response
+                        # An accepted socket the application walked away from.
+                        # Www.pod "Application Left a Response
                         # Incomplete" names one wire form for both
                         # transports: "On an accepted WebSocket the server
                         # sends a Close frame with code 1011 ... and then
@@ -1406,8 +1408,7 @@ sub _h2_abort_hook {
         return unless $weak_self && $weak_self->{h2_session};
         my $ss = $weak_self->{h2_streams}{$stream_id} or return;
         return if $ss->{h2_closed};
-        $ss->{server_close_reason} = 'app_abort';
-        $ss->{server_close_detail} = $detail;
+        $weak_self->_record_end($ss, reason => 'app_abort', detail => $detail);
         eval {
             $weak_self->{h2_session}->submit_rst_stream($stream_id, _h2_rst_cancel_code());
             $weak_self->_h2_write_pending;
@@ -2311,12 +2312,11 @@ sub _h2_create_websocket_receive {
     # Fallback disconnect for a receive() that resolves after this stream is
     # gone or the connection is closed: 1006/'client_closed' by default (RFC
     # 6455 abnormal closure with the token for a bare transport drop, per
-    # Www.pod "Disconnect - receive event"), but prefers the per-stream
-    # server_close_reason token when the stream's own state is still
-    # reachable in h2_streams -- a server-initiated teardown (idle timeout,
-    # keepalive timeout, protocol close, ...) records that token there before
-    # tearing the stream down, so a receive() racing that teardown still
-    # reports why.
+    # Www.pod "Disconnect - receive event"), but prefers the stream's own
+    # ending record when its state is still reachable in h2_streams -- a
+    # server-initiated teardown (idle timeout, keepalive timeout, protocol
+    # close, ...) records its reason there before tearing the stream down, so
+    # a receive() racing that teardown still reports why.
     my $fallback_disconnect = sub {
         return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
             unless $weak_self;
@@ -3076,8 +3076,6 @@ sub _h2_create_sse_send {
             # this arm, so the data_callback's END_STREAM decision and
             # _h2_on_close's per-scope clean computation both see it even if
             # resuming the stream closes it synchronously.
-            $weak_self->{sse_disconnect_reason} = $event->{reason}
-                if defined $event->{reason};
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -3376,10 +3374,10 @@ sub _h2_ws_close {
     # reason; the application's own websocket.close names nothing, because
     # its clean end is already recorded as the send state 'closed'.
     if ($server_reason) {
-        $ss->{server_close_reason} //= $server_reason;
         # The words already going to the peer in the Close frame double as
         # this stream's disconnect_detail.
-        $ss->{server_close_detail} //= $reason if defined $reason && length $reason;
+        $self->_record_end($ss, reason => $server_reason,
+            (defined $reason && length $reason ? (detail => $reason) : ()));
     }
     $self->{h2_session}->resume_stream($stream_id);
 }
@@ -3474,8 +3472,8 @@ sub _h2_start_ws_pong_timeout {
                 # for the $cs marking, should _h2_on_close still be the one
                 # to apply it (it's idempotent, so it's a no-op once the
                 # explicit mark below has already run).
-                $weak_ss->{server_close_reason} = 'keepalive_timeout';
-                $weak_ss->{server_close_detail} = "no pong within $weak_ss->{ws_ka_timeout}s";
+                $weak_self->_record_end($weak_ss, reason => 'keepalive_timeout',
+                    detail => "no pong within $weak_ss->{ws_ka_timeout}s");
 
                 # Mark the object BEFORE enqueueing (Www.pod "State
                 # Transition Order": steps 1-4 MUST precede step 5,
@@ -3484,7 +3482,7 @@ sub _h2_start_ws_pong_timeout {
                 # observe the object already terminal, not learn the reason
                 # only later when _h2_on_close eventually runs.
                 $weak_ss->{connection_state}->_mark_disconnected('keepalive_timeout',
-                    $weak_ss->{server_close_detail})
+                    $weak_self->_end_detail($weak_ss))
                     if $weak_ss->{connection_state};
 
                 # RFC 6455 section 7.4.1: 1006 MUST NOT be set as the status
@@ -3643,8 +3641,8 @@ sub _h2_start_sse_idle_timer {
             # server-initiated close, not the client going away, and
             # _h2_on_close prefers this token over its hardcoded fallback for
             # both the $cs marking and the queued sse.disconnect event.
-            $weak_ss->{server_close_reason} = 'idle_timeout';
-            $weak_ss->{server_close_detail} = "no traffic for $weak_self->{sse_idle_timeout}s";
+            $weak_self->_record_end($weak_ss, reason => 'idle_timeout',
+                detail => "no traffic for $weak_self->{sse_idle_timeout}s");
 
             # End THIS stream only, the same way an app-initiated sse.close
             # does: mark it closing so the data_callback emits the final
@@ -3706,7 +3704,7 @@ sub _start_stall_timer {
                     "Request stall timeout ($weak_self->{request_timeout}s) - closing connection");
             }
             $weak_self->_handle_disconnect_and_close('client_timeout',
-                "request stalled for $weak_self->{request_timeout}s");
+                detail => "request stalled for $weak_self->{request_timeout}s");
         },
     );
     $self->{stall_timer} = $timer;
@@ -3753,7 +3751,7 @@ sub _start_ws_idle_timer {
                     "WebSocket idle timeout ($weak_self->{ws_idle_timeout}s) - closing connection");
             }
             $weak_self->_handle_disconnect_and_close('idle_timeout',
-                "no traffic for $weak_self->{ws_idle_timeout}s");
+                detail => "no traffic for $weak_self->{ws_idle_timeout}s");
         },
     );
     $self->{ws_idle_timer} = $timer;
@@ -3799,9 +3797,9 @@ sub _start_sse_idle_timer {
                 $weak_self->{server}->_log(warn =>
                     "SSE idle timeout ($weak_self->{sse_idle_timeout}s) - closing connection");
             }
-            $weak_self->{sse_disconnect_reason} = 'idle_timeout';
+            $weak_self->_record_end($weak_self, reason => 'idle_timeout');
             $weak_self->_handle_disconnect_and_close('idle_timeout',
-                "no traffic for $weak_self->{sse_idle_timeout}s");
+                detail => "no traffic for $weak_self->{sse_idle_timeout}s");
         },
     );
     $self->{sse_idle_timer} = $timer;
@@ -4119,7 +4117,7 @@ sub _start_ws_pong_timeout {
                         "WebSocket keepalive timeout - no pong received within $weak_self->{ws_keepalive_timeout}s");
                 }
                 $weak_self->_handle_disconnect_and_close('keepalive_timeout',
-                    "no pong within $weak_self->{ws_keepalive_timeout}s");
+                    detail => "no pong within $weak_self->{ws_keepalive_timeout}s");
             }
         },
     );
@@ -4224,8 +4222,7 @@ sub _try_handle_request {
         # Mark connection as disconnected with protocol_error reason (PAGI spec compliance).
         # The parse message going to the client on the next line is also what
         # the operator needs (Www.pod: disconnect_detail).
-        $self->{_disconnect_detail} = $request->{message} if defined $request->{message};
-        $self->_handle_disconnect('protocol_error');
+        $self->_handle_disconnect('protocol_error', $request->{message});
         $self->_send_error_response($request->{error}, $request->{message});
         $self->_close;
         return;
@@ -4234,9 +4231,9 @@ sub _try_handle_request {
     # Check Content-Length against max_body_size limit (0 = unlimited)
     if ($self->{max_body_size} && defined $request->{content_length}) {
         if ($request->{content_length} > $self->{max_body_size}) {
-            $self->{_disconnect_detail} = "declared body of $request->{content_length} bytes"
-                . " exceeded $self->{max_body_size}";
-            $self->_handle_disconnect('body_too_large');
+            $self->_handle_disconnect('body_too_large',
+                "declared body of $request->{content_length} bytes"
+                    . " exceeded $self->{max_body_size}");
             $self->_send_error_response(413, 'Payload Too Large');
             $self->_close;
             return;
@@ -4255,7 +4252,7 @@ sub _try_handle_request {
     $self->{current_request} = $request;  # Store for access logging
 
     # Recorded for anything downstream that needs the scope kind without
-    # re-deriving it (e.g. the event-type fix in Task B3).
+    # re-deriving it from the request.
     $self->{scope_kind} = $is_websocket ? 'websocket' : $is_sse ? 'sse' : 'http';
 
     if ($is_websocket) {
@@ -4349,14 +4346,8 @@ async sub _handle_request {
             $self->_send_error_response(500, "Internal Server Error");
             $self->_log(error => "PAGI application error: $error");
         }
-        # Write access log before closing
-        $self->_write_access_log;
-        # Notify server that request completed (for max_requests tracking)
-        $self->{server}->_on_request_complete if $self->{server};
         # Always close connection after exception (3.2) - don't try keep-alive
-        $self->{_disconnect_detail} //= _detail_from_error($error);
-        $self->_handle_disconnect('server_error');
-        $self->_close;
+        $self->_end_scope('server_error', detail => _detail_from_error($error));
         return;
     }
 
@@ -4371,11 +4362,7 @@ async sub _handle_request {
             $self->_log(error => "PAGI application returned without starting a response");
             $self->_send_error_response(500, "Internal Server Error");
         }
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->{_disconnect_detail} //= 'no response was started';
-        $self->_handle_disconnect('server_error');
-        $self->_close;
+        $self->_end_scope('server_error', detail => 'no response was started');
         return;
     }
 
@@ -4392,12 +4379,10 @@ async sub _handle_request {
                 ? "PAGI application returned with an incomplete response (trailers were declared but never sent)\n"
                 : "PAGI application returned with an incomplete response\n");
         }
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->{_disconnect_detail} //= (($self->{h1_seq} // '') eq 'awaiting_trailers')
-            ? 'trailers were declared but never sent'
-            : 'response started but never completed';
-        $self->_handle_disconnect_and_close('server_error');
+        $self->_end_scope('server_error',
+            detail => (($self->{h1_seq} // '') eq 'awaiting_trailers')
+                ? 'trailers were declared but never sent'
+                : 'response started but never completed');
         return;
     }
 
@@ -4570,8 +4555,7 @@ async sub _read_chunked_body {
 
     # Check for parse error (invalid chunk size)
     if (ref($data) eq 'HASH' && $data->{error}) {
-        $self->{_disconnect_detail} = $data->{message} // 'Bad Request';
-        $self->_handle_disconnect('protocol_error');
+        $self->_handle_disconnect('protocol_error', $data->{message} // 'Bad Request');
         $self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
         $self->_close;
         return $make_disconnect->();
@@ -4587,8 +4571,8 @@ async sub _read_chunked_body {
         if ($self->{max_body_size} && $$bytes_read_ref > $self->{max_body_size}) {
             # Body too large - close connection
             $self->_send_error_response(413, 'Payload Too Large');
-            $self->{_disconnect_detail} = "request body exceeded $self->{max_body_size} bytes";
-            $self->_handle_disconnect('body_too_large');
+            $self->_handle_disconnect('body_too_large',
+                "request body exceeded $self->{max_body_size} bytes");
             $self->_close;
             return $make_disconnect->();
         }
@@ -5193,8 +5177,8 @@ sub _ws_disconnect_event {
         # close handshake). An empty reason belongs only to a peer Close
         # frame that carried no text, and that path pushes its own event and
         # sets _disconnect_handled, so it never reaches here.
-        code   => $self->{ws_disconnect_code}   // 1006,
-        reason => $self->{ws_disconnect_reason} // 'client_closed',
+        code   => $self->_end_code($self),
+        reason => $self->_end_reason($self),
     };
 }
 
@@ -5222,14 +5206,20 @@ sub _scope_disconnect_event {
         return undef if $seq eq 'refusal_complete';
         return {
             type   => 'sse.disconnect',
-            reason => $self->{sse_disconnect_reason} // 'client_closed',
+            reason => $self->_end_reason($self),
         };
     }
     return { type => 'http.disconnect' };
 }
 
+# Settle this connection's scope: record how it ended, mark every object it
+# owns, release parked I/O, and deliver the scope's disconnect event.
+# $detail is the human-readable supplement to $reason, supplied by whichever
+# site detected the end (Www.pod: disconnect_detail); it describes the one
+# event, so an h2 connection-level teardown hands the same words to every
+# stream it ends.
 sub _handle_disconnect {
-    my ($self, $reason) = @_;
+    my ($self, $reason, $detail) = @_;
 
     # Idempotency guard - prevent duplicate disconnect handling
     # Multiple paths can trigger disconnect (timeout, protocol error, session end)
@@ -5248,37 +5238,39 @@ sub _handle_disconnect {
     # A clean completion is not an abnormal disconnect: don't surface its reason.
     my $is_completion = $COMPLETION_REASON{$reason};
 
-    # Why this whole connection is ending, for the sites that settle parked
-    # I/O after _handle_disconnect has already marked the objects. _close's
-    # h2 sweep reads it so its synthesized events name the same token the
-    # objects carry (Www.pod "Agreement with disconnect events").
-    $self->{_disconnect_reason} = $reason unless $is_completion;
+    unless ($is_completion) {
+        # Why this whole connection is ending, for the sites that settle
+        # parked I/O after the objects have been marked. _close's h2 sweep
+        # and the disconnect event below read the record, so they name the
+        # same token the objects carry (Www.pod "Agreement with disconnect
+        # events").
+        $self->_record_end($self, reason => $reason, detail => $detail);
 
-    # The human-readable supplement to $reason, recorded by whichever site
-    # detected the end (Www.pod: disconnect_detail). Taken once and handed to
-    # every object marked below -- an h2 connection-level teardown marks many
-    # of them, and they all describe the same event.
-    my $detail = delete $self->{_disconnect_detail};
+        # Mark this scope's connection_state as disconnected (abnormal only).
+        # Applies uniformly to http, websocket, and sse scopes: every scope's
+        # pagi.connection attaches at scope creation (Www.pod "Connection State").
+        if ($self->{current_connection_state}) {
+            $self->{current_connection_state}->_mark_disconnected(
+                $self->_end_reason($self), $self->_end_detail($self));
+        }
 
-    # Mark this scope's connection_state as disconnected (abnormal only).
-    # Applies uniformly to http, websocket, and sse scopes: every scope's
-    # pagi.connection attaches at scope creation (Www.pod "Connection State").
-    if ($self->{current_connection_state} && !$is_completion) {
-        $self->{current_connection_state}->_mark_disconnected($reason, $detail);
-    }
-
-    # HTTP/2: connection-level teardown (server shutdown, socket error, ...)
-    # sweeps every open stream's own connection_state with this reason, so a
-    # stream still mid-response when the whole connection dies still reports
-    # why. _mark_disconnected is idempotent -- a stream _h2_on_close already
-    # took to a terminal state (complete, or its own client_closed/server_error)
-    # keeps that first reason; only still-open streams pick this one up.
-    # http, websocket, and sse streams all attach a connection_state, so the
-    # guard on $stream->{connection_state} is defensive only.
-    if ($self->{is_h2} && $self->{h2_streams} && !$is_completion) {
-        for my $stream (values %{$self->{h2_streams}}) {
-            $stream->{connection_state}->_mark_disconnected($reason, $detail)
-                if $stream->{connection_state};
+        # HTTP/2: connection-level teardown (server shutdown, socket error, ...)
+        # records this reason on every open stream and marks its own
+        # connection_state, so a stream still mid-response when the whole
+        # connection dies still reports why. First-wins: a stream that already
+        # named its own end (idle timeout, protocol close, ...) keeps that
+        # reason, and its object and its disconnect event still agree.
+        # _mark_disconnected is idempotent, so a stream _h2_on_close already
+        # took to a terminal state keeps that first mark. http, websocket, and
+        # sse streams all attach a connection_state, so the guard on
+        # $stream->{connection_state} is defensive only.
+        if ($self->{is_h2} && $self->{h2_streams}) {
+            for my $stream (values %{$self->{h2_streams}}) {
+                $self->_record_end($stream, reason => $reason, detail => $detail);
+                $stream->{connection_state}->_mark_disconnected(
+                    $self->_end_reason($stream), $self->_end_detail($stream))
+                    if $stream->{connection_state};
+            }
         }
     }
 
@@ -5289,22 +5281,6 @@ sub _handle_disconnect {
     # disconnect_reason() -- those must already reflect this disconnect, not
     # a stale "still connected" snapshot from before it was detected.
     $self->_cancel_drain_waiters($reason);
-
-    # Record the abnormal reason so the WebSocket disconnect event reports it
-    # (instead of the old empty string). Same for SSE: some detection sites
-    # (e.g. the idle timer) already set sse_disconnect_reason before calling
-    # in here, but every other abnormal reason (app_abort, server_error,
-    # write_error, keepalive_timeout, server_shutdown, protocol_error, ...)
-    # had no writer here, silently reporting client_closed instead -- a
-    # Www.pod "Agreement with disconnect events" violation once an sse scope
-    # carries a pagi.connection object whose own disconnect_reason must match.
-    my $kind = $self->{scope_kind} // 'http';
-    if ($kind eq 'websocket' && !$is_completion) {
-        $self->{ws_disconnect_reason} = $reason;
-    }
-    elsif ($kind eq 'sse' && !$is_completion) {
-        $self->{sse_disconnect_reason} = $reason;
-    }
 
     my $disconnect_event = $self->_scope_disconnect_event;
 
@@ -5333,7 +5309,7 @@ sub _send_close_frame {
 
     # Remember the wire code so the app-facing websocket.disconnect event reports
     # the same code the peer received, rather than the 1006 abnormal-close default.
-    $self->{ws_disconnect_code} = $code;
+    $self->_record_end($self, code => $code);
 
     my $frame = Protocol::WebSocket::Frame->new(
         type   => 'close',
@@ -5345,7 +5321,7 @@ sub _send_close_frame {
 }
 
 sub _close {
-    my ($self) = @_;
+    my ($self, %opt) = @_;
 
     # Idempotency guard for cleanup, kept separate from the "closed" flag
     # itself: _handle_disconnect_and_close may already have set {closed} = 1
@@ -5369,7 +5345,7 @@ sub _close {
                 $self->_h2_stop_sse_idle_timer($stream);
             }
 
-            $stream->{h2_closed} = 1;   # liveness for the dispatch wrapper (S5)
+            $stream->{h2_closed} = 1;   # liveness for the dispatch wrapper
             if ($stream->{body_pending} && !$stream->{body_pending}->is_ready
                 && !_h2_refusal_complete($stream)) {
                 # Www.pod "Agreement with disconnect events": this event's
@@ -5454,11 +5430,19 @@ sub _close {
     if ($self->{stream}) {
         # abort() MUST NOT wait for an in-flight write to drain, since that
         # write may be blocked by the peer (Www.pod "Connection Object
-        # Interface"): close_when_empty does wait, so _h1_abort_hook sets
-        # _close_now to route an app_abort teardown through close_now
-        # instead. Every other reason keeps close_when_empty (flush what's
-        # already queued, then close).
-        if ($self->{_close_now}) {
+        # Interface"): close_when_empty does wait, so an app_abort teardown
+        # asks for close_now instead. Every other reason keeps
+        # close_when_empty (flush what's already queued, then close).
+        #
+        # A scope that ended with app_abort closes now however this teardown
+        # was reached, which the option alone cannot guarantee: settling the
+        # abort resolves the parked send, which resumes the application
+        # inline, which returns into the incomplete-response tail, which
+        # calls in here first with no option of its own. _cleanup_done then
+        # makes the abort's own call a no-op, so the option it carried never
+        # runs. The ending record is the durable fact that survives that
+        # re-entrancy, and exactly one site writes app_abort into it.
+        if ($opt{close_now} || $self->_end_reason($self) eq 'app_abort') {
             $self->{stream}->close_now;
         } else {
             $self->{stream}->close_when_empty;
@@ -5470,15 +5454,7 @@ sub _close {
 # become undefined after _handle_disconnect completes its Future callbacks.
 # This method holds a strong reference to $self throughout the operation.
 sub _handle_disconnect_and_close {
-    my ($self, $reason, $detail) = @_;
-
-    # The optional supplement to $reason, for the sites that know something
-    # the token cannot say: which limit was hit, how long the silence was,
-    # which framing rule the peer broke (Www.pod: disconnect_detail).
-    # Recorded here so _handle_disconnect can hand it to every scope object
-    # it marks. Never overwrite one already recorded -- an abort's detail is
-    # set by _h1_abort_hook before it calls in here.
-    $self->{_disconnect_detail} //= $detail if defined $detail;
+    my ($self, $reason, %opt) = @_;
 
     # Mark the transport closed before notifying: _handle_disconnect below
     # completes any pending receive(), which can synchronously resume the
@@ -5489,26 +5465,37 @@ sub _handle_disconnect_and_close {
     # flag so it isn't skipped by this early flip.
     $self->{closed} = 1;
 
-    $self->_handle_disconnect($reason);
-    $self->_close;
+    $self->_handle_disconnect($reason, $opt{detail});
+    $self->_close(close_now => $opt{close_now});
+}
+
+# End the current h1 scope: access log, request-complete accounting, then the
+# transport transition. $reason is a standard token or a completion reason
+# (session_complete, stream_complete, request_complete).
+sub _end_scope {
+    my ($self, $reason, %opt) = @_;
+
+    $self->_write_access_log;
+    $self->{server}->_on_request_complete if $self->{server};
+    $self->_handle_disconnect_and_close($reason, %opt);
+    return;
 }
 
 # Teardown hook handed to every h1 ConnectionState: the object has already
 # marked itself app_abort when this runs. Close the transport without waiting
 # for any in-flight write to drain -- that write may be blocked by the peer
-# (Www.pod "Connection Object Interface"), so _close_now routes _close to
-# close_now instead of its default close_when_empty. _handle_disconnect
-# settles pending I/O and, because the object is already terminal, its own
-# _mark_disconnected is a no-op.
+# (Www.pod "Connection Object Interface"), so this teardown asks for close_now
+# instead of the default close_when_empty. _handle_disconnect settles pending
+# I/O and, because the object is already terminal, its own _mark_disconnected
+# is a no-op.
 sub _h1_abort_hook {
     my ($self) = @_;
     weaken(my $weak_self = $self);
     return sub {
         my ($cs, $detail) = @_;
         return unless $weak_self && !$weak_self->{closed};
-        $weak_self->{_disconnect_detail} = $detail;
-        $weak_self->{_close_now} = 1;
-        $weak_self->_handle_disconnect_and_close('app_abort');
+        $weak_self->_handle_disconnect_and_close('app_abort',
+            detail => $detail, close_now => 1);
     };
 }
 
@@ -5686,7 +5673,7 @@ async sub _handle_sse_request {
         $app_failed = 1;
     }
 
-    # D12 (Www.pod "Application Left a Response Incomplete"): a stream
+    # Www.pod "Application Left a Response Incomplete": a stream
     # started via sse.start but never ended via sse.close before the
     # application's Future resolved -- whether it returned or threw -- is an
     # incomplete response, never stream_complete. sse.close is the scope's
@@ -5695,7 +5682,6 @@ async sub _handle_sse_request {
     # connection alive afterward.
     if (($self->{h1_seq} // '') eq 'streaming' && !$self->{sse_finished}) {
         $self->{sse_finished} = 1;   # matches _finish_sse_stream's own guard: no terminator goes out
-        $self->{sse_finish_reason} = 'server_error';
         $self->_stop_sse_keepalive;
         $self->_stop_sse_idle_timer;
         # Client-already-gone carve-out (mirrors Application Produced No
@@ -5706,12 +5692,9 @@ async sub _handle_sse_request {
             unless $self->{closed} || $app_failed;
         my $sse_detail = $app_failed ? _detail_from_error($app_error)
                        : 'sse.start without sse.close';
-        $self->{_disconnect_detail} //= $sse_detail;
         $self->{current_connection_state}->_mark_disconnected('server_error', $sse_detail)
             if $self->{current_connection_state};
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->_handle_disconnect_and_close('server_error');
+        $self->_end_scope('server_error', detail => $sse_detail);
         return;
     }
 
@@ -5731,22 +5714,18 @@ async sub _handle_sse_request {
             # that already ended abnormally is not an application error.
             $self->_log(error => "PAGI application returned with an incomplete response")
                 unless $self->{closed} || $app_failed;
-            $self->_write_access_log;
-            $self->{server}->_on_request_complete if $self->{server};
-            $self->{_disconnect_detail} //= 'refusal started but never completed';
-            $self->_handle_disconnect_and_close('server_error');
+            $self->_end_scope('server_error',
+                detail => 'refusal started but never completed');
             return;
         }
         $self->{current_connection_state}->_mark_complete
             if $self->{current_connection_state};
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->_handle_disconnect_and_close('session_complete');
+        $self->_end_scope('session_complete');
         return;
     }
 
     # End the stream (no-op if an explicit sse.close already finished it).
-    $self->_finish_sse_stream('stream_complete');
+    $self->_finish_sse_stream;
 
     # The application produced no response at all: no sse.start, and no
     # refusal. That is the same protocol error the plain HTTP path reports,
@@ -5759,11 +5738,7 @@ async sub _handle_sse_request {
             $self->_log(error => "PAGI application returned without starting an SSE stream or a response");
             $self->_send_error_response(500, "Internal Server Error");
         }
-        $self->_write_access_log;
-        # Notify server that request completed (for max_requests tracking)
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->{_disconnect_detail} //= 'no response was started';
-        $self->_handle_disconnect_and_close('server_error');
+        $self->_end_scope('server_error', detail => 'no response was started');
         return;
     }
 
@@ -5777,9 +5752,9 @@ async sub _handle_sse_request {
     $self->{server}->_on_request_complete if $self->{server};
 
     # Design section 11.6: a CLEAN end -- a stream that never started, or a
-    # started stream properly ended with sse.close (the D12 branch above
-    # already intercepted a bare return with no sse.close, which is never
-    # clean; both refusal outcomes closed the connection above) -- honors the "Connection: keep-alive"
+    # started stream properly ended with sse.close (the incomplete-response
+    # branch above already intercepted a bare return with no sse.close, which
+    # is never clean; both refusal outcomes closed the connection above) -- honors the "Connection: keep-alive"
     # header the server itself emitted on sse.start; the terminator is written
     # above and the connection returns to ordinary request handling.
     # Keep-alive still yields to the usual overrides: an application
@@ -5791,7 +5766,14 @@ async sub _handle_sse_request {
         return;
     }
 
-    $self->_handle_disconnect_and_close($self->{sse_finish_reason} // 'stream_complete');
+    # The application ended this stream itself with sse.close: the connection
+    # ends under the reason it gave, or under the token that names the
+    # application as the closer. Anything else reaching here is an ordinary
+    # stream completion.
+    my $end_reason = (($self->{h1_seq} // '') eq 'closed')
+                   ? ($self->{end_reason} // 'app_closed')
+                   : 'stream_complete';
+    $self->_handle_disconnect_and_close($end_reason);
 }
 
 # Idempotently end an SSE stream: write the chunked terminator (HTTP/1.1) and
@@ -5805,7 +5787,7 @@ async sub _handle_sse_request {
 # gone out -- advance_sse only reaches 'closed' from 'streaming'). The
 # refusal branch ('refusing', 'refusal_complete') is a response but not
 # a stream, so it is deliberately excluded: the chunked terminator, the
-# D12 incomplete-response check and the stream-scoped send guards all
+# incomplete-response check and the stream-scoped send guards all
 # apply to a started stream only.
 sub _sse_stream_started {
     my ($state) = @_;
@@ -5814,10 +5796,9 @@ sub _sse_stream_started {
 }
 
 sub _finish_sse_stream {
-    my ($self, $reason) = @_;
+    my ($self) = @_;
     return if $self->{sse_finished};
     $self->{sse_finished} = 1;
-    $self->{sse_finish_reason} = $reason;
 
     # Nothing may reach the wire after the terminating chunk.
     $self->_stop_sse_keepalive;
@@ -5830,7 +5811,7 @@ sub _finish_sse_stream {
     }
 
     # Clean end for the connection_state (Www.pod "Connection State", Meaning
-    # per scope): reached only via an explicit sse.close (see D12 below --
+    # per scope): reached only via an explicit sse.close --
     # _handle_sse_request's tail intercepts a bare return with no sse.close
     # before it ever calls here, so a started stream here always means a genuine
     # sse.close).
@@ -5843,8 +5824,8 @@ sub _finish_sse_stream {
 # on the same socket, so every field the stream touched has to be back at its
 # constructor value. Inventory, as a constraint list:
 #
-#   SSE stream flags   sse_finished, sse_finish_reason,
-#                      sse_disconnect_reason
+#   SSE stream flags   sse_finished
+#   Ending record      end_reason, end_detail, end_code
 #   SSE timers/writer  sse_keepalive_timer + comment, sse_idle_timer,
 #                      sse_keepalive_writer (closes over this stream's framing)
 #   Response state     handling_request, response_started, h1_seq,
@@ -5868,10 +5849,11 @@ sub _reset_after_sse_stream {
     $self->_stop_sse_idle_timer;
     delete $self->{sse_keepalive_writer};
 
-    $self->{scope_kind}            = 'http';
-    $self->{sse_finished}          = 0;
-    $self->{sse_finish_reason}     = undef;
-    $self->{sse_disconnect_reason} = undef;
+    $self->{scope_kind}   = 'http';
+    $self->{sse_finished} = 0;
+    $self->{end_reason}   = undef;
+    $self->{end_detail}   = undef;
+    $self->{end_code}     = undef;
 
     # Mirrors the keep-alive reset in _handle_request.
     $self->{handling_request}         = 0;
@@ -5967,7 +5949,7 @@ sub _create_sse_receive {
     my $sse_disconnect = sub {
         return {
             type   => 'sse.disconnect',
-            reason => ($weak_self ? $weak_self->{sse_disconnect_reason} : undef) // 'client_closed',
+            reason => $weak_self ? $weak_self->_end_reason($weak_self) : 'client_closed',
         };
     };
 
@@ -6304,9 +6286,8 @@ sub _create_sse_send {
             # written to the wire. Idempotency for a repeat sse.close is handled
             # by advance_sse (the 'closed' state accepts another sse.close as a
             # no-op), and h1_seq is already 'closed' by the time this arm runs.
-            $weak_self->{sse_disconnect_reason} = $event->{reason}
-                if defined $event->{reason};
-            $weak_self->_finish_sse_stream($event->{reason} // 'app_closed');
+            $weak_self->_record_end($weak_self, reason => $event->{reason});
+            $weak_self->_finish_sse_stream;
         }
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush.
@@ -6369,10 +6350,8 @@ async sub _handle_websocket_request {
         $self->_flush_pending_headers;   # no terminator follows these
         $self->_log(error => "PAGI application returned with an incomplete response")
             unless $self->{closed} || $app_failed;
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->{_disconnect_detail} //= 'refusal started but never completed';
-        $self->_handle_disconnect_and_close('server_error');
+        $self->_end_scope('server_error',
+            detail => 'refusal started but never completed');
         return;
     }
 
@@ -6390,10 +6369,7 @@ async sub _handle_websocket_request {
                 unless $app_failed;
             $self->_send_error_response(500, "Internal Server Error");
         }
-        $self->_write_access_log;
-        $self->{server}->_on_request_complete if $self->{server};
-        $self->{_disconnect_detail} //= 'no response was started';
-        $self->_handle_disconnect_and_close('server_error');
+        $self->_end_scope('server_error', detail => 'no response was started');
         return;
     }
 
@@ -6402,17 +6378,23 @@ async sub _handle_websocket_request {
     $self->{server}->_on_request_complete if $self->{server};
 
     if (my $cs = $self->{current_connection_state}) {
-        if (_ws_handshake_accepted($self->{h1_seq}) && !$self->{close_sent} && !$self->{close_received} && !$self->{closed}) {
-            # App returned from an accepted socket without a closing handshake:
-            # an incomplete response (design 4.7, D13). Close with 1011, report
-            # server_error, log; never a clean end. _send_close_frame already
-            # sets close_sent and ws_disconnect_code; flushed by _close's
-            # close_when_empty before the socket closes.
+        if (_ws_handshake_accepted($self->{h1_seq})
+            && !PAGI::Server::EventValidator::scope_send_clean('websocket', $self->{h1_seq})
+            && !$self->{ws_peer_closed}
+            && !$self->{closed}) {
+            # App returned from an accepted socket without a closing
+            # handshake: an incomplete response (Www.pod "Application Left a
+            # Response Incomplete"). Close with 1011, report server_error,
+            # log; never a clean end. The guard asks the three facts the
+            # clean-end test asks: the handshake was accepted, the
+            # application's own send state never reached a clean end, and no
+            # peer Close frame validated. _send_close_frame records the code;
+            # flushed by _close's close_when_empty before the socket closes.
             $self->_send_close_frame(1011, '');
-            $self->{ws_disconnect_reason} = 'server_error';
+            $self->_record_end($self, reason => 'server_error');
             $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
-            $self->{_disconnect_detail} //= 'accepted socket left without a closing handshake';
-            $self->_handle_disconnect_and_close('server_error');
+            $self->_handle_disconnect_and_close('server_error',
+                detail => 'accepted socket left without a closing handshake');
             return;
         }
         # Keyed on the app's own send state and the validated peer Close
@@ -6516,7 +6498,7 @@ sub _create_websocket_receive {
     weaken(my $weak_self = $self);
 
     return sub {
-        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => '' })
+        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => 'client_closed' })
             unless $weak_self;
 
         # Check queue first - drain queued messages even if closed
@@ -6543,7 +6525,7 @@ sub _create_websocket_receive {
             if $weak_self->{closed};
 
         my $future = (async sub {
-            return { type => 'websocket.disconnect', code => 1006, reason => '' }
+            return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
                 unless $weak_self;
 
             # Check queue first - drain queued messages even if closed
@@ -6850,7 +6832,7 @@ sub _process_websocket_frames {
         if ($rsv && ref($rsv) eq 'ARRAY') {
             if (grep { $_ } @$rsv) {
                 $self->_send_close_frame(1002, 'RSV bits must be 0');
-                $self->_handle_disconnect_and_close('protocol_error', 'RSV bits must be 0');
+                $self->_handle_disconnect_and_close('protocol_error', detail => 'RSV bits must be 0');
                 return;
             }
         }
@@ -6859,7 +6841,7 @@ sub _process_websocket_frames {
         # Must fail connection with 1002 Protocol Error
         if (($opcode >= 3 && $opcode <= 7) || ($opcode >= 11 && $opcode <= 15)) {
             $self->_send_close_frame(1002, 'Reserved opcode');
-            $self->_handle_disconnect_and_close('protocol_error', 'Reserved opcode');
+            $self->_handle_disconnect_and_close('protocol_error', detail => 'Reserved opcode');
             return;
         }
 
@@ -6867,7 +6849,7 @@ sub _process_websocket_frames {
         # payload length <= 125 bytes
         if (($opcode == 8 || $opcode == 9 || $opcode == 10) && length($bytes) > 125) {
             $self->_send_close_frame(1002, 'Control frame too large');
-            $self->_handle_disconnect_and_close('protocol_error', 'Control frame too large');
+            $self->_handle_disconnect_and_close('protocol_error', detail => 'Control frame too large');
             return;
         }
 
@@ -6877,14 +6859,14 @@ sub _process_websocket_frames {
             unless (defined $text) {
                 # Invalid UTF-8 - close with 1007 per RFC 6455
                 $self->_send_close_frame(1007, 'Invalid UTF-8');
-                $self->_handle_disconnect_and_close('protocol_error', 'Invalid UTF-8');
+                $self->_handle_disconnect_and_close('protocol_error', detail => 'Invalid UTF-8');
                 return;
             }
             # Check queue limit before adding (DoS protection)
             if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
                 $self->_send_close_frame(1008, 'Message queue overflow');
                 $self->_handle_disconnect_and_close('queue_overflow',
-                    "inbound message queue at $self->{max_receive_queue}");
+                    detail => "inbound message queue at $self->{max_receive_queue}");
                 return;
             }
             push @{$self->{receive_queue}}, {
@@ -6898,7 +6880,7 @@ sub _process_websocket_frames {
             if (@{$self->{receive_queue}} >= $self->{max_receive_queue}) {
                 $self->_send_close_frame(1008, 'Message queue overflow');
                 $self->_handle_disconnect_and_close('queue_overflow',
-                    "inbound message queue at $self->{max_receive_queue}");
+                    detail => "inbound message queue at $self->{max_receive_queue}");
                 return;
             }
             push @{$self->{receive_queue}}, {
@@ -6915,7 +6897,7 @@ sub _process_websocket_frames {
             # 1 byte is invalid
             if (length($bytes) == 1) {
                 $self->_send_close_frame(1002, 'Invalid close frame');
-                $self->_handle_disconnect_and_close('protocol_error', 'Invalid close frame');
+                $self->_handle_disconnect_and_close('protocol_error', detail => 'Invalid close frame');
                 return;
             }
 
@@ -6938,7 +6920,7 @@ sub _process_websocket_frames {
                 }
                 unless ($valid_code) {
                     $self->_send_close_frame(1002, 'Invalid close code');
-                    $self->_handle_disconnect_and_close('protocol_error', 'Invalid close code');
+                    $self->_handle_disconnect_and_close('protocol_error', detail => 'Invalid close code');
                     return;
                 }
 
@@ -6948,7 +6930,7 @@ sub _process_websocket_frames {
                     my $decoded = eval { Encode::decode('UTF-8', $reason_copy, Encode::FB_CROAK) };
                     unless (defined $decoded) {
                         $self->_send_close_frame(1007, 'Invalid UTF-8 in close reason');
-                        $self->_handle_disconnect_and_close('protocol_error', 'Invalid UTF-8 in close reason');
+                        $self->_handle_disconnect_and_close('protocol_error', detail => 'Invalid UTF-8 in close reason');
                         return;
                     }
                 }

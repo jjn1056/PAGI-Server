@@ -55,15 +55,15 @@ my @cases = (
     {
         name   => 'server-detected protocol violation closed the socket',
         stream => { seq_state => 'accepted',
-                    server_close_reason => 'protocol_error',
-                    server_close_detail => 'RSV bits must be 0' },
+                    end_reason => 'protocol_error',
+                    end_detail => 'RSV bits must be 0' },
         clean  => 0,
     },
     {
         name   => 'bounded inbound queue overflowed and the server closed',
         stream => { seq_state => 'accepted',
-                    server_close_reason => 'queue_overflow',
-                    server_close_detail => 'inbound message queue at 100' },
+                    end_reason => 'queue_overflow',
+                    end_detail => 'inbound message queue at 100' },
         clean  => 0,
     },
     {
@@ -159,8 +159,8 @@ sub drive_h2_on_close {
 subtest 'a server protocol close on an unmarked object ends abnormally' => sub {
     my $got = drive_h2_on_close(
         seq_state           => 'accepted',
-        server_close_reason => 'protocol_error',
-        server_close_detail => 'RSV bits must be 0',
+        end_reason => 'protocol_error',
+        end_detail => 'RSV bits must be 0',
     );
 
     ok(!$got->{seen}{complete}, 'on_complete did not fire');
