@@ -240,6 +240,13 @@ log records the status field as C<->. Observed in C<t/72-abort.t> row 1.
 Behaviours the spec fixes are not listed here; the relevant sections below
 say what this server does and which test proves it, and the spec says why.
 
+A server may also enforce more than the spec requires, provided the extra
+check never contradicts a rule the spec does make: rejecting a send or a
+receive the spec leaves unspecified is allowed, delivering an event the spec
+says is not delivered is not. PAGI::Server currently adds no such checks
+beyond the ones listed above; if it does in future, they will be recorded
+here as rulings, each with the spec text that leaves the room.
+
 =head1 HTTP/1.1 COMPLIANCE
 
 PAGI::Server is fully compliant with RFC 7230 (HTTP/1.1 Message Syntax and Routing)
