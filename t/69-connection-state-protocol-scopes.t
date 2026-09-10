@@ -154,7 +154,7 @@ subtest 'h1 websocket: accepted socket, peer Close frame, is a clean end' => sub
 };
 
 subtest 'h1 sse: client drop before start marks client_closed; sse.close is a clean end; return without it is incomplete (D12)' => sub {
-    my %r;
+    my (%r, @log_events);
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'sse';
@@ -174,7 +174,9 @@ subtest 'h1 sse: client drop before start marks client_closed; sse.close is a cl
         $r{done} = 1;
         return;                                   # /stream: clean end via sse.close; /abandon: incomplete
     };
-    my $server = create_server($app);
+    # The /abandon arm provokes the sse incomplete-response error line; capture
+    # the server log so the suite's stderr carries only lines a test asserts.
+    my $server = create_server($app, logger => sub { push @log_events, $_[0] });
     drive(port => $server->port, request => sse_request($server->port), until => sub { $r{parked} }, close => 1);
     $loop->loop_once(0.05) for 1 .. 20;
     is($r{event}{type}, 'sse.disconnect', 'sse.disconnect before start');
@@ -197,6 +199,12 @@ subtest 'h1 sse: client drop before start marks client_closed; sse.close is a cl
     ok(!$r{complete}, 'on_complete did not fire for a return without sse.close');
     is($r{disc}[0], 'server_error', 'on_disconnect server_error (incomplete response)');
     unlike($wire, qr/\r\n0\r\n\r\n\z/, 'no terminator synthesized; connection closed without it');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1, 'exactly one error line across the three arms')
+        or diag('errors: ' . join('; ', map { $_->{message} // '' } @errors));
+    like($errors[0]{message}, qr/returned after sse\.start without sse\.close/,
+        'the line names the incomplete-response condition') if @errors;
 };
 
 subtest 'h1 sse: abort() after sse.start reports app_abort on both the event and the object' => sub {

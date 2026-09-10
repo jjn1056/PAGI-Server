@@ -98,9 +98,13 @@ subtest 'websocket before accept: abort ends the handshake with no response byte
         $c->on_disconnect(sub { push @{$r{disc}}, [@_] });
         $c->on_complete(sub { $r{complete}++ });
         await $receive->();                       # websocket.connect
+        # Park a receive before the abort: Www.pod "Disconnect event" names the
+        # pre-accept abort's event, 1006 with the condition's reason token.
+        my $parked = $receive->();
         $r{parked} = 1;
         my $verdict = await $lookup;              # a pool lookup, resolved by the test
         $c->abort('policy') if $verdict eq 'deny';
+        $r{event}     = await $parked;            # settled by abort's own teardown
         # "treat later sends as post-close no-ops": this resolves, it does not fail.
         $r{send_ok}   = eval { await $send->({ type => 'websocket.accept' }); 1 } ? 1 : 0;
         $r{send_err}  = $@;
@@ -126,6 +130,10 @@ subtest 'websocket before accept: abort ends the handshake with no response byte
     ok($$eof, 'the transport was closed');
     is($r{send_ok}, 1, 'the send after abort resolved as a post-close no-op')
         or diag("send error: $r{send_err}");
+    is($r{event}{type}, 'websocket.disconnect',
+        'the parked receive observed websocket.disconnect');
+    is($r{event}{code}, 1006, 'code 1006 (no Close frame was exchanged)');
+    is($r{event}{reason}, 'app_abort', 'reason app_abort');
     is($r{reason}, 'app_abort', 'disconnect_reason is app_abort');
     is($r{detail}, 'policy', 'disconnect_detail is the application string');
     is($r{connected}, 0, 'is_connected is false');
