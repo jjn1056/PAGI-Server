@@ -971,8 +971,9 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
             # sub; hand it to the caller so the suspended async sub behind it
             # is not reaped mid-run.
             $r{parked_future} = $parked unless $parked->is_ready;
-            # The object reaches its terminal state when the application
-            # returns, so it is read from out here, not from inside the app.
+            # Read from out here: these assertions are about the state that
+            # survives the application's return. Subtest (i) pins the
+            # earlier moment, when the terminal event was accepted.
             $r{conn} = $conn;
             $r{done} = 1;
             return;
@@ -1018,6 +1019,129 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
             is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
             is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");
             is($r{disconnect}, undef, "h2 $kind: on_disconnect never fired");
+        }
+    }
+};
+
+# ============================================================
+# (i) the refusal's terminal event is the moment the scope ends
+# ============================================================
+# Www.pod "Meaning per scope": a protocol scope ends cleanly when "the server
+# has finished its output of a refusal", and "the first to occur wins; the
+# terminal state never reopens". That moment is the refusal's terminal event,
+# not the application's return: an app still running after it must already see
+# a completed object, and a client that goes away in between must not be able
+# to re-decide the ending.
+
+subtest 'a completed refusal is complete before the application returns, and a client close afterwards leaves it complete' => sub {
+    # The application: refuse, snapshot the object while still running, then
+    # park on a Future the test resolves. It never calls receive() after the
+    # refusal, so nothing but the terminal event itself can have ended it.
+    my $refusing_app = sub {
+        my ($r, $released) = @_;
+        return async sub {
+            my ($scope, $receive, $send) = @_;
+            await $receive->() if $scope->{type} ne 'sse';
+            my $conn = $scope->{'pagi.connection'};
+            $conn->on_disconnect(sub { push @{$r->{disconnect}}, [@_] });
+            $conn->on_complete(sub { $r->{complete}++ });
+            await $send->({ type => 'http.response.start', status => 401,
+                            headers => [['content-type', 'text/plain'],
+                                        ['content-length', 4]] });
+            await $send->({ type => 'http.response.body', body => 'nope' });
+            $r->{at_terminal} = {
+                connected  => $conn->is_connected,
+                complete   => $conn->response_complete,
+                fired      => $r->{complete},
+                disconnects=> scalar @{$r->{disconnect} // []},
+            };
+            $r->{conn} = $conn;
+            await $released;
+            $r->{returned} = 1;
+            return;
+        };
+    };
+
+    for my $kind (@SCOPES) {
+        my %r;
+        my $released = $loop->new_future;
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        my $server = create_server($refusing_app->(\%r, $released));
+        my ($sock, $pump) = h1_open($server->port, h1_request($kind));
+        $pump->(25);
+
+        # Still parked: the terminal event alone drove the object terminal.
+        is($r{returned}, undef, "h1 $kind: the application has not returned yet");
+        is($r{at_terminal}{connected}, 0, "h1 $kind: is_connected is false at the terminal event");
+        is($r{at_terminal}{complete}, 1, "h1 $kind: response_complete is true at the terminal event");
+        is($r{at_terminal}{fired}, 1, "h1 $kind: on_complete had fired exactly once by then");
+        is($r{at_terminal}{disconnects}, 0, "h1 $kind: on_disconnect had not fired");
+
+        # The client goes away after the refusal but before the app returns:
+        # the terminal state must not reopen.
+        close $sock;
+        $loop->loop_once(0.05) for 1 .. 15;
+        is($r{conn}->response_complete, 1, "h1 $kind: still complete after the client closed");
+        is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason stayed undef");
+        is(scalar @{$r{disconnect} // []}, 0, "h1 $kind: on_disconnect never fired");
+
+        $released->done;
+        $loop->loop_once(0.05) for 1 .. 20;
+        $server->shutdown->get;
+        is($r{returned}, 1, "h1 $kind: the application returned");
+        is(scalar(@warnings), 0, "h1 $kind: nothing was logged") or diag("warnings: @warnings");
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 40 unless $have_h2;
+        for my $kind (@SCOPES) {
+            # Two ways for the h2 client to go away after the terminal event:
+            # a reset of this stream, and the whole connection dropping.
+            for my $ending (qw(rst_stream connection_close)) {
+                my %r;
+                my $released = $loop->new_future;
+                my @warnings;
+                local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+                my ($conn, $stream_io, $client_sock, $server) =
+                    create_h2_connection(app => $refusing_app->(\%r, $released));
+                my $client = create_client;
+                complete_h2_handshake($client, $client_sock);
+                my $sid = h2_submit($client, $client_sock, $kind);
+                $client_sock->syswrite($client->mem_send);
+                exchange_frames($client, $client_sock, 25);
+
+                is($r{returned}, undef, "h2 $kind/$ending: the application has not returned yet");
+                is($r{at_terminal}{connected}, 0, "h2 $kind/$ending: is_connected is false at the terminal event");
+                is($r{at_terminal}{complete}, 1, "h2 $kind/$ending: response_complete is true at the terminal event");
+                is($r{at_terminal}{fired}, 1, "h2 $kind/$ending: on_complete had fired exactly once by then");
+                is($r{at_terminal}{disconnects}, 0, "h2 $kind/$ending: on_disconnect had not fired");
+
+                my $closed_connection = 0;
+                if ($ending eq 'rst_stream') {
+                    $client->submit_rst_stream($sid, 8);   # CANCEL
+                    $client_sock->syswrite($client->mem_send);
+                    exchange_frames($client, $client_sock, 15);
+                }
+                else {
+                    $stream_io->close_now;
+                    $closed_connection = 1;
+                    $loop->loop_once(0.05) for 1 .. 15;
+                }
+
+                is($r{conn}->response_complete, 1, "h2 $kind/$ending: still complete after the client went away");
+                is($r{conn}->disconnect_reason, undef, "h2 $kind/$ending: disconnect_reason stayed undef");
+                is(scalar @{$r{disconnect} // []}, 0, "h2 $kind/$ending: on_disconnect never fired");
+
+                $released->done;
+                if ($closed_connection) { $loop->loop_once(0.05) for 1 .. 20 }
+                else { exchange_frames($client, $client_sock, 20) }
+                is($r{returned}, 1, "h2 $kind/$ending: the application returned");
+                is(scalar(@warnings), 0, "h2 $kind/$ending: nothing was logged") or diag("warnings: @warnings");
+
+                $stream_io->close_now unless $closed_connection;
+                $loop->remove($server);
+            }
         }
     }
 };

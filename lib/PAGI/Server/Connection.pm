@@ -2552,6 +2552,16 @@ sub _h2_create_websocket_send {
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
             die $error unless $ok;
+            # Www.pod "Meaning per scope": this scope ends cleanly when the
+            # server has finished its output of the refusal, not when the
+            # application returns. Mark the object here, while the app is
+            # still running, so a client reset in between cannot take it to
+            # a different terminal state. Keyed on the delegate's own state
+            # AFTER the send succeeded: a rolled-back send (unopenable file,
+            # undeclared trailers) leaves 'refusing' and dies before here.
+            # Idempotent -- _h2_on_close marks the same object again.
+            $ss->{connection_state}->_mark_complete
+                if $seq eq 'refusal_complete' && $ss && $ss->{connection_state};
             return;
         }
 
@@ -2981,6 +2991,16 @@ sub _h2_create_sse_send {
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
             die $error unless $ok;
+            # Www.pod "Meaning per scope": this scope ends cleanly when the
+            # server has finished its output of the refusal, not when the
+            # application returns. Mark the object here, while the app is
+            # still running, so a client reset in between cannot take it to
+            # a different terminal state. Keyed on the delegate's own state
+            # AFTER the send succeeded: a rolled-back send (unopenable file,
+            # undeclared trailers) leaves 'refusing' and dies before here.
+            # Idempotent -- _h2_on_close marks the same object again.
+            $ss->{connection_state}->_mark_complete
+                if $seq eq 'refusal_complete' && $ss && $ss->{connection_state};
             return;
         }
 
@@ -6174,6 +6194,17 @@ sub _create_sse_send {
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
             die $error unless $ok;
+            # Www.pod "Meaning per scope": this scope ends cleanly when the
+            # server has finished its output of the refusal, not when the
+            # application returns. Mark the object here, while the app is
+            # still running, so a client close in between cannot take it to
+            # a different terminal state. Keyed on the delegate's own state
+            # AFTER the send succeeded: a rolled-back send (unopenable file,
+            # undeclared trailers) leaves 'refusing' and dies before here.
+            # Idempotent -- the app-return tail marks the same object again.
+            $weak_self->{current_connection_state}->_mark_complete
+                if $seq eq 'refusal_complete'
+                && $weak_self->{current_connection_state};
             return;
         }
 
@@ -6652,6 +6683,17 @@ sub _create_websocket_send {
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
             die $error unless $ok;
+            # Www.pod "Meaning per scope": this scope ends cleanly when the
+            # server has finished its output of the refusal, not when the
+            # application returns. Mark the object here, while the app is
+            # still running, so a client close in between cannot take it to
+            # a different terminal state. Keyed on the delegate's own state
+            # AFTER the send succeeded: a rolled-back send (unopenable file,
+            # undeclared trailers) leaves 'refusing' and dies before here.
+            # Idempotent -- the app-return tail marks the same object again.
+            $weak_self->{current_connection_state}->_mark_complete
+                if $seq eq 'refusal_complete'
+                && $weak_self->{current_connection_state};
             return;
         }
 
