@@ -439,124 +439,38 @@ withheld.
 
 =head2 WebSocket over HTTP/2 (RFC 8441)
 
-PAGI::Server accepts a WebSocket upgrade over HTTP/2 through RFC 8441
-Extended CONNECT (C<:protocol =E<gt> 'websocket'>). Each accepted stream carries
-its own C<websocket.receive>/C<websocket.disconnect> event stream,
-multiplexed alongside every other stream on the connection.
+PAGI::Server accepts a WebSocket over HTTP/2 through RFC 8441 Extended
+CONNECT (C<:protocol =E<gt> 'websocket'>). Each accepted stream carries its
+own C<websocket.*> event stream, multiplexed with every other stream on the
+connection, and its own C<pagi.connection>.
 
-=head3 Framing Enforcement
+B<Framing.> RFC 8441 section 4 makes the framing identical to HTTP/1.1, so
+the same RFC 6455 checks apply per stream: a nonzero RSV bit, a reserved
+opcode, or a control frame over 125 bytes closes that stream with C<1002>
+and delivers C<websocket.disconnect> with reason C<protocol_error>. Pinned
+by C<t/http2/37-ws-frame-validation.t>.
 
-RFC 8441 requires WebSocket-over-HTTP/2 framing to be "identical to
-HTTP/1.1" (section 4), so the same three RFC 6455 framing checks the
-HTTP/1.1 WebSocket compliance section above performs also apply here, per
-stream: nonzero RSV1-3 bits close with
-C<1002> (section 5.2; C<Protocol::WebSocket::Frame> exposes C<rsv> but
-does not itself validate it), reserved/unknown opcodes C<3-7> and
-C<11-15> close with C<1002> (section 5.2), and a control frame
-(close/ping/pong) payload over 125 bytes closes with C<1002> (section
-5.5). Each violation follows the same server-initiated-protocol-close path
-described below: one Close frame on the wire, one C<websocket.disconnect>
-(code C<1002>, reason C<protocol_error>) delivered to the application.
+B<Keepalive.> C<websocket.keepalive> runs per stream, with its timers on the
+stream rather than the connection. A missing pong closes only that stream,
+with the code and reason the spec names (C<1006> / C<keepalive_timeout>);
+no Close frame is written, because RFC 6455 section 7.4.1 forbids C<1006>
+on the wire, and the stream is reset (RFC 8441 section 5). Pinned by
+C<t/http2/31-ws-keepalive-disconnect.t>.
 
-=head3 Keepalive
-
-C<websocket.keepalive> is supported per stream. An HTTP/2 connection
-multiplexes many WebSocket streams, so keepalive state and its timers live
-on the individual stream rather than the connection -- unlike HTTP/1.1,
-where one WebSocket occupies the whole connection and keepalive is
-connection-wide. A ping is delivered as an RFC 6455 ping frame carried in
-an HTTP/2 C<DATA> frame on that stream; the peer's pong (opcode 10) clears
-the stream's wait flag. Each C<websocket.keepalive> event for a stream
-supersedes any keepalive already running on it, and C<interval =E<gt> 0>
-stops it. When C<timeout> is given and no pong arrives
-within it, only that stream closes -- code C<1006>, reason
-C<keepalive_timeout> -- other streams multiplexed on the same connection
-are unaffected. That C<1006> is the code the application sees; it never
-reaches the wire, because RFC 6455 section 7.4.1 forbids C<1006> as the
-status code of a Close frame. A keepalive timeout sends no Close frame at
-all: it resets the stream (C<RST_STREAM>, error code C<CANCEL>), the
-HTTP/2 analogue of HTTP/1.1 dropping the transport. An omitted C<timeout>
-means the server never checks for a missing pong.
-
-=head3 Disconnect
-
-Each HTTP/2 WebSocket stream enqueues exactly one C<websocket.disconnect>
-event onto its scope's receive queue, whichever of the conditions below
-closes it first: the closure paths all funnel through one deduplicating
-enqueue, so no closure can queue a second disconnect and no two closure
-paths can race to queue conflicting ones. C<code> and C<reason> pair up the
-same way as
-L<the WebSocket "Disconnect - receive event" section of PAGI::Spec::Www|PAGI::Spec::Www>
-describes for the reference server:
-
-=over 4
-
-=item * B<The peer sent a Close frame.> C<code> is the peer's own close
-code (C<1005> if the frame carried none) and C<reason> is the peer's own
-reason text, which is commonly empty. The server does not substitute a
-token.
-
-=item * B<Abnormal drop with no close handshake> -- a bare C<END_STREAM>,
-an C<RST_STREAM>, or any other stream teardown that did not go through a
-Close frame. C<code> is C<1006> and C<reason> is C<client_closed>.
-
-=item * B<Keepalive pong timeout.> C<code> is C<1006> and C<reason> is
-C<keepalive_timeout>.
-
-=item * B<Server-initiated protocol close> -- the server detected a
-framing or protocol violation (a nonzero RSV bit, a reserved/unknown
-opcode, an oversized control-frame payload, an invalid close frame, an
-invalid close code, or invalid UTF-8 in a text frame or in a Close frame's
-reason) and sent the Close frame itself. C<code> is the RFC 6455 code for
-the fault (C<1002> for a framing/protocol error, C<1007> for invalid
-UTF-8) and C<reason> is C<protocol_error>.
-
-=item * B<Inbound receive-queue overflow> -- a text or binary message
-arrived while the stream's own receive queue already held
-C<max_receive_queue> undelivered events (default 1000; see
-L<PAGI::Server> for the C<max_receive_queue> constructor option), the same
-per-stream cap and enforcement point HTTP/1.1 uses. C<code> is C<1008> and
-C<reason> is C<queue_overflow>.
-
-=item * B<The application aborted the scope.> C<code> is C<1006> and
-C<reason> is C<app_abort>; C<disconnect_detail> carries the string the
-application passed to C<abort>. No Close frame is sent -- the stream is reset
-with C<RST_STREAM> (C<CANCEL>). See L</"Connection State (pagi.connection)">.
-
-=item * B<The application abandoned an accepted socket> -- it returned
-without sending C<websocket.close> and without a closing handshake having
-completed. The server sends a Close frame with code C<1011> in a C<DATA>
-frame carrying C<END_STREAM>, the connection object reports C<server_error>,
-and one error line names the condition. C<code> is C<1011> and C<reason> is
-C<server_error>, as on HTTP/1.1 (see L</"PAGI SPECIFICATION RULINGS"> for the
-frame-then-C<END_STREAM> choice).
-
-=back
-
-A drop B<before> C<websocket.accept> is a C<websocket.disconnect> like any
-other -- code C<1006>, reason C<client_closed> -- delivered to the scope that
-was still deciding. It is never an C<http.disconnect>: the scope's type
-decides the event's type, not how far the handshake got.
-
-A B<completed refusal> delivers no disconnect event at all, on this transport
-or on HTTP/1.1: it is a clean end, and a C<receive()> after it parks (see
-L</"PAGI SPECIFICATION RULINGS">).
-
-"Exactly one" above is a property of the receive queue, not a hard cap on
-what any number of C<receive()> calls can ever return. Once the stream's
-state has been torn down -- the connection is closed, or the stream's state
-has already been reclaimed -- a further C<receive()> has no queue left to
-read and falls back to synthesizing a C<websocket.disconnect> with code
-C<1006> and the reason the stream recorded for its own teardown, or
-C<client_closed> when the stream recorded none, which is the token for a bare
-transport drop. It is never an empty reason. An application that keeps calling
-C<receive()> after its disconnect event therefore keeps getting that
-fallback rather than hanging. The queued disconnect (the one carrying the
-real code and reason from the table above) is still delivered exactly once.
-
-The matrix of scope type against ending, on both transports, is
-C<t/70-protocol-disconnect-matrix.t>; the HTTP/2 clean-end classification has
-its own unit coverage in C<t/74-h2-ws-clean-end.t>.
+B<Disconnect.> The C<code> / C<reason> pairs are the ones
+L<PAGI::Spec::Www/"Disconnect - receive event"> defines. Where the spec
+leaves the close code to the server, PAGI::Server uses the RFC 6455 section
+7.4.1 code for the fault: C<1002> for a framing or protocol error, C<1007>
+for invalid UTF-8, and C<1008> (policy violation) when the stream's receive
+queue overflows C<max_receive_queue>. The event is queued exactly once per
+stream, whichever closure path fires first; a further C<receive()> resolves
+with the same event again, with a peer's Close code and text intact, and a
+completed refusal delivers none (see L</"PAGI SPECIFICATION RULINGS">).
+Pinned by C<t/http2/31> (queued once, proven through
+C<max_disconnect_receives>), C<t/http2/43-receive-after-stream-end.t>
+(re-delivery), C<t/70-protocol-disconnect-matrix.t> (every scope type
+against every ending, both transports) and C<t/74-h2-ws-clean-end.t> (the
+clean-end classification).
 
 =head2 HTTP/2 Trailers (http.response.trailers)
 
@@ -642,74 +556,35 @@ in the first place (see "HTTP/2 Trailers" above).
 
 =head2 Connection State (pagi.connection)
 
-PAGI exposes connection-lifecycle introspection to applications through the
-C<pagi.connection> scope key (see L<PAGI::Spec::Www/"Connection State">).
-PAGI::Server provides the object on B<every> scope -- C<http>, C<websocket>
-and C<sse> -- on both HTTP/1.1 and HTTP/2, with every accessor the sub-spec
-requires: C<is_connected>, C<disconnect_reason>, C<disconnect_detail>,
-C<on_disconnect> (abnormal end only, called with C<($reason, $detail)>),
-C<on_complete> (clean end only), C<disconnect_future>, C<response_started>,
-C<response_complete> (a boolean: C<1> after a clean end, C<0> otherwise), and
-C<abort($detail)>. Exactly one of C<on_disconnect> / C<on_complete> fires per
-scope. The object is marked before any pending C<receive()> is resumed, and the
-reason it carries is the same token the scope's disconnect event carries, on
-every ending the server decides. Coverage: C<t/69-connection-state-protocol-scopes.t>
-(interface and HTTP/1.1 endings), C<t/70-protocol-disconnect-matrix.t> (every
-scope type against every ending, both transports, agreement asserted per
-cell), C<t/http2/30-connection-state.t>.
+PAGI::Server provides C<pagi.connection> on every scope, on both
+transports, with every accessor L<PAGI::Spec::Www/"Connection State">
+requires, marked before any pending C<receive()> is resumed and carrying the
+same token as the scope's disconnect event. On HTTP/2 each stream has its
+own object; a whole-connection teardown (shutdown, socket error) records the
+connection-level reason on every stream still open, so a stream
+mid-response when the connection dies still reports why. Coverage:
+C<t/69-connection-state-protocol-scopes.t>, C<t/70-protocol-disconnect-matrix.t>
+(agreement asserted per cell), C<t/http2/30-connection-state.t>,
+C<t/72-abort.t> and C<t/http2/41-abort.t> (C<abort> on every scope type,
+including a send parked on backpressure and a sibling HTTP/2 stream that
+survives), C<t/69>, C<t/55-sse-alignment.t>, C<t/http2/24-incomplete-response.t>
+and C<t/http2/42-d13-incomplete-session.t> (responses left incomplete).
 
-On HTTP/2 each stream carries its own C<pagi.connection>, tracked
-independently of every other stream multiplexed on the same connection: one
-stream completing does not affect another still in flight. An ending the
-server decides (an abandoned response, a protocol close, a timeout, an
-C<abort>) is recorded the moment it is decided; an ending the peer causes is
-recorded when the stream closes, as C<client_closed> for a reset or a bare
-C<END_STREAM>. A whole-connection teardown (server shutdown, socket error)
-records the connection-level reason on every still-open stream, so a stream
-mid-response when the connection dies still reports why.
+Two details the spec leaves to the server:
 
-C<abort($detail)> ends the scope's transport immediately, on every scope type
-and both transports, with reason C<app_abort> and C<$detail> as
-C<disconnect_detail>: HTTP/1.1 closes the socket without waiting for the write
-queue to drain, HTTP/2 resets only that stream. No Close frame and no
-end-of-stream marker are written, a pending C<receive()> resolves with the
-scope's disconnect event, later sends are post-close no-ops, and nothing is
-logged. Coverage: C<t/72-abort.t> (HTTP/1.1, including a send parked on
-backpressure that resolves rather than blocking the abort) and
-C<t/http2/41-abort.t> (HTTP/2, including a sibling stream that survives).
+=over 4
 
-C<disconnect_future> follows the three possible states at the moment it is
-first called: while the request is still in flight it returns a fresh,
-pending Future that resolves later if the connection disconnects
-abnormally; after an abnormal disconnect it returns a Future already
-resolved with the disconnect reason; after a clean completion it returns a
-Future that is deliberately left pending forever, since a clean completion
-has no disconnect reason to resolve it with. Every call returns its own
-cancellation-isolated observer.
+=item * C<disconnect_future> returns a fresh, cancellation-isolated observer
+on every call. After an abnormal end it is already resolved with the reason;
+after a clean end it stays pending forever, since there is no reason to
+resolve it with.
 
-B<Socket errors:> a C<sysread>/C<syswrite> failure on the underlying socket
-(other than a clean EOF, which is C<client_closed>) reports C<read_error> /
-C<write_error> respectively, per
-L<PAGI::Spec::Www/"Standard Disconnect Reasons">. C<write_timeout> is
-B<not currently produced> -- PAGI::Server has no mechanism that times a
-write's completion independently of the connection's other timeouts
-(C<timeout>, C<request_timeout>), so a stalled write is only ever caught,
-if at all, by one of those.
+=item * C<write_timeout> is B<not currently produced>. PAGI::Server has no
+timer on an individual write; a stalled write is caught, if at all, by
+C<timeout> or C<request_timeout>. Socket errors other than a clean EOF
+report C<read_error> / C<write_error>.
 
-B<Incomplete responses:> when a scope has started its response but its
-terminal event never arrives, because the application returned early or
-raised, PAGI::Server forces an abnormal end rather than synthesizing terminal
-framing that was never sent, on every scope type: the terminal body or
-trailers for an HTTP response or a refusal, C<sse.close> for a started SSE
-stream, a closing handshake for an accepted WebSocket (see
-L<PAGI::Spec::Www/"Application Left a Response Incomplete">). On HTTP/1.1 the
-connection closes with no terminal framing and is not reused; on HTTP/2 the
-stream is reset with C<RST_STREAM> C<INTERNAL_ERROR>, or ended after a C<1011>
-Close frame for an accepted socket; other streams on the connection are
-unaffected. C<on_disconnect> fires with C<server_error>, C<on_complete> never
-fires, and one error line is logged unless the client had already gone.
-Coverage: C<t/69>, C<t/55-sse-alignment.t>, C<t/http2/24-incomplete-response.t>,
-C<t/http2/30>, C<t/http2/42>.
+=back
 
 =head2 Enabling HTTP/2
 
@@ -954,40 +829,18 @@ Validates close reason is valid UTF-8.
 
 =head2 Disconnect
 
-An HTTP/1.1 WebSocket connection enqueues exactly one C<websocket.disconnect>
-event onto its scope's receive queue -- the same "exactly once" guarantee
-described above for HTTP/2: whichever closure path fires
-first -- a peer Close frame (C<code>/C<reason> passed through unchanged, no
-PAGI token substitution), a TCP close with no close handshake (C<1006> /
-C<client_closed>), a keepalive pong timeout (C<1006> / C<keepalive_timeout>),
-a server-initiated protocol close (C<1002>/C<1007>, reason
-C<protocol_error>), a receive-queue overflow (C<1008> / C<queue_overflow>), or
-the application's own C<abort> (C<1006> / C<app_abort>, with the application's
-string as C<disconnect_detail>) -- marks the connection's disconnect-handled
-state so no other path can queue a second, conflicting event.
-
-A drop B<before> C<websocket.accept> is one of those paths, not a special
-case: the scope was a websocket scope from the start, so it receives
-C<websocket.disconnect> with C<1006> / C<client_closed>, never an
-C<http.disconnect>. A B<completed refusal>, by contrast, delivers no
-disconnect event at all -- it is a clean end, and a C<receive()> after it
-parks (see L</"PAGI SPECIFICATION RULINGS">).
-
-An application that returns from an B<accepted> socket without a closing
-handshake gets a C<1011> Close frame, C<server_error> on the connection
-object, and one error line; C<on_complete> never fires.
-
-As with HTTP/2, "exactly one" is a property of the receive queue, not a hard
-cap on what any number of C<receive()> calls can return: once the connection
-is closed, a further C<receive()> has no queue left to read and falls back to
-synthesizing a C<websocket.disconnect> carrying the code and reason the
-closure recorded, defaulting to C<1006> / C<client_closed> for a bare
-transport drop, rather than hanging. An empty reason belongs only to a peer
-Close frame that carried no text, and that path queues its own event.
-
-HTTP/1.1 endings for every scope type are covered by
-C<t/69-connection-state-protocol-scopes.t>, and the same matrix across both
-transports by C<t/70-protocol-disconnect-matrix.t>.
+An HTTP/1.1 WebSocket scope queues exactly one C<websocket.disconnect>,
+whichever closure path fires first, with the C<code> / C<reason> pairs
+L<PAGI::Spec::Www/"Disconnect - receive event"> defines and the same
+server-chosen codes as on HTTP/2 (C<1002> / C<1007> for protocol faults,
+C<1008> for a receive-queue overflow). A drop before C<websocket.accept> is
+one of those paths, never an C<http.disconnect>. A further C<receive()>
+resolves with the same event again, whether or not the socket is still
+open: after a peer's Close frame the server completes the handshake and
+keeps the connection open until the application returns. A completed
+refusal delivers no event (see L</"PAGI SPECIFICATION RULINGS">). Pinned by
+C<t/69-connection-state-protocol-scopes.t>, C<t/70-protocol-disconnect-matrix.t>
+and C<t/76-h1-receive-after-disconnect.t>.
 
 =head2 Known Limitations
 
@@ -1099,7 +952,7 @@ disconnect stays observable once the body is complete.
 
 =head2 Per-Stream HTTP/2 Keepalive and Idle Timeout
 
-As with HTTP/2 WebSocket (see L</"Keepalive">), an HTTP/2 connection
+As with HTTP/2 WebSocket (see L</"WebSocket over HTTP/2 (RFC 8441)">), an HTTP/2 connection
 multiplexes many SSE streams, so C<sse.keepalive> and C<sse_idle_timeout>
 state -- timer, interval, comment, writer, and last-activity reset -- live
 on the individual stream, not the connection. Starting or updating
