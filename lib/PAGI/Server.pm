@@ -1160,6 +1160,53 @@ you may increase to 5000-10000, but monitor memory usage.
 
 B<CLI:> C<--max-receive-queue 500>
 
+=item max_disconnect_receives => $count
+
+Maximum number of C<receive()> calls, on one scope, that the server will
+answer with a synthesized disconnect event before failing them instead.
+
+The spec has a scope's disconnect event re-delivered: once
+C<http.disconnect>, C<websocket.disconnect> or C<sse.disconnect> has been
+delivered, a further C<receive()> resolves with that event again, because
+the event reports the scope's terminal state rather than delivering a
+message. An application that loops on C<receive()> without ever checking for
+the event therefore never yields: the server answers each call from an
+already-resolved Future, the event loop never turns, and every other
+connection the process is serving is starved.
+
+B<Default:> 100 answers per scope
+
+B<What counts:> only calls the server answers by B<synthesizing> the
+disconnect event, i.e. calls made after the scope ended. The scope's one
+queued disconnect event, and every C<receive()> that was already pending
+when the disconnect was detected, are ordinary deliveries and are not
+counted. The count is per scope -- one HTTP/1.1 request, upgrade or stream,
+or one HTTP/2 stream -- and never resets.
+
+B<When exceeded:> the C<receive()> Future fails with
+
+    receive() called 101 times after the scope's disconnect event; the
+    application is not checking for it (PAGI::Server max_disconnect_receives=100)
+
+which, inside an C<async sub>, raises in the application. One error line is
+logged for the scope, naming the scope type and the transport; later calls
+on the same scope fail silently.
+
+B<Example:>
+
+    # Let a slow-draining application make 1000 such calls
+    my $server = PAGI::Server->new(
+        app                     => $app,
+        max_disconnect_receives => 1000,
+    );
+
+B<CLI:> C<--max-disconnect-receives 1000>
+
+B<Spec note:> this cap is a deliberate deviation from
+L<PAGI::Spec::Www/"Disconnect - receive event">, which places no limit on
+the re-delivery. Set it to C<0> for unlimited re-delivery and strict
+conformance. See L<PAGI::Server::Compliance/"Deliberate Deviations">.
+
 =item max_ws_frame_size => $bytes
 
 Maximum size in bytes for a single WebSocket frame payload. When a client
@@ -2470,6 +2517,9 @@ sub _init {
     $self->{shutdown_timeout}  = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
     $self->{reuseport}         = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
+    $self->{max_disconnect_receives} = delete $params->{max_disconnect_receives} // 100;  # Receives answered with a synthesized disconnect event, per scope (0 = unlimited)
+    die "Invalid max_disconnect_receives '$self->{max_disconnect_receives}' - must be 0 (unlimited) or a positive count\n"
+        if $self->{max_disconnect_receives} < 0;
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = use default (1000)
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
@@ -2650,6 +2700,12 @@ sub configure {
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
+    }
+    if (exists $params{max_disconnect_receives}) {
+        my $cap = delete $params{max_disconnect_receives};
+        die "Invalid max_disconnect_receives '$cap' - must be 0 (unlimited) or a positive count\n"
+            if $cap < 0;
+        $self->{max_disconnect_receives} = $cap;
     }
     if (exists $params{max_ws_frame_size}) {
         $self->{max_ws_frame_size} = delete $params{max_ws_frame_size};
@@ -3986,6 +4042,7 @@ sub _run_as_worker {
         sse_idle_timeout    => $self->{sse_idle_timeout},
         sync_file_threshold => $self->{sync_file_threshold},
         max_receive_queue   => $self->{max_receive_queue},
+        max_disconnect_receives => $self->{max_disconnect_receives},
         max_ws_frame_size   => $self->{max_ws_frame_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
@@ -4183,6 +4240,7 @@ sub _on_connection {
         access_log        => $self->{access_log},
         _access_log_formatter => $self->{_access_log_formatter},
         max_receive_queue => $self->{max_receive_queue},
+        max_disconnect_receives => $self->{max_disconnect_receives},
         max_ws_frame_size => $self->{max_ws_frame_size},
         sync_file_threshold => $self->{sync_file_threshold},
         validate_events   => $self->{validate_events},

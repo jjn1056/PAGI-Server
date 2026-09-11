@@ -42,7 +42,7 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
-    | PAGI 0.6 conformance      |    72 |     72 |      0 |
+    | PAGI 0.6 conformance      |    96 |     96 |      0 |
     +---------------------------+-------+--------+--------+
 
 The PAGI 0.6 conformance row is the sum of the suites that pin the
@@ -52,9 +52,17 @@ C<t/70-protocol-disconnect-matrix.t> (22 cells, each asserting event type,
 reason token, terminal-send settlement, and object/event agreement),
 C<t/71-http-refusal-on-protocol-scopes.t> (13), C<t/72-abort.t> (5),
 C<t/73-denial-retention.t> (4), C<t/74-h2-ws-clean-end.t> (5),
-C<t/http2/30-connection-state.t> (9), C<t/http2/41-abort.t> (4) and
-C<t/http2/42-d13-incomplete-session.t> (2). The full recursive suite
-(C<prove -lr t/>) is 151 files and 985 assertions.
+C<t/75-max-disconnect-receives.t> (24 -- the assertions that pin spec
+behaviour: unlimited re-delivery with the cap off, pending receives
+settling with the event, and the abandoned-Future race, on both
+transports), C<t/http2/30-connection-state.t> (9), C<t/http2/41-abort.t>
+(4) and C<t/http2/42-d13-incomplete-session.t> (2). The full recursive
+suite (C<prove -lr t/>) is 152 files and 1006 assertions.
+
+The figure assumes C<max_disconnect_receives> at its default. That cap is
+a deliberate deviation from the spec's unlimited re-delivery of a scope's
+disconnect event; setting it to C<0> restores conformance. See
+L</"Deliberate Deviations">.
 
 =head1 PAGI SPECIFICATION SUPPORT
 
@@ -237,6 +245,46 @@ log records the status field as C<->. Observed in C<t/72-abort.t> row 1.
 
 =back
 
+=head2 Deliberate Deviations
+
+One behaviour below departs from what the spec requires. It is on by default,
+it is configurable, and the option that switches it off restores conformance.
+
+=over 4
+
+=item * B<A cap on receives answered with a synthesized disconnect event.>
+
+B<Spec text.> L<PAGI::Spec::Www/"Disconnect - receive event"> (websocket) and
+L<PAGI::Spec::Www/"SSE Disconnect - receive event">: "Once this event has been
+delivered the scope is over, and a further C<receive()> resolves with the same
+event again." The http scope's L<PAGI::Spec::Www/"Disconnect - receive event">
+says the same in fewer words: the event is "sent to the application if receive
+is called after a response has been sent or after the HTTP connection has been
+closed". Nothing in the spec limits how many times.
+
+B<What PAGI::Server does instead.> It re-delivers the event, and counts the
+re-deliveries. After C<max_disconnect_receives> of them on one scope -- 100 by
+default -- the next C<receive()> Future B<fails> rather than resolving, which
+raises in the application and ends the scope. One error line is logged for the
+scope; later calls fail silently. Only synthesized answers count: the scope's
+queued disconnect event, and receives already pending when the disconnect was
+detected, are ordinary deliveries.
+
+B<Why.> Measured on 2026-09-10: an application whose receive loop never checks
+for the event ran 900,825 iterations inside a single turn of the event loop,
+because each answer came from an already-resolved Future and nothing yielded --
+during which a second, unrelated HTTP client on the same process received no
+response at all. Failing the call costs the one broken scope; re-delivering
+without limit costs every connection in the process.
+
+B<The option.> C<< PAGI::Server->new(max_disconnect_receives => $count) >>,
+C<configure>, or C<--max-disconnect-receives>. C<0> removes the cap and
+restores strict conformance. Pinned by C<t/75-max-disconnect-receives.t>,
+which asserts the capped behaviour, the unlimited behaviour under C<0>, and
+that neither pending receives nor the abandoned-Future race are affected.
+
+=back
+
 Behaviours the spec fixes are not listed here; the relevant sections below
 say what this server does and which test proves it, and the spec says why.
 
@@ -245,7 +293,9 @@ check never contradicts a rule the spec does make: rejecting a send or a
 receive the spec leaves unspecified is allowed, delivering an event the spec
 says is not delivered is not. PAGI::Server currently adds no such checks
 beyond the ones listed above; if it does in future, they will be recorded
-here as rulings, each with the spec text that leaves the room.
+here as rulings, each with the spec text that leaves the room. A behaviour
+that does contradict the spec is not a ruling at all -- it is recorded under
+L</"Deliberate Deviations">, with the option that switches it off.
 
 =head1 HTTP/1.1 COMPLIANCE
 

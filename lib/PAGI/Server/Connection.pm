@@ -236,6 +236,7 @@ sub new {
         access_log        => $args{access_log},     # Filehandle for access logging
         _access_log_formatter => $args{_access_log_formatter},  # Pre-compiled format closure
         max_receive_queue => $args{max_receive_queue} // 1000,  # Max WebSocket receive queue size
+        max_disconnect_receives => $args{max_disconnect_receives} // 100,  # Receives answered with a synthesized disconnect event, per scope (0 = unlimited)
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (default 64KB)
         validate_events => $args{validate_events} // 0,  # Deprecated: core event validation is mandatory; this flag is retained for compatibility and controls nothing.
@@ -1509,18 +1510,34 @@ sub _h2_create_receive {
 
     weaken(my $weak_self = $self);
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized http.disconnect goes through. Closure-local, so
+    # it outlives the h2_streams entry, which is reclaimed a tick after the
+    # stream closes. See _disconnect_receive_future.
+    my %cap = (scope => 'http', transport => "HTTP/2 stream $stream_id", count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(
+            \%cap, { type => 'http.disconnect' }, $parked);
+    };
+
     return sub {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
-        return Future->done({ type => 'http.disconnect' }) if $weak_self->{closed};
+        return $disconnect->() if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return Future->done({ type => 'http.disconnect' }) unless $ss;
+        return $disconnect->() unless $ss;
 
         my $future = (async sub {
             return { type => 'http.disconnect' } unless $weak_self;
 
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
             my $ss = $weak_self->{h2_streams}{$stream_id};
-            return { type => 'http.disconnect' } unless $ss;
+            return await $disconnect->($parked) unless $ss;
 
             # Check queue first
             if (@{$ss->{receive_queue}}) {
@@ -1550,11 +1567,12 @@ sub _h2_create_receive {
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
                 }
+                $parked = 1;
                 await $ss->{body_pending};
 
                 # Re-fetch stream state (may have changed)
                 $ss = $weak_self->{h2_streams}{$stream_id};
-                return { type => 'http.disconnect' } unless $ss;
+                return await $disconnect->($parked) unless $ss;
 
                 # Check queue after waking -- a queued event wins over the
                 # body fallthrough (a close can set body_complete AND queue
@@ -2363,6 +2381,16 @@ sub _h2_create_websocket_receive {
         };
     };
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized websocket.disconnect goes through. Closure-local,
+    # so it outlives the h2_streams entry, which is reclaimed a tick after the
+    # stream closes. See _disconnect_receive_future.
+    my %cap = (scope => 'websocket', transport => "HTTP/2 stream $stream_id", count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(\%cap, $fallback_disconnect, $parked);
+    };
+
     return sub {
         return Future->done($fallback_disconnect->())
             unless $weak_self;
@@ -2377,19 +2405,24 @@ sub _h2_create_websocket_receive {
         return $weak_self->{server}->loop->new_future
             if _h2_refusal_complete($stream_state);
 
-        return Future->done($fallback_disconnect->())
+        return $disconnect->()
             if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return Future->done($fallback_disconnect->())
+        return $disconnect->()
             unless $ss;
 
         my $future = (async sub {
             return $fallback_disconnect->()
                 unless $weak_self;
 
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
             my $ss = $weak_self->{h2_streams}{$stream_id};
-            return $fallback_disconnect->()
+            return await $disconnect->($parked)
                 unless $ss;
 
             # Check queue first
@@ -2409,16 +2442,18 @@ sub _h2_create_websocket_receive {
                     return shift @{$ss->{receive_queue}};
                 }
 
-                return $fallback_disconnect->()
-                    if $weak_self->{closed};
+                if ($weak_self->{closed}) {
+                    return await $disconnect->($parked);
+                }
 
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
                 }
+                $parked = 1;
                 await $ss->{body_pending};
 
                 $ss = $weak_self->{h2_streams}{$stream_id};
-                return $fallback_disconnect->()
+                return await $disconnect->($parked)
                     unless $ss;
             }
         })->();
@@ -2773,6 +2808,16 @@ sub _h2_create_sse_receive {
         };
     };
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized sse.disconnect goes through. Closure-local, so it
+    # outlives the h2_streams entry, which is reclaimed a tick after the
+    # stream closes. See _disconnect_receive_future.
+    my %cap = (scope => 'sse', transport => "HTTP/2 stream $stream_id", count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(\%cap, $sse_disconnect, $parked);
+    };
+
     return sub {
         return Future->done($sse_disconnect->()) unless $weak_self;
 
@@ -2782,16 +2827,21 @@ sub _h2_create_sse_receive {
         return $weak_self->{server}->loop->new_future
             if _h2_refusal_complete($stream_state);
 
-        return Future->done($sse_disconnect->()) if $weak_self->{closed};
+        return $disconnect->() if $weak_self->{closed};
 
         my $ss = $weak_self->{h2_streams}{$stream_id};
-        return Future->done($sse_disconnect->()) unless $ss;
+        return $disconnect->() unless $ss;
 
         my $future = (async sub {
             return $sse_disconnect->() unless $weak_self;
 
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
             my $ss = $weak_self->{h2_streams}{$stream_id};
-            return $sse_disconnect->() unless $ss;
+            return await $disconnect->($parked) unless $ss;
 
             # Check queue first
             if (@{$ss->{receive_queue}}) {
@@ -2813,15 +2863,18 @@ sub _h2_create_sse_receive {
                         return shift @{$ss->{receive_queue}};
                     }
 
-                    return $sse_disconnect->() if $weak_self->{closed};
+                    if ($weak_self->{closed}) {
+                        return await $disconnect->($parked);
+                    }
 
                     if (!$ss->{body_pending}) {
                         $ss->{body_pending} = Future->new;
                     }
+                    $parked = 1;
                     await $ss->{body_pending};
 
                     $ss = $weak_self->{h2_streams}{$stream_id};
-                    return $sse_disconnect->() unless $ss;
+                    return await $disconnect->($parked) unless $ss;
                 }
 
                 # body_complete can flip true on the very wake that also
@@ -2850,16 +2903,18 @@ sub _h2_create_sse_receive {
                     return shift @{$ss->{receive_queue}};
                 }
 
-                return $sse_disconnect->()
-                    if $weak_self->{closed};
+                if ($weak_self->{closed}) {
+                    return await $disconnect->($parked);
+                }
 
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
                 }
+                $parked = 1;
                 await $ss->{body_pending};
 
                 $ss = $weak_self->{h2_streams}{$stream_id};
-                return $sse_disconnect->() unless $ss;
+                return await $disconnect->($parked) unless $ss;
             }
         })->();
 
@@ -4545,17 +4600,21 @@ sub _create_scope {
 #
 # $body_complete_ref/$bytes_read_ref are scalar refs into the caller's own
 # closure-local state so it persists across receive() calls; $event_type
-# is 'http.request' or 'sse.request'; $make_disconnect is a coderef
-# producing this scope's disconnect event ({type=>'http.disconnect'} or
-# the SSE closure's sse.disconnect constructor).
+# is 'http.request' or 'sse.request'; $make_disconnect is a coderef taking
+# "this call had already parked" and returning a Future of this scope's
+# disconnect event, so the caller's max_disconnect_receives cap covers the
+# disconnects synthesized in here too (see _disconnect_receive_future).
 async sub _read_chunked_body {
     my ($self, $event_type, $make_disconnect, $body_complete_ref, $bytes_read_ref) = @_;
+
+    my $parked = 0;
 
     # Wait for data if buffer is empty
     while (length($self->{buffer}) == 0 && !$self->{closed}) {
         if (!$self->{receive_pending}) {
             $self->{receive_pending} = Future->new;
         }
+        $parked = 1;
         await $self->{receive_pending};
         $self->{receive_pending} = undef;
 
@@ -4565,8 +4624,9 @@ async sub _read_chunked_body {
         }
     }
 
-    return $make_disconnect->()
-        if $self->{closed} && length($self->{buffer}) == 0;
+    if ($self->{closed} && length($self->{buffer}) == 0) {
+        return await $make_disconnect->($parked);
+    }
 
     # Try to parse chunked data
     my ($data, $consumed, $complete) = $self->{protocol}->parse_chunked_body($self->{buffer});
@@ -4576,7 +4636,7 @@ async sub _read_chunked_body {
         $self->_handle_disconnect('protocol_error', $data->{message} // 'Bad Request');
         $self->_send_error_response($data->{error}, $data->{message} // 'Bad Request');
         $self->_close;
-        return $make_disconnect->();
+        return await $make_disconnect->($parked);
     }
 
     if ($consumed > 0) {
@@ -4592,7 +4652,7 @@ async sub _read_chunked_body {
             $self->_handle_disconnect('body_too_large',
                 "request body exceeded $self->{max_body_size} bytes");
             $self->_close;
-            return $make_disconnect->();
+            return await $make_disconnect->($parked);
         }
 
         if ($complete) {
@@ -4610,12 +4670,15 @@ async sub _read_chunked_body {
     if (!$self->{receive_pending}) {
         $self->{receive_pending} = Future->new;
     }
+    $parked = 1;
     await $self->{receive_pending};
     $self->{receive_pending} = undef;
 
     # Recursive call to re-process - but we can't use __SUB__ in nested async
     # Just return disconnect if closed
-    return $make_disconnect->() if $self->{closed};
+    if ($self->{closed}) {
+        return await $make_disconnect->($parked);
+    }
     # This shouldn't happen often - caller should retry
     return { type => $event_type, body => '', more => 1 };
 }
@@ -4636,15 +4699,33 @@ sub _create_receive {
 
     weaken(my $weak_self = $self);
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized http.disconnect goes through. See
+    # _disconnect_receive_future.
+    my %cap = (scope => 'http', transport => 'HTTP/1.1', count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(
+            \%cap, { type => 'http.disconnect' }, $parked);
+    };
+
     # Return a wrapper that tracks the Future from the async receive
     return sub {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
-        return Future->done({ type => 'http.disconnect' }) if $weak_self->{closed};
+        return $disconnect->() if $weak_self->{closed};
 
         # The actual async implementation
         my $future = (async sub {
             return { type => 'http.disconnect' } unless $weak_self;
-            return { type => 'http.disconnect' } if $weak_self->{closed};
+
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
+            if ($weak_self->{closed}) {
+                return await $disconnect->($parked);
+            }
 
             # Check queue first - events from disconnect handler
             if (@{$weak_self->{receive_queue}}) {
@@ -4660,8 +4741,9 @@ sub _create_receive {
                 # keep-alive connection that could be the next request's
                 # lifetime away. Matches the h2 side, which resolves the same
                 # way off its own completed stream.
-                return { type => 'http.disconnect' }
-                    if ($weak_self->{h1_seq} // '') eq 'complete';
+                if (($weak_self->{h1_seq} // '') eq 'complete') {
+                    return await $disconnect->($parked);
+                }
 
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
@@ -4669,9 +4751,10 @@ sub _create_receive {
 
                 if ($weak_self->{closed}) {
                     $weak_self->{receive_pending} = undef;
-                    return { type => 'http.disconnect' };
+                    return await $disconnect->($parked);
                 }
 
+                $parked = 1;
                 my $result = await $weak_self->{receive_pending};
                 # receive_pending may be completed with a value (disconnect event)
                 # or just done() as a signal
@@ -4680,7 +4763,7 @@ sub _create_receive {
                 if (@{$weak_self->{receive_queue}}) {
                     return shift @{$weak_self->{receive_queue}};
                 }
-                return { type => 'http.disconnect' };
+                return await $disconnect->($parked);
             }
 
             # For requests without body, return empty body immediately
@@ -4703,7 +4786,7 @@ sub _create_receive {
             if ($is_chunked) {
                 return await $weak_self->_read_chunked_body(
                     'http.request',
-                    sub { { type => 'http.disconnect' } },
+                    $disconnect,
                     \$body_complete,
                     \$bytes_read,
                 );
@@ -4726,6 +4809,7 @@ sub _create_receive {
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
+                $parked = 1;
                 await $weak_self->{receive_pending};
                 $weak_self->{receive_pending} = undef;
 
@@ -4737,7 +4821,7 @@ sub _create_receive {
 
             # Return disconnect if closed while waiting
             if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
-                return { type => 'http.disconnect' };
+                return await $disconnect->($parked);
             }
 
             # Read up to chunk_size or remaining bytes, whichever is smaller
@@ -5207,6 +5291,44 @@ sub _ws_disconnect_event {
 # sse.start has been sent"). A normally completed refusal is a clean end and
 # delivers no event at all (Www.pod "Meaning per scope", Agreement with
 # disconnect events).
+# One scope's cap on receives answered with a SYNTHESIZED disconnect event
+# (PAGI::Server max_disconnect_receives). Www.pod re-delivers a scope's
+# disconnect event to every later receive(), so an application that never
+# checks for the event loops on already-resolved Futures, the event loop
+# never turns, and every other connection in the process is starved. The cap
+# ends that loop by failing the call instead; 0 restores the spec's
+# unlimited re-delivery.
+#
+# $cap is the receive closure's own per-scope record -- scope and transport
+# for the log line, plus the running count, which never resets. $event is the
+# event or a coderef producing it. $parked says the call had already been
+# waiting when the scope ended: such a call is an ordinary delivery of the
+# scope's terminal state, not a repeat request for it, so it is answered
+# without counting. The scope's single queued disconnect event never reaches
+# here at all -- a receive that shifts it off the queue returns it directly.
+#
+# Returns the Future the receive() closure hands back: done with the event
+# while the cap allows it, failed once it does not, with one error line per
+# scope naming the scope, the transport and the count.
+sub _disconnect_receive_future {
+    my ($self, $cap, $event, $parked) = @_;
+
+    my $max = $self->{max_disconnect_receives} // 0;
+    my $n   = ($max && !$parked) ? ++$cap->{count} : 0;
+
+    return Future->done(ref $event eq 'CODE' ? $event->() : $event)
+        if !$max || $parked || $n <= $max;
+
+    my $message = "receive() called $n times after the scope's disconnect event; "
+                . "the application is not checking for it "
+                . "(PAGI::Server max_disconnect_receives=$max)";
+
+    $self->_log(error => "$cap->{scope} scope on $cap->{transport}: $message")
+        unless $cap->{logged}++;
+
+    return Future->fail("$message\n");
+}
+
 sub _scope_disconnect_event {
     my ($self) = @_;
 
@@ -5969,6 +6091,15 @@ sub _create_sse_receive {
         };
     };
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized sse.disconnect goes through. See
+    # _disconnect_receive_future.
+    my %cap = (scope => 'sse', transport => 'HTTP/1.1', count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(\%cap, $sse_disconnect, $parked);
+    };
+
     # The stream is over -- either the transport is gone, or the application
     # ended it with sse.close and is still running (the connection stays open
     # for keep-alive, design section 11.6). Nothing more will ever arrive
@@ -5996,12 +6127,18 @@ sub _create_sse_receive {
             if $weak_self && ($weak_self->{h1_seq} // '') eq 'refusal_complete';
 
         if ($stream_over->()) {
-            return Future->done($sse_disconnect->());
+            return $disconnect->();
         }
 
         my $future = (async sub {
-            return $sse_disconnect->()
-                if $stream_over->();
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
+            if ($stream_over->()) {
+                return await $disconnect->($parked);
+            }
 
             # Check queue first
             if (@{$weak_self->{receive_queue}}) {
@@ -6019,7 +6156,7 @@ sub _create_sse_receive {
                 if ($is_chunked) {
                     return await $weak_self->_read_chunked_body(
                         'sse.request',
-                        $sse_disconnect,
+                        $disconnect,
                         \$body_complete,
                         \$bytes_read,
                     );
@@ -6032,6 +6169,7 @@ sub _create_sse_receive {
                     if (!$weak_self->{receive_pending}) {
                         $weak_self->{receive_pending} = Future->new;
                     }
+                    $parked = 1;
                     await $weak_self->{receive_pending};
                     $weak_self->{receive_pending} = undef;
 
@@ -6040,7 +6178,9 @@ sub _create_sse_receive {
                     }
                 }
 
-                return $sse_disconnect->() if $weak_self->{closed};
+                if ($weak_self->{closed}) {
+                    return await $disconnect->($parked);
+                }
 
                 # Read available data up to remaining
                 my $to_read = $remaining < length($weak_self->{buffer})
@@ -6076,12 +6216,14 @@ sub _create_sse_receive {
                     return shift @{$weak_self->{receive_queue}};
                 }
 
-                return $sse_disconnect->()
-                    if $weak_self->{closed};
+                if ($weak_self->{closed}) {
+                    return await $disconnect->($parked);
+                }
 
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
+                $parked = 1;
                 await $weak_self->{receive_pending};
                 $weak_self->{receive_pending} = undef;
             }
@@ -6527,6 +6669,16 @@ sub _create_websocket_receive {
     my $connect_sent = 0;
     weaken(my $weak_self = $self);
 
+    # This scope's max_disconnect_receives record, and the Future-returning
+    # gate every synthesized websocket.disconnect goes through. See
+    # _disconnect_receive_future.
+    my %cap = (scope => 'websocket', transport => 'HTTP/1.1', count => 0);
+    my $disconnect = sub {
+        my ($parked) = @_;
+        return $weak_self->_disconnect_receive_future(
+            \%cap, $weak_self->_ws_disconnect_event, $parked);
+    };
+
     return sub {
         return Future->done({ type => 'websocket.disconnect', code => 1006, reason => 'client_closed' })
             unless $weak_self;
@@ -6551,20 +6703,26 @@ sub _create_websocket_receive {
         # $weak_self is known live here, so the fallback can report the
         # abnormal reason a server-initiated close recorded (idle timeout,
         # queue overflow, ...) instead of the bare 'client_closed' default.
-        return Future->done($weak_self->_ws_disconnect_event)
+        return $disconnect->()
             if $weak_self->{closed};
 
         my $future = (async sub {
             return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
                 unless $weak_self;
 
+            # True once this call has waited: the answer it then gets is a
+            # delivery of the scope's terminal state, not a repeat request
+            # for it, so the cap does not count it.
+            my $parked = 0;
+
             # Check queue first - drain queued messages even if closed
             if (@{$weak_self->{receive_queue}}) {
                 return shift @{$weak_self->{receive_queue}};
             }
 
-            return $weak_self->_ws_disconnect_event
-                if $weak_self->{closed};
+            if ($weak_self->{closed}) {
+                return await $disconnect->($parked);
+            }
 
             # First call returns websocket.connect
             if (!$connect_sent) {
@@ -6577,6 +6735,7 @@ sub _create_websocket_receive {
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
+                $parked = 1;
                 await $weak_self->{receive_pending};
                 $weak_self->{receive_pending} = undef;
 
@@ -6585,8 +6744,9 @@ sub _create_websocket_receive {
                 }
             }
 
-            return $weak_self->_ws_disconnect_event
-                if $weak_self->{closed};
+            if ($weak_self->{closed}) {
+                return await $disconnect->($parked);
+            }
 
             # Wait for events from frame processing
             while (1) {
@@ -6594,12 +6754,14 @@ sub _create_websocket_receive {
                     return shift @{$weak_self->{receive_queue}};
                 }
 
-                return $weak_self->_ws_disconnect_event
-                    if $weak_self->{closed};
+                if ($weak_self->{closed}) {
+                    return await $disconnect->($parked);
+                }
 
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
+                $parked = 1;
                 await $weak_self->{receive_pending};
                 $weak_self->{receive_pending} = undef;
             }

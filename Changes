@@ -47,6 +47,15 @@
     while the object carried the real reason.
   - h2: an incomplete SSE stream or refusal was not reset or reported.
 
+  Limits
+  - max_disconnect_receives (--max-disconnect-receives, default 100): a cap
+    on the receives one scope may have answered with a synthesized disconnect
+    event before they fail instead. The spec re-delivers a scope's disconnect
+    event to every later receive(), so an application that never checks for
+    it loops on already-resolved Futures and starves every other connection
+    in the process. Set to 0 for the spec's unlimited re-delivery. A
+    deliberate deviation, recorded in PAGI::Server::Compliance.
+
   Internal
   - One lifecycle state per scope: the validator's per-scope state machine is
     mirrored for websocket and sse as it was for http; ten hand-maintained

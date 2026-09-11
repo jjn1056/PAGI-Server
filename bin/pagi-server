@@ -63,6 +63,7 @@ GetOptionsFromArray(
     'max-header-size=i'     => \$server_opts{max_header_size},
     'max-header-count=i'    => \$server_opts{max_header_count},
     'max-receive-queue=i'   => \$server_opts{max_receive_queue},
+    'max-disconnect-receives=i' => \$server_opts{max_disconnect_receives},
     'max-ws-frame-size=i'   => \$server_opts{max_ws_frame_size},
     'b|listener-backlog=i'  => \$server_opts{listener_backlog},
 
@@ -408,6 +409,13 @@ Listen queue size (default: 2048)
 =item B<--max-receive-queue> NUM
 
 Maximum WebSocket receive queue size (default: 1000)
+
+=item B<--max-disconnect-receives> NUM
+
+Maximum receives answered with a synthesized disconnect event on one scope
+before they fail instead (default: 100; 0 disables the cap and restores the
+spec's unlimited re-delivery). See
+L<PAGI::Server/"max_disconnect_receives">.
 
 =item B<--max-ws-frame-size> NUM
 
