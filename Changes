@@ -16,6 +16,10 @@
     close).
   - sse.close is the only clean end of a started SSE stream; returning
     without it is an incomplete response, not a clean end.
+  - A receive after a clean end the application produced -- a completed
+    WebSocket or SSE refusal, or sse.close -- reports that end instead of
+    parking or naming a reason the scope never had: sse.disconnect with no
+    reason on an sse scope, http.disconnect after a WebSocket refusal.
 
   Refusals
   - Refusing a handshake or stream is an ordinary HTTP response: http.response.*
@@ -27,7 +31,8 @@
 
   Bug fixes (measured against 0.002013)
   - h1: a pre-accept WebSocket disconnect delivered http.disconnect.
-  - h1: receive() after a completed refusal delivered a disconnect.
+  - h1: receive() after a completed refusal delivered a fabricated
+    websocket.disconnect.
   - h2: a completed SSE refusal delivered sse.disconnect client_closed.
   - h2: a completed WebSocket denial was marked server_error rather than a
     clean end.
@@ -48,13 +53,12 @@
   - h2: an incomplete SSE stream or refusal was not reset or reported.
 
   Limits
-  - max_disconnect_receives (--max-disconnect-receives, default 100): a cap
-    on the receives one scope may have answered with a synthesized disconnect
-    event before they fail instead. The spec re-delivers a scope's disconnect
-    event to every later receive(), so an application that never checks for
-    it loops on already-resolved Futures and starves every other connection
-    in the process. Set to 0 for the spec's unlimited re-delivery. A
-    deliberate deviation, recorded in PAGI::Server::Compliance.
+  - max_disconnect_receives (--max-disconnect-receives, default 100): the
+    bound the spec allows on how many receives one scope may have answered
+    with the scope's end before they fail instead. Every receive after the
+    scope's end reports that end, so an application that never checks for it
+    loops on already-resolved Futures and starves every other connection in
+    the process. Set to 0 for unbounded re-delivery.
 
   Internal
   - One lifecycle state per scope: the validator's per-scope state machine is

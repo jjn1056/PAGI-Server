@@ -951,8 +951,16 @@ subtest 'http.response.start after accept or after sse.start fails, leaving the 
 # ============================================================
 # (h) a completed refusal is a clean end
 # ============================================================
+# Www.pod "Receiving after the scope's end": a receive made after a clean end
+# the application produced reports that end -- http.disconnect on a websocket
+# scope, whose refusal was an HTTP exchange, and a reasonless sse.disconnect
+# on an sse one. It never invents a reason: the object was marked complete
+# with none, and "Agreement with disconnect events" binds the two.
 
-subtest 'a completed refusal is a clean end that delivers no disconnect event' => sub {
+my %END_EVENT = (websocket => { type => 'http.disconnect' },
+                 sse       => { type => 'sse.disconnect' });
+
+subtest 'a completed refusal is a clean end, and a later receive reports it' => sub {
     for my $kind (@SCOPES) {
         my %r;
         my $app = async sub {
@@ -964,13 +972,14 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
             await $send->({ type => 'http.response.start', status => $STATUS,
                             headers => [['content-type', 'text/plain'], ['content-length', 4]] });
             await $send->({ type => 'http.response.body', body => 'nope' });
-            my $parked = $receive->();
-            await Future->wait_any($parked->without_cancel, $loop->delay_future(after => 0.4));
-            $r{parked_ready} = $parked->is_ready ? 1 : 0;
-            # A receive() left parked by a completed refusal outlives this
-            # sub; hand it to the caller so the suspended async sub behind it
-            # is not reaped mid-run.
-            $r{parked_future} = $parked unless $parked->is_ready;
+            my $after = $receive->();
+            await Future->wait_any($after->without_cancel, $loop->delay_future(after => 0.4));
+            $r{after_event} = $after->is_ready ? $after->get : undef;
+            # A receive that does not answer outlives this sub; hand it to the
+            # caller so the suspended async sub behind it is not reaped
+            # mid-run, and the case fails on its own assertion rather than on
+            # harness noise.
+            $r{unanswered} = $after unless $after->is_ready;
             # Read from out here: these assertions are about the state that
             # survives the application's return. Subtest (i) pins the
             # earlier moment, when the terminal event was accepted.
@@ -984,7 +993,8 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
         $server->shutdown->get;
 
         is($r{done}, 1, "h1 $kind: the app ran to completion");
-        is($r{parked_ready}, 0, "h1 $kind: a receive() after the refusal stays pending");
+        is($r{after_event}, $END_EVENT{$kind},
+            "h1 $kind: a receive() after the refusal reports the scope's end, with no reason");
         is($r{conn}->response_complete, 1, "h1 $kind: response_complete is true");
         is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason is undef");
         is($r{complete}, 1, "h1 $kind: on_complete fired exactly once");
@@ -1004,17 +1014,18 @@ subtest 'a completed refusal is a clean end that delivers no disconnect event' =
                 await $send->({ type => 'http.response.start', status => $STATUS,
                                 headers => [['content-type', 'text/plain']] });
                 await $send->({ type => 'http.response.body', body => 'nope' });
-                my $parked = $receive->();
-                await Future->wait_any($parked->without_cancel, $loop->delay_future(after => 0.4));
-                $r{parked_ready} = $parked->is_ready ? 1 : 0;
-                $r{parked_future} = $parked unless $parked->is_ready;
+                my $after = $receive->();
+                await Future->wait_any($after->without_cancel, $loop->delay_future(after => 0.4));
+                $r{after_event} = $after->is_ready ? $after->get : undef;
+                $r{unanswered} = $after unless $after->is_ready;
                 $r{conn} = $conn;
                 $r{done} = 1;
                 return;
             };
             h2_fetch(app => $app, kind => $kind, rounds => 40);
             is($r{done}, 1, "h2 $kind: the app ran to completion");
-            is($r{parked_ready}, 0, "h2 $kind: a receive() after the refusal stays pending");
+            is($r{after_event}, $END_EVENT{$kind},
+                "h2 $kind: a receive() after the refusal reports the scope's end, with no reason");
             is($r{conn}->response_complete, 1, "h2 $kind: response_complete is true");
             is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
             is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");

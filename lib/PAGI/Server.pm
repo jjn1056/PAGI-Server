@@ -1202,10 +1202,12 @@ B<Example:>
 
 B<CLI:> C<--max-disconnect-receives 1000>
 
-B<Spec note:> this cap is a deliberate deviation from
-L<PAGI::Spec::Www/"Disconnect - receive event">, which places no limit on
-the re-delivery. Set it to C<0> for unlimited re-delivery and strict
-conformance. See L<PAGI::Server::Compliance/"Deliberate Deviations">.
+B<Spec note:> this cap is the bound the spec allows.
+L<PAGI::Spec::Www/"Meaning per scope">, under "Receiving after the scope's
+end", lets a server bound how many receives it answers with the scope's end
+and fail the receive past that bound, leaving the number and its default to
+the server to choose and document. Set it to C<0> for unbounded re-delivery.
+See L<PAGI::Server::Compliance/"PAGI SPECIFICATION RULINGS">.
 
 =item max_ws_frame_size => $bytes
 

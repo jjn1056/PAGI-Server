@@ -28,11 +28,12 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # Two cases, on both transports, distinguished by how the application leaves
 # the scope:
 #
-#   Case B  The refusal completes normally and the application returns, while
-#           a receive() it parked is still outstanding. The corrected S6
-#           finding is that nothing is retained: the application coroutine is
-#           collected, the parked receive Future is collected, and the scope
-#           hash is gone. Asserted so a future change cannot turn that parked
+#   Case B  The refusal completes normally and the application returns. The
+#           receive() it left outstanding while the refusal was still going
+#           out is answered with the scope's end (Www.pod "Receiving after
+#           the scope's end"), and nothing is retained: the application
+#           coroutine is collected, that receive Future is collected, and the
+#           scope hash is gone. Asserted so a future change cannot turn that
 #           receive back into a leak.
 #
 #   Case A  The application is still suspended on a Future nobody will ever
@@ -79,10 +80,10 @@ sub make_app {
             return;
         }
 
-        my $gone = $receive->();                            # parked for the whole refusal
-        my $rg   = RetentionGuard->new(\$r->{receive_freed});
-        $gone->on_ready(sub { my $keep = $rg });            # the guard lives as long as it does
-        my $detail = await Future->wait_any(Future->done('ok'), $gone->without_cancel);
+        my $outstanding = $receive->();                     # outstanding across the refusal
+        my $rg = RetentionGuard->new(\$r->{receive_freed});
+        $outstanding->on_ready(sub { my $keep = $rg });      # the guard lives as long as it does
+        my $detail = await Future->wait_any(Future->done('ok'), $outstanding->without_cancel);
         await $send->({ type => 'http.response.body', body => $detail });
         $r->{app_returned} = 1;
         return;
@@ -194,10 +195,10 @@ sub freed { my ($r, $key) = @_; return $r->{$key} // 0 }
 sub scope_alive { my ($r) = @_; return defined $r->{scope_weak} ? 1 : 0 }
 
 # ============================================================
-# Case B: a completed refusal retains nothing, parked receive included
+# Case B: a completed refusal retains nothing, its outstanding receive included
 # ============================================================
 
-subtest 'h1: a completed refusal frees the app, the parked receive and the scope' => sub {
+subtest 'h1: a completed refusal frees the app, the answered receive and the scope' => sub {
     my ($r, $wire) = h1_case('B');
     like($wire, qr{^HTTP/1\.1 429}, 'the refusal reached the client');
     # Two chunks, so two chunked frames, then the terminator.
@@ -205,17 +206,17 @@ subtest 'h1: a completed refusal frees the app, the parked receive and the scope
         'both body chunks and the terminator reached the client');
     is($r->{app_returned}, 1, 'the application returned');
     is(freed($r, 'app_freed'), 1, 'the application coroutine was collected');
-    is(freed($r, 'receive_freed'), 1, 'the parked receive Future was collected');
+    is(freed($r, 'receive_freed'), 1, 'the outstanding receive Future was collected');
     is(scope_alive($r), 0, 'the scope hash is gone');
 };
 
-subtest 'h2: a completed refusal frees the app, the parked receive and the scope' => sub {
+subtest 'h2: a completed refusal frees the app, the answered receive and the scope' => sub {
     skip_all 'HTTP/2 not available' unless $have_h2;
     my ($before, $status, $after) = h2_case('B');
     is($status, '429', 'the refusal reached the client');
     is($before->{app_returned}, 1, 'the application returned');
     is(freed($before, 'app_freed'), 1, 'the application coroutine was collected');
-    is(freed($before, 'receive_freed'), 1, 'the parked receive Future was collected');
+    is(freed($before, 'receive_freed'), 1, 'the outstanding receive Future was collected');
     is(scope_alive($before), 0, 'the scope hash is gone');
 };
 

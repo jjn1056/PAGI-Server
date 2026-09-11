@@ -24,13 +24,14 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # event loop never turns, and every other connection in the process is
 # starved.
 #
-# PAGI::Server keeps the re-delivery and caps it. After
+# PAGI::Server keeps the re-delivery and bounds it. After
 # max_disconnect_receives such answers on one scope, the next receive()
 # fails instead, which ends the application coroutine and returns the
-# process to its event loop. The cap is configurable and 0 restores the
-# spec's unbounded re-delivery. This is a documented deliberate deviation
-# (PAGI::Server::Compliance, "Deliberate Deviations"); the cases below pin
-# both the cap and the spec behaviours the cap must not disturb.
+# process to its event loop. The bound is configurable and 0 restores
+# unbounded re-delivery. Www.pod "Meaning per scope", under "Receiving after
+# the scope's end", allows exactly this and leaves the number to the server
+# (PAGI::Server::Compliance, PAGI SPECIFICATION RULINGS); the cases below pin
+# both the bound and the spec behaviours it must not disturb.
 
 use PAGI::Server;
 use PAGI::Server::Connection;

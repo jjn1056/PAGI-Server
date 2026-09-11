@@ -44,8 +44,9 @@ BEGIN {
 #               mid  - app sent a refusal start + body(more=>1), parked on
 #                      receive(), client drops, then sends its terminal body
 #               post - app completed the refusal (more=>0), then calls
-#                      receive(): a completed refusal is a clean end and
-#                      delivers no disconnect event
+#                      receive(): a completed refusal is a clean end, and the
+#                      call reports that end with no reason (Www.pod
+#                      "Receiving after the scope's end")
 #               acc  - app accepted the WebSocket, parked, client drops
 #               peer - app accepted the WebSocket, peer sent a Close frame
 #               rsv1 - app accepted the WebSocket, peer sent a frame with
@@ -123,11 +124,12 @@ sub make_app {
                    : $rf->is_failed ? 'FAILED:' . ($rf->failure)[0]
                    : join(',', map { "$_=" . ($rf->get->{$_} // '') } sort keys %{$rf->get});
         $r->{obj_reason} = $conn ? $conn->disconnect_reason : undef;
-        # A receive() left parked by a completed refusal outlives this sub.
-        # Hand it to the caller so the suspended async sub behind it is not
-        # reaped mid-run, which Future::AsyncAwait reports as a lost
-        # returning future -- test-harness noise, not server behaviour.
-        $r->{parked_future} = $rf unless $rf->is_ready;
+        # Every cell here expects an answer. Hand an unanswered one to the
+        # caller anyway, so the suspended async sub behind it is not reaped
+        # mid-run: Future::AsyncAwait reports that as a lost returning future,
+        # and the cell must fail on its own assertion rather than on harness
+        # noise.
+        $r->{unanswered} = $rf unless $rf->is_ready;
 
         if ($case eq 'mid') {
             my $sf = $send->({ type => 'http.response.body', body => 'tail', more => 0 });
@@ -273,23 +275,27 @@ my %expect = (
     # label                   => [ recv type,              recv reason,     term_send ]
     'h1 ws pre close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h1 ws mid close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
-    'h1 ws post'         => { pending => 1, complete => 1,                                              term => '-' },
+    'h1 ws post'         => { type => 'http.disconnect', reason => undef, obj_reason => undef,
+                              complete => 1,                                               term => '-' },
     'h1 ws acc close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h1 sse pre close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h1 sse mid close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
-    'h1 sse post'        => { pending => 1, complete => 1,                                              term => '-' },
+    'h1 sse post'        => { type => 'sse.disconnect', reason => undef, obj_reason => undef,
+                              complete => 1,                                               term => '-' },
     'h2 ws pre rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws pre close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws mid rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
     'h2 ws mid close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => 'resolved' },
-    'h2 ws post'         => { pending => 1, complete => 1,                                              term => '-' },
+    'h2 ws post'         => { type => 'http.disconnect', reason => undef, obj_reason => undef,
+                              complete => 1,                                               term => '-' },
     'h2 ws acc rst'      => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 ws acc close'    => { type => 'websocket.disconnect', reason => 'client_closed', term => '-' },
     'h2 sse pre rst'     => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h2 sse pre close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => '-' },
     'h2 sse mid rst'     => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
     'h2 sse mid close'   => { type => 'sse.disconnect',       reason => 'client_closed', term => 'resolved' },
-    'h2 sse post'        => { pending => 1, complete => 1,                                              term => '-' },
+    'h2 sse post'        => { type => 'sse.disconnect', reason => undef, obj_reason => undef,
+                              complete => 1,                                               term => '-' },
 
     # A completed closing handshake is a clean end regardless of the peer's
     # close code, and the peer's code and reason text are delivered as
@@ -312,27 +318,11 @@ sub check_cell {
     my $e = $expect{$label} or die "no expectation for $label";
     my %recv = $r->{recv} && $r->{recv} ne 'PENDING' ? map { split /=/, $_, 2 } split /,/, $r->{recv} : ();
     subtest $label => sub {
-        if ($e->{pending}) {
-            # The app's own sample is taken at its timeout, while its scope is
-            # still running -- on h2 the stream had not closed yet, so that
-            # sample alone once certified a cell that did go on to deliver an
-            # event. Re-read the Future the app handed back, now that the
-            # runner has driven the scope's whole ending including transport
-            # teardown, so "delivers none" means never rather than not-yet.
-            is($r->{recv}, 'PENDING', 'no event after a completed refusal');
-            ok($r->{parked_future} && !$r->{parked_future}->is_ready,
-                'still no event once the scope has fully ended')
-                or diag('late event: ' . join(',',
-                    map { "$_=" . ($r->{parked_future}->get->{$_} // '') }
-                    sort keys %{ $r->{parked_future}->get }));
-        }
-        else {
-            is($recv{type},   $e->{type},   'event type');
-            is($recv{reason}, $e->{reason}, 'event reason token');
-            is($recv{code},   $e->{code},   'event close code') if exists $e->{code};
-            my $obj = exists $e->{obj_reason} ? $e->{obj_reason} : $e->{reason};
-            is($r->{obj_reason}, $obj, 'object reason agrees with the event');
-        }
+        is($recv{type},   $e->{type},   'event type');
+        is($recv{reason}, $e->{reason}, 'event reason token');
+        is($recv{code},   $e->{code},   'event close code') if exists $e->{code};
+        my $obj = exists $e->{obj_reason} ? $e->{obj_reason} : $e->{reason};
+        is($r->{obj_reason}, $obj, 'object reason agrees with the event');
         is($r->{term_send} // '-', $e->{term}, 'terminal send settlement');
         is($r->{has_conn}, 1, 'pagi.connection present');
         # Server Requirement 3: on_disconnect fires ONLY on an abnormal end and

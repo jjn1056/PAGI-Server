@@ -42,7 +42,7 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
-    | PAGI 0.6 conformance      |   100 |    100 |      0 |
+    | PAGI 0.6 conformance      |   114 |    114 |      0 |
     +---------------------------+-------+--------+--------+
 
 The PAGI 0.6 conformance row is the sum of the suites that pin the
@@ -56,16 +56,17 @@ C<t/75-max-disconnect-receives.t> (18 -- the tests that pin spec
 behaviour: unlimited re-delivery with the cap off, pending receives
 settling with the event, and the abandoned-Future race, each on three
 scopes and both transports), C<t/http2/30-connection-state.t> (9),
-C<t/http2/41-abort.t> (4), C<t/http2/42-d13-incomplete-session.t> (2) and
+C<t/http2/41-abort.t> (4), C<t/http2/42-d13-incomplete-session.t> (2),
 C<t/http2/43-receive-after-stream-end.t> (9 -- a receive after the scope's
 disconnect event resolves with that event again, with a peer's Close code
-and text intact, on every HTTP/2 scope type). The full recursive suite
-(C<prove -lr t/>) is 153 files and 1022 assertions.
+and text intact, on every HTTP/2 scope type) and
+C<t/77-receive-after-clean-end.t> (14 of its 15 -- a receive after a clean
+end the application produced, made after that end and already pending at it,
+across the three clean ends and both transports, plus the transport-closed
+control; its fifteenth pins the bound, which is a ruling rather than spec
+behaviour). The full recursive suite (C<prove -lr t/>) is 155 files and 1041
+assertions.
 
-The figure assumes C<max_disconnect_receives> at its default. That cap is
-a deliberate deviation from the spec's unlimited re-delivery of a scope's
-disconnect event; setting it to C<0> restores conformance. See
-L</"Deliberate Deviations">.
 
 =head1 PAGI SPECIFICATION SUPPORT
 
@@ -111,30 +112,33 @@ the spec.
 
 =over 4
 
-=item * B<C<receive()> after a clean end that delivers no event parks.>
-Two endings are clean and deliver nothing: a refusal the server carried to
-completion, and an event stream the application closed itself with
-C<sse.close>. L<PAGI::Spec::Www/"Meaning per scope"> says what a C<receive()>
-call returns after a completed refusal is unspecified.
-L<PAGI::Spec::Www/"SSE Disconnect - receive event"> names what delivers
-C<sse.disconnect> -- the client disconnecting, and the server shutting down a
-started event stream -- and the application's own C<sse.close> is neither;
-"Agreement with disconnect events" then binds the event's reason to the token
-the connection object was marked with, and a clean end is marked with no token
-at all. So in both cases the spec leaves the call unanswered rather than naming
-an event for it. PAGI::Server returns a Future that never resolves, on both
-transports, because the scope ended cleanly and there is no event left to
-deliver; a call already outstanding when the scope ends that way stays parked
-for the same reason. A "drain until disconnect" receive loop will therefore
-hang on a refused handshake or stream, and on a stream the application closed
-itself; a framework must end such a scope on C<on_complete> /
-C<response_complete>. Pinned for the refusal by the C<post> rows of
-C<t/70-protocol-disconnect-matrix.t> and by C<t/73-denial-retention.t>, and for
-C<sse.close> by C<t/77-sse-close-receive-parks.t>, whose control case keeps the
-other half of the rule: a stream the transport takes away still delivers
-C<sse.disconnect> with the reason the scope recorded. Both retention tests also
-show that the parked Future, the application coroutine and the scope are all
-released once the application returns.
+=item * B<A bound on how many receives are answered with the scope's end.>
+L<PAGI::Spec::Www/"Meaning per scope">, under "Receiving after the scope's
+end", has every receive made after the scope ended report that end, and then
+leaves the volume to the server: "A server MAY bound how many receives it
+answers this way on one scope, as a guard against a receive loop that never
+checks for the end, failing the receive once its documented bound is exceeded;
+the bound and its default are the server's to choose and document."
+PAGI::Server's bound is C<max_disconnect_receives>, 100 by default; C<0> is
+unbounded. What counts is every answer the server B<synthesizes> after the
+scope has ended, clean or abnormal alike: the reasonless C<sse.disconnect> or
+C<http.disconnect> that reports a clean end the application produced, and the
+re-delivered disconnect event of an abnormal one. Neither the scope's one
+queued disconnect event, which a C<receive()> takes off the queue, nor a
+C<receive()> already pending when the scope ended -- an ordinary delivery, not
+a repeat request for the end -- is counted. Past the bound the C<receive()>
+Future fails with "receive() called I<N> times after the scope's disconnect
+event; the application is not checking for it (PAGI::Server
+max_disconnect_receives=I<max>)", which raises inside an C<async sub>, and one
+error line naming the scope and the transport is logged for the scope; later
+calls fail silently. Measured on 2026-09-10: an application whose receive loop
+never checked for the event ran 900,825 iterations inside a single turn of the
+event loop, during which a second, unrelated HTTP client on the same process
+received no response at all. Set through
+C<< PAGI::Server->new(max_disconnect_receives => $count) >>, C<configure>, or
+C<--max-disconnect-receives>. Pinned by C<t/75-max-disconnect-receives.t>,
+C<t/77-receive-after-clean-end.t> and
+C<t/http2/31-ws-keepalive-disconnect.t>.
 
 =item * B<An accepted WebSocket the application abandoned, on HTTP/2, gets the
 1011 Close frame and then C<END_STREAM>, not a reset.>
@@ -205,49 +209,7 @@ check never contradicts a rule the spec does make: rejecting a send or a
 receive the spec leaves unspecified is allowed, delivering an event the spec
 says is not delivered is not. PAGI::Server currently adds no such checks
 beyond the ones listed above; if it does in future, they will be recorded
-here as rulings, each with the spec text that leaves the room. A behaviour
-that does contradict the spec is not a ruling at all -- it is recorded under
-L</"Deliberate Deviations">, with the option that switches it off.
-
-=head2 Deliberate Deviations
-
-One behaviour below departs from what the spec requires. It is on by default,
-it is configurable, and the option that switches it off restores conformance.
-
-=over 4
-
-=item * B<A cap on receives answered with a synthesized disconnect event.>
-
-B<Spec text.> L<PAGI::Spec::Www/"Disconnect - receive event"> (websocket) and
-L<PAGI::Spec::Www/"SSE Disconnect - receive event">: "Once this event has been
-delivered the scope is over, and a further C<receive()> resolves with the same
-event again." The http scope's L<PAGI::Spec::Www/"Disconnect - receive event">
-says the same in fewer words: the event is "sent to the application if receive
-is called after a response has been sent or after the HTTP connection has been
-closed". Nothing in the spec limits how many times.
-
-B<What PAGI::Server does instead.> It re-delivers the event, and counts the
-re-deliveries. After C<max_disconnect_receives> of them on one scope -- 100 by
-default -- the next C<receive()> Future B<fails> rather than resolving, which
-raises in the application and ends the scope. One error line is logged for the
-scope; later calls fail silently. Only synthesized answers count: the scope's
-queued disconnect event, and receives already pending when the disconnect was
-detected, are ordinary deliveries.
-
-B<Why.> Measured on 2026-09-10: an application whose receive loop never checks
-for the event ran 900,825 iterations inside a single turn of the event loop,
-because each answer came from an already-resolved Future and nothing yielded --
-during which a second, unrelated HTTP client on the same process received no
-response at all. Failing the call costs the one broken scope; re-delivering
-without limit costs every connection in the process.
-
-B<The option.> C<< PAGI::Server->new(max_disconnect_receives => $count) >>,
-C<configure>, or C<--max-disconnect-receives>. C<0> removes the cap and
-restores strict conformance. Pinned by C<t/75-max-disconnect-receives.t>,
-which asserts the capped behaviour, the unlimited behaviour under C<0>, and
-that neither pending receives nor the abandoned-Future race are affected.
-
-=back
+here as rulings, each with the spec text that leaves the room.
 
 =head1 HTTP/1.1 COMPLIANCE
 
