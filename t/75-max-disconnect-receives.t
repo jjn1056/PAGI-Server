@@ -632,21 +632,18 @@ SKIP: {
                 my ($scope, $receive, $send) = @_;
                 await $start_scope->($kind, $receive, $send);
 
-                # The scope's own disconnect event, then one turn of the
-                # event loop, after which the stream's state has been
-                # reclaimed and every further receive() is answered from the
-                # connection alone. That is where an HTTP/2 scope spins.
+                # The scope's own disconnect event, then a loop that never
+                # checks for it -- no yield in between, the same shape as the
+                # h1 arm. Every answer after the first is a capped one.
                 await $receive->();
                 $n++;
-                await $loop->delay_future(after => 0.05);
 
                 while (1) { await $receive->(); $n++ }
             };
-            # No second stream here: the h1 arm's starvation assertion has no
-            # HTTP/2 twin, because a sloppy HTTP/2 loop cannot reach the spin
-            # without first yielding a tick -- the h2 stream entry is dropped
-            # a tick after close, and a receive() made before that parks on a
-            # Future the drop then orphans (task B11).
+            # No second stream here: the h1 arm already pins that the cap
+            # hands the event loop back while another client is waiting, and
+            # the cap is the same per-scope counter on both transports. This
+            # arm pins the counting and the log line for an HTTP/2 scope.
             my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
             my $mark   = scalar @LOG;
             my $client = create_client();
@@ -714,38 +711,28 @@ SKIP: {
         };
     }
 
-    # Both arms below make the application wait on a Future the test resolves
-    # once the scope's ending has been processed, where the HTTP/1.1 arms go
-    # straight on. The h2 stream entry is dropped a tick after close, and a
-    # receive() made in the same turn as the disconnect delivery parks on a
-    # Future that drop then orphans (task B11), so the receives that must meet
-    # the ended scope are made after the test has let the drop land.
-
     for my $kind (@KINDS) {
         subtest "h2 $kind: receives pending at disconnect do not count against the cap" => sub {
             reset_case();
 
-            # How many receives one HTTP/2 scope can hold parked across its
-            # ending. A websocket or sse scope ends here with the connection,
-            # and the connection-close sweep answers every parked receive from
-            # the scope's ending record. An http scope is ended by RST_STREAM
-            # and has exactly one queued http.disconnect to hand out; a second
-            # parked receive would re-park and be orphaned by the drop, so this
-            # arm parks one.
-            my $pending = $kind eq 'http' ? 1 : 3;
+            # Three receives held parked across the scope's ending, and the
+            # capped loop that follows them made in the same turn as their
+            # delivery, exactly as the h1 arm does. A websocket or sse scope
+            # ends here with the connection and the close sweep answers all
+            # three; an http scope is ended by RST_STREAM and has one queued
+            # http.disconnect, so the other two are answered from the ended
+            # stream (t/http2/43). None of the three counts against the cap.
+            my $pending = 3;
 
             my @pending_types;
             my $after   = 0;
             my $failure = '';
-            my $resume  = $loop->new_future;
             my $app = async sub {
                 my ($scope, $receive, $send) = @_;
                 await $start_open_scope->($kind, $receive, $send);
 
                 my @f = map { $receive->() } 1 .. $pending;
                 for my $f (@f) { push @pending_types, (await $f)->{type} }
-
-                await $resume;
 
                 for my $i (1 .. $DEFAULT_CAP) {
                     await $receive->();
@@ -770,9 +757,6 @@ SKIP: {
             else {
                 $client_sock->close;                      # the connection goes
             }
-            exchange_frames($client, $client_sock, 10);
-
-            $resume->done;
             exchange_frames($client, $client_sock, 20);
 
             ok(!$ALARM_FIRED, 'the application finished without the test alarm');
@@ -810,6 +794,10 @@ SKIP: {
                 my $timer     = $loop->delay_future(after => 0.05);
                 await Future->wait_any($timer, $old);
 
+                # $resume is how the test says "the client has gone": the
+                # timer wins the race above long before the RST arrives, so
+                # without it the late receive below would be made while the
+                # stream was still open and would pin nothing.
                 await $resume;
 
                 $late_type = (await $receive->())->{type};

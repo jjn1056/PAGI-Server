@@ -207,10 +207,12 @@ sub close_codes {
 # websocket.disconnect arrives, then makes ONE bounded extra receive()
 # call to catch a second queued event -- the queue property that proves
 # "exactly one" (mirrors t/http2/31-ws-keepalive-disconnect.t's
-# make_ws_app). A synthesized fallback surfacing here only happens if the
-# connection was already torn down, which these subtests don't do before
-# this check, so any second event caught here is a genuine
-# duplicate-enqueue regression.
+# make_ws_app). That call is answered with the scope's terminal state again
+# once the STREAM has ended (Www.pod "Disconnect - receive event"), so it
+# reads as a second event only where the stream is still open at this point.
+# Every subtest here ends the scope with a server-sent Close frame and no
+# END_STREAM or RST from the client, so the stream outlives this check and
+# any second event caught here is a genuine duplicate-enqueue regression.
 sub make_ws_app {
     my ($events) = @_;
     return async sub {

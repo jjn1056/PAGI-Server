@@ -892,11 +892,22 @@ sub _h2_end_sse_stream {
 sub _h2_ws_enqueue_disconnect {
     my ($self, $stream, $code, $reason) = @_;
     return if $stream->{ws_disconnect_delivered}++;
-    push @{$stream->{receive_queue}}, {
+
+    # Kept as well as queued. Www.pod "Disconnect - receive event": "Once this
+    # event has been delivered the scope is over, and a further receive()
+    # resolves with the same websocket.disconnect again". The ending record
+    # cannot stand in for it here -- a peer's Close frame names its own RFC
+    # code and its own reason TEXT, while the record's vocabulary is the
+    # standard reason tokens the connection object reports -- so the receive
+    # fallback re-delivers this event itself. A copy is queued, so an
+    # application that edits the event it received cannot alter what a later
+    # reader sees.
+    $stream->{ws_disconnect_event} = {
         type   => 'websocket.disconnect',
         code   => $code,
         reason => $reason,
     };
+    push @{$stream->{receive_queue}}, { %{ $stream->{ws_disconnect_event} } };
     $self->_h2_wake_pending($stream);
 }
 
@@ -1563,6 +1574,22 @@ sub _h2_create_receive {
             }
 
             while (1) {
+                # This stream's close handler has already run. Its h2_streams
+                # entry is still here -- the entry is dropped one turn later
+                # so pending futures can resolve -- but nothing will ever wake
+                # body_pending again, so parking would strand this call on a
+                # Future that drop then orphans. Answer from the scope's
+                # ending instead: Www.pod "Disconnect - receive event" sends
+                # http.disconnect to a receive made "after a response has been
+                # sent or after the HTTP connection has been closed", and
+                # Spec.pod "Cancellation and Disconnects" forbids leaving a
+                # receive unresolved once the disconnect is known. The
+                # connection-close sweep leaves body_pending READY rather than
+                # undef, so without this the loop below re-awaits a resolved
+                # Future and spins.
+                return await $disconnect->($parked)
+                    unless $weak_self->_h2_stream_alive($stream_id);
+
                 # Wait for body data (or, once the request has been fully
                 # delivered, for the stream to end)
                 if (!$ss->{body_pending}) {
@@ -2375,6 +2402,11 @@ sub _h2_create_websocket_receive {
         return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
             unless $weak_self;
         my $scope = $weak_self->{h2_streams}{$stream_id} // $weak_self;
+        # This scope already delivered its disconnect: a further receive()
+        # resolves with that same event, not with a fresh reading of the
+        # ending record, which cannot spell a peer's close code and reason
+        # text (see _h2_ws_enqueue_disconnect).
+        return { %{ $scope->{ws_disconnect_event} } } if $scope->{ws_disconnect_event};
         return {
             type   => 'websocket.disconnect',
             code   => $weak_self->_end_code($scope),
@@ -2447,6 +2479,15 @@ sub _h2_create_websocket_receive {
                 if ($weak_self->{closed}) {
                     return await $disconnect->($parked);
                 }
+
+                # This stream's close handler has already run -- see the twin
+                # in _h2_create_receive for why parking here would strand the
+                # call. A completed refusal is the one exception: it ended
+                # cleanly and delivers no event at all (Www.pod "Disconnect -
+                # receive event"), so it keeps the silent park above.
+                return await $disconnect->($parked)
+                    if !$weak_self->_h2_stream_alive($stream_id)
+                    && !_h2_refusal_complete($ss);
 
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
@@ -2870,6 +2911,12 @@ sub _h2_create_sse_receive {
                         return await $disconnect->($parked);
                     }
 
+                    # The stream's close handler has already run; see the twin
+                    # in the disconnect-wait loop below.
+                    return await $disconnect->($parked)
+                        if !$weak_self->_h2_stream_alive($stream_id)
+                        && !_h2_refusal_complete($ss);
+
                     if (!$ss->{body_pending}) {
                         $ss->{body_pending} = Future->new;
                     }
@@ -2909,6 +2956,16 @@ sub _h2_create_sse_receive {
                 if ($weak_self->{closed}) {
                     return await $disconnect->($parked);
                 }
+
+                # This stream's close handler has already run -- see the twin
+                # in _h2_create_receive for why parking here would strand the
+                # call. A completed refusal is the one exception: it ended
+                # cleanly and delivers no event at all (Www.pod "SSE
+                # Disconnect - receive event"), so it keeps the silent park
+                # above.
+                return await $disconnect->($parked)
+                    if !$weak_self->_h2_stream_alive($stream_id)
+                    && !_h2_refusal_complete($ss);
 
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
@@ -5498,7 +5555,13 @@ sub _close {
                 # reason MUST match the token the stream's connection_state
                 # was (or will be) marked with.
                 my $reason = $self->_end_reason($stream);
-                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $reason }
+                # A websocket scope that already delivered its disconnect
+                # hands out that same event again (see
+                # _h2_ws_enqueue_disconnect); only a scope ending here for the
+                # first time reads the record.
+                my $event = $stream->{ws_disconnect_event}
+                                                    ? { %{ $stream->{ws_disconnect_event} } }
+                          : $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $reason }
                           : $stream->{is_websocket} ? { type => 'websocket.disconnect',
                                                         code => $self->_end_code($stream), reason => $reason }
                           :                           { type => 'http.disconnect' };

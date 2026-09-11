@@ -183,14 +183,23 @@ our @WS_EVENTS;
 
 # Build an app that accepts, drains receive() into @WS_EVENTS until a
 # websocket.disconnect arrives, then makes ONE bounded extra receive()
-# call to catch a second queued event -- the queue property that proves
-# "exactly one". A synthesized fallback 1006 surfacing here only happens
-# if the connection was already torn down, which none of these subtests
-# do before this check, so any second event caught here is a genuine
-# duplicate-enqueue regression.
+# call. Www.pod "Disconnect - receive event": "Once this event has been
+# delivered the scope is over, and a further receive() resolves with the
+# same websocket.disconnect again", so that call resolves once the stream
+# has ended and parks while it is still open. Its answer is kept out of
+# @WS_EVENTS -- it is the scope's terminal state read a second time, not a
+# second enqueue -- and checked by check_redelivery: an event that DIFFERS
+# from the one the loop received is the duplicate-enqueue regression this
+# file was written for (before 9fe6a1c the close-frame path queued the
+# peer's code and _h2_on_close queued another with 1006/'').
 our $WS_APP_OBJECT_REASON;
 
+# The answer to that further receive(), or undef if it was still parked when
+# the app's bound expired. Reset by make_ws_app, one app per subtest.
+our $WS_EXTRA_EVENT;
+
 sub make_ws_app {
+    $WS_EXTRA_EVENT = undef;
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'websocket';
@@ -210,12 +219,21 @@ sub make_ws_app {
         push @WS_EVENTS, $event;
 
         my $extra = await Future->wait_any($receive->(), $loop->delay_future(after => 0.3));
-        push @WS_EVENTS, $extra if ref $extra eq 'HASH';
+        $WS_EXTRA_EVENT = ref $extra eq 'HASH' ? $extra : undef;
     };
 }
 
 sub disconnects_seen {
     return grep { $_->{type} eq 'websocket.disconnect' } @WS_EVENTS;
+}
+
+# The further receive() the app made after its disconnect either parked (the
+# stream was still open) or was answered with the scope's terminal state
+# again. Never with a different event.
+sub check_redelivery {
+    my ($disconnect) = @_;
+    is($WS_EXTRA_EVENT // $disconnect, $disconnect,
+        'a further receive() resolved with that same event, or not at all');
 }
 
 # ============================================================
@@ -1061,6 +1079,7 @@ subtest 'peer Close(4321, "bye") delivers exactly one disconnect with the peer c
     if (@disconnects) {
         is($disconnects[0]{code}, 4321, 'code is the peer\'s code');
         is($disconnects[0]{reason}, 'bye', 'reason is the peer\'s reason text');
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
@@ -1092,6 +1111,7 @@ subtest 'peer Close with empty payload delivers exactly one disconnect, code 100
     if (@disconnects) {
         is($disconnects[0]{code}, 1005, 'code is 1005 (no status received)');
         is($disconnects[0]{reason}, '', 'reason is empty');
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
@@ -1129,6 +1149,7 @@ subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' =>
     if (@disconnects) {
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'client_closed', "reason is 'client_closed'");
+        check_redelivery($disconnects[0]);
     }
 
     is($WS_APP_OBJECT_REASON, 'client_closed',
@@ -1163,6 +1184,7 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
     if (@disconnects) {
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'client_closed', "reason is 'client_closed'");
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
