@@ -993,6 +993,20 @@ sub _h2_refusal_complete {
     return (($stream->{seq_state} // '') eq 'refusal_complete') ? 1 : 0;
 }
 
+# An sse scope this stream carried to a clean end: the application closed its
+# own stream with sse.close, or the server finished its output of a refusal.
+# Www.pod "SSE Disconnect - receive event" names what delivers the event -- a
+# client disconnect, and the server shutting down a started stream -- and a
+# clean end is neither, so a receive() has nothing left to be answered with.
+# The send state is the whole fact: advance_sse reaches 'closed' only through
+# sse.close and 'refusal_complete' only through a finished refusal response,
+# so a server-decided end (shutdown, idle timeout) is never one of these. The
+# h1 twin is the $clean_end predicate in _create_sse_receive.
+sub _h2_sse_clean_end {
+    my ($stream) = @_;
+    return PAGI::Server::EventValidator::scope_send_clean('sse', $stream->{seq_state});
+}
+
 sub _h2_on_close {
     my ($self, $stream_id, $error_code) = @_;
 
@@ -2877,11 +2891,12 @@ sub _h2_create_sse_receive {
     return sub {
         return Future->done($sse_disconnect->()) unless $weak_self;
 
-        # A completed refusal delivers no events at all; see the twin in
+        # A clean end -- the application's own sse.close, or a completed
+        # refusal -- delivers no event at all; see the twin in
         # _h2_create_websocket_receive for why this is read from
-        # $stream_state and why it is safe to test only here.
+        # $stream_state, which outlives the h2_streams entry.
         return $weak_self->{server}->loop->new_future
-            if _h2_refusal_complete($stream_state);
+            if _h2_sse_clean_end($stream_state);
 
         return $disconnect->() if $weak_self->{closed};
 
@@ -2915,6 +2930,16 @@ sub _h2_create_sse_receive {
             # bug (design section 11.1) without touching the event shape.
             if (!$ss->{sse_request_sent}) {
                 while (!$ss->{body_complete}) {
+                    # The scope ended cleanly under this call -- the
+                    # application's own sse.close, sent from another Future
+                    # while this one waits for the request body. It delivers
+                    # nothing, so this call parks for good rather than
+                    # answering with a truncated body or a synthesized
+                    # disconnect. Same rule, same order, as the wait loop
+                    # below and as the head of this closure.
+                    return await $weak_self->{server}->loop->new_future
+                        if _h2_sse_clean_end($stream_state);
+
                     if (@{$ss->{receive_queue}}) {
                         return shift @{$ss->{receive_queue}};
                     }
@@ -2924,10 +2949,11 @@ sub _h2_create_sse_receive {
                     }
 
                     # The stream's close handler has already run; see the twin
-                    # in the disconnect-wait loop below.
+                    # in the disconnect-wait loop below. A clean end never
+                    # reaches here: the park at the top of this loop answers
+                    # it first.
                     return await $disconnect->($parked)
-                        if !$weak_self->_h2_stream_alive($stream_id)
-                        && !_h2_refusal_complete($ss);
+                        if !$weak_self->_h2_stream_alive($stream_id);
 
                     if (!$ss->{body_pending}) {
                         $ss->{body_pending} = Future->new;
@@ -2961,6 +2987,15 @@ sub _h2_create_sse_receive {
 
             # Wait for disconnect
             while (1) {
+                # A call already parked when the scope ends cleanly stays
+                # parked: a clean end delivers no event at all. Asked ahead of
+                # the queue, because the stream closing after that end still
+                # queues the transport's own disconnect, and it is the scope's
+                # ending, not the transport's, that decides whether this call
+                # has anything to be answered with.
+                return await $weak_self->{server}->loop->new_future
+                    if _h2_sse_clean_end($stream_state);
+
                 if (@{$ss->{receive_queue}}) {
                     return shift @{$ss->{receive_queue}};
                 }
@@ -2976,19 +3011,16 @@ sub _h2_create_sse_receive {
                 # "once this event has been delivered the scope is over, and a
                 # further receive() resolves with the same sse.disconnect
                 # again" (Www.pod "SSE Disconnect - receive event"). The two
-                # are not the same moment: a server-decided end (sse.close, the
-                # idle timeout) delivers the event through _h2_end_sse_stream
-                # and only marks the stream ending, leaving the final
-                # END_STREAM to the data callback, which emits it once the
-                # stream's send queue has drained -- so a peer that stops
-                # reading holds the stream open for as long as it likes after
-                # the scope is over. A completed refusal is the one exception:
-                # it ended cleanly and delivers no event at all, so it keeps
-                # the silent park above.
+                # are not the same moment: a server-decided end (the idle
+                # timeout, a shutdown) delivers the event through
+                # _h2_end_sse_stream and only marks the stream ending, leaving
+                # the final END_STREAM to the data callback, which emits it
+                # once the stream's send queue has drained -- so a peer that
+                # stops reading holds the stream open for as long as it likes
+                # after the scope is over.
                 return await $disconnect->($parked)
-                    if (!$weak_self->_h2_stream_alive($stream_id)
-                        || $ss->{sse_disconnect_delivered})
-                    && !_h2_refusal_complete($ss);
+                    if !$weak_self->_h2_stream_alive($stream_id)
+                    || $ss->{sse_disconnect_delivered};
 
                 if (!$ss->{body_pending}) {
                     $ss->{body_pending} = Future->new;
@@ -6204,31 +6236,43 @@ sub _create_sse_receive {
         return $weak_self->_disconnect_receive_future(\%cap, $sse_disconnect, $parked);
     };
 
-    # The stream is over -- either the transport is gone, or the application
-    # ended it with sse.close and is still running (the connection stays open
-    # for keep-alive, design section 11.6). Nothing more will ever arrive
-    # on this scope, so answer immediately instead of blocking forever. This
-    # answers a receive() the application chose to make; it is not a disconnect
-    # fired at the application because the stream ended.
+    # This scope reached a clean end: the application closed its own stream
+    # with sse.close, or the server finished its output of a refusal. The send
+    # state is the whole fact -- advance_sse reaches 'closed' only through
+    # sse.close and 'refusal_complete' only through a finished refusal
+    # response -- so a server-decided end (shutdown, idle timeout) or a
+    # transport that goes away is never one of these.
+    my $clean_end = sub {
+        return 0 unless $weak_self;
+        return PAGI::Server::EventValidator::scope_send_clean('sse', $weak_self->{h1_seq});
+    };
+
+    # The stream is over: the transport is gone, or the application abandoned
+    # a started stream without sse.close (_handle_sse_request's tail marks it
+    # finished). Nothing more will ever arrive on this scope, so answer with
+    # its disconnect instead of blocking forever. A clean end is not here --
+    # the park below answers that.
     my $stream_over = sub {
         return 1 unless $weak_self;
         return $weak_self->{closed} || $weak_self->{sse_finished};
     };
 
     return sub {
-        # A completed refusal delivers no events at all (Www.pod "SSE
-        # Disconnect - receive event"): a receive() call made after the
-        # refusal response has already finished must not be answered with a
-        # synthesized sse.disconnect -- nothing abnormal happened. Park
-        # instead; the app has already gotten its answer (the refusal
-        # response) and has nothing further to receive. Asked ahead of the
-        # transport test, because the refusal is a fact about the scope: the
-        # connection closes when the application returns, not at the terminal
-        # event, so the app may well still be running against a live socket.
-        # The websocket receive parks the same way, and so does the h2 side of
-        # both.
+        # A clean end delivers no event at all (Www.pod "SSE Disconnect -
+        # receive event" lists what does deliver one: the client
+        # disconnecting, and the server shutting down a started stream). A
+        # receive() made after the application's own sse.close, or after its
+        # refusal response finished, must not be answered with a synthesized
+        # sse.disconnect -- nothing abnormal happened, and the object was
+        # marked complete with no reason to agree with. Park instead; the app
+        # has already been told the scope is over and has nothing further to
+        # receive. Asked ahead of the transport test, because the ending is a
+        # fact about the scope: the connection closes when the application
+        # returns, not at the terminal event, so the app may well still be
+        # running against a live socket. The websocket receive parks the same
+        # way, and so does the h2 side of both.
         return $weak_self->{server}->loop->new_future
-            if $weak_self && ($weak_self->{h1_seq} // '') eq 'refusal_complete';
+            if $weak_self && $clean_end->();
 
         if ($stream_over->()) {
             return $disconnect->();
@@ -6316,6 +6360,15 @@ sub _create_sse_receive {
 
             # Wait for disconnect
             while (1) {
+                # A call already parked when the scope ends cleanly stays
+                # parked, for the reason the head of this closure gives.
+                # Asked ahead of the queue: a transport that goes away after a
+                # clean end still queues its own disconnect, and it is the
+                # scope's ending, not the transport's, that decides whether
+                # this call has anything to be answered with.
+                return await $weak_self->{server}->loop->new_future
+                    if $clean_end->();
+
                 if (@{$weak_self->{receive_queue}}) {
                     return shift @{$weak_self->{receive_queue}};
                 }

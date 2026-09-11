@@ -111,16 +111,30 @@ the spec.
 
 =over 4
 
-=item * B<C<receive()> after a completed refusal parks.>
-L<PAGI::Spec::Www/"Meaning per scope"> says what a C<receive()> call returns
-after a completed refusal is unspecified. PAGI::Server returns a Future that
-never resolves, on both transports, because the scope ended cleanly and there
-is no event left to deliver. A "drain until disconnect" receive loop will
-therefore hang on a refused handshake or stream; a framework must end such a
-scope on C<on_complete> / C<response_complete>. Pinned by the C<post> rows of
-C<t/70-protocol-disconnect-matrix.t> and by C<t/73-denial-retention.t>, which
-also shows that the parked Future, the application coroutine and the scope
-are all released once the application returns.
+=item * B<C<receive()> after a clean end that delivers no event parks.>
+Two endings are clean and deliver nothing: a refusal the server carried to
+completion, and an event stream the application closed itself with
+C<sse.close>. L<PAGI::Spec::Www/"Meaning per scope"> says what a C<receive()>
+call returns after a completed refusal is unspecified.
+L<PAGI::Spec::Www/"SSE Disconnect - receive event"> names what delivers
+C<sse.disconnect> -- the client disconnecting, and the server shutting down a
+started event stream -- and the application's own C<sse.close> is neither;
+"Agreement with disconnect events" then binds the event's reason to the token
+the connection object was marked with, and a clean end is marked with no token
+at all. So in both cases the spec leaves the call unanswered rather than naming
+an event for it. PAGI::Server returns a Future that never resolves, on both
+transports, because the scope ended cleanly and there is no event left to
+deliver; a call already outstanding when the scope ends that way stays parked
+for the same reason. A "drain until disconnect" receive loop will therefore
+hang on a refused handshake or stream, and on a stream the application closed
+itself; a framework must end such a scope on C<on_complete> /
+C<response_complete>. Pinned for the refusal by the C<post> rows of
+C<t/70-protocol-disconnect-matrix.t> and by C<t/73-denial-retention.t>, and for
+C<sse.close> by C<t/77-sse-close-receive-parks.t>, whose control case keeps the
+other half of the rule: a stream the transport takes away still delivers
+C<sse.disconnect> with the reason the scope recorded. Both retention tests also
+show that the parked Future, the application coroutine and the scope are all
+released once the application returns.
 
 =item * B<An accepted WebSocket the application abandoned, on HTTP/2, gets the
 1011 Close frame and then C<END_STREAM>, not a reset.>
