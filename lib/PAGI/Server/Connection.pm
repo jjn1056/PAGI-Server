@@ -2399,14 +2399,19 @@ sub _h2_create_websocket_receive {
     # close, ...) records its reason there before tearing the stream down, so
     # a receive() racing that teardown still reports why.
     my $fallback_disconnect = sub {
-        return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
-            unless $weak_self;
-        my $scope = $weak_self->{h2_streams}{$stream_id} // $weak_self;
         # This scope already delivered its disconnect: a further receive()
         # resolves with that same event, not with a fresh reading of the
         # ending record, which cannot spell a peer's close code and reason
-        # text (see _h2_ws_enqueue_disconnect).
-        return { %{ $scope->{ws_disconnect_event} } } if $scope->{ws_disconnect_event};
+        # text (see _h2_ws_enqueue_disconnect). Read from the stream state
+        # this closure captured -- the same hash _h2_dispatch_stream took out
+        # of h2_streams -- so the event is still reachable after the deferred
+        # delete drops the h2_streams entry a turn past the close.
+        return { %{ $stream_state->{ws_disconnect_event} } }
+            if $stream_state && $stream_state->{ws_disconnect_event};
+
+        return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
+            unless $weak_self;
+        my $scope = $weak_self->{h2_streams}{$stream_id} // $weak_self;
         return {
             type   => 'websocket.disconnect',
             code   => $weak_self->_end_code($scope),
@@ -2480,13 +2485,20 @@ sub _h2_create_websocket_receive {
                     return await $disconnect->($parked);
                 }
 
-                # This stream's close handler has already run -- see the twin
-                # in _h2_create_receive for why parking here would strand the
-                # call. A completed refusal is the one exception: it ended
-                # cleanly and delivers no event at all (Www.pod "Disconnect -
-                # receive event"), so it keeps the silent park above.
+                # Nothing left for this call to wait for, on either count:
+                # this stream's close handler has already run (see the twin in
+                # _h2_create_receive for why parking here would strand the
+                # call), or the scope has already delivered its disconnect --
+                # "once this event has been delivered the scope is over, and a
+                # further receive() resolves with the same websocket.disconnect
+                # again" (Www.pod "Disconnect - receive event"), and a peer that
+                # half-closes with END_STREAM and never resets holds the stream
+                # itself open for as long as it likes. A completed refusal is
+                # the one exception: it ended cleanly and delivers no event at
+                # all, so it keeps the silent park above.
                 return await $disconnect->($parked)
-                    if !$weak_self->_h2_stream_alive($stream_id)
+                    if (!$weak_self->_h2_stream_alive($stream_id)
+                        || $ss->{ws_disconnect_delivered})
                     && !_h2_refusal_complete($ss);
 
                 if (!$ss->{body_pending}) {

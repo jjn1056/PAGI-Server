@@ -42,6 +42,7 @@ BEGIN {
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
+use Protocol::WebSocket::Frame;
 
 my $loop     = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -185,6 +186,13 @@ sub h2_submit {
         method => 'GET', path => $path, scheme => 'http', authority => 'localhost',
         headers => [],
     );
+}
+
+sub send_stream_data {
+    my ($client, $client_sock, $stream_id, $data, $end_stream) = @_;
+    $client->submit_data($stream_id, $data, $end_stream // 0);
+    my $out = $client->mem_send;
+    $client_sock->syswrite($out) if length($out);
 }
 
 # ============================================================
@@ -356,5 +364,66 @@ for my $kind (@KINDS) {
         shutdown_server($server);
     };
 }
+
+# ============================================================
+# The peer's own close code and reason outlive the stream entry
+# ============================================================
+# Www.pod "Agreement with disconnect events": a peer's Close frame names its
+# own RFC code and its own reason TEXT, and the event carries them. The
+# ending record cannot stand in for that -- its vocabulary is the standard
+# reason tokens -- so the scope's delivered event is kept and re-delivered
+# verbatim. The h2_streams entry is dropped a turn after the stream closes,
+# so this case reads the event two turns later, when the receive closure's
+# own captured stream state is the only place left holding it.
+
+subtest 'h2 websocket: a further receive reports the peer close code after the stream entry is dropped' => sub {
+    reset_case();
+    my @events;
+    my ($returned, $entry_gone) = (0, 0);
+    my ($conn, $sid);
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();                       # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+
+        my $event = await $receive->();
+        $event = await $receive->() while $event->{type} ne 'websocket.disconnect';
+        push @events, $event;
+
+        await $loop->delay_future(after => 0);    # the close's deferred delete
+        await $loop->delay_future(after => 0);    # and a turn past it
+        $entry_gone = !exists $conn->{h2_streams}{$sid};
+
+        push @events, await $receive->();
+        $returned = 1;
+        return;
+    };
+
+    my ($stream_io, $client_sock, $server);
+    ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    $sid = h2_submit($client, $client_sock, 'websocket');
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+
+    my $close = Protocol::WebSocket::Frame->new(
+        type => 'close', buffer => pack('n', 4321) . 'bye', masked => 1);
+    send_stream_data($client, $client_sock, $sid, $close->to_bytes, 1);
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    ok($entry_gone, 'the stream entry was already dropped when the further receive was made');
+    is(\@events,
+        [ ({ type => 'websocket.disconnect', code => 4321, reason => 'bye' }) x 2 ],
+        'the further receive carries the peer\'s own code and reason text');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
 
 done_testing;
