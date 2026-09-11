@@ -1517,6 +1517,7 @@ sub _h2_create_receive {
     my %cap = (scope => 'http', transport => "HTTP/2 stream $stream_id", count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return $weak_self->_disconnect_receive_future(
             \%cap, { type => 'http.disconnect' }, $parked);
     };
@@ -2388,6 +2389,7 @@ sub _h2_create_websocket_receive {
     my %cap = (scope => 'websocket', transport => "HTTP/2 stream $stream_id", count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done($fallback_disconnect->()) unless $weak_self;
         return $weak_self->_disconnect_receive_future(\%cap, $fallback_disconnect, $parked);
     };
 
@@ -2815,6 +2817,7 @@ sub _h2_create_sse_receive {
     my %cap = (scope => 'sse', transport => "HTTP/2 stream $stream_id", count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done($sse_disconnect->()) unless $weak_self;
         return $weak_self->_disconnect_receive_future(\%cap, $sse_disconnect, $parked);
     };
 
@@ -4705,6 +4708,7 @@ sub _create_receive {
     my %cap = (scope => 'http', transport => 'HTTP/1.1', count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return $weak_self->_disconnect_receive_future(
             \%cap, { type => 'http.disconnect' }, $parked);
     };
@@ -5291,6 +5295,26 @@ sub _ws_disconnect_event {
 # sse.start has been sent"). A normally completed refusal is a clean end and
 # delivers no event at all (Www.pod "Meaning per scope", Agreement with
 # disconnect events).
+sub _scope_disconnect_event {
+    my ($self) = @_;
+
+    my $kind = $self->{scope_kind} // 'http';
+    my $seq  = $self->{h1_seq} // '';
+
+    if ($kind eq 'websocket') {
+        return undef if $seq eq 'refusal_complete';
+        return $self->_ws_disconnect_event;
+    }
+    if ($kind eq 'sse') {
+        return undef if $seq eq 'refusal_complete';
+        return {
+            type   => 'sse.disconnect',
+            reason => $self->_end_reason($self),
+        };
+    }
+    return { type => 'http.disconnect' };
+}
+
 # One scope's cap on receives answered with a SYNTHESIZED disconnect event
 # (PAGI::Server max_disconnect_receives). Www.pod re-delivers a scope's
 # disconnect event to every later receive(), so an application that never
@@ -5306,6 +5330,11 @@ sub _ws_disconnect_event {
 # scope's terminal state, not a repeat request for it, so it is answered
 # without counting. The scope's single queued disconnect event never reaches
 # here at all -- a receive that shifts it off the queue returns it directly.
+#
+# Each caller tests its own weak connection reference before calling: a
+# receive() the application kept past the connection object's collection is
+# answered with the event, uncounted, because there is no connection left to
+# starve.
 #
 # Returns the Future the receive() closure hands back: done with the event
 # while the cap allows it, failed once it does not, with one error line per
@@ -5327,26 +5356,6 @@ sub _disconnect_receive_future {
         unless $cap->{logged}++;
 
     return Future->fail("$message\n");
-}
-
-sub _scope_disconnect_event {
-    my ($self) = @_;
-
-    my $kind = $self->{scope_kind} // 'http';
-    my $seq  = $self->{h1_seq} // '';
-
-    if ($kind eq 'websocket') {
-        return undef if $seq eq 'refusal_complete';
-        return $self->_ws_disconnect_event;
-    }
-    if ($kind eq 'sse') {
-        return undef if $seq eq 'refusal_complete';
-        return {
-            type   => 'sse.disconnect',
-            reason => $self->_end_reason($self),
-        };
-    }
-    return { type => 'http.disconnect' };
 }
 
 # Settle this connection's scope: record how it ended, mark every object it
@@ -6097,6 +6106,7 @@ sub _create_sse_receive {
     my %cap = (scope => 'sse', transport => 'HTTP/1.1', count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done($sse_disconnect->()) unless $weak_self;
         return $weak_self->_disconnect_receive_future(\%cap, $sse_disconnect, $parked);
     };
 
@@ -6675,6 +6685,8 @@ sub _create_websocket_receive {
     my %cap = (scope => 'websocket', transport => 'HTTP/1.1', count => 0);
     my $disconnect = sub {
         my ($parked) = @_;
+        return Future->done({ type => 'websocket.disconnect', code => 1006, reason => 'client_closed' })
+            unless $weak_self;
         return $weak_self->_disconnect_receive_future(
             \%cap, $weak_self->_ws_disconnect_event, $parked);
     };

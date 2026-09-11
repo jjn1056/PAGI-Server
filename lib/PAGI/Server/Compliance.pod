@@ -42,7 +42,7 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
-    | PAGI 0.6 conformance      |    96 |     96 |      0 |
+    | PAGI 0.6 conformance      |    91 |     91 |      0 |
     +---------------------------+-------+--------+--------+
 
 The PAGI 0.6 conformance row is the sum of the suites that pin the
@@ -50,14 +50,15 @@ sub-spec's connection-state, refusal, terminal-event and abort rules on
 both transports: C<t/69-connection-state-protocol-scopes.t> (8),
 C<t/70-protocol-disconnect-matrix.t> (22 cells, each asserting event type,
 reason token, terminal-send settlement, and object/event agreement),
-C<t/71-http-refusal-on-protocol-scopes.t> (13), C<t/72-abort.t> (5),
+C<t/71-http-refusal-on-protocol-scopes.t> (14), C<t/72-abort.t> (5),
 C<t/73-denial-retention.t> (4), C<t/74-h2-ws-clean-end.t> (5),
-C<t/75-max-disconnect-receives.t> (24 -- the assertions that pin spec
+C<t/75-max-disconnect-receives.t> (18 -- the tests that pin spec
 behaviour: unlimited re-delivery with the cap off, pending receives
-settling with the event, and the abandoned-Future race, on both
-transports), C<t/http2/30-connection-state.t> (9), C<t/http2/41-abort.t>
-(4) and C<t/http2/42-d13-incomplete-session.t> (2). The full recursive
-suite (C<prove -lr t/>) is 152 files and 1006 assertions.
+settling with the event, and the abandoned-Future race, each on three
+scopes and both transports), C<t/http2/30-connection-state.t> (9),
+C<t/http2/41-abort.t> (4) and C<t/http2/42-d13-incomplete-session.t> (2).
+The full recursive suite (C<prove -lr t/>) is 152 files and 1013
+assertions.
 
 The figure assumes C<max_disconnect_receives> at its default. That cap is
 a deliberate deviation from the spec's unlimited re-delivery of a scope's
@@ -245,6 +246,18 @@ log records the status field as C<->. Observed in C<t/72-abort.t> row 1.
 
 =back
 
+Behaviours the spec fixes are not listed here; the relevant sections below
+say what this server does and which test proves it, and the spec says why.
+
+A server may also enforce more than the spec requires, provided the extra
+check never contradicts a rule the spec does make: rejecting a send or a
+receive the spec leaves unspecified is allowed, delivering an event the spec
+says is not delivered is not. PAGI::Server currently adds no such checks
+beyond the ones listed above; if it does in future, they will be recorded
+here as rulings, each with the spec text that leaves the room. A behaviour
+that does contradict the spec is not a ruling at all -- it is recorded under
+L</"Deliberate Deviations">, with the option that switches it off.
+
 =head2 Deliberate Deviations
 
 One behaviour below departs from what the spec requires. It is on by default,
@@ -284,18 +297,6 @@ which asserts the capped behaviour, the unlimited behaviour under C<0>, and
 that neither pending receives nor the abandoned-Future race are affected.
 
 =back
-
-Behaviours the spec fixes are not listed here; the relevant sections below
-say what this server does and which test proves it, and the spec says why.
-
-A server may also enforce more than the spec requires, provided the extra
-check never contradicts a rule the spec does make: rejecting a send or a
-receive the spec leaves unspecified is allowed, delivering an event the spec
-says is not delivered is not. PAGI::Server currently adds no such checks
-beyond the ones listed above; if it does in future, they will be recorded
-here as rulings, each with the spec text that leaves the room. A behaviour
-that does contradict the spec is not a ruling at all -- it is recorded under
-L</"Deliberate Deviations">, with the option that switches it off.
 
 =head1 HTTP/1.1 COMPLIANCE
 

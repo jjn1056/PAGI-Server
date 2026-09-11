@@ -59,13 +59,13 @@ GetOptionsFromArray(
     'lifespan-startup-timeout=i' => \$server_opts{lifespan_startup_timeout},
 
     # Limits
-    'max-body-size=i'       => \$server_opts{max_body_size},
-    'max-header-size=i'     => \$server_opts{max_header_size},
-    'max-header-count=i'    => \$server_opts{max_header_count},
-    'max-receive-queue=i'   => \$server_opts{max_receive_queue},
+    'max-body-size=i'           => \$server_opts{max_body_size},
+    'max-header-size=i'         => \$server_opts{max_header_size},
+    'max-header-count=i'        => \$server_opts{max_header_count},
+    'max-receive-queue=i'       => \$server_opts{max_receive_queue},
     'max-disconnect-receives=i' => \$server_opts{max_disconnect_receives},
-    'max-ws-frame-size=i'   => \$server_opts{max_ws_frame_size},
-    'b|listener-backlog=i'  => \$server_opts{listener_backlog},
+    'max-ws-frame-size=i'       => \$server_opts{max_ws_frame_size},
+    'b|listener-backlog=i'      => \$server_opts{listener_backlog},
 
     # Write backpressure watermarks
     'write-high-watermark=i' => \$server_opts{write_high_watermark},

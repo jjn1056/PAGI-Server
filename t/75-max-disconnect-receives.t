@@ -147,6 +147,20 @@ sub reset_case {
     $ALARM_FIRED = 0;
 }
 
+# Every log line the case's scope produced, counted by level. A case takes
+# its mark once its server is up, so the count covers the scope alone and
+# not the startup lines the server writes when it begins listening. Asserted
+# at every level, not just error: a line about the cap at any level that no
+# case names is exactly the unasserted output the Compliance "Error logging"
+# ruling forbids, and these servers log into a collector, so the suite's
+# stderr diff never sees them.
+sub log_levels_since {
+    my ($mark) = @_;
+    my %by_level;
+    $by_level{ $_->{level} }++ for @LOG[$mark .. $#LOG];
+    return \%by_level;
+}
+
 sub shutdown_server {
     my ($server) = @_;
     eval { $server->shutdown->get };
@@ -363,6 +377,7 @@ for my $kind (@KINDS) {
             }
         };
         my $server = create_server($app);
+        my $mark   = scalar @LOG;
         my $port   = $server->port;
 
         my ($sock) = h1_connect($port, h1_request($kind));
@@ -383,6 +398,8 @@ for my $kind (@KINDS) {
             [ "$kind scope on HTTP/1.1: $message",
               "$APP_ERROR_H1{$kind}: $message" ],
             'the cap line, then the app exception the failed receive raised');
+        is(log_levels_since($mark), { error => 2 },
+            'those two error lines are everything the scope logged, at any level');
 
         like($$wire2, qr{^HTTP/1\.1 200 }, 'a second client was answered while the scope spun');
 
@@ -410,6 +427,7 @@ for my $kind (@KINDS) {
             return;
         };
         my $server = create_server($app, max_disconnect_receives => 0);
+        my $mark   = scalar @LOG;
         my $port   = $server->port;
 
         my ($sock) = h1_connect($port, h1_request($kind));
@@ -419,7 +437,7 @@ for my $kind (@KINDS) {
 
         ok(!$ALARM_FIRED, 'the bounded application loop finished on its own');
         is($n, 150, 'all 150 receives resolved with the disconnect event');
-        is([grep { $_->{level} eq 'error' } @LOG], [], 'nothing logged at error level');
+        is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
         shutdown_server($server);
     };
@@ -451,6 +469,7 @@ for my $kind (@KINDS) {
             return;
         };
         my $server = create_server($app);
+        my $mark   = scalar @LOG;
         my $port   = $server->port;
 
         my ($sock) = h1_connect($port, h1_request($kind));
@@ -464,6 +483,8 @@ for my $kind (@KINDS) {
         is($after, $DEFAULT_CAP, "the next $DEFAULT_CAP receives resolved");
         like($failure, qr/\Q@{[ cap_message($DEFAULT_CAP + 1, $DEFAULT_CAP) ]}\E/,
             'the call after the cap failed');
+        is(log_levels_since($mark), { error => 1 },
+            'the cap line alone: the application caught the failure itself');
 
         shutdown_server($server);
     };
@@ -491,6 +512,7 @@ for my $kind (@KINDS) {
             return;
         };
         my $server = create_server($app);
+        my $mark   = scalar @LOG;
         my $port   = $server->port;
 
         my ($sock) = h1_connect($port, h1_request($kind));
@@ -500,7 +522,7 @@ for my $kind (@KINDS) {
 
         ok(!$ALARM_FIRED, 'the application finished without the test alarm');
         is($late_type, $DISCONNECT_TYPE{$kind}, 'the later receive resolved with the event');
-        is([grep { $_->{level} eq 'error' } @LOG], [], 'nothing logged at error level');
+        is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
         shutdown_server($server);
     };
@@ -535,17 +557,64 @@ subtest 'a Connection built by the server carries the cap' => sub {
     reset_case();
     my $app = async sub { return };
     my $server = create_server($app, max_disconnect_receives => 42);
+    my $mark   = scalar @LOG;
     my $port   = $server->port;
 
     my ($sock) = h1_connect($port, undef);
     pump(5);
 
     my ($conn) = values %{ $server->{connections} };
+    ok(!$ALARM_FIRED, 'the connection was accepted without the test alarm');
     ok($conn, 'the server tracked the connection');
     is($conn->{max_disconnect_receives}, 42, 'the connection carries the configured cap');
+    is(log_levels_since($mark), {}, 'accepting the connection logged nothing at any level');
 
     close $sock;
     shutdown_server($server);
+};
+
+# ============================================================
+# 6. A receive() the application kept past the connection object
+# ============================================================
+# L<PAGI::Spec::Www/"SSE Disconnect - receive event"> (and the http and
+# websocket twins) require such a call to resolve with the scope's disconnect
+# event. The receive closures hold the connection weakly, so an application
+# that hands $receive to a background task can call it once nothing else
+# refers to the connection -- and the cap's gate must answer there too rather
+# than call a method on the undefined reference.
+#
+# Built from the closures directly, as the HTTP/2 cases build their
+# connection: a Connection reached through a listening server stays
+# referenced for as long as the application it dispatched can still be
+# running, so no socket-driven shape can free it while $receive is callable.
+subtest 'a receive() made after the connection object is gone still answers' => sub {
+    reset_case();
+    my $app = async sub { return };
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    $loop->add($server);
+
+    socketpair(my $sock_a, my $sock_b, AF_UNIX, SOCK_STREAM, 0) or die "socketpair: $!";
+    my $request = { content_length => undef, chunked => 0, expect_continue => 0,
+                    method => 'GET', path => '/r' };
+
+    for my $kind (@KINDS) {
+        my $stream = IO::Async::Stream->new(
+            read_handle => $sock_a, write_handle => $sock_a, on_read => sub { 0 });
+        my $conn = PAGI::Server::Connection->new(
+            stream => $stream, app => $app, protocol => $protocol, server => $server,
+            max_disconnect_receives => $DEFAULT_CAP,
+        );
+        my $receive = $kind eq 'websocket' ? $conn->_create_websocket_receive($request)
+                    : $kind eq 'sse'       ? $conn->_create_sse_receive($request)
+                    :                        $conn->_create_receive($request);
+        undef $conn;
+
+        my $type = eval { $receive->()->get->{type} };
+        is($type, $DISCONNECT_TYPE{$kind},
+            "h1 $kind: the freed connection's receive resolved with the event");
+    }
+
+    $loop->remove($server);
 };
 
 # ============================================================
@@ -553,7 +622,7 @@ subtest 'a Connection built by the server carries the cap' => sub {
 # ============================================================
 
 SKIP: {
-    skip 'HTTP/2 not available', 1 unless $have_h2;
+    skip 'HTTP/2 not available', 12 unless $have_h2;
 
     for my $kind (@KINDS) {
         subtest "h2 $kind: a sloppy receive loop is capped" => sub {
@@ -573,7 +642,13 @@ SKIP: {
 
                 while (1) { await $receive->(); $n++ }
             };
+            # No second stream here: the h1 arm's starvation assertion has no
+            # HTTP/2 twin, because a sloppy HTTP/2 loop cannot reach the spin
+            # without first yielding a tick -- the h2 stream entry is dropped
+            # a tick after close, and a receive() made before that parks on a
+            # Future the drop then orphans (task B11).
             my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+            my $mark   = scalar @LOG;
             my $client = create_client();
             complete_h2_handshake($client, $client_sock);
             my $sid = h2_submit($client, $client_sock, $kind);
@@ -593,6 +668,8 @@ SKIP: {
                 [ "$kind scope on HTTP/2 stream $sid: $message",
                   $APP_ERROR_H2{$kind} ? "$APP_ERROR_H2{$kind}: $message" : () ],
                 'the cap line, then whatever the app-exception path logs');
+            is(log_levels_since($mark), { error => 1 + ($APP_ERROR_H2{$kind} ? 1 : 0) },
+                'those error lines are everything the scope logged, at any level');
 
             $stream_io->close_now;
             shutdown_server($server);
@@ -617,6 +694,7 @@ SKIP: {
             };
             my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
                 app => $app, server_opts => { max_disconnect_receives => 0 });
+            my $mark   = scalar @LOG;
             my $client = create_client();
             complete_h2_handshake($client, $client_sock);
             my $sid = h2_submit($client, $client_sock, $kind);
@@ -629,9 +707,134 @@ SKIP: {
 
             ok(!$ALARM_FIRED, 'the bounded application loop finished on its own');
             is($n, 150, 'all 150 receives resolved with the disconnect event');
-            is([grep { $_->{level} eq 'error' } @LOG], [], 'nothing logged at error level');
+            is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
             $stream_io->close_now;
+            shutdown_server($server);
+        };
+    }
+
+    # Both arms below make the application wait on a Future the test resolves
+    # once the scope's ending has been processed, where the HTTP/1.1 arms go
+    # straight on. The h2 stream entry is dropped a tick after close, and a
+    # receive() made in the same turn as the disconnect delivery parks on a
+    # Future that drop then orphans (task B11), so the receives that must meet
+    # the ended scope are made after the test has let the drop land.
+
+    for my $kind (@KINDS) {
+        subtest "h2 $kind: receives pending at disconnect do not count against the cap" => sub {
+            reset_case();
+
+            # How many receives one HTTP/2 scope can hold parked across its
+            # ending. A websocket or sse scope ends here with the connection,
+            # and the connection-close sweep answers every parked receive from
+            # the scope's ending record. An http scope is ended by RST_STREAM
+            # and has exactly one queued http.disconnect to hand out; a second
+            # parked receive would re-park and be orphaned by the drop, so this
+            # arm parks one.
+            my $pending = $kind eq 'http' ? 1 : 3;
+
+            my @pending_types;
+            my $after   = 0;
+            my $failure = '';
+            my $resume  = $loop->new_future;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $start_open_scope->($kind, $receive, $send);
+
+                my @f = map { $receive->() } 1 .. $pending;
+                for my $f (@f) { push @pending_types, (await $f)->{type} }
+
+                await $resume;
+
+                for my $i (1 .. $DEFAULT_CAP) {
+                    await $receive->();
+                    $after++;
+                }
+                my $ok = eval { await $receive->(); 1 };
+                $failure = $ok ? '' : "$@";
+                return;
+            };
+            my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+            my $mark   = scalar @LOG;
+            my $client = create_client();
+            complete_h2_handshake($client, $client_sock);
+            my $sid = h2_submit($client, $client_sock, $kind);
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 10);
+
+            if ($kind eq 'http') {
+                $client->submit_rst_stream($sid, 8);      # CANCEL
+                $client_sock->syswrite($client->mem_send);
+            }
+            else {
+                $client_sock->close;                      # the connection goes
+            }
+            exchange_frames($client, $client_sock, 10);
+
+            $resume->done;
+            exchange_frames($client, $client_sock, 20);
+
+            ok(!$ALARM_FIRED, 'the application finished without the test alarm');
+            is(\@pending_types, [($DISCONNECT_TYPE{$kind}) x $pending],
+                "all $pending pending receives resolved with the disconnect event");
+            is($after, $DEFAULT_CAP, "the next $DEFAULT_CAP receives resolved");
+            like($failure, qr/\Q@{[ cap_message($DEFAULT_CAP + 1, $DEFAULT_CAP) ]}\E/,
+                'the call after the cap failed');
+            is(log_levels_since($mark), { error => 1 },
+                'the cap line alone: the application caught the failure itself');
+
+            eval { $stream_io->close_now };
+            shutdown_server($server);
+        };
+    }
+
+    for my $kind (@KINDS) {
+        subtest "h2 $kind: an abandoned receive Future still leaves the next one answerable" => sub {
+            reset_case();
+            my $late_type = '';
+            my $resume    = $loop->new_future;
+            my $app = async sub {
+                my ($scope, $receive, $send) = @_;
+                await $start_scope->($kind, $receive, $send);
+
+                # The application races a receive against a timer, keeps the
+                # loser alive, and asks again after the client has gone. The
+                # receive Future is held in its own variable as well: an
+                # HTTP/2 connection keeps no reference of its own to a receive
+                # in flight the way the HTTP/1.1 connection's receive_futures
+                # does, so letting go of it before the stream ends would
+                # collect the suspended receive instead of racing it.
+                my $abandoned = $receive->();
+                my $old       = $abandoned->without_cancel;
+                my $timer     = $loop->delay_future(after => 0.05);
+                await Future->wait_any($timer, $old);
+
+                await $resume;
+
+                $late_type = (await $receive->())->{type};
+                return;
+            };
+            my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+            my $mark   = scalar @LOG;
+            my $client = create_client();
+            complete_h2_handshake($client, $client_sock);
+            my $sid = h2_submit($client, $client_sock, $kind);
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 10);
+
+            $client->submit_rst_stream($sid, 8);          # CANCEL
+            $client_sock->syswrite($client->mem_send);
+            exchange_frames($client, $client_sock, 10);
+
+            $resume->done;
+            exchange_frames($client, $client_sock, 20);
+
+            ok(!$ALARM_FIRED, 'the application finished without the test alarm');
+            is($late_type, $DISCONNECT_TYPE{$kind}, 'the later receive resolved with the event');
+            is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+            eval { $stream_io->close_now };
             shutdown_server($server);
         };
     }
