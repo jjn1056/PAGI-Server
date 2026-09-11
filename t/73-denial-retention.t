@@ -60,6 +60,19 @@ package RetentionGuard {
     sub DESTROY { ${ $_[0]{flag} }++ }
 }
 
+# Case B abandons its outstanding receive and returns in the same turn, so the
+# connection tears down under a call the server has just answered. An answer
+# that arrived late, or twice, does not fail an assertion on its own -- it
+# complains on STDERR, as a dropped returning future or an already-done
+# Future. Collected here so case B can assert that its window produced none.
+my @WARNINGS;
+$SIG{__WARN__} = sub { push @WARNINGS, $_[0] };
+
+sub warnings_since {
+    my ($mark) = @_;
+    return [map { my $w = $_; $w =~ s/\s+\z//r } @WARNINGS[$mark .. $#WARNINGS]];
+}
+
 sub make_app {
     my ($case, $r) = @_;
     return async sub {
@@ -199,7 +212,9 @@ sub scope_alive { my ($r) = @_; return defined $r->{scope_weak} ? 1 : 0 }
 # ============================================================
 
 subtest 'h1: a completed refusal frees the app, the answered receive and the scope' => sub {
+    my $warn_mark = scalar @WARNINGS;
     my ($r, $wire) = h1_case('B');
+    is(warnings_since($warn_mark), [], 'the run emitted no warnings');
     like($wire, qr{^HTTP/1\.1 429}, 'the refusal reached the client');
     # Two chunks, so two chunked frames, then the terminator.
     like($wire, qr/\r\nslow down: \r\n.*\r\nok\r\n0\r\n\r\n\z/s,
@@ -212,7 +227,9 @@ subtest 'h1: a completed refusal frees the app, the answered receive and the sco
 
 subtest 'h2: a completed refusal frees the app, the answered receive and the scope' => sub {
     skip_all 'HTTP/2 not available' unless $have_h2;
+    my $warn_mark = scalar @WARNINGS;
     my ($before, $status, $after) = h2_case('B');
+    is(warnings_since($warn_mark), [], 'the run emitted no warnings');
     is($status, '429', 'the refusal reached the client');
     is($before->{app_returned}, 1, 'the application returned');
     is(freed($before, 'app_freed'), 1, 'the application coroutine was collected');

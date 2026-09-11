@@ -38,8 +38,10 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # The sse scope carries a request body, so the pending call can be one
 # reading that body on a request half the client never finished; two cases
 # drive exactly that, and on HTTP/2 they also pin how the finished stream is
-# ended. Two more pin where the answer arrives: after the application's own
-# terminal send returns, never inside it.
+# ended. Six more drive the tightest window such a call has -- the application
+# abandons it and returns in the same turn, so the connection tears down
+# before the loop turns again -- and two pin what the awaiting code finds when
+# it resumes: a scope that has already ended, wherever that resume lands.
 #
 # The spec also lets a server bound how many receives it answers this way.
 # PAGI::Server's bound is max_disconnect_receives, and three subtests pin that
@@ -82,6 +84,18 @@ sub logged_since {
     my ($mark) = @_;
     return [map { "$_->{level}: $_->{message}" }
             grep { $RANK{ $_->{level} // '' } } @LOG[$mark .. $#LOG]];
+}
+
+# Warnings are the other output a mishandled receive produces: a coroutine
+# whose returning Future was dropped, or a Future resolved twice, complains on
+# STDERR rather than failing an assertion. Collected so a case can assert its
+# own window emitted none.
+my @WARNINGS;
+$SIG{__WARN__} = sub { push @WARNINGS, $_[0] };
+
+sub warnings_since {
+    my ($mark) = @_;
+    return [map { my $w = $_; $w =~ s/\s+\z//r } @WARNINGS[$mark .. $#WARNINGS]];
 }
 
 # The cap's failure message and error line, verbatim (PAGI::Server
@@ -325,39 +339,72 @@ sub body_open_app {
     };
 }
 
-# Where the answer to a receive resolved by the application's own terminal
-# send arrives: a real awaiting coroutine records the moment it resumes,
-# against the send that produced the answer. An answer delivered inline off
-# ->done lands between BEFORE and AFTER, inside the application's own
-# half-finished $send.
-sub order_app {
+# What the awaiting code finds when the application's own terminal send
+# resolves the call it is awaiting: a real awaiting coroutine reads the
+# connection object the moment it resumes.
+sub resume_app {
     my ($case, $obs) = @_;
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq $SCOPE_KIND{$case};
 
+        my $cs = $scope->{'pagi.connection'};
         await $receive->();
         for my $event (setup_events($case)) { await $send->($event) }
 
         my $under_test = $receive->();
         my $watcher = (async sub {
             $obs->{answer} = await $under_test;
-            push @{ $obs->{order} }, 'resumed';
+            $obs->{resumed_object} = {
+                response_complete => $cs->response_complete ? 1 : 0,
+                disconnect_reason => $cs->disconnect_reason,
+            };
+            $obs->{resumed} = 1;
         })->();
 
         # Only the last of a case's terminal sends ends the scope; a refusal's
         # http.response.start is still setup.
         my @terminal = terminal_events($case);
         while (@terminal > 1) { await $send->(shift @terminal) }
-
-        push @{ $obs->{order} }, 'BEFORE send';
         await $send->($terminal[0]);
-        push @{ $obs->{order} }, 'AFTER send';
 
         await Future->wait_any($watcher->without_cancel,
                                $loop->delay_future(after => $PARK_BOUND));
         $obs->{returned} = 1;
         return;
+    };
+}
+
+# Arms the call under test, ends the scope, and returns without awaiting it.
+# A later scope on the same connection answers with a small response, so a
+# case can ask whether the connection still serves requests afterwards.
+sub abandon_app {
+    my ($case, $obs) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+
+        if ($scope->{type} eq 'http') {
+            await $receive->();
+            await $send->({ type => 'http.response.start', status => 200,
+                            headers => [['content-type', 'text/plain'],
+                                        ['content-length', 5]] });
+            await $send->({ type => 'http.response.body', body => 'again' });
+            $obs->{second_scope} = 1;
+            return;
+        }
+        return unless $scope->{type} eq $SCOPE_KIND{$case};
+
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { $obs->{on_complete}++ });
+        $cs->on_disconnect(sub { $obs->{on_disconnect} = $_[0] // 'undef' });
+
+        await $receive->();
+        for my $event (setup_events($case)) { await $send->($event) }
+
+        $obs->{abandoned} = $receive->();
+        for my $event (terminal_events($case)) { await $send->($event) }
+        $obs->{returned} = 1;
+        return;                       # the call is left outstanding
     };
 }
 
@@ -485,6 +532,9 @@ sub h2_run {
     my %obs;
 
     my $app = $opt{app} // clean_end_app($case, $timing, \%obs);
+    # A case that brings its own application records its own return; $opt{watch}
+    # points the pump at that hash so it stops as soon as the case is over.
+    my $watch = $opt{watch} // \%obs;
     my $server = PAGI::Server->new(
         app => $app, host => '127.0.0.1', port => 0, http2 => 1,
         log_level => 'debug', access_log => undef,
@@ -547,7 +597,7 @@ sub h2_run {
                 close $sock_b;
                 $dropped = 1;
             }
-            last if $obs{returned} && ++$after_return > 20;
+            last if $watch->{returned} && ++$after_return > 20;
         }
     });
 
@@ -757,37 +807,215 @@ subtest 'h2: a receive reading an unfinished request body reports the scope end'
 };
 
 # ============================================================
-# 4. The answer arrives after the application's own send returns
+# 4. The application abandons the call and returns in the same turn
 # ============================================================
-# Www.pod "Callback invocation context" keeps a callback out of the
-# application's own half-finished $send, so a framework never has to defend
-# every send against re-entrancy. An answer the application's own terminal
-# send produced is the same hazard: Future::AsyncAwait resumes an awaiting
-# coroutine inline off ->done, so without a deferral the resumed code would
-# run inside that send. The order below is the whole assertion.
+# The tightest window a clean end has. The terminal send resolves a receive
+# nobody is awaiting any more and the application returns immediately, so the
+# connection tears down before the loop turns again. "Receiving after the
+# scope's end" binds the answer to the scope's end whoever is listening, and
+# the connection's own ending is unaffected: a kept-alive connection serves
+# the next request on it, a Connection: close one is closed on the wire.
+# Nothing may be logged, nothing may be warned, and no exception may escape
+# the event loop.
+
+# This section's HTTP/1.1 harness. It differs from h1_run in what happens
+# after the application returns: the socket stays open, so a case can ask
+# whether the server closed the connection or served another request on it,
+# and the pump's exceptions are returned rather than rethrown, so an exception
+# escaping the event loop fails an assertion instead of aborting the file.
+sub h1_return_run {
+    my ($case, %opt) = @_;
+    my %obs;
+
+    my $server = PAGI::Server->new(
+        app => abandon_app($case, \%obs),
+        host => '127.0.0.1', port => 0,
+        log_level => 'debug', access_log => undef, shutdown_timeout => 1,
+        logger => sub { push @LOG, $_[0] },
+    );
+    $loop->add($server);
+    $server->listen->get;
+    my $mark = scalar @LOG;
+
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp', Timeout => 5)
+        or die "connect: $!";
+    # Only the sse.close case asks for Connection: close; a refusal rides a
+    # request that carries a Connection header of its own.
+    my $request = h1_request($case);
+    $request =~ s/\r\n\r\n\z/\r\nConnection: close\r\n\r\n/ if $opt{close};
+    print $sock $request;
+    $sock->blocking(0);
+
+    my ($wire, $eof) = ('', 0);
+    my $read = sub {
+        while (1) {
+            my $buf;
+            my $n = sysread($sock, $buf, 65536);
+            if (defined $n && $n == 0) { $eof = 1; last }
+            last unless defined $n && $n > 0;
+            $wire .= $buf;
+        }
+    };
+
+    my $pump = sub {
+        my ($limit, $done) = @_;
+        my $after = 0;
+        my $ok = eval {
+            bounded(sub {
+                for (1 .. $limit) {
+                    $loop->loop_once(0.05);
+                    $read->();
+                    last if $done->() && ++$after > 20;
+                }
+            });
+            1;
+        };
+        return $ok ? '' : "$@";
+    };
+
+    my $error = $pump->(200, sub { $obs{returned} });
+
+    if ($opt{followup}) {
+        print $sock "GET /after HTTP/1.1\r\nHost: x\r\n\r\n";
+        $error ||= $pump->(100, sub { $obs{second_scope} });
+    }
+
+    close $sock;
+    eval { $loop->loop_once(0.05) for 1 .. 20 };
+    eval { $server->shutdown->get };
+    eval { $loop->remove($server) };
+    return (\%obs, $wire, $eof, $mark, $error);
+}
+
+sub answered { my ($obs) = @_; return $obs->{abandoned}->is_ready ? 1 : 0 }
+sub answer_of { my ($obs) = @_; return $obs->{abandoned}->is_ready ? $obs->{abandoned}->get : undef }
+
+subtest 'h1: a call abandoned as the scope ends still reports the end' => sub {
+    for my $case (qw(ws_refusal sse_refusal sse_close)) {
+        my $warn_mark = scalar @WARNINGS;
+        my ($obs, undef, undef, $mark, $error) = h1_return_run($case);
+
+        is($obs->{returned}, 1, "$case: the application ran to the end");
+        is($error, '', "$case: nothing escaped the event loop");
+        is(answered($obs), 1, "$case: the abandoned call answered");
+        is(answer_of($obs), $END_EVENT{$case},
+            "$case: with exactly the scope end, and no reason key")
+            or diag('answer: ' . describe(answer_of($obs)));
+        is($obs->{on_complete}, 1, "$case: on_complete fired exactly once");
+        is($obs->{on_disconnect}, undef, "$case: on_disconnect never fired");
+        is(logged_since($mark), [], "$case: nothing was logged");
+        is(warnings_since($warn_mark), [], "$case: nothing was warned");
+    }
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+subtest 'h1 sse.close: the kept-alive connection still serves the next request' => sub {
+    my $warn_mark = scalar @WARNINGS;
+    my ($obs, $wire, $eof, $mark, $error) = h1_return_run('sse_close', followup => 1);
+
+    is($obs->{returned}, 1, 'the application ran to the end');
+    is($error, '', 'nothing escaped the event loop');
+    is(answer_of($obs), { type => 'sse.disconnect' },
+        'the abandoned call was answered with exactly the scope end')
+        or diag('answer: ' . describe(answer_of($obs)));
+    like($wire, qr/\r\n0\r\n\r\n/, 'the stream ended cleanly on the wire');
+    is($eof, 0, 'the server left the connection open');
+    is($obs->{second_scope}, 1, 'and ran a second scope on it');
+    like($wire, qr/again\z/, 'whose response reached the client');
+    is(logged_since($mark), [], 'nothing was logged');
+    is(warnings_since($warn_mark), [], 'nothing was warned');
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+subtest 'h1 sse.close: a Connection: close connection is closed on the wire' => sub {
+    my $warn_mark = scalar @WARNINGS;
+    my ($obs, $wire, $eof, $mark, $error) = h1_return_run('sse_close', close => 1);
+
+    is($obs->{returned}, 1, 'the application ran to the end');
+    is($error, '', 'nothing escaped the event loop');
+    is(answer_of($obs), { type => 'sse.disconnect' },
+        'the abandoned call was answered with exactly the scope end')
+        or diag('answer: ' . describe(answer_of($obs)));
+    like($wire, qr/\r\n0\r\n\r\n\z/, 'the stream ended cleanly on the wire');
+    is($eof, 1, 'and the server closed the connection');
+    is($obs->{on_complete}, 1, 'on_complete fired exactly once');
+    is($obs->{on_disconnect}, undef, 'on_disconnect never fired');
+    is(logged_since($mark), [], 'nothing was logged');
+    is(warnings_since($warn_mark), [], 'nothing was warned');
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+subtest 'h2: a call abandoned as the scope ends still reports the end' => sub {
+    skip_all 'HTTP/2 not available' unless $have_h2;
+
+    for my $case (qw(ws_refusal sse_refusal sse_close)) {
+        my $warn_mark = scalar @WARNINGS;
+        my %obs;
+        my @out;
+        my $ok = eval {
+            @out = h2_run($case, 'pending', app => abandon_app($case, \%obs),
+                          watch => \%obs);
+            1;
+        };
+        my $error = $ok ? '' : "$@";
+        my $mark = $ok ? $out[5] : scalar @LOG;
+
+        is($obs{returned}, 1, "$case: the application ran to the end");
+        is($error, '', "$case: nothing escaped the event loop");
+        is(answered(\%obs), 1, "$case: the abandoned call answered");
+        is(answer_of(\%obs), $END_EVENT{$case},
+            "$case: with exactly the scope end, and no reason key")
+            or diag('answer: ' . describe(answer_of(\%obs)));
+        is($obs{on_complete}, 1, "$case: on_complete fired exactly once");
+        is($obs{on_disconnect}, undef, "$case: on_disconnect never fired");
+        is(logged_since($mark), [], "$case: nothing was logged");
+        is(warnings_since($warn_mark), [], "$case: nothing was warned");
+    }
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+# ============================================================
+# 5. What the awaiting code finds when it resumes
+# ============================================================
+# Www.pod "Callback invocation context", after the paragraph that keeps
+# abnormal-disconnect notifications out of an application's own $send:
+#
+#   The same holds for a receive the application's own terminal send resolves
+#   (a receive pending when it sends sse.close or a refusal's terminal
+#   event): the awaiting code may resume inside that send, after the object
+#   is marked, and before the send's own Future resolves.
+#
+# So where the resume lands is the server's choice and is deliberately not
+# asserted here. What is not a choice is what the resumed code finds: the
+# object is terminal before a pending receive resumes ("State Transition
+# Order"), so the very first thing the awaiting coroutine reads is a scope
+# that has already ended.
 
 for my $transport (qw(h1 h2)) {
-    subtest "$transport: the scope end resolves a receive after the send returns" => sub {
+    subtest "$transport: the awaiting code resumes on a scope that has ended" => sub {
         skip_all 'HTTP/2 not available' if $transport eq 'h2' && !$have_h2;
 
         for my $case (qw(ws_refusal sse_refusal sse_close)) {
-            my %obs = (order => []);
+            my %obs;
             my $run = $transport eq 'h1' ? \&h1_run : \&h2_run;
-            $run->($case, 'pending', app => order_app($case, \%obs));
+            $run->($case, 'pending', app => resume_app($case, \%obs));
 
             is($obs{returned}, 1, "$case: the application ran to the end");
-            is($obs{order}, ['BEFORE send', 'AFTER send', 'resumed'],
-                "$case: the awaiting coroutine resumed after the send returned");
+            is($obs{resumed}, 1, "$case: the awaiting coroutine resumed");
             is($obs{answer}, $END_EVENT{$case},
                 "$case: with the scope's end")
                 or diag('answer: ' . describe($obs{answer}));
+            is($obs{resumed_object},
+                { response_complete => 1, disconnect_reason => undef },
+                "$case: and read a completed scope the moment it resumed");
         }
         ok(!$ALARM_FIRED, 'no pump needed its alarm');
     };
 }
 
 # ============================================================
-# 5. The bound the spec allows counts these answers
+# 6. The bound the spec allows counts these answers
 # ============================================================
 # Www.pod: "A server MAY bound how many receives it answers this way on one
 # scope ... failing the receive once its documented bound is exceeded."
@@ -820,7 +1048,7 @@ subtest 'h1 sse.close: the answers count against max_disconnect_receives' => sub
 };
 
 # ============================================================
-# 6. A receive already pending when the scope ended is not counted
+# 7. A receive already pending when the scope ended is not counted
 # ============================================================
 # The same ruling's other half: an answer to a call that was already waiting
 # is a delivery, not a repeat request for the end, so it does not count
@@ -862,7 +1090,7 @@ for my $transport (qw(h1 h2)) {
 }
 
 # ============================================================
-# 7. Control: an end the transport imposed still carries its reason
+# 8. Control: an end the transport imposed still carries its reason
 # ============================================================
 
 subtest 'h1: a client that drops mid-stream still delivers sse.disconnect' => sub {

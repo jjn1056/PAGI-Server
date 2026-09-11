@@ -42,7 +42,7 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
-    | PAGI 0.6 conformance      |   116 |    116 |      0 |
+    | PAGI 0.6 conformance      |   122 |    122 |      0 |
     +---------------------------+-------+--------+--------+
 
 The PAGI 0.6 conformance row is the sum of the suites that pin the
@@ -60,13 +60,14 @@ C<t/http2/41-abort.t> (4), C<t/http2/42-d13-incomplete-session.t> (2),
 C<t/http2/43-receive-after-stream-end.t> (9 -- a receive after the scope's
 disconnect event resolves with that event again, with a peer's Close code
 and text intact, on every HTTP/2 scope type) and
-C<t/77-receive-after-clean-end.t> (16 of its 21 -- a receive after a clean
+C<t/77-receive-after-clean-end.t> (22 of its 25 -- a receive after a clean
 end the application produced, made after that end and already pending at it,
 across the three clean ends and both transports, a call reading the scope's
-request body when the end arrives, and the transport-closed control; the
-other five pin the bound and the call frame the answer arrives in, both
-rulings rather than spec behaviour). The full recursive suite
-(C<prove -lr t/>) is 155 files and 1047 assertions.
+request body when the end arrives, a call the application abandons as it
+returns, what the awaiting code finds when it resumes, and the
+transport-closed control; the other three pin the bound, a ruling rather than
+spec behaviour). The full recursive suite (C<prove -lr t/>) is 155 files and
+1051 assertions.
 
 
 =head1 PAGI SPECIFICATION SUPPORT
@@ -140,29 +141,6 @@ C<< PAGI::Server->new(max_disconnect_receives => $count) >>, C<configure>, or
 C<--max-disconnect-receives>. Pinned by C<t/75-max-disconnect-receives.t>,
 C<t/77-receive-after-clean-end.t> and
 C<t/http2/31-ws-keepalive-disconnect.t>.
-
-=item * B<A receive resolved by the application's own terminal send resumes
-after that send returns, never inside it.>
-L<PAGI::Spec::Www/"Meaning per scope">, under "Receiving after the scope's
-end", says that a C<$receive> pending when the application ends its own scope
-resolves with that end, but says nothing about B<when> the awaiting code
-runs. It matters: L<Future::AsyncAwait> resumes an awaiting coroutine inline
-off C<< ->done >>, so the natural implementation would run a framework's
-close handling inside the application's own half-finished
-C<< $send({sse.close}) >> or refusal send. The spec's "Callback invocation
-context" forbids exactly that shape for C<on_disconnect> and
-C<disconnect_future>, with the reason that "a callback that can run inside an
-application's own half-finished call into C<$send> would force every
-framework to build re-entrancy defenses around every send". PAGI::Server
-therefore defers the clean end's answer one turn of the event loop: the
-connection object is driven to its terminal state first, as "State Transition
-Order" requires, and the resumed code runs after the send's C<await> has
-returned. The guarantee covers all six endings -- a completed WebSocket or SSE
-refusal and C<sse.close>, on both transports -- and applies only to an answer
-the application's own send produced; an end the transport imposed still
-resolves a pending receive from the transport's own callback. Pinned by
-C<t/77-receive-after-clean-end.t>, which records the order the application
-observes.
 
 =item * B<An accepted WebSocket the application abandoned, on HTTP/2, gets the
 1011 Close frame and then C<END_STREAM>, not a reset.>
