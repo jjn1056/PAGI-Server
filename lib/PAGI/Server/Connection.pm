@@ -5352,14 +5352,22 @@ my %COMPLETION_REASON = map { ($_ => 1) } qw(
 # when the connection dropped with no close handshake (timeout, TCP FIN).
 sub _ws_disconnect_event {
     my ($self) = @_;
+
+    # This scope has already delivered its disconnect, so a further receive()
+    # resolves with that same event rather than with a fresh reading of the
+    # ending record (Www.pod "Disconnect - receive event"). The record cannot
+    # stand in for it: a peer's Close frame names its own RFC code and its own
+    # reason TEXT, while the record's vocabulary is the standard reason tokens
+    # the connection object reports. A copy goes out, so an application that
+    # edits the event it received cannot alter what a later reader sees.
+    return { %{ $self->{ws_disconnect_event} } } if $self->{ws_disconnect_event};
+
     return {
         type   => 'websocket.disconnect',
         # A server-reported abnormal end names itself: 'client_closed' is the
         # token for the bare transport drop that leaves no other reason
         # behind (Www.pod "Disconnect - receive event": abnormal drop with no
-        # close handshake). An empty reason belongs only to a peer Close
-        # frame that carried no text, and that path pushes its own event and
-        # sets _disconnect_handled, so it never reaches here.
+        # close handshake).
         code   => $self->_end_code($self),
         reason => $self->_end_reason($self),
     };
@@ -5509,6 +5517,12 @@ sub _handle_disconnect {
     $self->_cancel_drain_waiters($reason);
 
     my $disconnect_event = $self->_scope_disconnect_event;
+
+    # A websocket scope keeps its one disconnect as well as queuing it, so a
+    # receive() made after the queued copy was drained is answered with the
+    # very event that was delivered (see _ws_disconnect_event).
+    $self->{ws_disconnect_event} = { %$disconnect_event }
+        if $disconnect_event && $disconnect_event->{type} eq 'websocket.disconnect';
 
     # Queue disconnect event (do this even if already closed)
     push @{$self->{receive_queue}}, $disconnect_event if $disconnect_event;
@@ -6771,6 +6785,20 @@ sub _create_websocket_receive {
             \%cap, $weak_self->_ws_disconnect_event, $parked);
     };
 
+    # Nothing more will ever arrive on this scope, so a receive() answers now
+    # instead of parking on a Future nothing is left to resolve. The two
+    # endings are not the same moment on HTTP/1.1: a completed closing
+    # handshake queues the scope's one websocket.disconnect and leaves the
+    # socket open until the application returns, and Www.pod "Disconnect -
+    # receive event" says that once this event has been delivered the scope is
+    # over, and a further receive() resolves with the same websocket.disconnect
+    # again. _disconnect_handled is the fact every delivery path sets, and the
+    # sse receive asks its own stream the same question ($stream_over).
+    my $scope_over = sub {
+        return 1 unless $weak_self;
+        return $weak_self->{closed} || $weak_self->{_disconnect_handled};
+    };
+
     return sub {
         return Future->done({ type => 'websocket.disconnect', code => 1006, reason => 'client_closed' })
             unless $weak_self;
@@ -6796,7 +6824,7 @@ sub _create_websocket_receive {
         # abnormal reason a server-initiated close recorded (idle timeout,
         # queue overflow, ...) instead of the bare 'client_closed' default.
         return $disconnect->()
-            if $weak_self->{closed};
+            if $scope_over->();
 
         my $future = (async sub {
             return { type => 'websocket.disconnect', code => 1006, reason => 'client_closed' }
@@ -6812,7 +6840,7 @@ sub _create_websocket_receive {
                 return shift @{$weak_self->{receive_queue}};
             }
 
-            if ($weak_self->{closed}) {
+            if ($scope_over->()) {
                 return await $disconnect->($parked);
             }
 
@@ -6823,7 +6851,7 @@ sub _create_websocket_receive {
             }
 
             # If not in WebSocket mode yet (waiting for accept), wait
-            while (!_ws_handshake_accepted($weak_self->{h1_seq}) && !$weak_self->{closed}) {
+            while (!_ws_handshake_accepted($weak_self->{h1_seq}) && !$scope_over->()) {
                 if (!$weak_self->{receive_pending}) {
                     $weak_self->{receive_pending} = Future->new;
                 }
@@ -6836,7 +6864,7 @@ sub _create_websocket_receive {
                 }
             }
 
-            if ($weak_self->{closed}) {
+            if ($scope_over->()) {
                 return await $disconnect->($parked);
             }
 
@@ -6846,7 +6874,7 @@ sub _create_websocket_receive {
                     return shift @{$weak_self->{receive_queue}};
                 }
 
-                if ($weak_self->{closed}) {
+                if ($scope_over->()) {
                     return await $disconnect->($parked);
                 }
 
@@ -7245,11 +7273,17 @@ sub _process_websocket_frames {
                 $self->{close_sent} = 1;
             }
 
-            push @{$self->{receive_queue}}, {
+            # Kept as well as queued: this event names the peer's own close
+            # code and its own reason text, which the ending record cannot
+            # spell, so a receive() made after the queued copy was drained is
+            # answered from here (see _ws_disconnect_event).
+            $self->{ws_disconnect_event} = {
                 type   => 'websocket.disconnect',
                 code   => $code,
                 reason => $reason,
             };
+            push @{$self->{receive_queue}}, { %{ $self->{ws_disconnect_event} } };
+
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"); consumed by
             # _handle_websocket_request's tail. Receive-side, so the
