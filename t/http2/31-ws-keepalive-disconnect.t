@@ -196,9 +196,10 @@ our @WS_EVENTS;
 # cap, so a second queued copy would make the second call the first COUNTED
 # one -- it would be answered instead of failing. The answers themselves are
 # kept out of @WS_EVENTS (they are the scope's terminal state read again,
-# not a second enqueue) and must be the same event: before 9fe6a1c the
-# close-frame path queued the peer's code and _h2_on_close queued another
-# with 1006/''.
+# not a second enqueue) and must be the same event: a scope that enqueued one
+# disconnect from the close-frame path and another from _h2_on_close would
+# spell them differently -- the peer's code and reason against 1006/'' -- and
+# the deep comparison catches that even where the cap arithmetic would not.
 our $WS_APP_OBJECT_REASON;
 
 # The answers to those two calls, and the failure text of whichever one the

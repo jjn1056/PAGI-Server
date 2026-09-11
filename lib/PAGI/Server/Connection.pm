@@ -2969,14 +2969,25 @@ sub _h2_create_sse_receive {
                     return await $disconnect->($parked);
                 }
 
-                # This stream's close handler has already run -- see the twin
-                # in _h2_create_receive for why parking here would strand the
-                # call. A completed refusal is the one exception: it ended
-                # cleanly and delivers no event at all (Www.pod "SSE
-                # Disconnect - receive event"), so it keeps the silent park
-                # above.
+                # Nothing left for this call to wait for, on either count:
+                # this stream's close handler has already run (see the twin in
+                # _h2_create_receive for why parking here would strand the
+                # call), or the scope has already delivered its disconnect --
+                # "once this event has been delivered the scope is over, and a
+                # further receive() resolves with the same sse.disconnect
+                # again" (Www.pod "SSE Disconnect - receive event"). The two
+                # are not the same moment: a server-decided end (sse.close, the
+                # idle timeout) delivers the event through _h2_end_sse_stream
+                # and only marks the stream ending, leaving the final
+                # END_STREAM to the data callback, which emits it once the
+                # stream's send queue has drained -- so a peer that stops
+                # reading holds the stream open for as long as it likes after
+                # the scope is over. A completed refusal is the one exception:
+                # it ended cleanly and delivers no event at all, so it keeps
+                # the silent park above.
                 return await $disconnect->($parked)
-                    if !$weak_self->_h2_stream_alive($stream_id)
+                    if (!$weak_self->_h2_stream_alive($stream_id)
+                        || $ss->{sse_disconnect_delivered})
                     && !_h2_refusal_complete($ss);
 
                 if (!$ss->{body_pending}) {
@@ -5567,13 +5578,7 @@ sub _close {
                 # reason MUST match the token the stream's connection_state
                 # was (or will be) marked with.
                 my $reason = $self->_end_reason($stream);
-                # A websocket scope that already delivered its disconnect
-                # hands out that same event again (see
-                # _h2_ws_enqueue_disconnect); only a scope ending here for the
-                # first time reads the record.
-                my $event = $stream->{ws_disconnect_event}
-                                                    ? { %{ $stream->{ws_disconnect_event} } }
-                          : $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $reason }
+                my $event = $stream->{is_sse}       ? { type => 'sse.disconnect', reason => $reason }
                           : $stream->{is_websocket} ? { type => 'websocket.disconnect',
                                                         code => $self->_end_code($stream), reason => $reason }
                           :                           { type => 'http.disconnect' };

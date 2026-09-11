@@ -111,6 +111,7 @@ sub create_h2_connection {
     my $conn = PAGI::Server::Connection->new(
         stream => $stream, app => $app, protocol => $protocol, server => $server,
         max_disconnect_receives => $server->{max_disconnect_receives},
+        sse_idle_timeout        => $server->{sse_idle_timeout},
         h2_protocol => $server->{http2_protocol}, alpn_protocol => 'h2',
     );
     $server->add_child($stream);
@@ -132,23 +133,25 @@ sub create_client {
 
 sub complete_h2_handshake {
     my ($client, $client_sock) = @_;
-    $loop->loop_once(0.1);
-    my $settings = '';
-    $client_sock->sysread($settings, 4096);
-    $client->send_connection_preface;
-    $client_sock->syswrite($client->mem_send);
-    $loop->loop_once(0.1);
-    $client->mem_recv($settings);
-    $loop->loop_once(0.1);
-    my $ack = '';
-    $client_sock->sysread($ack, 4096);
-    $client->mem_recv($ack) if length($ack);
-    my $out = $client->mem_send;
-    $client_sock->syswrite($out) if length($out);
-    $loop->loop_once(0.1);
-    my $extra = '';
-    $client_sock->sysread($extra, 4096);
-    $client->mem_recv($extra) if length($extra);
+    return bounded(sub {
+        $loop->loop_once(0.1);
+        my $settings = '';
+        $client_sock->sysread($settings, 4096);
+        $client->send_connection_preface;
+        $client_sock->syswrite($client->mem_send);
+        $loop->loop_once(0.1);
+        $client->mem_recv($settings);
+        $loop->loop_once(0.1);
+        my $ack = '';
+        $client_sock->sysread($ack, 4096);
+        $client->mem_recv($ack) if length($ack);
+        my $out = $client->mem_send;
+        $client_sock->syswrite($out) if length($out);
+        $loop->loop_once(0.1);
+        my $extra = '';
+        $client_sock->sysread($extra, 4096);
+        $client->mem_recv($extra) if length($extra);
+    });
 }
 
 sub exchange_frames {
@@ -421,6 +424,55 @@ subtest 'h2 websocket: a further receive reports the peer close code after the s
         'the further receive carries the peer\'s own code and reason text');
     is($returned, 1, 'the application returned');
     is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+# ============================================================
+# An SSE scope that ends while its own stream stays open
+# ============================================================
+# Www.pod "SSE Disconnect - receive event": "Once this event has been
+# delivered the scope is over, and a further receive() resolves with the same
+# sse.disconnect again." The scope's end and the stream's end are not the same
+# moment on HTTP/2. A server-decided end -- the idle timeout here -- delivers
+# the event and only marks the stream ending; the final END_STREAM is left to
+# the data callback, which emits it once the stream's send queue has drained.
+# So the further receive below is made with the h2 stream still open, which is
+# the shape the disconnect-wait loop's sse_disconnect_delivered clause answers.
+
+subtest 'h2 sse: a further receive after the idle timeout is answered while the stream is open' => sub {
+    reset_case();
+    my @events;
+    my $returned = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();                       # sse.request
+        await $send->({ type => 'sse.start' });
+
+        push @events, await $receive->();         # parked until the timeout
+        push @events, await $receive->();         # same turn, no yield
+        $returned = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server_opts => { sse_idle_timeout => 0.3 });
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = h2_submit($client, $client_sock, 'sse');
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 60);   # long enough for the 0.3s timeout
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@events, [ ({ type => 'sse.disconnect', reason => 'idle_timeout' }) x 2 ],
+        'both receives resolved with the same idle-timeout disconnect');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), { warn => 1 }, 'the scope logged one warn line');
+    like([ map { $_->{message} } @LOG[$mark .. $#LOG] ],
+        [ qr{^HTTP/2 SSE stream $sid idle timeout \(0\.3s\) - closing stream$} ],
+        'that line is the idle timeout on this stream');
 
     eval { $stream_io->close_now };
     shutdown_server($server);
