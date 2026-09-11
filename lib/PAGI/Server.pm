@@ -1185,8 +1185,8 @@ or one HTTP/2 stream -- and never resets.
 
 B<When exceeded:> the C<receive()> Future fails with
 
-    receive() called 101 times after the scope's disconnect event; the
-    application is not checking for it (PAGI::Server max_disconnect_receives=100)
+    receive() called 101 times after the scope ended; the application is not
+    checking for it (PAGI::Server max_disconnect_receives=100)
 
 which, inside an C<async sub>, raises in the application. One error line is
 logged for the scope, naming the scope type and the transport; later calls

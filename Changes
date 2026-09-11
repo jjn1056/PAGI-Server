@@ -19,7 +19,15 @@
   - A receive after a clean end the application produced -- a completed
     WebSocket or SSE refusal, or sse.close -- reports that end instead of
     parking or naming a reason the scope never had: sse.disconnect with no
-    reason on an sse scope, http.disconnect after a WebSocket refusal.
+    reason on an sse scope, http.disconnect after a WebSocket refusal. This
+    holds for a call reading the scope's request body when the end arrives,
+    including a chunked body on HTTP/1.1 and a request half the client never
+    finished on HTTP/2, and the answer reaches the application after its own
+    terminal send returns rather than inside it.
+  - h2: an sse scope closed with sse.close while the client's request half is
+    still open ends its stream with RST_STREAM NO_ERROR (RFC 9113 section
+    8.1) once the response is on the wire, instead of leaving a finished
+    stream open for the life of the connection.
 
   Refusals
   - Refusing a handshake or stream is an ordinary HTTP response: http.response.*
@@ -58,7 +66,9 @@
     with the scope's end before they fail instead. Every receive after the
     scope's end reports that end, so an application that never checks for it
     loops on already-resolved Futures and starves every other connection in
-    the process. Set to 0 for unbounded re-delivery.
+    the process. Set to 0 for unbounded re-delivery. The failure message
+    names the scope's end rather than a disconnect event, because a clean
+    end delivers none.
 
   Internal
   - One lifecycle state per scope: the validator's per-scope state machine is

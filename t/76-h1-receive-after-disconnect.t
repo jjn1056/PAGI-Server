@@ -365,7 +365,7 @@ subtest 'the delivered event is queued once: the cap counts the re-deliveries' =
         'the first further receive answered with an equal event, the cap\'s one');
     is($obs{third}, undef, 'the second further receive did not resolve');
 
-    my $message = "receive() called 2 times after the scope's disconnect event; "
+    my $message = "receive() called 2 times after the scope ended; "
                 . "the application is not checking for it "
                 . "(PAGI::Server max_disconnect_receives=1)";
     is($obs{failure}, "$message\n", 'it failed with the cap message');

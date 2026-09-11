@@ -859,6 +859,37 @@ sub _h2_wake_pending {
     }
 }
 
+# The HTTP/2 twin of _wake_receive_pending, in two halves because an h2
+# stream's flush runs inside the application's own send: writing END_STREAM
+# can close the stream, and _h2_on_close then wakes a parked receive inline
+# from nghttp2's write path. Resolving after the flush is therefore too late
+# -- the Future has to be out of the stream's state before it. _h2_hold_pending
+# takes it out; _h2_settle_pending resolves it one loop tick later when the
+# scope ended under that send (see _wake_receive_pending for why the tick),
+# and otherwise puts it back untouched for whoever wakes it next.
+sub _h2_hold_pending {
+    my ($self, $stream) = @_;
+    my $f = $stream && $stream->{body_pending};
+    return undef unless $f && !$f->is_ready;
+    $stream->{body_pending} = undef;
+    return $f;
+}
+
+sub _h2_settle_pending {
+    my ($self, $stream, $held, $scope_ended) = @_;
+    return unless $held && !$held->is_ready;
+    if (!$scope_ended && $stream && !$stream->{h2_closed}) {
+        $stream->{body_pending} //= $held;
+        return;
+    }
+    my $outstanding = _outstanding_receives($stream || {});
+    $self->{server}->loop->later(sub {
+        my $keep = $outstanding;
+        $held->done unless $held->is_ready;
+    });
+    return;
+}
+
 # End a websocket stream from the server side: record, mark, enqueue, wake,
 # in that order (Www.pod "State Transition Order": the object is terminal
 # before any pending receive is resumed, because the enqueue can resume a
@@ -1015,17 +1046,42 @@ sub _h2_sse_clean_end {
 sub _sse_scope_end_event  { return { type => 'sse.disconnect' } }
 sub _ws_refusal_end_event { return { type => 'http.disconnect' } }
 
-# Wake a receive() parked on this HTTP/1.1 connection. The h2 twin is
-# _h2_wake_pending; both are called only after the connection object has been
-# driven to its terminal state (Www.pod "State Transition Order").
+# Hand a receive() parked on this HTTP/1.1 connection the answer its scope's
+# clean end now has. The Future comes out of the connection's state at once,
+# so nothing resolves it twice, and is settled one loop tick later. Every
+# caller is inside the application's own terminal send, and
+# Future::AsyncAwait resumes an awaiting coroutine inline off ->done: without
+# the tick a framework whose close hook is driven by a receive would re-enter
+# its own half-finished $send. Www.pod "Callback invocation context" gives
+# that reason for deferring on_disconnect, and the same hazard and remedy
+# apply to an answer the application's own send produced. Callers drive the
+# connection object to its terminal state first (Www.pod "State Transition
+# Order"), so the tick changes only which call frame the answer arrives in.
+# The h2 twin is _h2_hold_pending / _h2_settle_pending.
 sub _wake_receive_pending {
     my ($self) = @_;
-    if ($self->{receive_pending} && !$self->{receive_pending}->is_ready) {
-        my $f = $self->{receive_pending};
-        $self->{receive_pending} = undef;
-        $f->done;
-    }
+    my $f = $self->{receive_pending};
+    return unless $f && !$f->is_ready;
+    $self->{receive_pending} = undef;
+    my $outstanding = _outstanding_receives($self);
+    $self->{server}->loop->later(sub {
+        my $keep = $outstanding;
+        $f->done unless $f->is_ready;
+    });
     return;
+}
+
+# The receive() calls this connection or stream still has in flight, held by
+# whoever defers their answer a tick. A scope's clean end is accepted while
+# the application is still running, and an application that abandons an
+# outstanding call and returns lets the connection tear down in the same turn;
+# _close drops its tracked futures unanswered for a scope that ended cleanly,
+# which destroys a suspended coroutine's returning future and costs a
+# "lost its returning future" warning for a call the server is one tick away
+# from answering. Holding them over that tick lets the answer land first.
+sub _outstanding_receives {
+    my ($owner) = @_;
+    return [grep { !$_->is_ready } @{ $owner->{receive_futures} || [] }];
 }
 
 sub _h2_on_close {
@@ -1477,6 +1533,16 @@ sub _h2_rst_error_code {
 # Net::HTTP2::nghttp2.
 sub _h2_rst_cancel_code {
     return Net::HTTP2::nghttp2::NGHTTP2_CANCEL();
+}
+
+# RST_STREAM error code for a complete response the server finished before the
+# client finished its request. RFC 9113 section 8.1: a server that has sent a
+# complete response "MAY request that the client abort transmission of a
+# request without error by sending a RST_STREAM with an error code of
+# NO_ERROR". NGHTTP2_NO_ERROR is exported by Net::HTTP2::nghttp2, and is the
+# zero error code _h2_on_close reads as a clean close.
+sub _h2_rst_no_error_code {
+    return Net::HTTP2::nghttp2::NGHTTP2_NO_ERROR();
 }
 
 # Teardown hook for one h2 stream: reset only that stream. The object is
@@ -2568,6 +2634,15 @@ sub _h2_create_websocket_receive {
             }
         })->();
 
+        # Tracked for the reason the HTTP/1.1 twins track theirs: a wake
+        # deferred a tick (_h2_settle_pending) holds the calls it is about to
+        # answer, so an application that abandons one and returns does not
+        # drop the last reference to a coroutine the server is resuming. Only
+        # the calls still in flight are kept.
+        push @{$stream_state->{receive_futures}}, $future;
+        @{$stream_state->{receive_futures}}
+            = grep { !$_->is_ready } @{$stream_state->{receive_futures}};
+
         return $future;
     };
 }
@@ -2694,28 +2769,33 @@ sub _h2_create_websocket_send {
                     $s->{seq_state} = $seq if $s;
                 },
             );
+            # The send below can finish the refusal and close the stream, and
+            # _h2_on_close wakes a parked receive inline from nghttp2's write
+            # path -- inside this very send. Hold that Future aside for the
+            # duration; it is settled after the mark, either way.
+            my $held = $weak_self->_h2_hold_pending($ss);
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
-            die $error unless $ok;
+            my $scope_ended = ($ok && $seq eq 'refusal_complete') ? 1 : 0;
             # Www.pod "Meaning per scope": this scope ends cleanly when the
             # server has finished its output of the refusal, not when the
             # application returns. Mark the object here, while the app is
             # still running, so a client reset in between cannot take it to
             # a different terminal state. Keyed on the delegate's own state
             # AFTER the send succeeded: a rolled-back send (unopenable file,
-            # undeclared trailers) leaves 'refusing' and dies before here.
-            # Idempotent -- _h2_on_close marks the same object again.
+            # undeclared trailers) leaves 'refusing' and is settled back below
+            # before the die. Idempotent -- _h2_on_close marks the same object
+            # again.
             $ss->{connection_state}->_mark_complete
-                if $seq eq 'refusal_complete' && $ss && $ss->{connection_state};
+                if $scope_ended && $ss && $ss->{connection_state};
             # A receive parked on this scope has its answer now: the end
-            # (Www.pod "Receiving after the scope's end"). Woken after the
-            # mark above, never inside the delegate's on_state, because the
-            # object must be terminal before a pending receive resumes
-            # (Www.pod "State Transition Order") -- Future::AsyncAwait resumes
-            # an awaiting coroutine inline off ->done, and its first act may
-            # be to read the object.
-            $weak_self->_h2_wake_pending($ss)
-                if $seq eq 'refusal_complete' && $ss;
+            # (Www.pod "Receiving after the scope's end"). Settled after the
+            # mark above, because the object must be terminal before a
+            # pending receive resumes (Www.pod "State Transition Order"), and
+            # a tick from now, so the resumed coroutine runs after this send
+            # returns rather than inside it.
+            $weak_self->_h2_settle_pending($ss, $held, $scope_ended);
+            die $error unless $ok;
             return;
         }
 
@@ -3102,6 +3182,15 @@ sub _h2_create_sse_receive {
             }
         })->();
 
+        # Tracked for the reason the HTTP/1.1 twins track theirs: a wake
+        # deferred a tick (_h2_settle_pending) holds the calls it is about to
+        # answer, so an application that abandons one and returns does not
+        # drop the last reference to a coroutine the server is resuming. Only
+        # the calls still in flight are kept.
+        push @{$stream_state->{receive_futures}}, $future;
+        @{$stream_state->{receive_futures}}
+            = grep { !$_->is_ready } @{$stream_state->{receive_futures}};
+
         return $future;
     };
 }
@@ -3227,28 +3316,33 @@ sub _h2_create_sse_send {
                     $s->{seq_state} = $seq if $s;
                 },
             );
+            # The send below can finish the refusal and close the stream, and
+            # _h2_on_close wakes a parked receive inline from nghttp2's write
+            # path -- inside this very send. Hold that Future aside for the
+            # duration; it is settled after the mark, either way.
+            my $held = $weak_self->_h2_hold_pending($ss);
             my $ok = eval { await $refusal_send->($event); 1 };
             my $error = $@;
-            die $error unless $ok;
+            my $scope_ended = ($ok && $seq eq 'refusal_complete') ? 1 : 0;
             # Www.pod "Meaning per scope": this scope ends cleanly when the
             # server has finished its output of the refusal, not when the
             # application returns. Mark the object here, while the app is
             # still running, so a client reset in between cannot take it to
             # a different terminal state. Keyed on the delegate's own state
             # AFTER the send succeeded: a rolled-back send (unopenable file,
-            # undeclared trailers) leaves 'refusing' and dies before here.
-            # Idempotent -- _h2_on_close marks the same object again.
+            # undeclared trailers) leaves 'refusing' and is settled back below
+            # before the die. Idempotent -- _h2_on_close marks the same object
+            # again.
             $ss->{connection_state}->_mark_complete
-                if $seq eq 'refusal_complete' && $ss && $ss->{connection_state};
+                if $scope_ended && $ss && $ss->{connection_state};
             # A receive parked on this scope has its answer now: the end
-            # (Www.pod "Receiving after the scope's end"). Woken after the
-            # mark above, never inside the delegate's on_state, because the
-            # object must be terminal before a pending receive resumes
-            # (Www.pod "State Transition Order") -- Future::AsyncAwait resumes
-            # an awaiting coroutine inline off ->done, and its first act may
-            # be to read the object.
-            $weak_self->_h2_wake_pending($ss)
-                if $seq eq 'refusal_complete' && $ss;
+            # (Www.pod "Receiving after the scope's end"). Settled after the
+            # mark above, because the object must be terminal before a
+            # pending receive resumes (Www.pod "State Transition Order"), and
+            # a tick from now, so the resumed coroutine runs after this send
+            # returns rather than inside it.
+            $weak_self->_h2_settle_pending($ss, $held, $scope_ended);
+            die $error unless $ok;
             return;
         }
 
@@ -3384,6 +3478,23 @@ sub _h2_create_sse_send {
             $weak_self->_h2_stop_sse_keepalive($ss);
             $weak_self->_h2_stop_sse_idle_timer($ss);
 
+            # Www.pod "Meaning per scope": this scope ends cleanly when the
+            # server has finished its output, and sse.close is that moment --
+            # END_STREAM is queued just below. Mark the object here, while the
+            # application is still running, so a client reset arriving
+            # afterwards finds a scope that has already ended and cannot take
+            # it to a different terminal state; "the first to occur wins", and
+            # the terminal state never reopens. The refusal arm above marks at
+            # the same point in its own ending, and _h2_on_close's mark stays
+            # and is idempotent.
+            $ss->{connection_state}->_mark_complete if $ss->{connection_state};
+
+            # The flush below can close the stream, and _h2_on_close wakes a
+            # parked receive inline from nghttp2's write path -- inside this
+            # very send. Hold that Future aside across the flush and settle it
+            # a tick later, after the mark above.
+            my $held = $weak_self->_h2_hold_pending($ss);
+
             # End THIS HTTP/2 stream now: flush remaining queued events, then the
             # data_callback emits a final END_STREAM frame. `reason` is
             # server-side only and is never written to the wire.
@@ -3393,6 +3504,27 @@ sub _h2_create_sse_send {
             # resuming the stream closes it synchronously.
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
+
+            $weak_self->_h2_settle_pending($ss, $held, 1);
+
+            # RFC 9113 section 8.1: a server that finished a complete response
+            # before the client finished its request MAY ask the client to
+            # abort the rest of it with RST_STREAM NO_ERROR. Without that, a
+            # client whose request half is still open -- a POST body it never
+            # ended -- holds this finished stream open indefinitely, and the
+            # scope that has already ended never sees its stream close. Only
+            # once the whole response is on the wire: bytes the peer's
+            # flow-control window left queued still have END_STREAM behind
+            # them, and resetting then would truncate the stream. A tick from
+            # now, after the answer above, so _h2_on_close's own inline wake
+            # cannot land inside this send either; a stream that closed under
+            # the flush is already gone and _h2_reset_stream skips it.
+            $weak_self->{server}->loop->later(sub {
+                return unless $weak_self;
+                my $s = $weak_self->{h2_streams}{$stream_id} or return;
+                return if @{ $s->{send_queue} || [] };
+                $weak_self->_h2_reset_stream($stream_id, _h2_rst_no_error_code());
+            });
         }
         elsif ($type eq 'http.fullflush') {
             # Hand any pending frames to the session's write path (design §8.4).
@@ -4797,13 +4929,28 @@ sub _create_scope {
 # "this call had already parked" and returning a Future of this scope's
 # disconnect event, so the caller's max_disconnect_receives cap covers the
 # disconnects synthesized in here too (see _disconnect_receive_future).
+#
+# $clean_end/$make_scope_end are the caller's clean-end predicate and its
+# matching answer, in the same shape. An sse scope carries a request body
+# (Www.pod's sse.request: POST, htmx, datastar), so the application can end
+# that scope with sse.close, or finish a refusal, while a call in here is
+# still waiting for the next chunk; Www.pod "Close SSE - send event" is
+# unconditional that such a call, "pending or later", resolves with the
+# scope's end. Both park sites therefore ask before waiting again. The http
+# scope has no such ending and passes neither.
 async sub _read_chunked_body {
-    my ($self, $event_type, $make_disconnect, $body_complete_ref, $bytes_read_ref) = @_;
+    my ($self, $event_type, $make_disconnect, $body_complete_ref, $bytes_read_ref,
+        $clean_end, $make_scope_end) = @_;
 
     my $parked = 0;
 
     # Wait for data if buffer is empty
     while (length($self->{buffer}) == 0 && !$self->{closed}) {
+        # The scope ended cleanly under this call. Asked at the top of the
+        # loop, so it covers both the wait about to start and the wake that
+        # brought no chunk with it.
+        return await $make_scope_end->($parked) if $clean_end && $clean_end->();
+
         if (!$self->{receive_pending}) {
             $self->{receive_pending} = Future->new;
         }
@@ -4860,6 +5007,8 @@ async sub _read_chunked_body {
     }
 
     # Need more data - wait for it
+    return await $make_scope_end->($parked) if $clean_end && $clean_end->();
+
     if (!$self->{receive_pending}) {
         $self->{receive_pending} = Future->new;
     }
@@ -4872,6 +5021,11 @@ async sub _read_chunked_body {
     if ($self->{closed}) {
         return await $make_disconnect->($parked);
     }
+    # The scope ended cleanly while this call waited for the rest of a chunk:
+    # the end is what it reports, rather than the truthful-but-endless more=>1
+    # placeholder below.
+    return await $make_scope_end->($parked) if $clean_end && $clean_end->();
+
     # This shouldn't happen often - caller should retry
     return { type => $event_type, body => '', more => 1 };
 }
@@ -5547,7 +5701,11 @@ sub _disconnect_receive_future {
     return Future->done(ref $event eq 'CODE' ? $event->() : $event)
         if !$max || $parked || $n <= $max;
 
-    my $message = "receive() called $n times after the scope's disconnect event; "
+    # "after the scope ended", not "after the scope's disconnect event": a
+    # clean end the application produced delivers no disconnect event at all,
+    # and an operator who hits this line after sse.close must not be sent
+    # looking for one.
+    my $message = "receive() called $n times after the scope ended; "
                 . "the application is not checking for it "
                 . "(PAGI::Server max_disconnect_receives=$max)";
 
@@ -6173,10 +6331,13 @@ sub _finish_sse_stream {
     # A receive parked on this scope has its answer the moment sse.close is
     # accepted: the end (Www.pod "Receiving after the scope's end"). Woken
     # after the mark above, because the object must be terminal before a
-    # pending receive resumes (Www.pod "State Transition Order"). Only for the
-    # clean end -- a started stream this call is ending because the
-    # application abandoned it is not an end the application produced, and
-    # _end_scope answers a receive parked on that one, with its reason.
+    # pending receive resumes (Www.pod "State Transition Order"), and a tick
+    # from now, so the resumed coroutine runs after the application's own
+    # sse.close send returns rather than inside it (see
+    # _wake_receive_pending). Only for the clean end -- a started stream this
+    # call is ending because the application abandoned it is not an end the
+    # application produced, and _end_scope answers a receive parked on that
+    # one, with its reason.
     $self->_wake_receive_pending
         if PAGI::Server::EventValidator::scope_send_clean('sse', $self->{h1_seq});
 }
@@ -6401,11 +6562,17 @@ sub _create_sse_receive {
                 }
 
                 if ($is_chunked) {
+                    # The clean-end pair travels with the disconnect: this
+                    # sub parks on the same receive_pending, and the sibling
+                    # Content-Length branch below asks the same question in
+                    # the same place.
                     return await $weak_self->_read_chunked_body(
                         'sse.request',
                         $disconnect,
                         \$body_complete,
                         \$bytes_read,
+                        $clean_end,
+                        $scope_end,
                     );
                 }
 
@@ -6614,9 +6781,9 @@ sub _create_sse_send {
             # (Www.pod "Receiving after the scope's end"). Woken after the
             # mark above, never inside the delegate's on_state, because the
             # object must be terminal before a pending receive resumes
-            # (Www.pod "State Transition Order") -- Future::AsyncAwait resumes
-            # an awaiting coroutine inline off ->done, and its first act may
-            # be to read the object.
+            # (Www.pod "State Transition Order"), and a tick from now, so the
+            # resumed coroutine runs after this send returns rather than
+            # inside it (see _wake_receive_pending).
             $weak_self->_wake_receive_pending if $seq eq 'refusal_complete';
             return;
         }
@@ -7169,9 +7336,9 @@ sub _create_websocket_send {
             # (Www.pod "Receiving after the scope's end"). Woken after the
             # mark above, never inside the delegate's on_state, because the
             # object must be terminal before a pending receive resumes
-            # (Www.pod "State Transition Order") -- Future::AsyncAwait resumes
-            # an awaiting coroutine inline off ->done, and its first act may
-            # be to read the object.
+            # (Www.pod "State Transition Order"), and a tick from now, so the
+            # resumed coroutine runs after this send returns rather than
+            # inside it (see _wake_receive_pending).
             $weak_self->_wake_receive_pending if $seq eq 'refusal_complete';
             return;
         }

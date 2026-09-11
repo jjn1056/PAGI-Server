@@ -54,7 +54,7 @@ my @LOG;
 
 sub cap_message {
     my ($n, $max) = @_;
-    return "receive() called $n times after the scope's disconnect event; "
+    return "receive() called $n times after the scope ended; "
          . "the application is not checking for it "
          . "(PAGI::Server max_disconnect_receives=$max)";
 }

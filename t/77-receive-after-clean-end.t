@@ -35,9 +35,17 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # the object was marked complete with no reason, and "Agreement with
 # disconnect events" binds the event's reason to the object's.
 #
+# The sse scope carries a request body, so the pending call can be one
+# reading that body on a request half the client never finished; two cases
+# drive exactly that, and on HTTP/2 they also pin how the finished stream is
+# ended. Two more pin where the answer arrives: after the application's own
+# terminal send returns, never inside it.
+#
 # The spec also lets a server bound how many receives it answers this way.
-# PAGI::Server's bound is max_disconnect_receives, and the last subtest pins
-# that these answers go through it like every other synthesized answer.
+# PAGI::Server's bound is max_disconnect_receives, and three subtests pin that
+# these answers go through it like every other synthesized answer, and that a
+# call already waiting when the scope ended is a delivery rather than a repeat
+# request for the end, so it is not counted.
 #
 # The control is the other half of the rule: an end the transport imposed
 # still delivers sse.disconnect carrying the reason the scope recorded.
@@ -80,7 +88,7 @@ sub logged_since {
 # "max_disconnect_receives"); the same spelling t/75 and t/http2/31 use.
 sub cap_message {
     my ($n, $max) = @_;
-    return "receive() called $n times after the scope's disconnect event; "
+    return "receive() called $n times after the scope ended; "
          . "the application is not checking for it "
          . "(PAGI::Server max_disconnect_receives=$max)";
 }
@@ -120,12 +128,16 @@ sub bounded_wait {
 #                 websocket scope
 #   sse_refusal   a refused SSE stream -- the same response on an sse scope
 #   sse_close     a started stream the application ended with sse.close
+#   body_open     the same sse.close, on a scope whose request body the
+#                 client never finished, with the receive under test parked
+#                 on that body
 #   client_drop   the control: no terminal event at all, the transport goes
 #                 away under an outstanding receive
 my %SCOPE_KIND = (
     ws_refusal  => 'websocket',
     sse_refusal => 'sse',
     sse_close   => 'sse',
+    body_open   => 'sse',
     client_drop => 'sse',
 );
 
@@ -149,7 +161,7 @@ sub setup_events {
 # The sends that end the scope cleanly. The control has none.
 sub terminal_events {
     my ($case) = @_;
-    return ({ type => 'sse.close' }) if $case eq 'sse_close';
+    return ({ type => 'sse.close' }) if $case eq 'sse_close' || $case eq 'body_open';
     return () if $case eq 'client_drop';
     return ({ type => 'http.response.start', status => $REFUSAL_STATUS{$case},
               headers => [['content-type', 'text/plain'], ['content-length', 4]] },
@@ -234,6 +246,121 @@ sub capped_app {
     };
 }
 
+# The cap case the ruling on pending answers needs: a receive already
+# outstanding when the scope ends is a delivery, not a repeat request for the
+# end, so it is answered without being counted. The two calls after it are
+# counted, and the server here allows exactly one.
+sub capped_pending_app {
+    my ($obs) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { $obs->{on_complete}++ });
+        $cs->on_disconnect(sub { $obs->{on_disconnect} = $_[0] // 'undef' });
+
+        await $receive->();
+        await $send->({ type => 'sse.start', status => 200, headers => [] });
+        await $send->({ type => 'sse.send', data => 'hi' });
+
+        my $pending = $receive->();
+        await $send->({ type => 'sse.close' });
+        push @{ $obs->{answers} }, await bounded_wait($pending);
+
+        for my $n (1 .. 2) {
+            my $answer;
+            my $ok = eval { $answer = await bounded_wait($receive->()); 1 };
+            push @{ $obs->{answers} }, $ok ? $answer : { FAILED => "$@" };
+        }
+        $obs->{returned} = 1;
+        return;
+    };
+}
+
+# An sse scope carrying a request body the client never finished, with the
+# receive under test parked on that body when sse.close lands. The two
+# transports present the shape differently -- HTTP/1.1 delivers each chunk as
+# it arrives, HTTP/2 holds sse.request back until the whole body is in -- so
+# the HTTP/1.1 application reads its first chunk and arms the call under test
+# after it, while on HTTP/2 the call under test is itself the one waiting for
+# a body that never completes.
+sub body_open_app {
+    my ($transport, $obs) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { $obs->{on_complete}++ });
+        $cs->on_disconnect(sub { $obs->{on_disconnect} = $_[0] // 'undef' });
+
+        my $under_test;
+        if ($transport eq 'h1') {
+            $obs->{first} = await bounded_wait($receive->());
+            for my $event (setup_events('sse_close')) { await $send->($event) }
+            $under_test = $receive->();
+        }
+        else {
+            $under_test = $receive->();
+            for my $event (setup_events('sse_close')) { await $send->($event) }
+        }
+        $obs->{armed_ready} = $under_test->is_ready ? 1 : 0;
+
+        await $send->({ type => 'sse.close' });
+
+        $obs->{answer}  = await bounded_wait($under_test);
+        $obs->{pending} = $under_test->is_ready ? 0 : 1;
+        $obs->{object}  = {
+            is_connected      => $cs->is_connected ? 1 : 0,
+            response_complete => $cs->response_complete ? 1 : 0,
+            disconnect_reason => $cs->disconnect_reason,
+        };
+        # Held so the file can ask, once the connection is gone, whether the
+        # call was still waiting: a park that outlives teardown is the defect
+        # this case exists for.
+        $obs->{outstanding} = $under_test;
+        $obs->{returned} = 1;
+        return;
+    };
+}
+
+# Where the answer to a receive resolved by the application's own terminal
+# send arrives: a real awaiting coroutine records the moment it resumes,
+# against the send that produced the answer. An answer delivered inline off
+# ->done lands between BEFORE and AFTER, inside the application's own
+# half-finished $send.
+sub order_app {
+    my ($case, $obs) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq $SCOPE_KIND{$case};
+
+        await $receive->();
+        for my $event (setup_events($case)) { await $send->($event) }
+
+        my $under_test = $receive->();
+        my $watcher = (async sub {
+            $obs->{answer} = await $under_test;
+            push @{ $obs->{order} }, 'resumed';
+        })->();
+
+        # Only the last of a case's terminal sends ends the scope; a refusal's
+        # http.response.start is still setup.
+        my @terminal = terminal_events($case);
+        while (@terminal > 1) { await $send->(shift @terminal) }
+
+        push @{ $obs->{order} }, 'BEFORE send';
+        await $send->($terminal[0]);
+        push @{ $obs->{order} }, 'AFTER send';
+
+        await Future->wait_any($watcher->without_cancel,
+                               $loop->delay_future(after => $PARK_BOUND));
+        $obs->{returned} = 1;
+        return;
+    };
+}
+
 sub describe {
     my ($event) = @_;
     return 'no answer' unless ref $event eq 'HASH';
@@ -252,6 +379,11 @@ sub h1_request {
          . "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "
          . MIME::Base64::encode_base64('0123456789abcdef', '') . "\r\n\r\n"
         if $SCOPE_KIND{$case} eq 'websocket';
+    # One chunk and no terminator: the request half stays open for the life of
+    # the scope, so a receive reading the body has nothing left to wake it.
+    return "POST /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n"
+         . "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"
+        if $case eq 'body_open';
     return "GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n";
 }
 
@@ -327,10 +459,26 @@ sub h2_submit {
         headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
         body => sub { undef })
         if $SCOPE_KIND{$case} eq 'websocket';
+    # One chunk and then a source that yields nothing and never signals
+    # END_STREAM: the request half stays open, so this stream does not close
+    # of its own accord once the response is finished.
+    if ($case eq 'body_open') {
+        my $sent = 0;
+        return $client->submit_request(
+            method => 'POST', path => '/events', scheme => 'http',
+            authority => 'localhost',
+            headers => [['accept', 'text/event-stream'], ['content-type', 'text/plain']],
+            body => sub { return 'hello' unless $sent++; return undef });
+    }
     return $client->submit_request(
         method => 'GET', path => '/events', scheme => 'http',
         authority => 'localhost', headers => [['accept', 'text/event-stream']]);
 }
+
+# RST_STREAM's frame type (RFC 9113 section 6.4, 0x03). Net::HTTP2::nghttp2
+# exports NGHTTP2_DATA and NGHTTP2_FLAG_END_STREAM but no frame-type constant
+# for this one.
+use constant RST_STREAM_FRAME => 3;
 
 sub h2_run {
     my ($case, $timing, %opt) = @_;
@@ -359,11 +507,11 @@ sub h2_run {
     my $mark = scalar @LOG;
 
     require Net::HTTP2::nghttp2::Session;
-    my ($body, $close_code, %headers) = ('', undef);
+    my ($body, $close_code, %headers, @frames) = ('', undef);
     my $client = Net::HTTP2::nghttp2::Session->new_client(callbacks => {
         on_begin_headers   => sub { 0 },
         on_header          => sub { my (undef, $n, $v) = @_; $headers{lc $n} = $v; 0 },
-        on_frame_recv      => sub { 0 },
+        on_frame_recv      => sub { my ($f) = @_; push @frames, $f; 0 },
         on_data_chunk_recv => sub { my (undef, $d) = @_; $body .= $d; 0 },
         on_stream_close    => sub { my (undef, $c) = @_; $close_code = $c; 0 },
     });
@@ -412,7 +560,7 @@ sub h2_run {
     undef $conn;
     bounded(sub { $loop->loop_once(0.05) for 1 .. 10 });
 
-    return (\%before, \%obs, $body, \%headers, $close_code, $mark);
+    return (\%before, \%obs, $body, \%headers, $close_code, $mark, \@frames);
 }
 
 sub freed { my ($obs, $key) = @_; return $obs->{$key} // 0 }
@@ -519,7 +667,127 @@ for my $case (qw(ws_refusal sse_refusal sse_close)) {
 }
 
 # ============================================================
-# 3. The bound the spec allows counts these answers
+# 3. The same clean end with the request body still open
+# ============================================================
+# Www.pod "Close SSE - send event" is unconditional: "A $receive call, pending
+# or later, resolves with sse.disconnect carrying no reason." An sse scope
+# carries a request body (sse.request: POST, htmx, datastar), so the call that
+# is pending when sse.close lands can be one reading that body, on a request
+# half the client has not finished. Nothing else will ever wake it, so this is
+# the shape where a park lasts for the life of the process.
+#
+# On HTTP/2 the scope's end is also the moment the server has finished its
+# output, so the object is complete there and then, and the stream -- which
+# the open request half would otherwise hold open forever -- is ended the way
+# RFC 9113 section 8.1 prescribes for a complete response sent before the
+# request finished: RST_STREAM with error code NO_ERROR.
+
+# The clean end on the HTTP/2 wire for such a stream, in order.
+sub h2_end_frames {
+    my ($frames) = @_;
+    require Net::HTTP2::nghttp2;
+    my $data       = Net::HTTP2::nghttp2::NGHTTP2_DATA();
+    my $end_stream = Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM();
+    my @seen;
+    for my $frame (@$frames) {
+        push @seen, 'END_STREAM'
+            if $frame->{type} == $data && ($frame->{flags} & $end_stream);
+        push @seen, 'RST_STREAM' if $frame->{type} == RST_STREAM_FRAME;
+    }
+    return \@seen;
+}
+
+subtest 'h1: a receive reading a chunked request body reports the scope end' => sub {
+    my %obs;
+    my (undef, undef, $wire, $mark) =
+        h1_run('body_open', 'pending', app => body_open_app('h1', \%obs));
+
+    is($obs{returned}, 1, 'the application ran to the end');
+    is($obs{first}{type}, 'sse.request', 'the first chunk arrived as sse.request');
+    is($obs{first}{body}, 'hello', 'with its body');
+    is($obs{first}{more}, 1, 'and more still to come');
+
+    is($obs{armed_ready}, 0, 'the call under test was outstanding when sse.close was sent');
+    is($obs{pending}, 0, 'and it answered');
+    is($obs{answer}, { type => 'sse.disconnect' },
+        'with exactly the scope end, and no reason key')
+        or diag('answer: ' . describe($obs{answer}));
+
+    is($obs{object}, {
+        is_connected => 0, response_complete => 1, disconnect_reason => undef,
+    }, 'the object reads a clean end');
+    is($obs{on_complete}, 1, 'on_complete fired exactly once');
+    is($obs{on_disconnect}, undef, 'on_disconnect never fired');
+
+    like($wire, qr/data: hi/, 'the client received the event');
+    like($wire, qr/\r\n0\r\n\r\n\z/, 'and the chunked terminator ended the stream cleanly');
+    is(logged_since($mark), [], 'nothing was logged');
+
+    is($obs{outstanding}->is_ready, 1, 'the call was not still waiting after teardown');
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+subtest 'h2: a receive reading an unfinished request body reports the scope end' => sub {
+    skip_all 'HTTP/2 not available' unless $have_h2;
+    my %obs;
+    my (undef, undef, $body, $headers, $close_code, $mark, $frames) =
+        h2_run('body_open', 'pending', app => body_open_app('h2', \%obs));
+
+    is($obs{returned}, 1, 'the application ran to the end');
+    is($obs{armed_ready}, 0, 'the call under test was outstanding when sse.close was sent');
+    is($obs{pending}, 0, 'and it answered');
+    is($obs{answer}, { type => 'sse.disconnect' },
+        'with exactly the scope end, and no reason key')
+        or diag('answer: ' . describe($obs{answer}));
+
+    is($obs{object}, {
+        is_connected => 0, response_complete => 1, disconnect_reason => undef,
+    }, 'the object reads a clean end, from inside the application');
+    is($obs{on_complete}, 1, 'on_complete fired exactly once');
+    is($obs{on_disconnect}, undef, 'on_disconnect never fired');
+
+    like($body, qr/data: hi/, 'the client received the event');
+    is(h2_end_frames($frames), ['END_STREAM', 'RST_STREAM'],
+        'the response ended with END_STREAM, then the stream was reset');
+    is($close_code, 0, 'and the reset carried error code NO_ERROR');
+    is(logged_since($mark), [], 'nothing was logged');
+
+    is($obs{outstanding}->is_ready, 1, 'the call was not still waiting after teardown');
+    ok(!$ALARM_FIRED, 'no pump needed its alarm');
+};
+
+# ============================================================
+# 4. The answer arrives after the application's own send returns
+# ============================================================
+# Www.pod "Callback invocation context" keeps a callback out of the
+# application's own half-finished $send, so a framework never has to defend
+# every send against re-entrancy. An answer the application's own terminal
+# send produced is the same hazard: Future::AsyncAwait resumes an awaiting
+# coroutine inline off ->done, so without a deferral the resumed code would
+# run inside that send. The order below is the whole assertion.
+
+for my $transport (qw(h1 h2)) {
+    subtest "$transport: the scope end resolves a receive after the send returns" => sub {
+        skip_all 'HTTP/2 not available' if $transport eq 'h2' && !$have_h2;
+
+        for my $case (qw(ws_refusal sse_refusal sse_close)) {
+            my %obs = (order => []);
+            my $run = $transport eq 'h1' ? \&h1_run : \&h2_run;
+            $run->($case, 'pending', app => order_app($case, \%obs));
+
+            is($obs{returned}, 1, "$case: the application ran to the end");
+            is($obs{order}, ['BEFORE send', 'AFTER send', 'resumed'],
+                "$case: the awaiting coroutine resumed after the send returned");
+            is($obs{answer}, $END_EVENT{$case},
+                "$case: with the scope's end")
+                or diag('answer: ' . describe($obs{answer}));
+        }
+        ok(!$ALARM_FIRED, 'no pump needed its alarm');
+    };
+}
+
+# ============================================================
+# 5. The bound the spec allows counts these answers
 # ============================================================
 # Www.pod: "A server MAY bound how many receives it answers this way on one
 # scope ... failing the receive once its documented bound is exceeded."
@@ -552,7 +820,49 @@ subtest 'h1 sse.close: the answers count against max_disconnect_receives' => sub
 };
 
 # ============================================================
-# 4. Control: an end the transport imposed still carries its reason
+# 6. A receive already pending when the scope ended is not counted
+# ============================================================
+# The same ruling's other half: an answer to a call that was already waiting
+# is a delivery, not a repeat request for the end, so it does not count
+# against the bound. At max_disconnect_receives => 1 that is the difference
+# between two answers and one.
+
+my %CAP_TRANSPORT = (h1 => 'HTTP/1.1', h2 => 'HTTP/2 stream 1');
+
+for my $transport (qw(h1 h2)) {
+    subtest "$transport sse.close: the pending answer is not counted against the bound" => sub {
+        skip_all 'HTTP/2 not available' if $transport eq 'h2' && !$have_h2;
+
+        my %obs;
+        my $run = $transport eq 'h1' ? \&h1_run : \&h2_run;
+        my @out = $run->('sse_close', 'after',
+                         app => capped_pending_app(\%obs),
+                         server_opts => { max_disconnect_receives => 1 });
+        # The log mark each harness returns: h1_run's fourth value, h2_run's
+        # sixth.
+        my $mark = $transport eq 'h1' ? $out[3] : $out[5];
+
+        is($obs{returned}, 1, 'the application ran to the end');
+        is($obs{answers}[0], { type => 'sse.disconnect' },
+            'the receive already pending at sse.close is answered')
+            or diag('answer: ' . describe($obs{answers}[0]));
+        is($obs{answers}[1], { type => 'sse.disconnect' },
+            'and so is the next one, which is the one the bound allows')
+            or diag('answer: ' . describe($obs{answers}[1]));
+        like($obs{answers}[2]{FAILED}, qr/\Q@{[ cap_message(2, 1) ]}\E/,
+            'the call past the bound fails, naming the cap');
+
+        is(logged_since($mark),
+            [ "error: sse scope on $CAP_TRANSPORT{$transport}: " . cap_message(2, 1) ],
+            'one error line for the scope, and nothing else');
+        is($obs{on_complete}, 1, 'on_complete still fired exactly once');
+        is($obs{on_disconnect}, undef, 'on_disconnect never fired');
+        ok(!$ALARM_FIRED, 'no pump needed its alarm');
+    };
+}
+
+# ============================================================
+# 7. Control: an end the transport imposed still carries its reason
 # ============================================================
 
 subtest 'h1: a client that drops mid-stream still delivers sse.disconnect' => sub {

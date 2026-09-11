@@ -77,7 +77,7 @@ use constant WS_DISCONNECT_CAP => 1;
 # The cap's error line, verbatim (PAGI::Server "max_disconnect_receives").
 sub cap_message {
     my ($n) = @_;
-    return "receive() called $n times after the scope's disconnect event; "
+    return "receive() called $n times after the scope ended; "
          . "the application is not checking for it "
          . "(PAGI::Server max_disconnect_receives=@{[ WS_DISCONNECT_CAP ]})";
 }
