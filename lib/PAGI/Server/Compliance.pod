@@ -42,7 +42,7 @@ management, and 71% WebSocket RFC 6455 compliance.
     | Protocol Fuzzing          |    49 |     49 |      0 |
     | Memory/Resource Leaks     |     4 |      4 |      0 |
     | WebSocket (Autobahn)      |   301 |    215 |     86 |
-    | PAGI 0.6 conformance      |    91 |     91 |      0 |
+    | PAGI 0.6 conformance      |   100 |    100 |      0 |
     +---------------------------+-------+--------+--------+
 
 The PAGI 0.6 conformance row is the sum of the suites that pin the
@@ -56,9 +56,11 @@ C<t/75-max-disconnect-receives.t> (18 -- the tests that pin spec
 behaviour: unlimited re-delivery with the cap off, pending receives
 settling with the event, and the abandoned-Future race, each on three
 scopes and both transports), C<t/http2/30-connection-state.t> (9),
-C<t/http2/41-abort.t> (4) and C<t/http2/42-d13-incomplete-session.t> (2).
-The full recursive suite (C<prove -lr t/>) is 152 files and 1013
-assertions.
+C<t/http2/41-abort.t> (4), C<t/http2/42-d13-incomplete-session.t> (2) and
+C<t/http2/43-receive-after-stream-end.t> (9 -- a receive after the scope's
+disconnect event resolves with that event again, with a peer's Close code
+and text intact, on every HTTP/2 scope type). The full recursive suite
+(C<prove -lr t/>) is 153 files and 1022 assertions.
 
 The figure assumes C<max_disconnect_receives> at its default. That cap is
 a deliberate deviation from the spec's unlimited re-delivery of a scope's
@@ -191,14 +193,6 @@ scope on C<on_complete> / C<response_complete>. Pinned by the C<post> rows of
 C<t/70-protocol-disconnect-matrix.t> and by C<t/73-denial-retention.t>, which
 also shows that the parked Future, the application coroutine and the scope
 are all released once the application returns.
-
-=item * B<Further C<receive()> calls after the disconnect event re-synthesize
-it.> The spec delivers a scope's disconnect event once. PAGI::Server queues it
-exactly once, and a C<receive()> made after the transport has closed does not
-hang: on a websocket or sse scope it resolves again with a
-C<websocket.disconnect> / C<sse.disconnect> carrying the code and reason the
-closure recorded, and on an http scope with C<http.disconnect>. Pinned by
-C<t/61-pending-io-at-disconnect.t> and C<t/http2/40-pending-io-at-disconnect.t>.
 
 =item * B<An accepted WebSocket the application abandoned, on HTTP/2, gets the
 1011 Close frame and then C<END_STREAM>, not a reset.>
