@@ -182,17 +182,26 @@ for my $shape (sort keys %TERMINAL) {
                 if $shape eq 'trailers';
             is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
-            # Today's policy for what is left of the request body: the request
-            # tail makes its ordinary keep-alive decision and this HTTP/1.1
-            # request carried no Connection: close, so the socket stays open.
-            # Asserted, not prescribed -- B14 did not change it.
+            # What is left of the request body is the connection's to read
+            # before it can take another request (RFC 9112 section 9.6, and
+            # t/80-unread-body-keepalive.t for the whole of that behaviour):
+            # until the body is gone, what the client sends is that body. A
+            # request line written now is swallowed as the rest of the
+            # declared length; under chunked framing it is not valid chunk
+            # framing at all and the connection ends. Neither writes anything
+            # over the response this scope already finished.
+            my $before = $response;
+            syswrite($sock, "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n");
             my $eof = 0;
             pump_until(sub {
                 my $n = read_available($sock, \$response);
                 $eof = 1 if defined $n && $n == 0;
                 $eof;
             }, 1);
-            ok(!$eof, 'the connection was kept alive, as it is for any other request');
+            is($response, $before, 'the completed response was never written over');
+            $framing eq 'chunked'
+                ? ok($eof, 'the broken chunk framing ended the connection')
+                : ok(!$eof, 'the connection stays open, still reading the body it was promised');
 
             close $sock;
             $server->shutdown->get;
