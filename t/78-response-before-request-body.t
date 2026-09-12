@@ -17,8 +17,10 @@
 # t/http2/43-receive-after-stream-end.t.
 #
 # What remains of the unread request body is the transport's business, not the
-# scope's: this file asserts the server's existing policy for it (the request
-# tail's ordinary keep-alive decision) rather than introducing one.
+# scope's. This file asserts only that the transport's handling of it never
+# writes over the response the scope already finished; the handling itself --
+# the discard, its bound, and the connection's fate -- is
+# t/80-unread-body-keepalive.t.
 # =============================================================================
 
 use strict;

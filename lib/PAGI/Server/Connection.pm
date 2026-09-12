@@ -247,9 +247,8 @@ sub new {
         ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
-        # What is left of a request body the application did not read, which
-        # this connection must consume before it can parse another request
-        # (RFC 9112 section 9.6). See _begin_body_discard.
+        # What is left of a request body the application never read, which this
+        # connection consumes before it parses anything else (RFC 9112 s9.6).
         discarding_body   => undef,
         access_log        => $args{access_log},     # Filehandle for access logging
         _access_log_formatter => $args{_access_log_formatter},  # Pre-compiled format closure
@@ -4850,23 +4849,13 @@ sub _should_keep_alive {
     return 0;
 }
 
-# =============================================================================
-# An unread request body (RFC 9112 section 9.6)
-# =============================================================================
-# A response sent before the whole request content has arrived leaves the rest
-# of that content framed into the connection (section 6.3): a server that
-# keeps the connection MUST read it, because the bytes that follow are body
-# and nothing else can be taken for the next request until they are gone.
-#
-# What is owed is bookkeeping about bytes, not about the scope, and it lives
-# in {discarding_body}: undef when this connection owes nothing, otherwise
-# { remaining => N } for a declared length or { chunked => 1, discarded => N }
-# for chunked framing, which needs its running total to stay under the bound.
-
-# The request tail's question, asked of the one fact the receive closure
-# records on the request: how much of the body it consumed.
+# What this request still owes, from what the receive path recorded on it:
+# { remaining => N }, { chunked => 1, discarded => N }, or nothing at all.
 sub _begin_body_discard {
     my ($self, $request) = @_;
+
+    # RFC 9110 s10.1.1: no 100 Continue went out, so the content never comes.
+    return if $request->{expect_continue} && !$request->{continue_sent};
 
     if ($request->{chunked}) {
         return if $request->{body_complete};
@@ -4881,19 +4870,15 @@ sub _begin_body_discard {
     return;
 }
 
-# Discard what has arrived of a body this connection owes, through the same
-# buffer and the same chunk parser the receive path reads it with. True while
-# the connection may not parse a request: the discard is still running, or it
-# has ended the connection.
+# Consume what has arrived of an owed body, through the same buffer and the same
+# chunk parser the receive path reads it with. True while no request may parse.
 sub _discard_unread_body {
     my ($self) = @_;
 
     my $discard = $self->{discarding_body} or return 0;
 
     if (!$discard->{chunked}) {
-        # A declared length over max_body_size is answered 413 before the
-        # application runs, so a declared remainder is already within the
-        # bound and needs none of its own.
+        # A declared length over the bound is answered 413 before dispatch.
         my $take = length($self->{buffer});
         $take = $discard->{remaining} if $discard->{remaining} < $take;
         substr($self->{buffer}, 0, $take) = '';
@@ -4906,9 +4891,8 @@ sub _discard_unread_body {
     my ($data, $consumed, $complete)
         = $self->{protocol}->parse_chunked_body($self->{buffer});
 
-    # Malformed framing over a response that is already complete: there is no
-    # exchange left to answer with a 400, and nothing after it can be trusted
-    # to be a request.
+    # Over a complete response there is no exchange left to answer 400 on, and
+    # nothing behind unreadable framing can be trusted.
     if (ref($data) eq 'HASH' && $data->{error}) {
         $self->{discarding_body} = undef;
         $self->_handle_disconnect_and_close('protocol_error',
@@ -4919,15 +4903,14 @@ sub _discard_unread_body {
     substr($self->{buffer}, 0, $consumed) = '' if $consumed;
     $discard->{discarded} += length($data // '');
 
-    # The bound is the limit itself (0 = unlimited): a body no application
-    # will read is not taken in without end merely because it is being thrown
-    # away. The scope ended cleanly with its response, so this is a transport
-    # decision after it -- the connection ends, the scope does not change.
+    # The bound is max_body_size (0 = unlimited), and crossing it ends the
+    # connection, not the scope, which already ended cleanly with its response.
     if ($self->{max_body_size} && $discard->{discarded} > $self->{max_body_size}) {
         $self->{discarding_body} = undef;
-        $self->_handle_disconnect_and_close('body_too_large',
-            detail => "unread request body exceeded max_body_size"
-                    . " ($self->{max_body_size} bytes)");
+        my $detail = "unread request body exceeded max_body_size"
+                   . " ($self->{max_body_size} bytes)";
+        $self->_log(debug => "HTTP/1.1 connection closed: $detail");
+        $self->_handle_disconnect_and_close('body_too_large', detail => $detail);
         return 1;
     }
 
@@ -5120,14 +5103,14 @@ sub _create_receive {
     my $content_length = $request->{content_length};
     my $is_chunked = $request->{chunked} // 0;
     my $expect_continue = $request->{expect_continue} // 0;
-    my $continue_sent = 0;
 
-    # How much of this body has been consumed lives on the request record
-    # rather than in this closure: the request tail asks the same question
-    # after the application returns, to decide whether anything of the body
-    # is still on the wire (RFC 9112 section 9.6). See _begin_body_discard.
+    # What this closure consumes of the body, and whether it let the client
+    # send it, live on the request record rather than in here: the request tail
+    # asks the same questions after the application returns, to decide what of
+    # the body is still coming (RFC 9112 s9.6). See _begin_body_discard.
     $request->{body_complete}   = 0;
     $request->{body_bytes_read} = 0;
+    $request->{continue_sent}   = 0;
     my $chunk_size = 65536;  # 64KB chunks for large bodies
 
     # For requests without Content-Length and not chunked, treat as no body
@@ -5218,8 +5201,8 @@ sub _create_receive {
             }
 
             # Send 100 Continue if client expects it (before reading body)
-            if ($expect_continue && !$continue_sent) {
-                $continue_sent = 1;
+            if ($expect_continue && !$request->{continue_sent}) {
+                $request->{continue_sent} = 1;
                 $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
             }
 
@@ -6384,7 +6367,7 @@ async sub _handle_sse_request {
     # error, server shutdown), a client "Connection: close", and HTTP/1.0
     # semantics.
     if (!$app_failed && !$self->{closed} && $self->_should_keep_alive($request)) {
-        $self->_reset_after_sse_stream;
+        $self->_reset_after_sse_stream($request);
         return;
     }
 
@@ -6460,6 +6443,7 @@ sub _finish_sse_stream {
 #   Receive state      receive_queue, receive_pending, receive_futures
 #   Idle timeout       the between-requests idle timer, removed when the
 #                      stream started, must be re-armed
+#   Request body       discarding_body, set from what the stream left unread
 #
 # The send closure's own $seq is per-request by construction (a new closure is
 # built per request), so the post-sse.close raise contract survives untouched.
@@ -6468,7 +6452,7 @@ sub _finish_sse_stream {
 # with _close (and so with {closed}), which the keep-alive branch excludes, so
 # reaching here means no disconnect was ever handled and the flag is still 0.
 sub _reset_after_sse_stream {
-    my ($self) = @_;
+    my ($self, $request) = @_;
 
     $self->_stop_sse_keepalive;
     $self->_stop_sse_idle_timer;
@@ -6507,6 +6491,10 @@ sub _reset_after_sse_stream {
     # SSE removed the between-requests idle timer as a long-lived mode; an
     # ordinary keep-alive connection must not sit open forever.
     $self->_start_idle_timer;
+
+    # Whatever the stream left unread of the request body is this connection's
+    # to discard before it parses anything else, exactly as after a response.
+    $self->_begin_body_discard($request);
 
     # Check if there's more data in the buffer (pipelining)
     if (length($self->{buffer}) > 0) {
@@ -6563,10 +6551,13 @@ sub _create_sse_receive {
     my $content_length = $request->{content_length};
     my $is_chunked = $request->{chunked} // 0;
     my $expect_continue = $request->{expect_continue} // 0;
-    my $continue_sent = 0;
     my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
-    my $body_complete = 0;
-    my $bytes_read = 0;
+
+    # On the request record for the same reason as the http scope's twin: the
+    # tail of a kept-alive stream asks what is left of this body.
+    $request->{body_complete}   = 0;
+    $request->{body_bytes_read} = 0;
+    $request->{continue_sent}   = 0;
 
     weaken(my $weak_self = $self);
 
@@ -6654,10 +6645,10 @@ sub _create_sse_receive {
             }
 
             # Handle request body for POST/PUT SSE requests
-            if ($has_body && !$body_complete) {
+            if ($has_body && !$request->{body_complete}) {
                 # Send 100 Continue if client expects it (before reading body)
-                if ($expect_continue && !$continue_sent) {
-                    $continue_sent = 1;
+                if ($expect_continue && !$request->{continue_sent}) {
+                    $request->{continue_sent} = 1;
                     $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
                 }
 
@@ -6669,14 +6660,14 @@ sub _create_sse_receive {
                     return await $weak_self->_read_chunked_body(
                         'sse.request',
                         $disconnect,
-                        \$body_complete,
-                        \$bytes_read,
+                        \$request->{body_complete},
+                        \$request->{body_bytes_read},
                         $clean_end,
                         $scope_end,
                     );
                 }
 
-                my $remaining = $content_length - $bytes_read;
+                my $remaining = $content_length - $request->{body_bytes_read};
 
                 # Wait for data if buffer is empty
                 while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed} && $remaining > 0) {
@@ -6709,10 +6700,10 @@ sub _create_sse_receive {
                     : length($weak_self->{buffer});
 
                 my $chunk = substr($weak_self->{buffer}, 0, $to_read, '');
-                $bytes_read += length($chunk);
+                $request->{body_bytes_read} += length($chunk);
 
-                my $more = ($bytes_read < $content_length) ? 1 : 0;
-                $body_complete = 1 if !$more;
+                my $more = ($request->{body_bytes_read} < $content_length) ? 1 : 0;
+                $request->{body_complete} = 1 if !$more;
 
                 return {
                     type => 'sse.request',
@@ -6722,8 +6713,8 @@ sub _create_sse_receive {
             }
 
             # No body or body complete - return empty body if not yet returned
-            if (!$body_complete) {
-                $body_complete = 1;
+            if (!$request->{body_complete}) {
+                $request->{body_complete} = 1;
                 return {
                     type => 'sse.request',
                     body => '',

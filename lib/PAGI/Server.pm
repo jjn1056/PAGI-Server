@@ -1398,6 +1398,18 @@ instead:
         last unless $event->{more};
     }
 
+The limit also bounds a body the application never read at all. An
+application that answers before reading (a 401, a 413 of its own) leaves the
+rest of that body framed into an HTTP/1.1 connection, and the connection must
+consume it before it can take another request (RFC 9112 section 9.6). That
+discard stops at C<max_body_size>: within the limit the remainder is thrown
+away and the connection serves the next request as usual; over it the
+connection closes after the response, ending with C<body_too_large>. The scope
+itself is untouched either way -- it ended cleanly with its response, so
+C<on_complete> fired, C<disconnect_reason> is C<undef>, the client's response
+is complete rather than truncated, and the close is logged at debug level
+only.
+
 B<Example:>
 
     my $server = PAGI::Server->new(

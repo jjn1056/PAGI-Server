@@ -78,6 +78,17 @@
   - h2: connection-level teardown delivered client_closed to parked receives
     while the object carried the real reason.
   - h2: an incomplete SSE stream or refusal was not reset or reported.
+  - h1: a request body the application never read became the next request. An
+    application that answers before reading (a 401 on an upload) left the
+    remainder framed into the kept-alive connection, and the next parse took it
+    for a request line, dispatching a client-controlled method and losing the
+    request that really followed. The connection now discards what is left --
+    after a response and after an SSE stream, through the terminating chunk's
+    trailer section -- before it parses anything else, bounded by
+    max_body_size; over that bound, or on chunk framing it cannot read, the
+    connection closes after the response the scope already completed. A
+    refused Expect: 100-continue owes nothing at all, the client having sent
+    no content (RFC 9112 section 9.6, RFC 9110 section 10.1.1).
 
   Limits
   - max_disconnect_receives (--max-disconnect-receives, default 100): the

@@ -68,7 +68,28 @@ my $app = async sub {
     $cs->on_complete(sub { push @completes, $scope->{path} });
     $cs->on_disconnect(sub { push @disconnects, $scope->{path} });
     push @served, { request => "$scope->{method} $scope->{path}",
-                    client_port => $scope->{client}[1] };
+                    client_port => $scope->{client}[1],
+                    scope_type  => $scope->{type} };
+
+    # An SSE stream that ends itself, reading none of the body its request
+    # carried: the same refusal shape on the scope that keeps the connection.
+    if ($scope->{type} eq 'sse') {
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
+    }
+
+    # One read, then a refusal. Under Expect: 100-continue the read is what
+    # sends the 100 Continue, so the client is sending its content and the
+    # rest of it is the connection's to discard.
+    if ($scope->{path} eq '/peek') {
+        await $receive->();
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain'], ['content-length', 7]] });
+        await $send->({ type => 'http.response.body', body => 'sign in' });
+        return;
+    }
 
     if ($scope->{path} eq '/upload') {
         await $send->({ type => 'http.response.start', status => 401,
@@ -227,7 +248,8 @@ subtest 'h1: the remainder of an unread chunked body is not the next request' =>
 # 3. The discard is bounded by max_body_size. A chunked body never read by the
 #    application is the one shape that can cross the bound after the response:
 #    a declared length over it is answered 413 before the application runs
-#    (t/22-content-length-keepalive.t), so it never reaches the tail.
+#    (t/10-http-compliance.t "Max body size exceeded returns 413 Payload Too
+#    Large"), so it never reaches the tail.
 # =============================================================================
 subtest 'h1: an unread body over max_body_size closes the connection' => sub {
     my @log;
@@ -261,7 +283,18 @@ subtest 'h1: an unread body over max_body_size closes the connection' => sub {
     is(\@disconnects, [], 'on_disconnect never fired');
     is($readings[0], { is_connected => 0, response_complete => 1, disconnect_reason => undef },
         'and the scope carries no disconnect reason');
-    assert_quiet('an unread body over the bound', \@log);
+
+    # A connection killed for a body nobody asked for is the one outcome here
+    # an operator cannot see from the exchange, so it leaves a debug line --
+    # and nothing louder, the client's own exchange having completed normally.
+    my @w = @warnings;
+    @warnings = ();
+    is(scalar(@w), 0, 'nothing was warned to stderr') or diag("unexpected: @w");
+    is([ map { "[$_->{level}] $_->{message}" } @log ],
+        ['[debug] HTTP/1.1 connection closed: unread request body exceeded'
+            . ' max_body_size (1000 bytes)'],
+        'the killed connection is the one debug line the server logged');
+    @log = ();
 
     close $sock;
     undef $conn;
@@ -335,6 +368,181 @@ subtest 'h1: pipelined requests carrying bodies all answer' => sub {
     assert_quiet('pipelined bodies', \@log);
 
     close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 6. Expect: 100-continue, refused without reading. RFC 9110 section 10.1.1: a
+#    client that asked permission and got a final response instead of a 100
+#    Continue does not send the content. Nothing is owed, so the connection
+#    parses the request that follows as a request.
+# =============================================================================
+subtest 'h1: a refused Expect: 100-continue owes no body at all' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    # The client asks before sending, and sends none of the 500 bytes.
+    syswrite($sock, "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+                  . "Content-Length: 500\r\nExpect: 100-continue\r\n\r\n");
+    $pump->(sub { $$wire =~ /sign in/ });
+    unlike($$wire, qr{100 Continue}, 'the application refused before any 100 Continue was written');
+    like($$wire, qr{^HTTP/1\.1 401\b}, 'so the 401 is the whole of the answer');
+
+    # The content it never sent is not owed, so this is a request.
+    syswrite($sock, $SECOND);
+    $pump->(sub { $$wire =~ /health/ });
+
+    is(statuses($$wire), ['401', '200'], 'the next request was answered');
+    is([ map { $_->{request} } @served ], ['POST /upload', 'GET /health'],
+        'the application saw both requests');
+    is($served[0]{client_port}, $served[1]{client_port},
+        'both arrived on the one connection');
+    ok(!$$eof, 'which is still open');
+    is(\@completes, ['/upload', '/health'], 'both scopes ended with on_complete');
+    assert_quiet('a refused 100-continue', \@log);
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 7. The counter-case: the 100 Continue WAS written, so the content is on its
+#    way and the ordinary discard owes it.
+# =============================================================================
+subtest 'h1: a 100-continue the server answered still owes the remainder' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    syswrite($sock, "POST /peek HTTP/1.1\r\nHost: localhost\r\n"
+                  . "Content-Length: 500\r\nExpect: 100-continue\r\n\r\n");
+    $pump->(sub { $$wire =~ /100 Continue/ });
+    like($$wire, qr{^HTTP/1\.1 100 Continue}, 'the read sent the 100 Continue');
+
+    # The client starts sending; the application reads one event and refuses.
+    syswrite($sock, 'A' x 100);
+    $pump->(sub { $$wire =~ /sign in/ });
+
+    # The rest of the content it was told to send, then its next request.
+    syswrite($sock, ('B' x 400) . $SECOND);
+    $pump->(sub { $$wire =~ /health/ });
+
+    is(statuses($$wire), ['100', '401', '200'],
+        'the continue, the refusal, and the next request answered');
+    is([ map { $_->{request} } @served ], ['POST /peek', 'GET /health'],
+        'the remainder was discarded rather than parsed as a request');
+    ok(!$$eof, 'the connection is still open');
+    is(\@completes, ['/peek', '/health'], 'both scopes ended with on_complete');
+    assert_quiet('an answered 100-continue', \@log);
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 8. The SSE tail is the same tail. An sse scope carries a request body
+#    (L<PAGI::Spec::Www> sse.request), the stream's clean end returns the
+#    connection to ordinary request handling, and RFC 9112 section 9.6 governs
+#    what is left of that body exactly as it does after a response.
+# =============================================================================
+subtest 'h1: the body an SSE stream never read is not the next request' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    syswrite($sock, "POST /events HTTP/1.1\r\nHost: localhost\r\n"
+                  . "Accept: text/event-stream\r\nContent-Length: 500\r\n\r\n"
+                  . ('A' x 100));
+    $pump->(sub { $$wire =~ /data: hello/ });
+    like($$wire, qr{^HTTP/1\.1 200\b}, 'the stream started');
+
+    # The rest of the body the stream never read, then the next request.
+    syswrite($sock, ('B' x 400) . $SECOND);
+    $pump->(sub { $$wire =~ /health/ });
+
+    is(statuses($$wire), ['200', '200'], 'the request after the stream was answered');
+    is([ map { "$_->{scope_type} $_->{request}" } @served ],
+        ['sse POST /events', 'http GET /health'],
+        'the second dispatch was GET /health, parsed from its own request line');
+    is($served[0]{client_port}, $served[1]{client_port},
+        'both arrived on the one connection');
+    ok(!$$eof, 'which is still open');
+    is(\@completes, ['/events', '/health'], 'both scopes ended with on_complete');
+    assert_quiet('an unread body under an SSE stream', \@log);
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 9. A chunked body may end with a trailer section (RFC 9112 section 7.1.2):
+#    the terminating chunk, trailer fields, then the blank line. The discard
+#    runs to the end of that section, not to the terminating chunk.
+# =============================================================================
+subtest 'h1: the discard consumes a chunked trailer section' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    syswrite($sock, $CHUNKED_HEAD . chunk('A' x 100));
+    $pump->(sub { $$wire =~ /sign in/ });
+    like($$wire, qr{^HTTP/1\.1 401\b}, 'the 401 reached the client');
+
+    syswrite($sock, "0\r\nX-Checksum: abc\r\nX-Rows: 4\r\n\r\n" . $SECOND);
+    $pump->(sub { $$wire =~ /health/ });
+
+    is(statuses($$wire), ['401', '200'],
+        'the request after the trailers was answered, and no 400 was written'
+            . ' over the response that was already complete');
+    is([ map { $_->{request} } @served ], ['POST /upload', 'GET /health'],
+        'the trailer fields were consumed as body framing, not parsed as a request');
+    ok(!$$eof, 'the connection is still open');
+    is(\@completes, ['/upload', '/health'], 'both scopes ended with on_complete');
+    assert_quiet('a chunked trailer section', \@log);
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 10. Chunk framing that cannot be read at all during the discard. The response
+#     is already complete, so there is no exchange left to answer 400 on: the
+#     connection ends, saying why.
+# =============================================================================
+subtest 'h1: malformed chunk framing during the discard ends the connection' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    syswrite($sock, $CHUNKED_HEAD . chunk('A' x 100));
+    $pump->(sub { $$wire =~ /sign in/ });
+    like($$wire, qr{^HTTP/1\.1 401\b}, 'the 401 reached the client');
+
+    my ($conn) = values %{ $server->{connections} };
+    ok($conn, 'the connection is still on the server');
+
+    # A request line where a chunk size belongs: not framing, and not a request.
+    syswrite($sock, $SECOND);
+    $pump->(sub { $$eof });
+
+    ok($$eof, 'the connection closed');
+    is(statuses($$wire), ['401'], 'with no 400 over the finished response');
+    is([ map { $_->{request} } @served ], ['POST /upload'],
+        'and nothing behind the broken framing became a request');
+    is($conn->{end_reason}, 'protocol_error', 'the connection ended with protocol_error');
+    is($conn->{end_detail}, 'Invalid chunk size', 'naming the framing it could not read');
+    is(\@completes, ['/upload'], 'the refusing scope still ended with on_complete');
+    is(\@disconnects, [], 'and was not reopened as a disconnect');
+    assert_quiet('broken framing during the discard', \@log);
+
+    close $sock;
+    undef $conn;
     $server->shutdown->get;
     $loop->remove($server);
 };
