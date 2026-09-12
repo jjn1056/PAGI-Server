@@ -165,11 +165,18 @@ the wire) and on HTTP/2 by C<t/http2/42-d13-incomplete-session.t>.
 
 =item * B<C<RST_STREAM> error codes.> Where the spec says "e.g.", PAGI::Server
 uses C<CANCEL> for an C<abort> (the application is no longer interested in
-the stream) and C<INTERNAL_ERROR> for an incomplete or unanswered response.
-Both follow the code semantics of RFC 9113 section 7 (C<CANCEL>: the stream
-is no longer needed; C<INTERNAL_ERROR>: an unexpected condition), and for a
-WebSocket stream RFC 8441 section 5 names C<CANCEL> for the reset case.
-Pinned by C<t/http2/41-abort.t> and C<t/http2/24-incomplete-response.t>.
+the stream), C<INTERNAL_ERROR> for an incomplete or unanswered response, and
+C<NO_ERROR> for a complete response the server finished before the client
+finished its request -- RFC 9113 section 8.1: such a server "MAY request that
+the client abort transmission of a request without error by sending a
+RST_STREAM with an error code of NO_ERROR". nghttp2 sends no such reset of
+its own, so PAGI::Server sends it, once per stream, at the point nghttp2 has
+serialized the frame carrying C<END_STREAM>. The first two follow the code
+semantics of RFC 9113 section 7 (C<CANCEL>: the stream is no longer needed;
+C<INTERNAL_ERROR>: an unexpected condition), and for a WebSocket stream RFC
+8441 section 5 names C<CANCEL> for the reset case. Pinned by
+C<t/http2/41-abort.t>, C<t/http2/24-incomplete-response.t> and
+C<t/http2/43-receive-after-stream-end.t>.
 
 =item * B<C<disconnect_detail> contents.> The spec makes the detail a SHOULD
 with an unspecified format. PAGI::Server supplies one on every server-detected

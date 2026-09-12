@@ -7,6 +7,7 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 use Socket qw(AF_UNIX SOCK_STREAM);
+use Scalar::Util ();
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -125,19 +126,19 @@ sub create_client {
     return Net::HTTP2::nghttp2::Session->new_client(callbacks => {
         on_begin_headers   => sub { 0 },
         on_header          => $o{on_header}          // sub { 0 },
-        on_frame_recv      => sub { 0 },
+        on_frame_recv      => $o{on_frame_recv}      // sub { 0 },
         on_data_chunk_recv => $o{on_data_chunk_recv} // sub { 0 },
         on_stream_close    => $o{on_stream_close}    // sub { 0 },
     });
 }
 
 sub complete_h2_handshake {
-    my ($client, $client_sock) = @_;
+    my ($client, $client_sock, %settings) = @_;
     return bounded(sub {
         $loop->loop_once(0.1);
         my $settings = '';
         $client_sock->sysread($settings, 4096);
-        $client->send_connection_preface;
+        $client->send_connection_preface(%settings);
         $client_sock->syswrite($client->mem_send);
         $loop->loop_once(0.1);
         $client->mem_recv($settings);
@@ -473,6 +474,465 @@ subtest 'h2 sse: a further receive after the idle timeout is answered while the 
     like([ map { $_->{message} } @LOG[$mark .. $#LOG] ],
         [ qr{^HTTP/2 SSE stream $sid idle timeout \(0\.3s\) - closing stream$} ],
         'that line is the idle timeout on this stream');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+# ============================================================
+# The terminal response event ends the http scope, request body read or not
+# ============================================================
+# L<PAGI::Spec::Www> "Meaning per scope": the http scope's clean end is its
+# terminal body or trailers, and response_complete is true "once the response
+# body completed" -- not once the request finished arriving. "Receiving after
+# the scope's end" then reports that end to every receive, pending or later.
+# The client here POSTs and never finishes its request half, which is the
+# shape a 401 or a 413 answers without reading anything.
+#
+# RFC 9113 section 8.1 names the wire form: a server that has sent a complete
+# response "MAY request that the client abort transmission of a request
+# without error by sending a RST_STREAM with an error code of NO_ERROR".
+# Measured before this was built (task-B14-report.md, step 0): nghttp2 sends
+# no such reset of its own, and without one the finished stream stays open
+# for as long as the client's request half does.
+
+# RFC 9113 section 6.4. The binding exports no frame-type constant for it.
+use constant RST_STREAM_FRAME => 0x3;
+
+# The frames this stream carried, in order, named the way the RFC names them.
+# Only the three that decide the shape of an ending: everything else on the
+# connection (SETTINGS, WINDOW_UPDATE) is noise here.
+sub wire_for {
+    my ($frames, $sid) = @_;
+    my @out;
+    for my $f (@$frames) {
+        next unless ($f->{stream_id} // 0) == $sid;
+        my $end = ($f->{flags} & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM()) ? '+END_STREAM' : '';
+        push @out, 'RST_STREAM'          if $f->{type} == RST_STREAM_FRAME;
+        push @out, "DATA$end"            if $f->{type} == Net::HTTP2::nghttp2::NGHTTP2_DATA();
+        push @out, "HEADERS$end"         if $f->{type} == Net::HTTP2::nghttp2::NGHTTP2_HEADERS();
+    }
+    return \@out;
+}
+
+# A client whose request half stays open: the body provider defers forever,
+# so nghttp2 sends HEADERS without END_STREAM and nothing after it.
+sub submit_open_request {
+    my ($client, $client_sock, $method) = @_;
+    my $sid = $client->submit_request(
+        method => $method, path => '/r', scheme => 'http', authority => 'localhost',
+        headers => [['content-type', 'text/plain']],
+        body    => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+    return $sid;
+}
+
+# The object readings the spec pins at a clean end, in one hash so a failure
+# names every one of them at once.
+sub readings_of {
+    my ($cs) = @_;
+    return {
+        is_connected      => $cs->is_connected,
+        response_started  => $cs->response_started,
+        response_complete => $cs->response_complete,
+        disconnect_reason => $cs->disconnect_reason,
+    };
+}
+
+# status => the terminal send that ends the response. Each case answers
+# without ever calling receive() for the body.
+my %TERMINAL = (
+    'inline body' => [
+        { type => 'http.response.start', status => 401,
+          headers => [['content-type', 'text/plain'], ['content-length', 4]] },
+        { type => 'http.response.body', body => 'nope' },
+    ],
+    'trailers' => [
+        { type => 'http.response.start', status => 401, trailers => 1,
+          headers => [['content-type', 'text/plain'], ['trailer', 'x-why']] },
+        { type => 'http.response.body', body => 'nope' },
+        { type => 'http.response.trailers', headers => [['x-why', 'unauthorized']] },
+    ],
+);
+
+for my $shape (sort keys %TERMINAL) {
+    subtest "h2 http: a $shape response ends the scope with the request body still open" => sub {
+        reset_case();
+        my (@events, @completes, @disconnects);
+        my ($returned, $readings) = (0, undef);
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            my $cs = $scope->{'pagi.connection'};
+            $cs->on_complete(sub { push @completes, 1 });
+            $cs->on_disconnect(sub { push @disconnects, 1 });
+            for my $event (@{ $TERMINAL{$shape} }) { await $send->($event) }
+            push @events, await $receive->();
+            $readings = readings_of($cs);
+            $returned = 1;
+            return;
+        };
+
+        my (@frames, @closes);
+        my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+        my $mark   = scalar @LOG;
+        my $client = create_client(
+            on_frame_recv   => sub { push @frames, { %{ $_[0] } }; 0 },
+            on_stream_close => sub { push @closes, { id => $_[0], code => $_[1] }; 0 },
+        );
+        complete_h2_handshake($client, $client_sock);
+        my $sid = submit_open_request($client, $client_sock, 'POST');
+        exchange_frames($client, $client_sock, 20);
+
+        ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+        is(\@events, [ { type => 'http.disconnect' } ],
+            'the receive made after the terminal event resolved with http.disconnect');
+        is($readings, {
+            is_connected => 0, response_started => 1,
+            response_complete => 1, disconnect_reason => undef,
+        }, 'the object reads complete, with no disconnect reason');
+        is(scalar @completes, 1, 'on_complete fired once');
+        is(scalar @disconnects, 0, 'on_disconnect never fired');
+        is($returned, 1, 'the application returned');
+        is(wire_for(\@frames, $sid), [
+            'HEADERS',
+            ($shape eq 'trailers' ? ('DATA', 'HEADERS+END_STREAM') : ('DATA+END_STREAM')),
+            'RST_STREAM',
+        ], 'the wire is the complete response and then RST_STREAM (RFC 9113 8.1)');
+        is(\@closes, [ { id => $sid, code => 0 } ],
+            'the client saw the stream close with NO_ERROR');
+        is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+        eval { $stream_io->close_now };
+        shutdown_server($server);
+    };
+}
+
+subtest 'h2 http: a HEAD response ends the scope with the request body still open' => sub {
+    reset_case();
+    my (@events, @completes);
+    my ($returned, $readings) = (0, undef);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { push @completes, 1 });
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        push @events, await $receive->();
+        $readings = readings_of($cs);
+        $returned = 1;
+        return;
+    };
+
+    my (@frames, @closes);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client(
+        on_frame_recv   => sub { push @frames, { %{ $_[0] } }; 0 },
+        on_stream_close => sub { push @closes, { id => $_[0], code => $_[1] }; 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    my $sid = submit_open_request($client, $client_sock, 'HEAD');
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@events, [ { type => 'http.disconnect' } ],
+        'the receive made after the terminal event resolved with http.disconnect');
+    is($readings, {
+        is_connected => 0, response_started => 1,
+        response_complete => 1, disconnect_reason => undef,
+    }, 'the object reads complete, with no disconnect reason');
+    is(scalar @completes, 1, 'on_complete fired once');
+    is($returned, 1, 'the application returned');
+    is(wire_for(\@frames, $sid), [ 'HEADERS', 'DATA+END_STREAM', 'RST_STREAM' ],
+        'the suppressed body still ends the stream, and the reset follows it');
+    is(\@closes, [ { id => $sid, code => 0 } ],
+        'the client saw the stream close with NO_ERROR');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+subtest 'h2 http: a receive parked on the body is answered by the terminal event' => sub {
+    reset_case();
+    my (@events, @completes);
+    my ($returned, $readings) = (0, undef);
+    # The parked receive and the response come from the same application:
+    # the receive is armed but never awaited until after the send, so it is
+    # genuinely pending on the request body when the scope ends.
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { push @completes, 1 });
+        my $parked = $receive->();
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        push @events, await $parked;
+        $readings = readings_of($cs);
+        $returned = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = submit_open_request($client, $client_sock, 'POST');
+    # One body chunk, no END_STREAM: the receive is parked waiting for more.
+    send_stream_data($client, $client_sock, $sid, 'hello', 0);
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@events, [ { type => 'http.disconnect' } ],
+        'the pending receive resolved with the scope\'s end, not the unread body');
+    is($readings, {
+        is_connected => 0, response_started => 1,
+        response_complete => 1, disconnect_reason => undef,
+    }, 'the object reads complete, with no disconnect reason');
+    is(scalar @completes, 1, 'on_complete fired once');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+subtest 'h2 http: a client RST after the complete response leaves the scope ended' => sub {
+    reset_case();
+    my (@completes, @disconnects);
+    my ($returned, $readings) = (0, undef);
+    my $released;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { push @completes, 1 });
+        $cs->on_disconnect(sub { push @disconnects, 1 });
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        # The scope, and the object with it, must survive only as long as the
+        # application does (t/73's technique): nothing here may keep it alive.
+        $released = $scope;
+        Scalar::Util::weaken($released);
+        await $loop->delay_future(after => 0);
+        $readings = readings_of($cs);
+        $returned = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = submit_open_request($client, $client_sock, 'POST');
+    exchange_frames($client, $client_sock, 10);
+
+    $client->submit_rst_stream($sid, Net::HTTP2::nghttp2::NGHTTP2_CANCEL());
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is($readings, {
+        is_connected => 0, response_started => 1,
+        response_complete => 1, disconnect_reason => undef,
+    }, 'the later reset did not reopen the terminal state');
+    is(scalar @completes, 1, 'on_complete fired once');
+    is(scalar @disconnects, 0, 'on_disconnect never fired');
+    is($returned, 1, 'the application returned');
+    ok(!defined $released, 'the scope was released when the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+# The cap counts only the answers the server has to invent. The stream closing
+# behind the terminal event queues this scope's own http.disconnect, and the
+# first receive is handed that one -- a delivery, free, as t/75 pins for every
+# scope. With the cap at 1 it therefore takes three calls to reach it.
+subtest 'h2 http: receives after the scope ended are capped' => sub {
+    reset_case();
+    my (@events, @errors);
+    my $returned = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain'], ['content-length', 4]] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        for my $try (1 .. 3) {
+            my $ok = eval { push @events, await $receive->(); 1 };
+            push @errors, $@ unless $ok;
+        }
+        $returned = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server_opts => { max_disconnect_receives => 1 });
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = submit_open_request($client, $client_sock, 'POST');
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@events, [ ({ type => 'http.disconnect' }) x 2 ],
+        'the queued delivery and one capped answer were both handed over');
+    is(scalar @errors, 1, 'the receive past the cap failed');
+    like($errors[0], qr/max_disconnect_receives/,
+        'the failure names the cap that produced it');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), { error => 1 }, 'the cap logged one error line');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+subtest 'h2 http: a request the client finished is unchanged, and draws no reset' => sub {
+    reset_case();
+    my @events;
+    my $returned = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        push @events, await $receive->();         # http.request, body complete
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type', 'text/plain'], ['content-length', 2]] });
+        await $send->({ type => 'http.response.body', body => 'ok' });
+        push @events, await $receive->();
+        $returned = 1;
+        return;
+    };
+
+    my (@frames, @closes);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client(
+        on_frame_recv   => sub { push @frames, { %{ $_[0] } }; 0 },
+        on_stream_close => sub { push @closes, { id => $_[0], code => $_[1] }; 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    my $sid = $client->submit_request(
+        method => 'POST', path => '/r', scheme => 'http', authority => 'localhost',
+        headers => [['content-type', 'text/plain']], body => 'hello');
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@events, [
+        { type => 'http.request', body => 'hello', more => 0 },
+        { type => 'http.disconnect' },
+    ], 'the body arrived and the receive after the response reported the end');
+    is($returned, 1, 'the application returned');
+    is(wire_for(\@frames, $sid), [ 'HEADERS', 'DATA+END_STREAM' ],
+        'a request the client finished draws no reset');
+    is(\@closes, [ { id => $sid, code => 0 } ], 'the stream closed with NO_ERROR');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+subtest 'h2 http: chunks still in flight do not end the scope' => sub {
+    reset_case();
+    my (@events, @mid);
+    my $returned = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'part', more => 1 });
+
+        # Made between chunks: the scope has not ended, so this one parks.
+        my $between = $receive->();
+        await $loop->delay_future(after => 0);
+        push @mid, {
+            resolved          => $between->is_ready ? 1 : 0,
+            response_started  => $cs->response_started,
+            response_complete => $cs->response_complete,
+        };
+
+        await $send->({ type => 'http.response.body', body => 'done' });
+        push @events, await $between;
+        $returned = 1;
+        return;
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = submit_open_request($client, $client_sock, 'POST');
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(\@mid, [ { resolved => 0, response_started => 1, response_complete => 0 } ],
+        'a receive between chunks parked, and the object was not complete');
+    is(\@events, [ { type => 'http.disconnect' } ],
+        'the terminal chunk ended the scope and answered that receive');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
+
+
+# The clean end is the application's terminal event, not the wire's. Under a
+# peer window too small for the body, the data callback never reaches its
+# terminal chunk, so no END_STREAM is serialized, no reset goes out and the
+# stream stays open -- and the scope has still ended. This case is what
+# separates the terminal-event mark from the stream close that, in every other
+# case here, the wire rule triggers inside the same send.
+subtest 'h2 http: a terminal body the peer cannot take still ends the scope' => sub {
+    reset_case();
+    my (@events, @completes, @closes);
+    my ($returned, $readings) = (0, undef);
+    my $body = 'x' x 40000;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { push @completes, 1 });
+        await $send->({ type => 'http.response.start', status => 401,
+                        headers => [['content-type', 'text/plain']] });
+        # Streaming, so the body goes out through the data callback, which is
+        # where the peer's per-stream window actually bites.
+        await $send->({ type => 'http.response.body', body => 'x', more => 1 });
+        await $send->({ type => 'http.response.body', body => $body });
+        $readings = readings_of($cs);
+        push @events, await $receive->();
+        $returned = 1;
+        return;
+    };
+
+    my %bytes;
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client(
+        on_data_chunk_recv => sub { $bytes{ $_[0] } += length $_[1]; 0 },
+        on_stream_close    => sub { push @closes, { id => $_[0], code => $_[1] }; 0 },
+    );
+    complete_h2_handshake($client, $client_sock, initial_window_size => 2000);
+    my $sid = submit_open_request($client, $client_sock, 'POST');
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    ok(($bytes{$sid} // 0) < length $body,
+        'the peer\'s window stopped the body short of its end');
+    is(\@closes, [], 'the stream never closed: no END_STREAM, so no reset');
+    is($readings, {
+        is_connected => 0, response_started => 1,
+        response_complete => 1, disconnect_reason => undef,
+    }, 'the object was complete at the terminal event, not at the stream close');
+    is(scalar @completes, 1, 'on_complete fired once');
+    is(\@events, [ { type => 'http.disconnect' } ],
+        'the receive after it reported the scope\'s end');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
     eval { $stream_io->close_now };
     shutdown_server($server);

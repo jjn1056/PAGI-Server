@@ -11,6 +11,12 @@
     See PAGI::Upgrading.
 
   Connection state
+  - The terminal response event ends the http scope on both transports, whether
+    or not the application read the request body: the object is complete at
+    that event, and a receive pending or made afterwards reports http.disconnect
+    instead of parking or handing back an unread body. On HTTP/2 the server then
+    asks the client to abandon an unfinished request with RST_STREAM NO_ERROR
+    (RFC 9113 section 8.1), which nghttp2 does not send on its own.
   - pagi.connection on websocket and sse scopes on HTTP/1.1 and HTTP/2, with
     abort($detail), disconnect_detail, response_complete as a boolean, and
     on_disconnect callbacks receiving (reason, detail). New reason app_abort.

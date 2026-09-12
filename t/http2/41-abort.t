@@ -269,14 +269,13 @@ subtest 'websocket stream: abort resets with CANCEL and sends no Close frame' =>
     exchange_frames($client, $client_sock, 20);
     ok($r{sib_done}, 'the sibling ran to completion after the reset');
     like($data{$ssid}, qr/\x88/, 'the sibling did send a Close frame');
-    # nghttp2 reports on_stream_close only once both sides have ended, and this
-    # client deliberately keeps its CONNECT request body open -- that is what
-    # makes the stream a tunnel -- so a clean server-side END_STREAM leaves the
-    # code undefined here rather than 0. (Same limitation as t/71 case (h)'s h2
-    # half.) The contrast that matters survives: the aborted stream carries a
-    # nonzero error code, this one carries none at all, and the scope's own
-    # clean end is asserted directly on the next line.
-    is($closed{$ssid}, undef, 'and its stream was never reset');
+    # This client deliberately keeps its CONNECT request body open -- that is
+    # what makes the stream a tunnel -- so once the server's own output ends it
+    # asks the client to abandon that half with RST_STREAM NO_ERROR (RFC 9113
+    # section 8.1), and nghttp2 then reports the close with error code 0. The
+    # contrast that matters is what it always was: the aborted stream carries a
+    # nonzero error code, this one carries none.
+    is($closed{$ssid}, 0, 'and its stream ended with NO_ERROR, not a reset in error');
     is($r{sib_conn}->response_complete, 1, 'the sibling scope ended cleanly');
     is(errors_in(\@log), [], 'no error line was logged for either stream');
 

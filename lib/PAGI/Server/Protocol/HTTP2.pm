@@ -117,6 +117,7 @@ sub new {
         on_body    => sub { ($stream_id, $data, $eof) = @_ },
         on_close   => sub { ($stream_id, $error_code) = @_ },
         on_header_overflow => sub { ($stream_id) = @_ },
+        on_frame_sent      => sub { ($stream_id, $type, $flags) = @_ },
     );
 
 Creates a new HTTP/2 session for a connection. Returns a
@@ -128,6 +129,11 @@ request's HEADERS block exceeds C<max_header_list_size> (RFC 9113 section
 stream id (no request state was ever dispatched, so there is nothing to
 clean up on the caller's side). If omitted, an oversized request is simply
 never dispatched and no response is sent for it.
+
+C<on_frame_sent> is optional. It fires with a frame's stream id, type and
+flags once nghttp2 has serialized it -- the point at which an C<END_STREAM>
+has claimed its place in the output. A handler may queue further frames, but
+must not feed or extract the session from inside it.
 
 =cut
 
@@ -142,6 +148,7 @@ sub create_session {
         on_body    => $callbacks{on_body},
         on_close   => $callbacks{on_close},
         on_header_overflow => $callbacks{on_header_overflow},
+        on_frame_sent      => $callbacks{on_frame_sent},
         settings   => {
             max_concurrent_streams  => $self->{max_concurrent_streams},
             initial_window_size     => $self->{initial_window_size},
@@ -174,6 +181,7 @@ sub new {
         on_body     => $args{on_body},
         on_close    => $args{on_close},
         on_header_overflow => $args{on_header_overflow},
+        on_frame_sent      => $args{on_frame_sent},
         settings    => $args{settings},
         h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
@@ -440,6 +448,14 @@ sub _init_nghttp2_session {
                 return 0;
             },
 
+            on_frame_send => sub {
+                my ($frame) = @_;
+                return 0 unless $weak_self && $weak_self->{on_frame_sent};
+                $weak_self->{on_frame_sent}->(
+                    $frame->{stream_id}, $frame->{type}, $frame->{flags});
+                return 0;
+            },
+
             on_stream_close => sub {
                 my ($stream_id, $error_code) = @_;
                 return 0 unless $weak_self;
@@ -636,6 +652,22 @@ C<http.response.start>, so there is no honest way to finish the body.
 sub submit_rst_stream {
     my ($self, $stream_id, $error_code) = @_;
     return $self->{nghttp2}->submit_rst_stream($stream_id, $error_code);
+}
+
+=head2 get_stream_remote_close
+
+    my $finished = $session->get_stream_remote_close($stream_id);
+
+True once the client has finished its half of this stream, false while it may
+still send on it, and C<undef> when the session no longer has the stream. The
+server asks it to tell a response that outran its request from one that did
+not: only the first has a request half left to abandon (RFC 9113 section 8.1).
+
+=cut
+
+sub get_stream_remote_close {
+    my ($self, $stream_id) = @_;
+    return $self->{nghttp2}->get_stream_remote_close($stream_id);
 }
 
 1;
