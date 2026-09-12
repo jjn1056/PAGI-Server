@@ -3,6 +3,14 @@
 0.002014 - UNRELEASED
 
   Specification
+  - max_body_size: a request body of undeclared length that crosses the limit
+    after the application has started its response now ends the scope with
+    body_too_large and truncates the response (RST_STREAM INTERNAL_ERROR on
+    HTTP/2, connection close on HTTP/1.1) instead of writing a 413 as a second
+    response, which nghttp2 refused and which tore the whole HTTP/2 connection
+    down. A declared Content-Length over the limit is still answered 413 before
+    the application runs. One error line names the cause. The max_body_size
+    documentation describes the app-owned-limit pattern for streaming uploads.
   - HTTP/2 support now requires Net::HTTP2::nghttp2 0.011 (on_frame_send and the
     stream-close queries the server uses to end a scope whose request body the
     client never finished; 0.011 makes a submit from inside a callback safe and

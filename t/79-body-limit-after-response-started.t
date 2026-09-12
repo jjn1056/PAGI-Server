@@ -79,7 +79,8 @@ sub assert_no_warnings {
 # receive() call now on the stack is still producing, so Future::AsyncAwait
 # sees that call's returning Future resolved out from under it. Every
 # HTTP/1.1 path that closes from inside a receive has it; the fix belongs to
-# the receive/close ordering, not to max_body_size. Pinned here so it cannot
+# the receive/close ordering, not to max_body_size (tracking ledger item
+# L11; remove this pin with that fix). Pinned here so it cannot
 # change or multiply unnoticed.
 sub assert_h1_teardown_warning {
     my ($label) = @_;
