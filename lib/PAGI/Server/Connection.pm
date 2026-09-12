@@ -768,7 +768,15 @@ sub _h2_on_body {
                 ],
                 body    => 'Payload Too Large',
             );
-            # No flush here — this runs inside feed(); see _h2_session_call
+            # Mark death BEFORE the two releases below and the wake further
+            # down: each can resume an awaiting async sub synchronously, and a
+            # resumed app may call $send while this entry is still live in
+            # h2_streams (the carve-outs key off entry existence). h2_closed
+            # lets every send closure treat a doomed-but-still-present entry as
+            # an absent one, per the post-close contract (design §6.2 / §21
+            # item 1), mirroring _h2_on_close's own marker.
+            $stream->{h2_closed} = 1;
+            # No flush here — _h2_process_data flushes after feed() returns
             $self->_h2_resolve_stream_drain_waiters($stream);
             $self->_h2_resolve_stream_trailer_wait($stream);
             # Drop (don't fire) the app's on_drain fires: the stream is closing,
@@ -834,17 +842,6 @@ sub _h2_on_body {
             $stream->{connection_state}->_mark_disconnected('body_too_large',
                 "request body exceeded $self->{max_body_size} bytes")
                 if $stream->{connection_state};
-            # Mark death BEFORE the wake, mirroring _h2_on_close's own
-            # h2_closed marker (see its comment): the wake below can resume
-            # the app's async sub synchronously, and a resumed app may call
-            # $send before this function reaches its own delete further
-            # down -- $ss would still be a live h2_streams entry at that
-            # point (STREAM_GONE / already-closed carve-outs key off entry
-            # existence). h2_closed lets every send closure recognize a
-            # doomed-but-still-present entry and no-op on it, same as an
-            # absent one, per the post-close contract (design §6.2 / §21
-            # item 1).
-            $stream->{h2_closed} = 1;
             $self->_h2_wake_pending($stream);
 
             delete $self->{h2_streams}{$stream_id};
@@ -1461,9 +1458,8 @@ sub _h2_incomplete_scope_end {
         # response on any ordinary HTTP/2 stream.
         $self->_h2_ws_close($stream_id, code => 1011, text => '',
             reason => 'server_error', detail => $detail);
-        # This runs off the application's Future, outside feed(), so the
-        # queued frame needs an explicit flush.
-        eval { $self->_h2_write_pending };
+        # Runs off the application's Future; the queued frame needs a flush.
+        $self->_h2_write_pending;
     }
     else {
         # The scope is ending for this server's own reason, so it records that
@@ -1837,9 +1833,9 @@ sub _h2_create_send {
     # terminal (eof=1) chunk. If a trailers send() is waiting on this
     # (staged $pending_trailer_headers), submits it HERE -- synchronously,
     # from inside the data-provider callback, per nghttp2's own sanctioned
-    # pattern -- then wakes the waiting send() on the next loop tick (never
-    # resolve an app Future from inside a native nghttp2 callback -- same
-    # discipline as the drain waiters above).
+    # pattern -- then wakes the waiting send() inline: this provider has just
+    # delivered its terminal chunk and will not be invoked again, so the
+    # resumed send()'s own resume_stream is inert and its flush defers.
     my $deliver_trailer_eof = sub {
         $data_eof_delivered = 1;
         return unless defined $pending_trailer_headers;
@@ -1865,11 +1861,8 @@ sub _h2_create_send {
         };
         my $err = $@;
         my $f = $ss2 && delete $ss2->{trailer_wait};
-        return unless $f;
-        $weak_self->{server}->loop->later(sub {
-            return if $f->is_ready;
-            if ($ok) { $f->done(1) } else { $f->fail($err) }
-        });
+        return if !$f || $f->is_ready;
+        if ($ok) { $f->done(1) } else { $f->fail($err) }
     };
 
     # Data callback for nghttp2's streaming response.
@@ -3636,7 +3629,7 @@ sub _h2_process_ws_frames {
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
             $stream->{ws_eof_pending} = 1;
             $self->{h2_session}->resume_stream($stream_id);
-            # No flush here — this runs inside feed(); see _h2_session_call
+            # No flush here — _h2_process_data flushes after feed() returns
 
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"). Receive-side,
@@ -3662,7 +3655,7 @@ sub _h2_process_ws_frames {
             push @{$stream->{send_queue} ||= []}, $pong_bytes;
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $pong_bytes;
             $self->{h2_session}->resume_stream($stream_id);
-            # No flush here — this runs inside feed(); see _h2_session_call
+            # No flush here — _h2_process_data flushes after feed() returns
         }
         elsif ($opcode == 10) {
             # Pong — clear this stream's keepalive wait flag (response to
@@ -4354,18 +4347,13 @@ sub _h2_wait_for_stream_drain {
 
 # Release any producer blocked on _h2_wait_for_stream_drain for a stream that
 # is being torn down (close/RST/connection shutdown). Resolve, never fail - the
-# producer rechecks connection/stream state after the await. Some teardown
-# sites run inside nghttp2's feed() (e.g. the oversize-body 413 path); completing
-# a waiter resumes the producer synchronously, so defer to the next loop tick to
-# keep the resumed producer out of a re-entrant nghttp2 call.
+# producer rechecks connection/stream state after the await. Every caller marks
+# the stream h2_closed first, so a producer resumed inline here fails that
+# recheck and stops without reaching nghttp2.
 sub _h2_resolve_stream_drain_waiters {
     my ($self, $ss) = @_;
     return unless $ss && $ss->{stream_drain_waiters};
-    my @waiters = splice @{$ss->{stream_drain_waiters}};
-    return unless @waiters;
-    $self->{server}->loop->later(sub {
-        $_->done for grep { !$_->is_ready } @waiters;
-    });
+    $_->done for grep { !$_->is_ready } splice @{$ss->{stream_drain_waiters}};
 }
 
 # Release a send() parked in the http.response.trailers arm awaiting
@@ -4373,17 +4361,14 @@ sub _h2_resolve_stream_drain_waiters {
 # stream that is being torn down before that ever happens. Resolve, never
 # fail -- same h2_closed carve-out contract as every other post-close send
 # (design §6.2 / §21 item 1): a trailers send racing a disconnect is a
-# successful no-op, not an error the app must handle. Same re-entrancy
-# discipline as _h2_resolve_stream_drain_waiters above (deferred one loop
-# tick -- some teardown sites run inside nghttp2's feed()).
+# successful no-op, not an error the app must handle. Resolved inline: the
+# parked send() rechecks the connection and this stream's h2_closed the moment
+# it wakes, which every caller has already set.
 sub _h2_resolve_stream_trailer_wait {
     my ($self, $ss) = @_;
     return unless $ss;
     my $f = delete $ss->{trailer_wait};
-    return unless $f;
-    $self->{server}->loop->later(sub {
-        $f->done unless $f->is_ready;
-    });
+    $f->done if $f && !$f->is_ready;
 }
 
 # ============================================================================
