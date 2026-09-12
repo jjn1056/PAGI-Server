@@ -1373,6 +1373,31 @@ Set to 0 for unlimited (not recommended for public-facing servers).
 Requests with Content-Length exceeding this limit receive HTTP 413
 (Payload Too Large). Chunked requests are also checked as data arrives.
 
+A body of undeclared length (chunked on HTTP/1.1, DATA without
+C<content-length> on HTTP/2) can cross the limit after the application has
+already started its response. A started response can never be replaced by a
+second one, so no 413 is written: the scope ends with C<disconnect_reason>
+C<body_too_large>, the application's disconnect event carries the same token,
+one line is logged, and the response is truncated on the wire (RST_STREAM on
+HTTP/2, a close with no terminal framing on HTTP/1.1) so the client sees it as
+incomplete. A streaming endpoint that accepts unknown-length uploads should
+enforce its own per-route limit while reading, so it can report in band
+instead:
+
+    my $read = 0;
+    while (1) {
+        my $event = await $receive->();
+        last if $event->{type} ne 'http.request';
+        $read += length($event->{body} // '');
+        if ($read > $MY_LIMIT) {
+            await $send->({ type => 'http.response.body',
+                            body => "upload too large\n", more => 1 });
+            $scope->{'pagi.connection'}->abort;
+            return;
+        }
+        last unless $event->{more};
+    }
+
 B<Example:>
 
     my $server = PAGI::Server->new(

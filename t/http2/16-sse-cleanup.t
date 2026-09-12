@@ -317,6 +317,7 @@ subtest 'keepalive timers cleaned up on disconnect' => sub {
 # unfixed, the timer keeps firing for the life of the process.
 subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' => sub {
     my $sse_started = 0;
+    my @log;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -351,9 +352,14 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
         app           => $app,
         max_body_size => 40,
+        logger        => sub { push @log, $_[0] },
     );
 
-    my $client = create_client();
+    my ($status, $closed_code);
+    my $client = create_client(
+        on_header       => sub { my (undef, $n, $v) = @_; $status = $v if lc($n) eq ':status'; 0 },
+        on_stream_close => sub { $closed_code = $_[1]; 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     my $stream_id = $client->submit_request(
@@ -399,9 +405,24 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
     }
 
     ok(!exists $conn->{h2_streams}{$stream_id},
-        'stream entry reclaimed after max_body_size 413');
+        'stream entry reclaimed after the overrun');
     ok(!$timer->is_running,
-        'the stream keepalive timer was stopped, not leaked, by the 413 teardown');
+        'the stream keepalive timer was stopped, not leaked, by the teardown');
+
+    # The overrun landed on a stream whose response had already started, so
+    # there is no 413 to send: PAGI::Spec::Www "Application Left a Response
+    # Incomplete" forbids replacing a started response, and the stream is
+    # truncated instead. Without these four the subtest passed while the whole
+    # connection was being destroyed by a second submit_response and the
+    # client got nothing -- the two surviving assertions above were swept by
+    # the connection teardown rather than reached by this path.
+    is($status, '200', 'the client keeps the SSE 200; no 413 was written over it');
+    is($closed_code, 2, 'the stream ended with RST_STREAM INTERNAL_ERROR');
+    ok(!$conn->{closed}, 'the connection survived: only the stream was reset');
+    is([map { $_->{message} } @log],
+       ['request body exceeded max_body_size (40 bytes) after the response'
+        . " had started (HTTP/2 stream $stream_id); response truncated"],
+       'exactly one log line, naming the limit, the transport and the truncation');
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -49,6 +49,20 @@ sub _detail_from_error {
     return length $first ? $first : undef;
 }
 
+# A request body that crossed max_body_size once this scope had already
+# started its response. The 413 that answers the same overrun before the
+# application runs has nowhere to go here -- Www.pod "Application Left a
+# Response Incomplete" forbids replacing a started response and requires it
+# stay observable as truncated -- so the scope ends with body_too_large
+# instead. One sentence says why, as disconnect_detail without $where and as
+# the log line with the transport in it.
+sub _body_limit_after_start {
+    my ($limit, $where) = @_;
+    return "request body exceeded max_body_size ($limit bytes) after the"
+         . ' response had started' . (defined $where ? " ($where)" : '')
+         . '; response truncated';
+}
+
 # =============================================================================
 # HTTP/2 connection-specific header stripping (RFC 9113 section 8.2.2, design
 # doc section 13.3)
@@ -760,14 +774,46 @@ sub _h2_on_body {
 
         # Enforce max_body_size (0 = unlimited)
         if ($self->{max_body_size} && length($stream->{body}) > $self->{max_body_size}) {
-            $self->{h2_session}->submit_response($stream_id,
-                status  => 413,
-                headers => [
-                    ['content-type', 'text/plain'],
-                    ['date', $self->{protocol}->format_date],
-                ],
-                body    => 'Payload Too Large',
-            );
+            # Which answer this overrun gets turns on one question the send
+            # machine's own state already answers: has this scope started its
+            # response? A 413 is a response, and a started response can never
+            # be replaced by a second one (Www.pod "Application Left a Response
+            # Incomplete"). HTTP/2 cannot even carry the attempt -- nghttp2
+            # refuses a second data provider on a live stream and the croak
+            # takes down the whole connection. So past that point the scope is
+            # ended abnormally with the same Standard Disconnect Reason and the
+            # stream is truncated the way every other incomplete response on
+            # this transport is: RST_STREAM INTERNAL_ERROR, the other streams
+            # on the connection untouched.
+            my $kind = $stream->{is_websocket} ? 'websocket'
+                     : $stream->{is_sse}       ? 'sse'
+                     :                           'http';
+            my $detail;
+            if (PAGI::Server::EventValidator::scope_started($kind, $stream->{seq_state})) {
+                $detail = _body_limit_after_start($self->{max_body_size});
+                # The one report an application author gets on the operator
+                # side, at the level of the incomplete-response line it stands
+                # in for (the dispatch wrapper's, suppressed below by the
+                # recorded reason) -- a truncated response must not go silent
+                # under log_level 'error'.
+                $self->_log(error => _body_limit_after_start(
+                    $self->{max_body_size}, "HTTP/2 stream $stream_id"));
+                # Before h2_closed below: that mark is exactly what
+                # _h2_reset_stream's liveness test reads. The flush waits for
+                # _h2_session_call on the way out of the mem_recv this runs in.
+                $self->_h2_reset_stream($stream_id, _h2_rst_error_code());
+            }
+            else {
+                $detail = "request body exceeded $self->{max_body_size} bytes";
+                $self->{h2_session}->submit_response($stream_id,
+                    status  => 413,
+                    headers => [
+                        ['content-type', 'text/plain'],
+                        ['date', $self->{protocol}->format_date],
+                    ],
+                    body    => 'Payload Too Large',
+                );
+            }
             # Mark death BEFORE the two releases below and the wake further
             # down: each can resume an awaiting async sub synchronously, and a
             # resumed app may call $send while this entry is still live in
@@ -840,8 +886,7 @@ sub _h2_on_body {
             } else {
                 push @{$stream->{receive_queue}}, { type => 'http.disconnect' };
             }
-            $stream->{connection_state}->_mark_disconnected('body_too_large',
-                "request body exceeded $self->{max_body_size} bytes")
+            $stream->{connection_state}->_mark_disconnected('body_too_large', $detail)
                 if $stream->{connection_state};
             $self->_h2_wake_pending($stream);
 
@@ -4912,10 +4957,26 @@ async sub _read_chunked_body {
 
         # Check max_body_size for chunked requests (0 = unlimited)
         if ($self->{max_body_size} && $$bytes_read_ref > $self->{max_body_size}) {
-            # Body too large - close connection
-            $self->_send_error_response(413, 'Payload Too Large');
-            $self->_handle_disconnect('body_too_large',
-                "request body exceeded $self->{max_body_size} bytes");
+            # The same split as the HTTP/2 guard, asked of this scope's own
+            # mirrored send state: a 413 only while no response has started,
+            # and past that point the abnormal end plus a close with no
+            # terminal framing, which is this transport's truncation (Www.pod
+            # "Application Left a Response Incomplete"). _send_error_response
+            # already refuses to write over a started response, so the branch
+            # is what makes the ending say why rather than what stops the
+            # write.
+            my $detail;
+            if (PAGI::Server::EventValidator::scope_started(
+                    $self->{scope_kind} // 'http', $self->{h1_seq})) {
+                $detail = _body_limit_after_start($self->{max_body_size});
+                $self->_log(error => _body_limit_after_start(
+                    $self->{max_body_size}, 'HTTP/1.1'));
+            }
+            else {
+                $detail = "request body exceeded $self->{max_body_size} bytes";
+                $self->_send_error_response(413, 'Payload Too Large');
+            }
+            $self->_handle_disconnect('body_too_large', $detail);
             $self->_close;
             return await $make_disconnect->($parked);
         }
