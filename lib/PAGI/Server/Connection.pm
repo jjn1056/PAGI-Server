@@ -571,7 +571,7 @@ sub _h2_process_data {
     return unless $self->{h2_session};
 
     if (length($self->{buffer}) > 0) {
-        $self->{h2_session}->feed($self->{buffer});
+        $self->_h2_session_call(sub { $self->{h2_session}->feed($self->{buffer}) });
         $self->{buffer} = '';
     }
 
@@ -579,19 +579,41 @@ sub _h2_process_data {
 
     # Close connection when session is done (GOAWAY received or sent)
     if ($self->{h2_session} && !$self->{h2_session}->want_read) {
-        $self->_h2_write_pending;  # Flush any remaining output
         $self->_handle_disconnect_and_close;
     }
+}
+
+# nghttp2 runs this server's callbacks from inside mem_recv and mem_send and
+# forbids reentering either from there (Net::HTTP2::nghttp2::Session,
+# "Reentrancy"): a flush reached from a callback croaks, while queueing frames
+# there is legal and nghttp2 serializes them into the same flush. So every
+# session call that can run callbacks -- feed's mem_recv and the extract below
+# -- is made here, and the flush its callbacks asked for is left to the
+# outermost one, on its way out. A receive woken inside a session call still
+# resumes its application inline (Www.pod "Callback invocation context"); it is
+# only that application's flush that waits.
+sub _h2_session_call {
+    my ($self, $code) = @_;
+    $self->{h2_session_depth}++;
+    my $ok  = eval { $code->(); 1 };
+    my $err = $@;
+    $self->{h2_session_depth}--;
+    die $err unless $ok;
+    $self->_h2_write_pending if !$self->{h2_session_depth} && delete $self->{h2_flush_wanted};
+    return;
 }
 
 sub _h2_write_pending {
     my ($self) = @_;
     return unless $self->{h2_session};
-    while (1) {
-        my $data = $self->{h2_session}->extract;
-        last unless defined $data && length($data) > 0;
-        $self->{stream}->write($data);
-    }
+    return $self->{h2_flush_wanted} = 1 if $self->{h2_session_depth};
+    $self->_h2_session_call(sub {
+        while (1) {
+            my $data = $self->{h2_session}->extract;
+            last unless defined $data && length($data) > 0;
+            $self->{stream}->write($data);
+        }
+    });
 }
 
 # =============================================================================
@@ -604,25 +626,20 @@ sub _h2_write_pending {
 # request's HEADERS block exceeds max_header_list_size -- no request state
 # was ever dispatched (HTTP2.pm never called on_request for this stream),
 # so there is nothing in {h2_streams} to initialize or clean up here.
-# Mirrors the plain-CONNECT-501 and content-length-413 idiom below: defer
-# the response to avoid re-entrant nghttp2 calls (we're inside feed/mem_recv).
+# Like the plain-CONNECT-501 and content-length-413 answers below, this runs
+# inside feed's mem_recv and leaves its flush to _h2_session_call.
 sub _h2_on_header_overflow {
     my ($self, $stream_id) = @_;
 
-    weaken(my $ws = $self);
-    $self->{server}->loop->later(sub {
-        return unless $ws;
-        return if $ws->{closed};
-        $ws->{h2_session}->submit_response($stream_id,
-            status  => 431,
-            headers => [
-                ['content-type', 'text/plain'],
-                ['date', $ws->{protocol}->format_date],
-            ],
-            body    => "Request Header Fields Too Large\n",
-        );
-        $ws->_h2_write_pending;
-    });
+    $self->{h2_session}->submit_response($stream_id,
+        status  => 431,
+        headers => [
+            ['content-type', 'text/plain'],
+            ['date', $self->{protocol}->format_date],
+        ],
+        body    => "Request Header Fields Too Large\n",
+    );
+    $self->_h2_write_pending;
 }
 
 sub _h2_on_request {
@@ -649,22 +666,16 @@ sub _h2_on_request {
             # Extended CONNECT for WebSocket (RFC 8441)
             $is_websocket = 1;
         } else {
-            # Plain CONNECT not supported — defer response to avoid
-            # re-entrant nghttp2 calls (we're inside feed/mem_recv)
-            weaken(my $ws = $self);
-            $self->{server}->loop->later(sub {
-                return unless $ws;
-                return if $ws->{closed};
-                $ws->{h2_session}->submit_response($stream_id,
-                    status  => 501,
-                    headers => [
-                        ['content-type', 'text/plain'],
-                        ['date', $ws->{protocol}->format_date],
-                    ],
-                    body    => "CONNECT method not supported\n",
-                );
-                $ws->_h2_write_pending;
-            });
+            # Plain CONNECT not supported.
+            $self->{h2_session}->submit_response($stream_id,
+                status  => 501,
+                headers => [
+                    ['content-type', 'text/plain'],
+                    ['date', $self->{protocol}->format_date],
+                ],
+                body    => "CONNECT method not supported\n",
+            );
+            $self->_h2_write_pending;
             return;
         }
     }
@@ -699,21 +710,15 @@ sub _h2_on_request {
         for my $h (@$headers) {
             if ($h->[0] eq 'content-length') {
                 if ($h->[1] > $self->{max_body_size}) {
-                    # Defer response to avoid re-entrant nghttp2 calls
-                    weaken(my $ws = $self);
-                    $self->{server}->loop->later(sub {
-                        return unless $ws;
-                        return if $ws->{closed};
-                        $ws->{h2_session}->submit_response($stream_id,
-                            status  => 413,
-                            headers => [
-                                ['content-type', 'text/plain'],
-                                ['date', $ws->{protocol}->format_date],
-                            ],
-                            body    => "Payload Too Large\n",
-                        );
-                        $ws->_h2_write_pending;
-                    });
+                    $self->{h2_session}->submit_response($stream_id,
+                        status  => 413,
+                        headers => [
+                            ['content-type', 'text/plain'],
+                            ['date', $self->{protocol}->format_date],
+                        ],
+                        body    => "Payload Too Large\n",
+                    );
+                    $self->_h2_write_pending;
                     return;
                 }
                 last;
@@ -763,8 +768,7 @@ sub _h2_on_body {
                 ],
                 body    => 'Payload Too Large',
             );
-            # No _h2_write_pending here — we're inside feed(); _h2_process_data
-            # flushes after feed() returns
+            # No flush here — this runs inside feed(); see _h2_session_call
             $self->_h2_resolve_stream_drain_waiters($stream);
             $self->_h2_resolve_stream_trailer_wait($stream);
             # Drop (don't fire) the app's on_drain fires: the stream is closing,
@@ -1495,14 +1499,11 @@ sub _h2_stream_alive {
 # it has already released and corrupts at session teardown, so every RST_STREAM
 # this server sends is submitted here, behind the liveness check.
 sub _h2_reset_stream {
-    my ($self, $stream_id, $code, %opt) = @_;
+    my ($self, $stream_id, $code) = @_;
     return unless $self->_h2_stream_alive($stream_id);
     eval {
         $self->{h2_session}->submit_rst_stream($stream_id, $code);
-        # Inside a session callback the flush is not ours to make: nghttp2
-        # forbids reentering mem_send from there, and the mem_send already
-        # running carries this frame out with the rest of the flush.
-        $self->_h2_write_pending unless $opt{in_callback};
+        $self->_h2_write_pending;
     };
     return;
 }
@@ -1540,7 +1541,7 @@ sub _h2_on_frame_sent {
     # undef = nghttp2 no longer has this stream at all.
     my $request_finished = $self->{h2_session}->get_stream_remote_close($stream_id);
     return if !defined $request_finished || $request_finished;
-    $self->_h2_reset_stream($stream_id, _h2_rst_no_error_code(), in_callback => 1);
+    $self->_h2_reset_stream($stream_id, _h2_rst_no_error_code());
     return;
 }
 
@@ -3635,7 +3636,7 @@ sub _h2_process_ws_frames {
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
             $stream->{ws_eof_pending} = 1;
             $self->{h2_session}->resume_stream($stream_id);
-            # No _h2_write_pending — inside feed(); flushed by _h2_process_data
+            # No flush here — this runs inside feed(); see _h2_session_call
 
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"). Receive-side,
@@ -3661,7 +3662,7 @@ sub _h2_process_ws_frames {
             push @{$stream->{send_queue} ||= []}, $pong_bytes;
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $pong_bytes;
             $self->{h2_session}->resume_stream($stream_id);
-            # No _h2_write_pending — inside feed(); flushed by _h2_process_data
+            # No flush here — this runs inside feed(); see _h2_session_call
         }
         elsif ($opcode == 10) {
             # Pong — clear this stream's keepalive wait flag (response to
@@ -3681,9 +3682,8 @@ sub _h2_process_ws_frames {
 # outliving its stream (it would otherwise keep pinging a half-closed
 # stream for the life of the connection).
 #
-# Callers inside feed() need no flush (_h2_process_data flushes after
-# feed() returns); callers outside it must call _h2_write_pending
-# themselves.
+# Callers inside feed() need no flush (see _h2_session_call); callers outside
+# it must call _h2_write_pending themselves.
 sub _h2_ws_close {
     my ($self, $stream_id, %a) = @_;      # code, text, reason, detail
 
