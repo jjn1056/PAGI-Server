@@ -825,11 +825,12 @@ sub _h2_on_body {
                 # the matching Standard Disconnect Reasons token, and
                 # body_too_large is one). Pushed directly rather than
                 # through _h2_ws_enqueue_disconnect: that helper also calls
-                # _h2_wake_pending, but the wake here must wait until
-                # h2_closed is set below (same ordering the sse/http arms
-                # rely on -- see the comment above h2_closed). Still honor
-                # the single-delivery contract so a later delivery attempt
-                # for this (about-to-be-deleted) stream is a no-op.
+                # _h2_wake_pending, and the wake for this stream happens
+                # once, further down, after every release (h2_closed is
+                # already set above, so a resumed producer sees a dead
+                # stream). Still honor the single-delivery contract so a
+                # later delivery attempt for this (about-to-be-deleted)
+                # stream is a no-op.
                 $stream->{ws_disconnect_delivered}++;
                 push @{$stream->{receive_queue}}, {
                     type   => 'websocket.disconnect',
