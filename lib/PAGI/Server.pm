@@ -1401,7 +1401,7 @@ instead:
 The limit also bounds a body the application never read at all. An
 application that answers before reading (a 401, a 413 of its own) leaves the
 rest of that body framed into an HTTP/1.1 connection, and the connection must
-consume it before it can take another request (RFC 9112 section 9.6). That
+consume it before it can take another request (RFC 9112 section 9.3). That
 discard stops at C<max_body_size>: within the limit the remainder is thrown
 away and the connection serves the next request as usual; over it the
 connection closes after the response, ending with C<body_too_large>. The scope

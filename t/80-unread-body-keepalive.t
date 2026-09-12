@@ -3,9 +3,9 @@
 # =============================================================================
 # Test: an unread request body never becomes the next request (HTTP/1.1)
 #
-# RFC 9112 section 9.6 ("Tear-down"): a server that sends a response before
-# receiving the entire request content MUST either read the whole content or
-# close the connection afterwards -- the content is framed into the connection
+# RFC 9112 section 9.3 ("Persistence"): a server MUST read the entire request
+# message body or close the connection after sending its response, otherwise
+# the remaining data would be misinterpreted as the next request -- the content is framed into the connection
 # (section 6.3, "Message Body Length") and cannot be skipped over. An
 # application that refuses an upload without reading it (a 401, a 413) is the
 # ordinary way a server ends up in that position.
@@ -377,7 +377,7 @@ subtest 'h1: pipelined requests carrying bodies all answer' => sub {
 #    content can be neither read nor skipped: RFC 9110 section 10.1.1 lets the
 #    client hold it back until invited AND lets it send anyway without waiting,
 #    so no rule on this connection can tell the next bytes from that content.
-#    The connection takes RFC 9112 section 9.6's other branch and closes after
+#    The connection takes RFC 9112 section 9.3's other branch and closes after
 #    the response, which is also the intent section 10.1.1 asks the server to
 #    indicate when it answers before reading the whole content.
 # =============================================================================
@@ -497,7 +497,7 @@ subtest 'h1: a 100-continue the server answered still owes the remainder' => sub
 # =============================================================================
 # 8. The SSE tail is the same tail. An sse scope carries a request body
 #    (L<PAGI::Spec::Www> sse.request), the stream's clean end returns the
-#    connection to ordinary request handling, and RFC 9112 section 9.6 governs
+#    connection to ordinary request handling, and RFC 9112 section 9.3 governs
 #    what is left of that body exactly as it does after a response.
 # =============================================================================
 subtest 'h1: the body an SSE stream never read is not the next request' => sub {

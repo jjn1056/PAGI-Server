@@ -90,7 +90,7 @@
     request refused under Expect: 100-continue without a 100 Continue going
     out also closes the connection: its content may arrive at any moment and
     may never arrive, so it can be neither read nor skipped (RFC 9112
-    section 9.6, RFC 9110 section 10.1.1).
+    section 9.3, RFC 9110 section 10.1.1).
 
   Limits
   - max_disconnect_receives (--max-disconnect-receives, default 100): the

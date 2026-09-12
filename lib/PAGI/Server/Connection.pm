@@ -248,7 +248,7 @@ sub new {
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
         # What is left of a request body the application never read, which this
-        # connection consumes before it parses anything else (RFC 9112 s9.6).
+        # connection consumes before it parses anything else (RFC 9112 s9.3).
         discarding_body   => undef,
         access_log        => $args{access_log},     # Filehandle for access logging
         _access_log_formatter => $args{_access_log_formatter},  # Pre-compiled format closure
@@ -4859,7 +4859,7 @@ sub _begin_body_discard {
     # anyway without a response, and MAY hold it back forever (RFC 9110
     # s10.1.1), so nothing here can tell a body from the next request. The
     # server closes instead, which is the intent RFC 9110 s10.1.1 asks a final
-    # response before the whole content to indicate (RFC 9112 s9.6).
+    # response before the whole content to indicate; RFC 9112 s9.3 allows it.
     if ($request->{expect_continue} && !$request->{continue_sent}) {
         $self->_handle_disconnect_and_close('request_complete');
         return;
@@ -5115,7 +5115,7 @@ sub _create_receive {
     # What this closure consumes of the body, and whether it let the client
     # send it, live on the request record rather than in here: the request tail
     # asks the same questions after the application returns, to decide what of
-    # the body is still coming (RFC 9112 s9.6). See _begin_body_discard.
+    # the body is still coming (RFC 9112 s9.3). See _begin_body_discard.
     $request->{body_complete}   = 0;
     $request->{body_bytes_read} = 0;
     $request->{continue_sent}   = 0;

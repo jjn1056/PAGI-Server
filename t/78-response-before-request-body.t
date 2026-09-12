@@ -185,7 +185,7 @@ for my $shape (sort keys %TERMINAL) {
             is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
 
             # What is left of the request body is the connection's to read
-            # before it can take another request (RFC 9112 section 9.6, and
+            # before it can take another request (RFC 9112 section 9.3, and
             # t/80-unread-body-keepalive.t for the whole of that behaviour):
             # until the body is gone, what the client sends is that body. A
             # request line written now is swallowed as the rest of the
