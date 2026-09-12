@@ -3,9 +3,10 @@
 0.002014 - UNRELEASED
 
   Specification
-  - HTTP/2 support now requires Net::HTTP2::nghttp2 0.010 (on_frame_send and the
+  - HTTP/2 support now requires Net::HTTP2::nghttp2 0.011 (on_frame_send and the
     stream-close queries the server uses to end a scope whose request body the
-    client never finished).
+    client never finished; 0.011 makes a submit from inside a callback safe and
+    refuses a re-entrant mem_send instead of corrupting its buffer).
   - Implements HTTP/WebSocket/SSE sub-spec 0.6 (PAGI 0.002009); scopes report
     spec_version '0.6'. The core PAGI version key is unchanged at '0.5'.
     See PAGI::Upgrading.
