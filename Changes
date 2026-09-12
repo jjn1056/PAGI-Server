@@ -87,8 +87,10 @@
     trailer section -- before it parses anything else, bounded by
     max_body_size; over that bound, or on chunk framing it cannot read, the
     connection closes after the response the scope already completed. A
-    refused Expect: 100-continue owes nothing at all, the client having sent
-    no content (RFC 9112 section 9.6, RFC 9110 section 10.1.1).
+    request refused under Expect: 100-continue without a 100 Continue going
+    out also closes the connection: its content may arrive at any moment and
+    may never arrive, so it can be neither read nor skipped (RFC 9112
+    section 9.6, RFC 9110 section 10.1.1).
 
   Limits
   - max_disconnect_receives (--max-disconnect-receives, default 100): the

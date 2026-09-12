@@ -373,12 +373,15 @@ subtest 'h1: pipelined requests carrying bodies all answer' => sub {
 };
 
 # =============================================================================
-# 6. Expect: 100-continue, refused without reading. RFC 9110 section 10.1.1: a
-#    client that asked permission and got a final response instead of a 100
-#    Continue does not send the content. Nothing is owed, so the connection
-#    parses the request that follows as a request.
+# 6. Expect: 100-continue, refused before any 100 Continue went out. The
+#    content can be neither read nor skipped: RFC 9110 section 10.1.1 lets the
+#    client hold it back until invited AND lets it send anyway without waiting,
+#    so no rule on this connection can tell the next bytes from that content.
+#    The connection takes RFC 9112 section 9.6's other branch and closes after
+#    the response, which is also the intent section 10.1.1 asks the server to
+#    indicate when it answers before reading the whole content.
 # =============================================================================
-subtest 'h1: a refused Expect: 100-continue owes no body at all' => sub {
+subtest 'h1: a refused Expect: 100-continue closes the connection after the response' => sub {
     my @log;
     my $server = start_server(log => \@log);
     my ($sock, $pump, $wire, $eof) = open_client($server->port);
@@ -386,22 +389,70 @@ subtest 'h1: a refused Expect: 100-continue owes no body at all' => sub {
     # The client asks before sending, and sends none of the 500 bytes.
     syswrite($sock, "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
                   . "Content-Length: 500\r\nExpect: 100-continue\r\n\r\n");
-    $pump->(sub { $$wire =~ /sign in/ });
+    $pump->(sub { $$eof });
     unlike($$wire, qr{100 Continue}, 'the application refused before any 100 Continue was written');
     like($$wire, qr{^HTTP/1\.1 401\b}, 'so the 401 is the whole of the answer');
+    like($$wire, qr{sign in\z}, 'and the client has all of it');
+    is(statuses($$wire), ['401'], 'nothing else was written');
+    ok($$eof, 'then the connection closed, the content being unreadable either way');
 
-    # The content it never sent is not owed, so this is a request.
-    syswrite($sock, $SECOND);
-    $pump->(sub { $$wire =~ /health/ });
+    # The scope itself ended cleanly with the 401, so the close is a transport
+    # decision taken after it -- exactly as it is over max_body_size (case 3).
+    is([ map { $_->{request} } @served ], ['POST /upload'],
+        'the application saw the one request');
+    is(\@completes, ['/upload'], 'which ended with on_complete');
+    is(\@disconnects, [], 'and never with on_disconnect');
+    is($readings[0], { is_connected => 0, response_complete => 1, disconnect_reason => undef },
+        'the refusing scope read complete, with no disconnect reason');
 
-    is(statuses($$wire), ['401', '200'], 'the next request was answered');
-    is([ map { $_->{request} } @served ], ['POST /upload', 'GET /health'],
-        'the application saw both requests');
-    is($served[0]{client_port}, $served[1]{client_port},
-        'both arrived on the one connection');
-    ok(!$$eof, 'which is still open');
-    is(\@completes, ['/upload', '/health'], 'both scopes ended with on_complete');
+    # An ordinary keep-alive close the client can see from its own exchange:
+    # nothing for an operator to be told about.
     assert_quiet('a refused 100-continue', \@log);
+
+    # The client's next request belongs on its next connection, and is served.
+    my ($sock2, $pump2, $wire2) = open_client($server->port);
+    syswrite($sock2, $SECOND);
+    $pump2->(sub { $$wire2 =~ /health/ });
+    like($$wire2, qr{^HTTP/1\.1 200\b}, 'a fresh connection is answered normally');
+    is([ map { $_->{request} } @served ], ['POST /upload', 'GET /health'],
+        'and that is where the second request was dispatched');
+    assert_quiet('the connection after it', \@log);
+
+    close $sock;
+    close $sock2;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 6b. The same refusal against the client RFC 9110 section 10.1.1 explicitly
+#     permits: one that bounds its wait and sends the content without ever
+#     seeing a 100 Continue (libcurl's default is 1 second). The content is on
+#     the wire with a request behind it, and the only thing that keeps the
+#     content from being parsed as that request is the close.
+# =============================================================================
+subtest 'h1: a 100-continue client that does not wait has its content closed off, not parsed' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    # Headers, all 500 bytes, and the next request, in one write -- the client
+    # did not wait, so the content and a real request line are both in the
+    # buffer when the refusal is written.
+    syswrite($sock, "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+                  . "Content-Length: 500\r\nExpect: 100-continue\r\n\r\n"
+                  . ('A' x 500) . $SECOND);
+    $pump->(sub { $$eof });
+    unlike($$wire, qr{100 Continue}, 'the application refused before any 100 Continue was written');
+
+    is(statuses($$wire), ['401'], 'the client saw its 401 and nothing else');
+    ok($$eof, 'and the connection closed after it');
+    is([ map { $_->{request} } @served ], ['POST /upload'],
+        'the content it sent unbidden was never dispatched as a request, and'
+            . ' the GET /health behind it was never processed either');
+    is(\@completes, ['/upload'], 'the refusing scope ended with on_complete');
+    is(\@disconnects, [], 'not with on_disconnect');
+    assert_quiet('a 100-continue client that did not wait', \@log);
 
     close $sock;
     $server->shutdown->get;

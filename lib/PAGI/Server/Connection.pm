@@ -4854,8 +4854,16 @@ sub _should_keep_alive {
 sub _begin_body_discard {
     my ($self, $request) = @_;
 
-    # RFC 9110 s10.1.1: no 100 Continue went out, so the content never comes.
-    return if $request->{expect_continue} && !$request->{continue_sent};
+    # Content under an expectation the server never answered can neither be
+    # read nor waited out: a client that sent Expect: 100-continue MAY send it
+    # anyway without a response, and MAY hold it back forever (RFC 9110
+    # s10.1.1), so nothing here can tell a body from the next request. The
+    # server closes instead, which is the intent RFC 9110 s10.1.1 asks a final
+    # response before the whole content to indicate (RFC 9112 s9.6).
+    if ($request->{expect_continue} && !$request->{continue_sent}) {
+        $self->_handle_disconnect_and_close('request_complete');
+        return;
+    }
 
     if ($request->{chunked}) {
         return if $request->{body_complete};
