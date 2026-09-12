@@ -11,7 +11,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.010+ required)');
 }
 
 # ============================================================
