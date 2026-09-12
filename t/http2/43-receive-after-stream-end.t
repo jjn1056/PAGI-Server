@@ -938,4 +938,60 @@ subtest 'h2 http: a terminal body the peer cannot take still ends the scope' => 
     shutdown_server($server);
 };
 
+# A refused handshake is not a tunnel. The application answered the extended
+# CONNECT with an ordinary HTTP response, so the request half it leaves open
+# is an unfinished request and RFC 9113 section 8.1's NO_ERROR reset applies
+# to it exactly as it does to an http scope. Only an accepted socket is
+# exempt (RFC 8441 section 5); that one is pinned by t/http2/41 and t/http2/42.
+subtest 'h2 websocket: a refused handshake ends with END_STREAM and a NO_ERROR reset' => sub {
+    reset_case();
+    my (@events, @completes, @disconnects);
+    my ($returned, $readings) = (0, undef);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $cs = $scope->{'pagi.connection'};
+        $cs->on_complete(sub { push @completes, 1 });
+        $cs->on_disconnect(sub { push @disconnects, 1 });
+        await $receive->();                       # websocket.connect
+        await $send->({ type => 'http.response.start', status => 403,
+                        headers => [['content-type', 'text/plain'], ['content-length', 2]] });
+        await $send->({ type => 'http.response.body', body => 'no' });
+        $readings = readings_of($cs);
+        push @events, await $receive->();
+        $returned = 1;
+        return;
+    };
+
+    my (@frames, @closes);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $mark   = scalar @LOG;
+    my $client = create_client(
+        on_frame_recv   => sub { push @frames, { %{ $_[0] } }; 0 },
+        on_stream_close => sub { push @closes, { id => $_[0], code => $_[1] }; 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    my $sid = h2_submit($client, $client_sock, 'websocket');
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok(!$ALARM_FIRED, 'the pump finished without the test alarm');
+    is(wire_for(\@frames, $sid), [ 'HEADERS', 'DATA+END_STREAM', 'RST_STREAM' ],
+        'the refusal ended the stream and then reset it (RFC 9113 8.1)');
+    is(\@closes, [ { id => $sid, code => 0 } ],
+        'the client saw the stream close with NO_ERROR');
+    is($readings, {
+        is_connected => 0, response_started => 1,
+        response_complete => 1, disconnect_reason => undef,
+    }, 'the object reads complete, with no disconnect reason');
+    is(scalar @completes, 1, 'on_complete fired once');
+    is(scalar @disconnects, 0, 'on_disconnect never fired');
+    is(\@events, [ { type => 'http.disconnect' } ],
+        'a receive after the refusal reports the HTTP exchange it was');
+    is($returned, 1, 'the application returned');
+    is(log_levels_since($mark), {}, 'the scope logged nothing at any level');
+
+    eval { $stream_io->close_now };
+    shutdown_server($server);
+};
+
 done_testing;

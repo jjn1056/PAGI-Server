@@ -1524,6 +1524,18 @@ sub _h2_on_frame_sent {
         && ($type == Net::HTTP2::nghttp2::NGHTTP2_DATA()
          || $type == Net::HTTP2::nghttp2::NGHTTP2_HEADERS())
         && ($flags & Net::HTTP2::nghttp2::NGHTTP2_FLAG_END_STREAM());
+    # An accepted WebSocket is the one stream whose open half is not an
+    # unfinished request: RFC 8441 section 5 makes an orderly close an
+    # END_STREAM from each side and reserves RST_STREAM for the exception
+    # path. RFC 9113 section 8.1 offers the reset for a response the server
+    # completed before the request, which a tunnel the application closed by
+    # its own handshake is not. RFC 9113 section 8.5 expects the peer to send
+    # its own END_STREAM once it has received one, so nothing has to abandon
+    # that half. A refused handshake never accepted: it is the ordinary HTTP
+    # response section 8.1 describes, and it resets like any other.
+    my $stream = $self->{h2_streams}{$stream_id};
+    return if $stream && $stream->{is_websocket}
+        && _ws_handshake_accepted($stream->{seq_state});
     # 1 = the request half is finished and the stream is closing on its own;
     # undef = nghttp2 no longer has this stream at all.
     my $request_finished = $self->{h2_session}->get_stream_remote_close($stream_id);

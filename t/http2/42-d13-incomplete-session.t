@@ -144,6 +144,7 @@ sub ws_frames {
 sub errors_in { return [map { $_->{message} } grep { ($_->{level} // '') eq 'error' } @{$_[0]}] }
 
 use constant H2_DATA_FRAME  => 0;      # NGHTTP2_DATA (RFC 9113 section 6.1)
+use constant H2_RST_STREAM  => 3;      # NGHTTP2_RST_STREAM (RFC 9113 section 6.4)
 use constant H2_END_STREAM  => 0x1;    # END_STREAM flag
 
 # ============================================================
@@ -174,14 +175,16 @@ subtest 'h2: an accepted socket abandoned by the app is closed with 1011 and rep
     my ($conn, $stream_io, $client_sock, $server)
         = create_h2_connection(app => $app, logger => sub { push @log, $_[0] });
 
-    my ($wsid, %data, @data_frames);
+    my ($wsid, %data, @data_frames, @rst_frames);
     my $client = create_client(
         on_data_chunk_recv => sub { my ($sid, $d) = @_; $data{$sid} .= $d; 0 },
         on_frame_recv      => sub {
             my ($f) = @_;
+            return 0 unless defined $wsid && $f->{stream_id} == $wsid;
             push @data_frames, { flags => $f->{flags}, length => $f->{length} }
-                if defined $wsid && $f->{type} == H2_DATA_FRAME
-                    && $f->{stream_id} == $wsid;
+                if $f->{type} == H2_DATA_FRAME;
+            push @rst_frames, { flags => $f->{flags} }
+                if $f->{type} == H2_RST_STREAM;
             return 0;
         },
     );
@@ -209,6 +212,11 @@ subtest 'h2: an accepted socket abandoned by the app is closed with 1011 and rep
         if @data_frames;
     is(scalar(grep { $_->{flags} & H2_END_STREAM } @data_frames), 1,
         'exactly one DATA frame ended the stream');
+    # An accepted socket is closed by the WebSocket handshake and an END_STREAM
+    # from each side; RFC 8441 section 5 reserves RST_STREAM for the exception
+    # path, and RFC 9113 section 8.5 expects the peer's own END_STREAM in reply.
+    is(scalar(@rst_frames), 0,
+        'and no RST_STREAM followed it: the Close frame and END_STREAM are the whole ending');
 
     ok($r{cs}, 'the app captured its connection object');
     is($r{cs}->is_connected, 0, 'is_connected is false');
