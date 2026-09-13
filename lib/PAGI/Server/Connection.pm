@@ -748,7 +748,12 @@ sub _h2_on_request {
     $self->{server}->loop->later(sub {
         return unless $weak_self;
         return if $weak_self->{closed};
-        $weak_self->_h2_dispatch_stream($stream_id);
+        # The same boundary the dispatch tail has, for the part of dispatch
+        # that runs before the application: the scope, receive and send
+        # builders throw here, where there is not yet a Future to carry the
+        # failure and nothing but this eval between them and $loop->run.
+        eval { $weak_self->_h2_dispatch_stream($stream_id); 1 }
+            or $weak_self && $weak_self->_h2_connection_handler_error($stream_id, $@);
     });
 }
 
@@ -1289,175 +1294,215 @@ sub _h2_dispatch_stream {
         };
         my $error = $@;
 
-        if ($weak_self) {
-            my $cs = $stream_state->{connection_state};
+        # The boundary HTTP/1.1 has had all along, now around HTTP/2's own
+        # dispatch tail: everything from here on is the SERVER's code, the
+        # application having had its own eval above. An exception from it used
+        # to fail the adopted dispatch Future, and a failed adopted Future
+        # reaches IO::Async::Notifier::invoke_error, which -- with no on_error
+        # on PAGI::Server and no parent notifier -- is a bare die out of
+        # $loop->run, so one connection's fault ended the process. One eval
+        # frame per request; nothing per frame and nothing per receive.
+        eval {
+            if ($weak_self) {
+                my $cs = $stream_state->{connection_state};
 
-            # Client-already-gone carve-out: if the client reset this stream
-            # (or the whole connection tore down) while the app's Future was
-            # still pending, _h2_on_close already ran and drove $cs to an
-            # ABNORMAL terminal state. There is then nothing left to report:
-            # no synthesized 500, no incomplete-response RST, no warning
-            # about a stream the client no longer cares about.
-            #
-            # The test is "abnormal", not merely "terminal": a clean
-            # _mark_complete also leaves $cs disconnected, and it happens
-            # routinely BEFORE the app returns (the send closure flushes
-            # END_STREAM synchronously, so _h2_on_close -> _mark_complete
-            # normally runs inside the app's final await). Keying off
-            # is_connected would swallow every exception thrown after a
-            # fully-delivered response. An abnormal end has a
-            # disconnect_reason; a clean completion leaves it undef.
-            # Every stream (http, websocket, sse) attaches a connection_state
-            # today, so $cs is always defined here; the _h2_stream_alive
-            # fallback below exists only as a defensive default for the
-            # theoretical case of a stream with none.
-            #
-            # A recorded reason of 'server_error' is NOT a "scope already
-            # ended" signal: it is what this very dispatch wrapper's
-            # incomplete-response branches below record before resetting the
-            # stream with RST_STREAM INTERNAL_ERROR, so it must still warn.
-            # Every other server-decided end (idle_timeout, keepalive_timeout,
-            # protocol_error, queue_overflow, server_shutdown, app_abort) marks
-            # the object with its own token BEFORE the app's pending receive is
-            # woken (State Transition Order), so by the time the app returns
-            # the scope has already ended with a reason of its own; those ends
-            # take the carve-out exactly like a client disconnect and do not
-            # warn.
-            my $stream_alive = $weak_self->_h2_stream_alive($stream_id);
-            my $reason = $cs ? $cs->disconnect_reason : undef;
-            my $scope_already_ended = $cs ? (defined($reason) && $reason ne 'server_error')
-                                          : !$stream_alive;
+                # Client-already-gone carve-out: if the client reset this stream
+                # (or the whole connection tore down) while the app's Future was
+                # still pending, _h2_on_close already ran and drove $cs to an
+                # ABNORMAL terminal state. There is then nothing left to report:
+                # no synthesized 500, no incomplete-response RST, no warning
+                # about a stream the client no longer cares about.
+                #
+                # The test is "abnormal", not merely "terminal": a clean
+                # _mark_complete also leaves $cs disconnected, and it happens
+                # routinely BEFORE the app returns (the send closure flushes
+                # END_STREAM synchronously, so _h2_on_close -> _mark_complete
+                # normally runs inside the app's final await). Keying off
+                # is_connected would swallow every exception thrown after a
+                # fully-delivered response. An abnormal end has a
+                # disconnect_reason; a clean completion leaves it undef.
+                # Every stream (http, websocket, sse) attaches a connection_state
+                # today, so $cs is always defined here; the _h2_stream_alive
+                # fallback below exists only as a defensive default for the
+                # theoretical case of a stream with none.
+                #
+                # A recorded reason of 'server_error' is NOT a "scope already
+                # ended" signal: it is what this very dispatch wrapper's
+                # incomplete-response branches below record before resetting the
+                # stream with RST_STREAM INTERNAL_ERROR, so it must still warn.
+                # Every other server-decided end (idle_timeout, keepalive_timeout,
+                # protocol_error, queue_overflow, server_shutdown, app_abort) marks
+                # the object with its own token BEFORE the app's pending receive is
+                # woken (State Transition Order), so by the time the app returns
+                # the scope has already ended with a reason of its own; those ends
+                # take the carve-out exactly like a client disconnect and do not
+                # warn.
+                #
+                # That exception is a per-STREAM one. Once the CONNECTION itself
+                # has ended, its h2 sweep has stamped server_error on every stream
+                # it caught in flight, and a connection-level end is quiet for
+                # those scopes exactly as server_shutdown and protocol_error are:
+                # the ending is recorded and logged once, for the connection, and
+                # an application whose connection was destroyed under it never had
+                # the chance to start the response it would otherwise be accused
+                # of withholding.
+                my $stream_alive = $weak_self->_h2_stream_alive($stream_id);
+                my $reason = $cs ? $cs->disconnect_reason : undef;
+                my $connection_ended = $weak_self->{closed} || $weak_self->{_disconnect_handled};
+                my $scope_already_ended =
+                    $cs ? (defined($reason) && ($connection_ended || $reason ne 'server_error'))
+                        : !$stream_alive;
 
-            unless ($scope_already_ended) {
-                if (!$stream_state->{response_started}) {
-                    # If the application failed, OR returned without starting a
-                    # response, synthesize a 500 (only possible while no response
-                    # has begun). A clean return that produced no response is a
-                    # protocol error, same as a throw.
-                    $self->_log(error => $error
-                        ? "PAGI application error (HTTP/2 stream $stream_id): $error"
-                        : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)");
-                    # Mark BEFORE the response settles: submitting it (below) can
-                    # complete the stream synchronously once flushed, and
-                    # _h2_on_close would then mark this same connection_state
-                    # terminal if it got there first. _mark_disconnected is
-                    # idempotent -- first mark wins -- so marking here first
-                    # guarantees the app observes server_error. The synthesized
-                    # 500 is this stream's response (spec section 9.1), so mark
-                    # it started FIRST: _mark_disconnected fires on_disconnect
-                    # callbacks synchronously, and they must observe
-                    # response_started true.
-                    #
-                    # Record the reason on the stream first, the way every other
-                    # server-decided per-stream end does (keepalive timeout, sse
-                    # idle timeout, protocol close, abort). This is the fact
-                    # _h2_on_close and both receive fallbacks read when they
-                    # synthesize this scope's disconnect event; without it they
-                    # fall back to 'client_closed' and the event contradicts the
-                    # object, which Www.pod "Agreement with disconnect events"
-                    # forbids.
-                    my $no_response_detail = $error ? _detail_from_error($error)
-                                                   : 'no response was started';
-                    $weak_self->_record_end($stream_state, reason => 'server_error',
-                        detail => $no_response_detail);
-                    $cs->_mark_response_started if $cs;
-                    $cs->_mark_disconnected('server_error', $no_response_detail) if $cs;
-                    # The stream may already be gone (a zero-error close marked it
-                    # server_error and the entry is doomed-but-present); nghttp2 must
-                    # not be asked to answer a stream it has released.
-                    eval {
-                        $weak_self->{h2_session}->submit_response($stream_id,
-                            status  => 500,
-                            headers => [
-                                ['content-type', 'text/plain'],
-                                ['date', $weak_self->{protocol}->format_date],
-                            ],
-                            body    => "Internal Server Error\n",
-                        );
-                        $weak_self->_h2_write_pending;
-                    } if $stream_alive;
-                }
-                elsif ($stream_state->{is_websocket} || $stream_state->{is_sse}) {
-                    # The generic incomplete-response test below is keyed on the
-                    # http state name 'complete', which neither of these scopes
-                    # can reach. Ask each scope the same two questions against
-                    # its own mirrored state instead (Www.pod "Meaning per
-                    # scope": a stream abandoned without its own clean end).
-                    #
-                    # "Started" is scope_started, not the streaming branch alone:
-                    # Www.pod counts a refusal's http.response.start as the
-                    # scope's start, and a refusal abandoned before its terminal
-                    # event is an incomplete response exactly like an abandoned
-                    # stream ("Application Left a Response Incomplete" names the
-                    # refusal case first).
-                    my $seq_now = $stream_state->{seq_state};
-                    my $kind    = $stream_state->{is_websocket} ? 'websocket' : 'sse';
-                    my $started = PAGI::Server::EventValidator::scope_started($kind, $seq_now);
-                    my $clean   = $stream_state->{is_websocket}
-                                ? _h2_ws_clean_end($stream_state)
-                                : PAGI::Server::EventValidator::scope_send_clean('sse', $seq_now);
-                    if ($started && !$clean) {
-                        $weak_self->_h2_incomplete_scope_end($stream_id, $stream_state, $error);
+                unless ($scope_already_ended) {
+                    if (!$stream_state->{response_started}) {
+                        # If the application failed, OR returned without starting a
+                        # response, synthesize a 500 (only possible while no response
+                        # has begun). A clean return that produced no response is a
+                        # protocol error, same as a throw.
+                        $self->_log(error => $error
+                            ? "PAGI application error (HTTP/2 stream $stream_id): $error"
+                            : "PAGI application returned without starting a response (HTTP/2 stream $stream_id)");
+                        # Mark BEFORE the response settles: submitting it (below) can
+                        # complete the stream synchronously once flushed, and
+                        # _h2_on_close would then mark this same connection_state
+                        # terminal if it got there first. _mark_disconnected is
+                        # idempotent -- first mark wins -- so marking here first
+                        # guarantees the app observes server_error. The synthesized
+                        # 500 is this stream's response (spec section 9.1), so mark
+                        # it started FIRST: _mark_disconnected fires on_disconnect
+                        # callbacks synchronously, and they must observe
+                        # response_started true.
+                        #
+                        # Record the reason on the stream first, the way every other
+                        # server-decided per-stream end does (keepalive timeout, sse
+                        # idle timeout, protocol close, abort). This is the fact
+                        # _h2_on_close and both receive fallbacks read when they
+                        # synthesize this scope's disconnect event; without it they
+                        # fall back to 'client_closed' and the event contradicts the
+                        # object, which Www.pod "Agreement with disconnect events"
+                        # forbids.
+                        my $no_response_detail = $error ? _detail_from_error($error)
+                                                       : 'no response was started';
+                        $weak_self->_record_end($stream_state, reason => 'server_error',
+                            detail => $no_response_detail);
+                        $cs->_mark_response_started if $cs;
+                        $cs->_mark_disconnected('server_error', $no_response_detail) if $cs;
+                        # The stream may already be gone (a zero-error close marked it
+                        # server_error and the entry is doomed-but-present); nghttp2 must
+                        # not be asked to answer a stream it has released.
+                        eval {
+                            $weak_self->{h2_session}->submit_response($stream_id,
+                                status  => 500,
+                                headers => [
+                                    ['content-type', 'text/plain'],
+                                    ['date', $weak_self->{protocol}->format_date],
+                                ],
+                                body    => "Internal Server Error\n",
+                            );
+                            $weak_self->_h2_write_pending;
+                        } if $stream_alive;
                     }
-                    elsif ($clean) {
-                        # Clean end -- a completed closing handshake, sse.close,
-                        # or a completed refusal on either scope. _h2_on_close
-                        # ordinarily marks this already; mark here too in case
-                        # this coroutine resumed first -- idempotent.
-                        $cs->_mark_complete if $cs;
-                        $self->_log(error => 'PAGI application error after '
-                            . _h2_scope_verb($kind, $seq_now)
-                            . " ended cleanly (HTTP/2 stream $stream_id): $error")
-                            if $error;
+                    elsif ($stream_state->{is_websocket} || $stream_state->{is_sse}) {
+                        # The generic incomplete-response test below is keyed on the
+                        # http state name 'complete', which neither of these scopes
+                        # can reach. Ask each scope the same two questions against
+                        # its own mirrored state instead (Www.pod "Meaning per
+                        # scope": a stream abandoned without its own clean end).
+                        #
+                        # "Started" is scope_started, not the streaming branch alone:
+                        # Www.pod counts a refusal's http.response.start as the
+                        # scope's start, and a refusal abandoned before its terminal
+                        # event is an incomplete response exactly like an abandoned
+                        # stream ("Application Left a Response Incomplete" names the
+                        # refusal case first).
+                        my $seq_now = $stream_state->{seq_state};
+                        my $kind    = $stream_state->{is_websocket} ? 'websocket' : 'sse';
+                        my $started = PAGI::Server::EventValidator::scope_started($kind, $seq_now);
+                        my $clean   = $stream_state->{is_websocket}
+                                    ? _h2_ws_clean_end($stream_state)
+                                    : PAGI::Server::EventValidator::scope_send_clean('sse', $seq_now);
+                        if ($started && !$clean) {
+                            $weak_self->_h2_incomplete_scope_end($stream_id, $stream_state, $error);
+                        }
+                        elsif ($clean) {
+                            # Clean end -- a completed closing handshake, sse.close,
+                            # or a completed refusal on either scope. _h2_on_close
+                            # ordinarily marks this already; mark here too in case
+                            # this coroutine resumed first -- idempotent.
+                            $cs->_mark_complete if $cs;
+                            $self->_log(error => 'PAGI application error after '
+                                . _h2_scope_verb($kind, $seq_now)
+                                . " ended cleanly (HTTP/2 stream $stream_id): $error")
+                                if $error;
+                        }
+                        # else ($started false, $clean false): the application never
+                        # accepted, never started a stream, and never refused. The
+                        # !response_started arm above has already answered that case.
                     }
-                    # else ($started false, $clean false): the application never
-                    # accepted, never started a stream, and never refused. The
-                    # !response_started arm above has already answered that case.
-                }
-                elsif ($cs && (($stream_state->{seq_state} // 'complete') ne 'complete')) {
-                    # Response started but never finished: the app either
-                    # returned cleanly without sending the terminal body/file/fh
-                    # (or trailers), or threw after starting. Either way the
-                    # stream is framed but unterminated -- there is no way to
-                    # synthesize END_STREAM without lying about the body, so
-                    # reset the stream instead. Only plain HTTP streams reach
-                    # here: WebSocket/SSE are handled by their own arms above.
-                    # Trailers-specific parenthetical mirrors the h1 wording (see
-                    # _handle_request's incomplete branch) -- appended after the
-                    # stream-id parenthetical so t/http2/24-incomplete-response.t's
-                    # "...incomplete response (HTTP/2 stream $stream_id)" pin
-                    # still matches as a contiguous substring.
-                    my $trailers_note = (($stream_state->{seq_state} // '') eq 'awaiting_trailers')
-                        ? ' (trailers were declared but never sent)' : '';
-                    $self->_log(error => $error
-                        ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error"
-                        : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)$trailers_note");
-                    # Mark BEFORE the RST. _h2_on_close fires for our own RST
-                    # too (as an abnormal close, since seq_state never reached
-                    # 'complete') and would mark this same connection_state
-                    # 'client_closed' if it got there first. _mark_disconnected
-                    # is idempotent -- first mark wins -- so marking here first
-                    # guarantees the app observes server_error.
-                    $cs->_mark_disconnected('server_error',
-                        $error ? _detail_from_error($error)
-                                : (($stream_state->{seq_state} // '') eq 'awaiting_trailers'
-                                    ? 'trailers were declared but never sent'
-                                    : 'response started but never completed'));
-                    $weak_self->_h2_reset_stream($stream_id, _h2_rst_error_code());
-                }
-                elsif ($error) {
-                    # Response already complete; cannot send a 500 or usefully
-                    # reset a finished stream. Log only.
-                    $self->_log(error => "PAGI application error after response started (HTTP/2 stream $stream_id): $error");
+                    elsif ($cs && (($stream_state->{seq_state} // 'complete') ne 'complete')) {
+                        # Response started but never finished: the app either
+                        # returned cleanly without sending the terminal body/file/fh
+                        # (or trailers), or threw after starting. Either way the
+                        # stream is framed but unterminated -- there is no way to
+                        # synthesize END_STREAM without lying about the body, so
+                        # reset the stream instead. Only plain HTTP streams reach
+                        # here: WebSocket/SSE are handled by their own arms above.
+                        # Trailers-specific parenthetical mirrors the h1 wording (see
+                        # _handle_request's incomplete branch) -- appended after the
+                        # stream-id parenthetical so t/http2/24-incomplete-response.t's
+                        # "...incomplete response (HTTP/2 stream $stream_id)" pin
+                        # still matches as a contiguous substring.
+                        my $trailers_note = (($stream_state->{seq_state} // '') eq 'awaiting_trailers')
+                            ? ' (trailers were declared but never sent)' : '';
+                        $self->_log(error => $error
+                            ? "PAGI application error after response started (HTTP/2 stream $stream_id): $error"
+                            : "PAGI application returned with an incomplete response (HTTP/2 stream $stream_id)$trailers_note");
+                        # Mark BEFORE the RST. _h2_on_close fires for our own RST
+                        # too (as an abnormal close, since seq_state never reached
+                        # 'complete') and would mark this same connection_state
+                        # 'client_closed' if it got there first. _mark_disconnected
+                        # is idempotent -- first mark wins -- so marking here first
+                        # guarantees the app observes server_error.
+                        $cs->_mark_disconnected('server_error',
+                            $error ? _detail_from_error($error)
+                                    : (($stream_state->{seq_state} // '') eq 'awaiting_trailers'
+                                        ? 'trailers were declared but never sent'
+                                        : 'response started but never completed'));
+                        $weak_self->_h2_reset_stream($stream_id, _h2_rst_error_code());
+                    }
+                    elsif ($error) {
+                        # Response already complete; cannot send a 500 or usefully
+                        # reset a finished stream. Log only.
+                        $self->_log(error => "PAGI application error after response started (HTTP/2 stream $stream_id): $error");
+                    }
                 }
             }
-        }
 
-        # Notify server that request completed (for max_requests tracking)
-        $weak_self->{server}->_on_request_complete if $weak_self && $weak_self->{server};
+            # Notify server that request completed (for max_requests tracking)
+            $weak_self->{server}->_on_request_complete if $weak_self && $weak_self->{server};
+            1;
+        } or do {
+            $self->_h2_connection_handler_error($stream_id, $@);
+        };
     })->();
 
     $self->{server}->adopt_future($future);
+}
+
+# What both HTTP/2 dispatch boundaries do with what they caught, and what the
+# HTTP/1.1 read handler's eval has always done with what it catches: name the
+# fault once, then end this connection with server_error and the exception as
+# its disconnect_detail (Www.pod "Standard Disconnect Reasons").
+#
+# The close is the default close_when_empty, not close_now: a response the
+# application had already delivered in full before the server's tail failed
+# still reaches the peer, exactly as it does on HTTP/1.1 where those bytes are
+# already in the stream's buffer, and _close reserves close_now for app_abort.
+sub _h2_connection_handler_error {
+    my ($self, $stream_id, $error) = @_;
+    $self->_log(error => "PAGI connection handler error (HTTP/2 stream $stream_id): $error");
+    $self->_handle_disconnect_and_close('server_error', detail => _detail_from_error($error));
+    return;
 }
 
 # The event that started this scope, for the messages that name it. A
