@@ -169,6 +169,21 @@ sub raw_frame {
          . pack('N', $stream_id & 0x7fffffff) . $payload;
 }
 
+# RFC 7541 section 6.2.2: Literal Header Field without Indexing, New Name.
+# Enough for short ASCII fixtures -- no huffman, no dynamic table.
+sub hpack_literal_new_name {
+    my ($name, $value) = @_;
+    return "\x00" . chr(length $name) . $name . chr(length $value) . $value;
+}
+
+sub raw_headers_frame {
+    my ($stream_id, $pairs, %o) = @_;
+    my $payload = join('', map { hpack_literal_new_name(@$_) } @$pairs);
+    my $flags = 0x4;                    # END_HEADERS
+    $flags |= 0x1 if $o{end_stream};
+    return raw_frame(0x1, $flags, $stream_id, $payload);
+}
+
 sub errors_since {
     my ($mark) = @_;
     return grep { ($_->{level} // '') =~ /^(warn|error)$/ } @LOG[$mark .. $#LOG];
@@ -237,8 +252,12 @@ subtest 'a frame nghttp2 rejects reaches the scope as a protocol error' => sub {
     like($end->{detail}, qr/NGHTTP2_ERR_PROTO/,
         'and names nghttp2\'s error by the constant the binding exports');
 
-    is(scalar(errors_since($mark)), 0, 'a misbehaving client logged nothing')
-        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } errors_since($mark));
+    my @logged = errors_since($mark);
+    is(scalar(@logged), 1, 'the violation put exactly one line in the log')
+        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } @logged);
+    is($logged[0]{level}, 'error', 'at error level');
+    like($logged[0]{message}, qr/WINDOW_UPDATE/,
+        'and the log and the object say the same thing');
     is($ALARM_FIRED, 0, 'no pump alarm');
 
     $stream_io->close_now;
@@ -260,20 +279,33 @@ subtest 'nghttp2\'s own message reaches the scope that was open' => sub {
 
     # RFC 9113 section 8.2.2 forbids connection-specific header fields. nghttp2
     # rejects this request without ever delivering it, so the only scope left
-    # to report the reason is the one already open on the first stream.
+    # to report the reason is the one already open on the first stream. The
+    # value is long because nghttp2 quotes the peer's own bytes back in its
+    # message, up to its own 4096-byte cap: what a scope reads has to be
+    # bounded below that.
     submit_open_request($client, $sock, '/forbidden',
-        headers => [['connection', 'keep-alive']]);
+        headers => [['connection', 'A' x 4000]]);
     pump($client, $sock, 20, sub { $ENDED{'/open'} });
 
     my $end = $ENDED{'/open'} // {};
     is($end->{connected}, 0, 'the open scope ended');
     is($end->{reason}, 'protocol_error', 'as a protocol error');
+    # Only the field name is asserted. Net::HTTP2::nghttp2::Session's POD for
+    # on_error says nghttp2's wording is free to change between library
+    # versions, so the sentence around the name is not a stable thing to pin.
     like($end->{detail}, qr/\bconnection\b/,
-        'the detail carries nghttp2\'s own account of the offending field')
+        'the detail names the field nghttp2 would not permit')
         or diag('detail: ' . ($end->{detail} // '(undef)'));
+    is(length($end->{detail} // ''), 256,
+        'and the peer does not choose how much of it an application reads');
+    like($end->{detail}, qr/\Q...\E\z/, 'the truncation says it happened');
 
-    is(scalar(errors_since($mark)), 0, 'a misbehaving client logged nothing')
-        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } errors_since($mark));
+    my @logged = errors_since($mark);
+    is(scalar(@logged), 1, 'the violation put exactly one line in the log')
+        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } @logged);
+    is($logged[0]{level}, 'error', 'at error level');
+    like($logged[0]{message}, qr/\bconnection\b/,
+        'and the log and the object say the same thing');
     is($ALARM_FIRED, 0, 'no pump alarm');
 
     $stream_io->close_now;
@@ -316,6 +348,58 @@ subtest 'a graceful shutdown announces GOAWAY naming the last stream taken up' =
 
     $stream_io->close_now;
     eval { $loop->remove($server) };
+};
+
+# ============================================================
+# (4) a diagnostic nghttp2 only tolerated does not blame the peer
+# ============================================================
+# nghttp2 reports a header field it merely IGNORES through the same on_error
+# callback, and with the same NGHTTP2_ERR_HTTP_HEADER code, as one it rejects
+# (measured against Net::HTTP2::nghttp2 0.011: an OWS-padded value and a
+# connection-specific field both arrive as -531). So the message cannot decide
+# whether the peer broke anything. What decides is which party ended the
+# session: here the peer sends its own GOAWAY, and the ending is the peer's.
+#
+# Asserted on the CONNECTION's end record, not a scope's: every stream here
+# closed first and recorded its own ending under the first-wins rule, so no
+# scope ever observes the connection-level reason.
+subtest 'a header nghttp2 tolerated does not turn the peer\'s own GOAWAY into a violation' => sub {
+    %ENDED = (); $ALARM_FIRED = 0;
+    my $mark = scalar @LOG;
+
+    my ($conn, $stream_io, $sock, $server) = create_h2_connection(app => $parked_app);
+    my $client = create_client;
+    handshake($client, $sock);
+    submit_open_request($client, $sock, '/open');
+    pump($client, $sock, 10);
+
+    # One feed: a request carrying an OWS-padded value (RFC 9113 section 8.2.1
+    # -- nghttp2 drops the field and carries on), then both streams cancelled,
+    # then the peer's own GOAWAY with NO_ERROR. Hand-built because a client
+    # session applies the same validation and would refuse to send the padded
+    # value at all.
+    $sock->syswrite(
+        raw_headers_frame(3, [
+            [':method', 'POST'], [':path', '/padded'], [':scheme', 'http'],
+            [':authority', 'localhost'], ['x-padded', '  padded-value  '],
+        ])
+        . raw_frame(3, 0, 1, pack('N', 8))      # RST_STREAM CANCEL, stream 1
+        . raw_frame(3, 0, 3, pack('N', 8))      # RST_STREAM CANCEL, stream 3
+        . raw_frame(7, 0, 0, pack('NN', 0, 0))  # GOAWAY, last stream 0, NO_ERROR
+    );
+    pump($client, $sock, 30, sub { $ENDED{'/open'} });
+
+    is($conn->{end_reason}, 'client_closed',
+        'the peer ended the connection, and the peer is what it is named for');
+    unlike($conn->{end_detail} // '', qr/Ignoring/,
+        'a field nghttp2 only ignored is not offered as the reason')
+        or diag('detail: ' . ($conn->{end_detail} // '(undef)'));
+    is(scalar(errors_since($mark)), 0, 'and a clean goodbye logged nothing')
+        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } errors_since($mark));
+    is($ALARM_FIRED, 0, 'no pump alarm');
+
+    $stream_io->close_now;
+    shutdown_server($server);
 };
 
 done_testing;

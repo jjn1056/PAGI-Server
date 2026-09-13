@@ -590,6 +590,10 @@ sub _init_h2_session {
                 _h2_frame_name($type), $stream_id,
                 _h2_lib_error_name($lib_error_code)));
         },
+        on_goaway => sub {
+            return unless $weak_self;
+            $weak_self->{h2_feed}{peer_goaway} = 1;
+        },
     );
 
     # Send initial SETTINGS to client
@@ -617,13 +621,26 @@ sub _h2_lib_error_name {
     return $H2_LIB_ERROR_NAME{$code} // "nghttp2 error $code";
 }
 
-# What nghttp2 last said about the peer's frames while this feed ran. A
-# diagnostic string on the connection, cleared at the start of every feed and
-# released with the connection: nghttp2 has already decided what to do about
-# the violation, and this only records how to describe it.
+# nghttp2's message is the peer's own header names and values quoted back,
+# bounded only by nghttp2's 4096-byte cap on the whole message. An application
+# reads it as disconnect_detail and an operator reads it in a log line, so what
+# is kept is one line's worth.
+my $H2_DETAIL_MAX = 256;
+
+sub _h2_bounded_detail {
+    my ($message) = @_;
+    return $message if !defined $message || length($message) <= $H2_DETAIL_MAX;
+    return substr($message, 0, $H2_DETAIL_MAX - 3) . '...';
+}
+
+# What this feed learned about how the session is ending: nghttp2's account of
+# the peer's frames, and whether the peer's own GOAWAY arrived. One hashref on
+# the connection, cleared at the start of every feed and released with the
+# connection -- nghttp2 has already decided what to do about a violation, and
+# this only records how to describe the ending.
 sub _h2_record_nghttp2_diagnostic {
     my ($self, $message) = @_;
-    $self->{h2_nghttp2_detail} = $message;
+    $self->{h2_feed}{detail} = _h2_bounded_detail($message);
     return;
 }
 
@@ -632,7 +649,7 @@ sub _h2_process_data {
     return unless $self->{h2_session};
 
     if (length($self->{buffer}) > 0) {
-        delete $self->{h2_nghttp2_detail};
+        delete $self->{h2_feed};
         $self->_h2_session_call(sub { $self->{h2_session}->feed($self->{buffer}) });
         $self->{buffer} = '';
     }
@@ -641,16 +658,22 @@ sub _h2_process_data {
 
     # Close connection when session is done (GOAWAY received or sent)
     if ($self->{h2_session} && !$self->{h2_session}->want_read) {
-        # nghttp2 ends the session itself when the peer breaks HTTP/2, and it
-        # is the only party that knows which rule was broken. A diagnostic
-        # from the feed that just ended the session is that rule, and makes
-        # this a protocol_error rather than the ordinary peer-went-away close
-        # (Compliance.pod "disconnect_detail contents"). A diagnostic nghttp2
-        # answered per-stream does not survive the next feed, so it cannot
-        # blame a later, unrelated close.
-        return $self->_handle_disconnect_and_close('protocol_error',
-            detail => $self->{h2_nghttp2_detail})
-            if defined $self->{h2_nghttp2_detail};
+        # Which party ended the session is what the ending is named for. A peer
+        # that sent GOAWAY ended it itself, and anything nghttp2 said about the
+        # peer's frames on the way is context, not a verdict: nghttp2 reports a
+        # header field it merely ignores through the same callback and the same
+        # NGHTTP2_ERR_HTTP_HEADER code as one it rejects, so the message cannot
+        # decide. With no GOAWAY from the peer it was nghttp2 that ended the
+        # session, and it only does that on a violation -- its diagnostic is
+        # then the rule that was broken, which nghttp2 alone knows
+        # (Compliance.pod "disconnect_detail contents"). Nothing survives the
+        # next feed, so a diagnostic cannot blame a later, unrelated close.
+        my $feed = $self->{h2_feed};
+        if ($feed && defined $feed->{detail} && !$feed->{peer_goaway}) {
+            $self->_log(error => "PAGI connection error (HTTP/2): $feed->{detail}");
+            return $self->_handle_disconnect_and_close('protocol_error',
+                detail => $feed->{detail});
+        }
         $self->_handle_disconnect_and_close;
     }
 }
@@ -6109,15 +6132,20 @@ sub _close {
         # A shutdown is the one ending the peer can still act on: RFC 9113
         # section 6.8 has it read GOAWAY's last stream id to learn which of
         # its requests this server never took up, and may retry elsewhere.
-        # terminate_session puts nothing on the wire, so those clients used to
-        # see a bare TCP close. Every other ending keeps it -- a protocol
-        # error nghttp2 already answered with its own GOAWAY, a socket that
-        # has gone away.
+        # terminate_session puts nothing on the wire. Every other ending keeps
+        # it -- a protocol error nghttp2 already answered with its own GOAWAY,
+        # a socket that has gone away.
+        my $announced = 0;
         if ($self->_end_reason($self, '') eq 'server_shutdown') {
-            eval { $self->{h2_session}->graceful_shutdown; $self->_h2_write_pending };
-        } else {
-            eval { $self->{h2_session}->terminate(0) };
+            $announced = eval {
+                $self->{h2_session}->graceful_shutdown;
+                $self->_h2_write_pending;
+                1;
+            };
         }
+        # An announcement that could not be queued or flushed leaves the
+        # session running in nghttp2, so it still needs the ordinary ending.
+        eval { $self->{h2_session}->terminate(0) } unless $announced;
         delete $self->{h2_session};
     }
 

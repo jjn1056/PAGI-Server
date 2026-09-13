@@ -190,8 +190,10 @@ C<app_abort>. On HTTP/2 the violated rule comes from nghttp2, which parses
 the peer's frames and is the only party that knows which rule was broken: a
 frame it rejected is named by its RFC 9113 frame type and the
 C<NGHTTP2_ERR_*> constant nghttp2 reported, and a diagnostic it offers in
-words is passed through as it stands. Pinned across C<t/69>, C<t/71>,
-C<t/72>, C<t/http2/31> and C<t/http2/45>.
+words is passed through as it stands. That diagnostic quotes the peer's own
+header names and values back, so it is peer-controlled text; PAGI::Server
+truncates it to 256 bytes before an application or a log line sees it. Pinned
+across C<t/69>, C<t/71>, C<t/72>, C<t/http2/31> and C<t/http2/45>.
 
 =item * B<Error logging.> The spec says the server SHOULD log an incomplete
 response or a missing response at error level. PAGI::Server logs exactly one

@@ -135,6 +135,18 @@ flags once nghttp2 has serialized it -- the point at which an C<END_STREAM>
 has claimed its place in the output. A handler may queue further frames, but
 must not feed or extract the session from inside it.
 
+C<on_invalid_frame>, C<on_nghttp2_error> and C<on_goaway> are optional, and
+report what nghttp2 saw in the peer's frames. C<on_invalid_frame> fires with
+the stream id, RFC 9113 frame type and C<NGHTTP2_ERR_*> code of a frame
+nghttp2 rejected. C<on_nghttp2_error> fires with an C<NGHTTP2_ERR_*> code and
+nghttp2's own diagnostic in words; nghttp2 offers one for a header field it
+merely ignores as well as for one it rejects, and with the same code, so the
+message is context and not a verdict. C<on_goaway> fires, with no arguments,
+when the peer's C<GOAWAY> arrives -- the fact that separates a session nghttp2
+ended on a violation from one the peer ended itself. All three are reports:
+nghttp2 has already chosen the C<RST_STREAM> or C<GOAWAY> a violation calls
+for.
+
 =cut
 
 sub create_session {
@@ -151,6 +163,7 @@ sub create_session {
         on_frame_sent      => $callbacks{on_frame_sent},
         on_nghttp2_error   => $callbacks{on_nghttp2_error},
         on_invalid_frame   => $callbacks{on_invalid_frame},
+        on_goaway          => $callbacks{on_goaway},
         settings   => {
             max_concurrent_streams  => $self->{max_concurrent_streams},
             initial_window_size     => $self->{initial_window_size},
@@ -186,6 +199,7 @@ sub new {
         on_frame_sent      => $args{on_frame_sent},
         on_nghttp2_error   => $args{on_nghttp2_error},
         on_invalid_frame   => $args{on_invalid_frame},
+        on_goaway          => $args{on_goaway},
         settings    => $args{settings},
         h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
@@ -440,6 +454,14 @@ sub _init_nghttp2_session {
                     }
                 }
 
+                # GOAWAY frame = the peer is ending the connection itself, so
+                # whatever nghttp2 said about the peer's frames on the way is
+                # not why the session ended. The connection needs that fact to
+                # name the ending (Connection.pm, _h2_process_data).
+                if ($type == Net::HTTP2::nghttp2::NGHTTP2_GOAWAY()) {
+                    $weak_self->{on_goaway}->() if $weak_self->{on_goaway};
+                }
+
                 return 0;
             },
 
@@ -676,10 +698,12 @@ Queue a C<GOAWAY> announcing an orderly shutdown, naming the highest
 peer-initiated stream this session took up and C<NO_ERROR> as the reason.
 The caller flushes it like any other queued frame.
 
-Unlike C<terminate>, this leaves the session able to finish the streams it
-already accepted: RFC 9113 section 6.8 has the peer read the last stream id
-to learn which of its requests were never acted on and may safely be retried
-elsewhere.
+Unlike C<terminate>, which puts nothing on the wire, this tells the peer where
+the server stopped: RFC 9113 section 6.8 has it read the last stream id to
+learn which of its requests were never acted on and may safely be retried
+elsewhere. It does not itself keep the connection open. The server closes the
+connection as part of the same shutdown, so streams still in flight end with
+it.
 
 =cut
 
