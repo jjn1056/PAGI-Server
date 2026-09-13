@@ -312,6 +312,7 @@ sub new {
         is_h2             => 0,                        # Set during start() if HTTP/2 detected
         h2_session        => undef,                    # PAGI::Server::Protocol::HTTP2::Session
         h2_streams        => {},                       # Per-stream state for HTTP/2
+        h2_peer_goaway    => 0,                        # The peer announced GOAWAY on this connection
         # Transport info (tcp or unix)
         transport_type    => $args{transport_type} // 'tcp',
         transport_path    => $args{transport_path},  # socket path for unix
@@ -590,9 +591,14 @@ sub _init_h2_session {
                 _h2_frame_name($type), $stream_id,
                 _h2_lib_error_name($lib_error_code)));
         },
+        # RFC 9113 section 6.8: a peer that sends GOAWAY is shutting the
+        # connection down, and may do so while streams are still open --
+        # nghttp2 keeps the session readable until the last of those closes.
+        # So the peer's goodbye outlives the feed that carried it, and is kept
+        # for as long as nghttp2 keeps its own record of it: the connection.
         on_goaway => sub {
             return unless $weak_self;
-            $weak_self->{h2_feed}{peer_goaway} = 1;
+            $weak_self->{h2_peer_goaway} = 1;
         },
     );
 
@@ -634,10 +640,11 @@ sub _h2_bounded_detail {
 }
 
 # What this feed learned about how the session is ending: nghttp2's account of
-# the peer's frames, and whether the peer's own GOAWAY arrived. One hashref on
-# the connection, cleared at the start of every feed and released with the
-# connection -- nghttp2 has already decided what to do about a violation, and
-# this only records how to describe the ending.
+# the peer's frames. One hashref on the connection, cleared at the start of
+# every feed and released with the connection -- nghttp2 has already decided
+# what to do about a violation, and this only records how to describe the
+# ending. The peer's own GOAWAY is not kept here; it is a fact about the
+# connection rather than about one feed (h2_peer_goaway).
 sub _h2_record_nghttp2_diagnostic {
     my ($self, $message) = @_;
     $self->{h2_feed}{detail} = _h2_bounded_detail($message);
@@ -666,10 +673,13 @@ sub _h2_process_data {
         # decide. With no GOAWAY from the peer it was nghttp2 that ended the
         # session, and it only does that on a violation -- its diagnostic is
         # then the rule that was broken, which nghttp2 alone knows
-        # (Compliance.pod "disconnect_detail contents"). Nothing survives the
-        # next feed, so a diagnostic cannot blame a later, unrelated close.
+        # (Compliance.pod "disconnect_detail contents"). The two facts are read
+        # from where each one lives: a peer that announced GOAWAY is closing and
+        # stays closing, so that is the connection's, while a diagnostic
+        # describes the feed it arrived in and is dropped at the next one, so it
+        # cannot blame a later, unrelated close.
         my $feed = $self->{h2_feed};
-        if ($feed && defined $feed->{detail} && !$feed->{peer_goaway}) {
+        if ($feed && defined $feed->{detail} && !$self->{h2_peer_goaway}) {
             $self->_log(error => "PAGI connection error (HTTP/2): $feed->{detail}");
             return $self->_handle_disconnect_and_close('protocol_error',
                 detail => $feed->{detail});

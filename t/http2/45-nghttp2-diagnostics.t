@@ -402,4 +402,55 @@ subtest 'a header nghttp2 tolerated does not turn the peer\'s own GOAWAY into a 
     shutdown_server($server);
 };
 
+# ============================================================
+# (5) the peer's GOAWAY arrived in an EARLIER feed
+# ============================================================
+# RFC 9113 section 6.8 lets a peer announce GOAWAY while its streams are still
+# open -- that is the graceful shutdown it describes. nghttp2 keeps the session
+# readable until the last of those streams closes, so the session ends on a
+# LATER feed than the one that carried the goodbye. The peer's GOAWAY therefore
+# cannot be a fact about one feed: if it is forgotten, a diagnostic in the
+# ending feed blames a peer that broke nothing.
+subtest 'a peer\'s GOAWAY still names the ending when it arrived in an earlier feed' => sub {
+    %ENDED = (); $ALARM_FIRED = 0;
+    my $mark = scalar @LOG;
+
+    my ($conn, $stream_io, $sock, $server) = create_h2_connection(app => $parked_app);
+    my $client = create_client;
+    handshake($client, $sock);
+    submit_open_request($client, $sock, '/open');
+    pump($client, $sock, 10);
+
+    # Feed one: the peer's own GOAWAY, NO_ERROR, with stream 1 still open.
+    $sock->syswrite(raw_frame(7, 0, 0, pack('NN', 0, 0)));
+    pump($client, $sock, 10);
+    ok(!defined $conn->{end_reason},
+        'a GOAWAY over an open stream does not end the connection by itself');
+
+    # Feed two: the OWS-padded field nghttp2 only ignores (RFC 9113 section
+    # 8.2.1), then both streams cancelled -- which is what ends the session.
+    $sock->syswrite(
+        raw_headers_frame(3, [
+            [':method', 'POST'], [':path', '/padded'], [':scheme', 'http'],
+            [':authority', 'localhost'], ['x-padded', '  padded-value  '],
+        ])
+        . raw_frame(3, 0, 1, pack('N', 8))      # RST_STREAM CANCEL, stream 1
+        . raw_frame(3, 0, 3, pack('N', 8))      # RST_STREAM CANCEL, stream 3
+    );
+    pump($client, $sock, 30, sub { defined $conn->{end_reason} });
+
+    is($conn->{end_reason}, 'client_closed',
+        'the peer that said goodbye is still what the ending is named for');
+    unlike($conn->{end_detail} // '', qr/Ignoring/,
+        'a field nghttp2 only ignored is not offered as the reason')
+        or diag('detail: ' . ($conn->{end_detail} // '(undef)'));
+    is(scalar(errors_since($mark)), 0,
+        'and a peer that broke nothing puts nothing in the operator\'s log')
+        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } errors_since($mark));
+    is($ALARM_FIRED, 0, 'no pump alarm');
+
+    $stream_io->close_now;
+    shutdown_server($server);
+};
+
 done_testing;
