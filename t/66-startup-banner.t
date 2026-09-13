@@ -28,13 +28,16 @@ subtest 'the first line names the server and where it is listening' => sub {
 };
 
 subtest 'the spec version appears only when the spec is installed' => sub {
-    my $with = banner_for();
-    like($with->[0], qr/\(PAGI [0-9.]+\)/,
-        'PAGI is installed here, so it is named');
-
-    # PAGI::Server has no runtime dependency on PAGI, so the banner has to
-    # degrade rather than print "unknown" or die.
+    # PAGI::Server has no runtime dependency on PAGI, so whether the spec is
+    # installed is the tester's environment, not this test's: both readings
+    # are pinned by standing in for the lookup.
     no warnings 'redefine';
+    local *PAGI::Server::_pagi_spec_version = sub { '0.002008' };
+    my $with = banner_for();
+    like($with->[0], qr/\(PAGI 0\.002008\)/,
+        'when the spec is installed, the banner names its version');
+
+    # ...and the banner has to degrade rather than print "unknown" or die.
     local *PAGI::Server::_pagi_spec_version = sub { undef };
     my $without = banner_for();
     unlike($without->[0], qr/\(PAGI/,

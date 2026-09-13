@@ -15,6 +15,7 @@ use strict;
 use warnings;
 use Test2::V0;
 use Future;
+use Scalar::Util qw(refaddr);
 
 require PAGI::Server::ConnectionState;
 require PAGI::Server::Connection;
@@ -35,18 +36,23 @@ subtest 'initial state' => sub {
 };
 
 # =============================================================================
-# Test: Lazy Future is cached
+# Test: One cached signal, a fresh observer per call
 # =============================================================================
 
-subtest 'lazy future is cached' => sub {
+subtest 'each call returns its own observer of one cached signal' => sub {
     my $conn = PAGI::Server::ConnectionState->new();
 
     my $future1 = $conn->disconnect_future;
     my $future2 = $conn->disconnect_future;
 
-    ok($future1, 'first call returns Future');
-    ok($future2, 'second call returns Future');
-    is($future1, $future2, 'same Future returned on subsequent calls');
+    # Cancellation isolation (spec, Connection State) needs a distinct
+    # observer per caller; the signal behind them is created once and
+    # resolves them all. (Object identity is not the contract: Test2's is()
+    # deep-compares pure-perl Futures and refaddr-compares Future::XS ones.)
+    isnt(refaddr($future1), refaddr($future2), 'two calls return two observers');
+    $conn->_mark_disconnected('client_closed');
+    is([ $future1->get, $future2->get ], [ ('client_closed') x 2 ],
+        'both observers resolve from the one signal');
 };
 
 # =============================================================================
