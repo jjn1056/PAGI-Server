@@ -303,6 +303,56 @@ subtest 'h1: an unread body over max_body_size closes the connection' => sub {
 };
 
 # =============================================================================
+# 3b. The discard's max_body_size bound counts wire bytes, chunk framing
+#     included -- not decoded chunk data. Many tiny chunks whose payload sums
+#     well under the limit still carry it well past the limit in framing.
+# =============================================================================
+subtest 'h1: the discard bound counts chunk framing, not just decoded data' => sub {
+    my @log;
+    my $server = start_server(log => \@log, max_body_size => 60);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    syswrite($sock, $CHUNKED_HEAD . chunk('A' x 5));
+    $pump->(sub { $$wire =~ /sign in/ });
+    like($$wire, qr{^HTTP/1\.1 401\b}, 'the 401 reached the client');
+
+    my ($conn) = values %{ $server->{connections} };
+    ok($conn, 'the connection is still on the server');
+
+    # 40 one-byte chunks: 40 bytes of decoded content (well under the 60-byte
+    # limit, plus the 5 already sent -- 45 total) framed into 240 bytes on the
+    # wire (well over it, plus the 10 already sent -- 250 total).
+    syswrite($sock, (chunk('X') x 40) . "0\r\n\r\n" . $SECOND);
+    $pump->(sub { $$eof });
+
+    ok($$eof, 'the connection closed after the response');
+    is(statuses($$wire), ['401'],
+        'the client saw its 401 and nothing else -- no 413 over a finished response');
+    is([ map { $_->{request} } @served ], ['POST /upload'],
+        'the request behind the oversized framing never became a request');
+    is($conn->{end_reason}, 'body_too_large', 'the connection ended with body_too_large');
+    is($conn->{end_detail}, 'unread request body exceeded max_body_size (60 bytes)',
+        'the wire total, not the 45-byte decoded total, crossed the bound');
+
+    is(\@completes, ['/upload'], 'on_complete fired for the refusing scope');
+    is(\@disconnects, [], 'on_disconnect never fired');
+
+    my @w = @warnings;
+    @warnings = ();
+    is(scalar(@w), 0, 'nothing was warned to stderr') or diag("unexpected: @w");
+    is([ map { "[$_->{level}] $_->{message}" } @log ],
+        ['[debug] HTTP/1.1 connection closed: unread request body exceeded'
+            . ' max_body_size (60 bytes)'],
+        'the killed connection is the one debug line the server logged');
+    @log = ();
+
+    close $sock;
+    undef $conn;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
 # 4. A client that stops sending mid-body is closed by the idle timer, under
 #    the reason that timer already reports for a connection that has served a
 #    request. The server itself is unaffected.
@@ -453,6 +503,40 @@ subtest 'h1: a 100-continue client that does not wait has its content closed off
     is(\@completes, ['/upload'], 'the refusing scope ended with on_complete');
     is(\@disconnects, [], 'not with on_disconnect');
     assert_quiet('a 100-continue client that did not wait', \@log);
+
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
+# =============================================================================
+# 6c. Expect: 100-continue on a request that declares no content at all: RFC
+#     9110 s10.1.1's ambiguity is about content the client might still send or
+#     hold back, and a request with neither Content-Length nor chunked framing
+#     has none to send or withhold, so the close in cases 6/6b does not apply
+#     -- the connection serves the next request as usual.
+# =============================================================================
+subtest 'h1: Expect: 100-continue with no declared content does not close the connection' => sub {
+    my @log;
+    my $server = start_server(log => \@log);
+    my ($sock, $pump, $wire, $eof) = open_client($server->port);
+
+    # No Content-Length, not chunked: nothing is framed into this request
+    # beyond its headers. The application answers without reading, and the
+    # pipelined request behind it is on the same connection.
+    syswrite($sock, "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+                  . "Expect: 100-continue\r\n\r\n" . $SECOND);
+    $pump->(sub { $$wire =~ /health/ });
+
+    unlike($$wire, qr{100 Continue}, 'the application refused before any 100 Continue was written');
+    is(statuses($$wire), ['401', '200'],
+        'the refusal and the pipelined request both answered on one connection');
+    is([ map { $_->{request} } @served ], ['POST /upload', 'GET /health'],
+        'the pipelined request was not dropped behind the refusal');
+    ok(!$$eof, 'the connection is still open');
+    is(\@completes, ['/upload', '/health'], 'both scopes ended with on_complete');
+    is(\@disconnects, [], 'neither ended with on_disconnect');
+    assert_quiet('Expect: 100-continue with no declared content', \@log);
 
     close $sock;
     $server->shutdown->get;

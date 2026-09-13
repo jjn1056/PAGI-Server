@@ -1371,7 +1371,9 @@ Maximum request body size in bytes. Default: 10,000,000 (10MB).
 Set to 0 for unlimited (not recommended for public-facing servers).
 
 Requests with Content-Length exceeding this limit receive HTTP 413
-(Payload Too Large). Chunked requests are also checked as data arrives.
+(Payload Too Large). Chunked requests are also checked as data arrives; for a
+chunked body the limit counts the bytes received on the wire, chunk framing
+and trailers included, not just the decoded content.
 
 A body of undeclared length (chunked on HTTP/1.1, DATA without
 C<content-length> on HTTP/2) can cross the limit after the application has

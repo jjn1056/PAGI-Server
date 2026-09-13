@@ -5011,7 +5011,11 @@ sub _begin_body_discard {
     # s10.1.1), so nothing here can tell a body from the next request. The
     # server closes instead, which is the intent RFC 9110 s10.1.1 asks a final
     # response before the whole content to indicate; RFC 9112 s9.3 allows it.
-    if ($request->{expect_continue} && !$request->{continue_sent}) {
+    # A request that declared no content has none of this ambiguity -- there
+    # is nothing to hold back or send unbidden -- so the close only applies
+    # when the request actually declared a body.
+    if ($request->{expect_continue} && !$request->{continue_sent}
+        && ($request->{chunked} || ($request->{content_length} // 0) > 0)) {
         $self->_handle_disconnect_and_close('request_complete');
         return;
     }
@@ -5060,7 +5064,10 @@ sub _discard_unread_body {
     }
 
     substr($self->{buffer}, 0, $consumed) = '' if $consumed;
-    $discard->{discarded} += length($data // '');
+    # Counted in wire bytes taken off the buffer, not decoded chunk data:
+    # chunk framing and trailers are what the client actually sent, and the
+    # bound below must hold on that, not on what survives decoding.
+    $discard->{discarded} += $consumed;
 
     # The bound is max_body_size (0 = unlimited), and crossing it ends the
     # connection, not the scope, which already ended cleanly with its response.
@@ -5192,8 +5199,11 @@ async sub _read_chunked_body {
     if ($consumed > 0) {
         substr($self->{buffer}, 0, $consumed) = '';
 
-        # Track total bytes read for max_body_size check
-        $$bytes_read_ref += length($data // '');
+        # Track total wire bytes read for max_body_size check -- $consumed is
+        # what came off the buffer (chunk framing and trailers included), not
+        # the decoded chunk data, so framing overhead is bound the same as
+        # payload.
+        $$bytes_read_ref += $consumed;
 
         # Check max_body_size for chunked requests (0 = unlimited)
         if ($self->{max_body_size} && $$bytes_read_ref > $self->{max_body_size}) {

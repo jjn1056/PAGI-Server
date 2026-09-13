@@ -562,6 +562,39 @@ subtest 'HTTP/1.1 http: the overrun truncates the started response' => sub {
 };
 
 # ============================================================
+# 4b. HTTP/1.1: chunk framing overhead alone crosses the limit, the decoded
+#     payload staying well under it. The limit bounds what came off the wire
+#     -- chunk-size lines and CRLFs included -- not what survives decoding.
+# ============================================================
+
+subtest 'HTTP/1.1 http: chunk framing overhead alone crosses the limit' => sub {
+    my (%r, @log);
+    my $server = h1_server(app => streaming_app(\%r, read => 1), log => \@log);
+    my ($sock, $pump, $wire, $eof) = h1_open($server->port,
+        "POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
+    $pump->(30);
+    is($r{started}, 1, 'the response started before the overrun');
+
+    # 150 five-byte chunks: 750 bytes of decoded content (under the
+    # 1000-byte limit) framed into 1500 bytes on the wire (over it).
+    syswrite($sock, (chunk('Y' x 5)) x 150);
+    $pump->(40);
+
+    is($r{reason}, 'body_too_large', 'the object reports body_too_large');
+    is($r{detail}, $DETAIL,          'the detail names the limit and the truncation');
+    is($r{completes} // 0, 0,       'on_complete never fired');
+    assert_one_log(\@log, 'HTTP/1.1', 'h1 framing overhead');
+
+    like($$wire, qr{^HTTP/1\.1 200 }, 'the client got the 200, not a 413');
+    unlike($$wire, qr/413/,           'no 413 was written over the started response');
+    is($$eof, 1, 'the socket was closed');
+    assert_h1_teardown_warning('h1 framing overhead');
+
+    close $sock;
+    $loop->remove($server);
+};
+
+# ============================================================
 # 5. Control: no response started -> 413, exactly as before
 # ============================================================
 
