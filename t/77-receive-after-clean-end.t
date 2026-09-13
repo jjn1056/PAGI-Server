@@ -438,6 +438,9 @@ sub h1_run {
     my ($case, $timing, %opt) = @_;
     my %obs;
 
+    # A case that brings its own application records its own return; $opt{watch}
+    # points the pump at that hash so it stops as soon as the case is over.
+    my $watch = $opt{watch} // \%obs;
     my $server = PAGI::Server->new(
         app => $opt{app} // clean_end_app($case, $timing, \%obs),
         host => '127.0.0.1', port => 0,
@@ -481,13 +484,18 @@ sub h1_run {
                 close $sock;
                 $dropped = 1;
             }
-            last if $obs{returned} && ++$after_return > 20;
+            last if $watch->{returned} && ++$after_return > 20;
         }
     });
 
     my %before = %obs;
     close $sock unless $dropped;
-    bounded(sub { $loop->loop_once(0.05) for 1 .. 40 });
+    bounded(sub {
+        for (1 .. 40) {
+            $loop->loop_once(0.05);
+            last if settled(\%obs, \%opt);
+        }
+    });
 
     eval { $server->shutdown->get };
     eval { $loop->remove($server) };
@@ -603,18 +611,40 @@ sub h2_run {
 
     my %before = %obs;
     close $sock_b unless $dropped;
-    bounded(sub { $loop->loop_once(0.05) for 1 .. 40 });
+    bounded(sub {
+        for (1 .. 40) {
+            $loop->loop_once(0.05);
+            last if settled(\%obs, \%opt);
+        }
+    });
 
     $stream->close_now;
     eval { $loop->remove($server) };
     undef $conn;
-    bounded(sub { $loop->loop_once(0.05) for 1 .. 10 });
+    bounded(sub {
+        for (1 .. 10) {
+            $loop->loop_once(0.05);
+            last if settled(\%obs, \%opt);
+        }
+    });
 
     return (\%before, \%obs, $body, \%headers, $close_code, $mark, \@frames);
 }
 
 sub freed { my ($obs, $key) = @_; return $obs->{$key} // 0 }
 sub scope_alive { my ($obs) = @_; return defined $obs->{scope_weak} ? 1 : 0 }
+
+# What the teardown tail waits for, so it ends when the scope's life has
+# ended rather than after a fixed count of turns. For the application this
+# file supplies that reading is the retention guards: the coroutine and the
+# receive Future collected and the scope hash freed. A case that brings its
+# own application names its own observable in $opt{settled}; with neither the
+# tail runs its whole bound.
+sub settled {
+    my ($obs, $opt) = @_;
+    return $opt->{settled}->() ? 1 : 0 if $opt->{settled};
+    return freed($obs, 'app_freed') && freed($obs, 'receive_freed') && !scope_alive($obs);
+}
 
 # What each clean end leaves on the wire, so a case proves the end was the
 # clean one it claims rather than a truncation that happened to look like it.
@@ -750,7 +780,11 @@ sub h2_end_frames {
 subtest 'h1: a receive reading a chunked request body reports the scope end' => sub {
     my %obs;
     my (undef, undef, $wire, $mark) =
-        h1_run('body_open', 'pending', app => body_open_app('h1', \%obs));
+        h1_run('body_open', 'pending', app => body_open_app('h1', \%obs),
+               watch   => \%obs,
+               # The reading this case takes after teardown: whether the call
+               # under test was still waiting.
+               settled => sub { $obs{outstanding} && $obs{outstanding}->is_ready });
 
     is($obs{returned}, 1, 'the application ran to the end');
     is($obs{first}{type}, 'sse.request', 'the first chunk arrived as sse.request');
@@ -781,7 +815,9 @@ subtest 'h2: a receive reading an unfinished request body reports the scope end'
     skip_all 'HTTP/2 not available' unless $have_h2;
     my %obs;
     my (undef, undef, $body, $headers, $close_code, $mark, $frames) =
-        h2_run('body_open', 'pending', app => body_open_app('h2', \%obs));
+        h2_run('body_open', 'pending', app => body_open_app('h2', \%obs),
+               watch   => \%obs,
+               settled => sub { $obs{outstanding} && $obs{outstanding}->is_ready });
 
     is($obs{returned}, 1, 'the application ran to the end');
     is($obs{armed_ready}, 0, 'the call under test was outstanding when sse.close was sent');
@@ -999,7 +1035,11 @@ for my $transport (qw(h1 h2)) {
         for my $case (qw(ws_refusal sse_refusal sse_close)) {
             my %obs;
             my $run = $transport eq 'h1' ? \&h1_run : \&h2_run;
-            $run->($case, 'pending', app => resume_app($case, \%obs));
+            # Everything this case asserts is what the resumed coroutine read
+            # while the application was still running, so the teardown tail
+            # has nothing left to watch.
+            $run->($case, 'pending', app => resume_app($case, \%obs),
+                   watch => \%obs, settled => sub { 1 });
 
             is($obs{returned}, 1, "$case: the application ran to the end");
             is($obs{resumed}, 1, "$case: the awaiting coroutine resumed");
@@ -1028,7 +1068,8 @@ subtest 'h1 sse.close: the answers count against max_disconnect_receives' => sub
     my %obs;
     my (undef, undef, $wire, $mark) =
         h1_run('sse_close', 'after',
-               app => capped_app(\%obs), server_opts => { max_disconnect_receives => 1 });
+               app => capped_app(\%obs), watch => \%obs,
+               server_opts => { max_disconnect_receives => 1 });
 
     is($obs{returned}, 1, 'the application ran to the end');
     is($obs{answers}[0], { type => 'sse.disconnect' },
@@ -1064,7 +1105,7 @@ for my $transport (qw(h1 h2)) {
         my %obs;
         my $run = $transport eq 'h1' ? \&h1_run : \&h2_run;
         my @out = $run->('sse_close', 'after',
-                         app => capped_pending_app(\%obs),
+                         app => capped_pending_app(\%obs), watch => \%obs,
                          server_opts => { max_disconnect_receives => 1 });
         # The log mark each harness returns: h1_run's fourth value, h2_run's
         # sixth.

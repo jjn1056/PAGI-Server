@@ -132,12 +132,18 @@ sub bounded {
     return $ALARM_FIRED;
 }
 
+# $done is what the pump is waiting for. Once it holds the pump runs on for
+# another 20 turns -- a second of settling, so an assertion that nothing
+# further happens is made against a quiet loop -- and then stops, rather than
+# spending its whole round count on a condition already met.
 sub pump {
-    my ($rounds) = @_;
+    my ($rounds, $done) = @_;
+    my $after = 0;
     return bounded(sub {
         for (1 .. ($rounds // 20)) {
             $loop->loop_once(0.05);
             $_->() for @READERS;
+            last if $done && $done->() && ++$after > 20;
         }
     });
 }
@@ -231,16 +237,19 @@ sub complete_h2_handshake {
 }
 
 sub exchange_frames {
-    my ($client, $client_sock, $rounds) = @_;
+    my ($client, $client_sock, $rounds, $done) = @_;
+    my $after = 0;
     return bounded(sub {
         for (1 .. ($rounds // 20)) {
             $loop->loop_once(0.05);
-            next unless defined fileno($client_sock);   # the client may have left
-            my $buf = '';
-            $client_sock->sysread($buf, 16384);
-            $client->mem_recv($buf) if length($buf);
-            my $out = $client->mem_send;
-            $client_sock->syswrite($out) if length($out);
+            if (defined fileno($client_sock)) {   # the client may have left
+                my $buf = '';
+                $client_sock->sysread($buf, 16384);
+                $client->mem_recv($buf) if length($buf);
+                my $out = $client->mem_send;
+                $client_sock->syswrite($out) if length($out);
+            }
+            last if $done && $done->() && ++$after > 20;
         }
     });
 }
@@ -386,7 +395,10 @@ for my $kind (@KINDS) {
         close $sock;                                      # the client drops
 
         my ($sock2, $wire2) = h1_connect($port, h1_request('http', '/second'));
-        pump(40);
+        # The second client is answered only once the cap has handed the event
+        # loop back, which is after the capped loop has stopped and both error
+        # lines are out.
+        pump(40, sub { $$wire2 =~ m{^HTTP/1\.1 200} });
 
         my $expected = $DEFAULT_CAP + $DELIVERED_H1{$kind};
         ok(!$ALARM_FIRED, 'the cap stopped the loop; the test alarm never fired');
@@ -434,7 +446,7 @@ for my $kind (@KINDS) {
         my ($sock) = h1_connect($port, h1_request($kind));
         pump(10);
         close $sock;
-        pump(30);
+        pump(30, sub { $n == 150 });
 
         ok(!$ALARM_FIRED, 'the bounded application loop finished on its own');
         is($n, 150, 'all 150 receives resolved with the disconnect event');
@@ -476,7 +488,7 @@ for my $kind (@KINDS) {
         my ($sock) = h1_connect($port, h1_request($kind));
         pump(10);
         close $sock;
-        pump(30);
+        pump(30, sub { length $failure });
 
         ok(!$ALARM_FIRED, 'the application finished without the test alarm');
         is(\@pending_types, [($DISCONNECT_TYPE{$kind}) x 3],
@@ -519,7 +531,7 @@ for my $kind (@KINDS) {
         my ($sock) = h1_connect($port, h1_request($kind));
         pump(10);
         close $sock;
-        pump(30);
+        pump(30, sub { length $late_type });
 
         ok(!$ALARM_FIRED, 'the application finished without the test alarm');
         is($late_type, $DISCONNECT_TYPE{$kind}, 'the later receive resolved with the event');
@@ -655,7 +667,8 @@ SKIP: {
 
             $client->submit_rst_stream($sid, 8);          # CANCEL
             $client_sock->syswrite($client->mem_send);
-            exchange_frames($client, $client_sock, 30);
+            exchange_frames($client, $client_sock, 30,
+                            sub { $n >= $DEFAULT_CAP + $DELIVERED_H2{$kind} });
 
             ok(!$ALARM_FIRED, 'the cap stopped the loop; the test alarm never fired');
             is($n, $DEFAULT_CAP + $DELIVERED_H2{$kind},
@@ -701,7 +714,7 @@ SKIP: {
 
             $client->submit_rst_stream($sid, 8);
             $client_sock->syswrite($client->mem_send);
-            exchange_frames($client, $client_sock, 40);
+            exchange_frames($client, $client_sock, 40, sub { $n == 150 });
 
             ok(!$ALARM_FIRED, 'the bounded application loop finished on its own');
             is($n, 150, 'all 150 receives resolved with the disconnect event');

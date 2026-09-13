@@ -80,13 +80,19 @@ sub h1_open {
     $sock->blocking(0);
     my $wire = '';
     my $eof  = 0;
+    # $done is what the pump is waiting for. Once it holds the pump runs on
+    # for another 20 turns -- a second of settling, so an assertion that
+    # nothing further arrives is made against a quiet loop -- and then stops,
+    # rather than spending the whole round count on a condition already met.
     my $pump = sub {
-        my ($rounds) = @_;
+        my ($rounds, $done) = @_;
+        my $after = 0;
         for (1 .. ($rounds // 20)) {
             $loop->loop_once(0.05);
             my $buf;
             my $n = sysread($sock, $buf, 65536);
             if (defined $n) { $n ? ($wire .= $buf) : ($eof = 1) }
+            last if $done && $done->() && ++$after > 20;
         }
         return $wire;
     };
@@ -94,9 +100,11 @@ sub h1_open {
 }
 
 sub h1_fetch {
-    my ($port, $request, $rounds) = @_;
+    my ($port, $request, $rounds, $done) = @_;
     my ($sock, $pump, $wire, $eof) = h1_open($port, $request);
-    $pump->($rounds // 30);
+    # A fetch ends when the server has closed the connection, unless the case
+    # is waiting for something else of its own.
+    $pump->($rounds // 30, $done // sub { $$eof });
     close $sock;
     return ($$wire, $$eof);
 }
@@ -180,7 +188,8 @@ sub complete_h2_handshake {
 }
 
 sub exchange_frames {
-    my ($client, $client_sock, $rounds) = @_;
+    my ($client, $client_sock, $rounds, $done) = @_;
+    my $after = 0;
     for (1 .. ($rounds // 20)) {
         $loop->loop_once(0.05);
         my $buf = '';
@@ -188,6 +197,7 @@ sub exchange_frames {
         $client->mem_recv($buf) if length($buf);
         my $out = $client->mem_send;
         $client_sock->syswrite($out) if length($out);
+        last if $done && $done->() && ++$after > 20;
     }
 }
 
@@ -228,7 +238,10 @@ sub h2_fetch {
     complete_h2_handshake($client, $client_sock);
     h2_submit($client, $client_sock, $a{kind}, $a{path});
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock, $a{rounds} // 25);
+    # A fetch ends when the client has seen the stream close, unless the case
+    # names something else of its own.
+    exchange_frames($client, $client_sock, $a{rounds} // 25,
+                    $a{done} // sub { defined $close_code });
     $a{after}->($client, $client_sock) if $a{after};
     $stream_io->close_now;
     $loop->remove($server);
@@ -309,12 +322,12 @@ subtest 'a streamed refusal delivers its first chunk before the terminal one' =>
         };
         my $server = create_server($app);
         my ($sock, $pump, $wire) = h1_open($server->port, h1_request($kind));
-        $pump->(25);
+        $pump->(25, sub { $$wire =~ /\r\n\r\n5\r\nfirst\r\n/ });
         like($$wire, qr/\r\n\r\n5\r\nfirst\r\n/,
             "h1 $kind: the first chunk is on the wire before the terminal one is sent");
         unlike($$wire, qr/last/, "h1 $kind: the terminal chunk has not been sent yet");
         $gate->done;
-        $pump->(25);
+        $pump->(25, sub { $$wire =~ /0\r\n\r\n\z/ });
         like($$wire, qr/4\r\nlast\r\n0\r\n\r\n\z/,
             "h1 $kind: the terminal chunk and the chunked terminator follow");
         close $sock;
@@ -342,10 +355,10 @@ subtest 'a streamed refusal delivers its first chunk before the terminal one' =>
             complete_h2_handshake($client, $client_sock);
             h2_submit($client, $client_sock, $kind);
             $client_sock->syswrite($client->mem_send);
-            exchange_frames($client, $client_sock, 25);
+            exchange_frames($client, $client_sock, 25, sub { $body eq 'first' });
             is($body, 'first', "h2 $kind: the first DATA frame arrived before the terminal chunk");
             $gate->done;
-            exchange_frames($client, $client_sock, 25);
+            exchange_frames($client, $client_sock, 25, sub { $body eq 'firstlast' });
             is($body, 'firstlast', "h2 $kind: the terminal chunk follows");
             $stream_io->close_now;
             $loop->remove($server);
@@ -479,7 +492,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
         local $SIG{__WARN__} = sub { push @warnings, $_[0] };
         my $server = create_server($app);
         my ($sock, $pump) = h1_open($server->port, h1_request($kind));
-        $pump->(25);
+        $pump->(25, sub { $r{parked} });
         close $sock;                 # client gone
         $loop->loop_once(0.05) for 1 .. 10;
         $released->done;
@@ -514,7 +527,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
             complete_h2_handshake($client, $client_sock);
             my $sid = h2_submit($client, $client_sock, $kind);
             $client_sock->syswrite($client->mem_send);
-            exchange_frames($client, $client_sock, 25);
+            exchange_frames($client, $client_sock, 25, sub { $r{parked} });
             # The client resets the stream while the app is still parked.
             $client->submit_rst_stream($sid, 8);   # CANCEL
             $client_sock->syswrite($client->mem_send);
@@ -564,12 +577,12 @@ subtest 'a websocket refusal below 300 fails the send and leaves the handshake o
 
     my $server = create_server($app);
     my ($sock, $pump, $wire) = h1_open($server->port, h1_request('websocket'));
-    $pump->(20);
+    $pump->(20, sub { $$wire =~ m{^HTTP/1\.1 101} });
     like($$wire, qr{^HTTP/1\.1 101}, 'h1: the accept still completed the handshake');
     unlike($$wire, qr{^HTTP/1\.1 200}m, 'h1: the failed start transmitted nothing');
     print $sock Protocol::WebSocket::Frame->new(
         buffer => 'ping-me', type => 'text', masked => 1)->to_bytes;
-    $pump->(25);
+    $pump->(25, sub { $$wire =~ /echo:ping-me/ });
     close $sock;
     $server->shutdown->get;
 
@@ -608,11 +621,11 @@ subtest 'a websocket refusal below 300 fails the send and leaves the handshake o
         complete_h2_handshake($client, $client_sock);
         my $sid = h2_submit($client, $client_sock, 'websocket');
         $client_sock->syswrite($client->mem_send);
-        exchange_frames($client, $client_sock, 25);
+        exchange_frames($client, $client_sock, 25, sub { defined $h2{started} });
         $client->submit_data($sid, Protocol::WebSocket::Frame->new(
             buffer => 'ping-me', type => 'text', masked => 1)->to_bytes, 0);
         $client_sock->syswrite($client->mem_send);
-        exchange_frames($client, $client_sock, 25);
+        exchange_frames($client, $client_sock, 25, sub { $data =~ /echo:ping-me/ });
         $stream_io->close_now;
         $loop->remove($server2);
 
@@ -784,7 +797,7 @@ subtest 'websocket: an app that neither accepts nor refuses gets the 500 backsto
         complete_h2_handshake($client, $client_sock);
         my $sid = h2_submit($client, $client_sock, 'websocket');
         $client_sock->syswrite($client->mem_send);
-        exchange_frames($client, $client_sock, 25);
+        exchange_frames($client, $client_sock, 25, sub { $h2g{parked} });
         $client->submit_rst_stream($sid, 8);      # CANCEL, while the app is parked
         $client_sock->syswrite($client->mem_send);
         exchange_frames($client, $client_sock, 15);
@@ -988,7 +1001,7 @@ subtest 'a completed refusal is a clean end, and a later receive reports it' => 
             return;
         };
         my $server = create_server($app);
-        my ($wire, $eof) = h1_fetch($server->port, h1_request($kind), 40);
+        my ($wire, $eof) = h1_fetch($server->port, h1_request($kind), 40, sub { $r{done} });
         $loop->loop_once(0.05) for 1 .. 10;
         $server->shutdown->get;
 
@@ -1022,7 +1035,7 @@ subtest 'a completed refusal is a clean end, and a later receive reports it' => 
                 $r{done} = 1;
                 return;
             };
-            h2_fetch(app => $app, kind => $kind, rounds => 40);
+            h2_fetch(app => $app, kind => $kind, rounds => 40, done => sub { $r{done} });
             is($r{done}, 1, "h2 $kind: the app ran to completion");
             is($r{after_event}, $END_EVENT{$kind},
                 "h2 $kind: a receive() after the refusal reports the scope's end, with no reason");
@@ -1080,7 +1093,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
         local $SIG{__WARN__} = sub { push @warnings, $_[0] };
         my $server = create_server($refusing_app->(\%r, $released));
         my ($sock, $pump) = h1_open($server->port, h1_request($kind));
-        $pump->(25);
+        $pump->(25, sub { $r{at_terminal} });
 
         # Still parked: the terminal event alone drove the object terminal.
         is($r{returned}, undef, "h1 $kind: the application has not returned yet");
@@ -1120,7 +1133,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
                 complete_h2_handshake($client, $client_sock);
                 my $sid = h2_submit($client, $client_sock, $kind);
                 $client_sock->syswrite($client->mem_send);
-                exchange_frames($client, $client_sock, 25);
+                exchange_frames($client, $client_sock, 25, sub { $r{at_terminal} });
 
                 is($r{returned}, undef, "h2 $kind/$ending: the application has not returned yet");
                 is($r{at_terminal}{connected}, 0, "h2 $kind/$ending: is_connected is false at the terminal event");
@@ -1173,12 +1186,12 @@ subtest 'a completed h1 refusal says Connection: close and closes the socket' =>
     my $server = create_server($app);
     for my $kind (@SCOPES) {
         my ($sock, $pump, $wire, $eof) = h1_open($server->port, h1_request($kind));
-        $pump->(25);
+        $pump->(25, sub { $$wire =~ /^connection:\s*close\r$/mi });
         like($$wire, qr/^connection:\s*close\r$/mi,
             "h1 $kind: the refusal carries Connection: close");
         # A pipelined follow-up request must not be served on this socket.
         print $sock h1_request('http', '/second');
-        $pump->(25);
+        $pump->(25, sub { $$eof });
         ok($$eof, "h1 $kind: the socket reached EOF");
         my @statuses = ($$wire =~ m{^HTTP/1\.1 (\d+)}mg);
         is(scalar(@statuses), 1, "h1 $kind: exactly one response was served, not a pipelined second");
@@ -1210,7 +1223,7 @@ subtest 'a completed h2 refusal ends its stream and leaves the connection usable
         complete_h2_handshake($client, $client_sock);
         my $refusal_id = h2_submit($client, $client_sock, $kind);
         $client_sock->syswrite($client->mem_send);
-        exchange_frames($client, $client_sock, 25);
+        exchange_frames($client, $client_sock, 25, sub { length $body });
         # No error code: the refusal ended the server's half of the stream
         # normally. A websocket refusal answers an extended CONNECT whose
         # request body this client deliberately leaves open, so nghttp2
@@ -1221,7 +1234,7 @@ subtest 'a completed h2 refusal ends its stream and leaves the connection usable
         # A sibling stream on the same connection still works.
         my $sibling_id = h2_submit($client, $client_sock, 'http', '/sibling');
         $client_sock->syswrite($client->mem_send);
-        exchange_frames($client, $client_sock, 25);
+        exchange_frames($client, $client_sock, 25, sub { defined $closed{$sibling_id} });
         is($closed{$sibling_id}, 0, "h2 $kind: a sibling stream on the same connection still works");
         like($body, qr/http/, "h2 $kind: and the sibling's own response arrived");
 

@@ -147,6 +147,13 @@ sub app_log_errors {
     return [grep { $_->{level} eq 'error' } @log];
 }
 
+# What a fault case is waiting for: the injected failure has fired and the
+# error lines it produces are out. $n is how many the case expects.
+sub fault_landed {
+    my ($n) = @_;
+    return !$ARMED && @{ app_log_errors() } >= $n;
+}
+
 sub log_lines {
     return join "\n", map { "[$_->{level}] $_->{message}" } @log;
 }
@@ -242,8 +249,14 @@ sub h2_connect {
 # Pump the loop and move bytes for every peer given. Returns the exception if
 # the loop itself threw -- which is the pre-fix behaviour this file exists to
 # rule out -- and undef when it ran normally.
+# A trailing coderef is what the pump is waiting for. Once it holds the pump
+# runs on for another 20 turns -- a second of settling, so an assertion that
+# nothing further arrives is made against a quiet loop -- and then stops,
+# rather than spending its whole round count on a condition already met.
 sub pump {
     my ($rounds, @peers) = @_;
+    my $done  = (@peers && ref $peers[-1] eq 'CODE') ? pop @peers : undef;
+    my $after = 0;
     for (1 .. $rounds) {
         eval { $loop->loop_once(0.05); 1 } or return $@;
         for my $p (@peers) {
@@ -253,6 +266,7 @@ sub pump {
             my $out = $p->{session}->mem_send;
             $p->{sock}->syswrite($out) if length $out;
         }
+        last if $done && $done->() && ++$after > 20;
     }
     return undef;
 }
@@ -302,14 +316,16 @@ sub h1_connect {
 
 # Send $request and pump, accumulating the wire. Returns (wire, loop exception).
 sub h1_exchange {
-    my ($sock, $request, $rounds) = @_;
+    my ($sock, $request, $rounds, $done) = @_;
     print $sock $request;
-    my $wire = '';
+    my $wire  = '';
+    my $after = 0;
     for (1 .. ($rounds // 25)) {
         eval { $loop->loop_once(0.05); 1 } or return ($wire, $@);
         my $buf;
         my $n = sysread($sock, $buf, 65536);
         $wire .= $buf if $n;
+        last if $done && $done->($wire) && ++$after > 20;
     }
     return ($wire, undef);
 }
@@ -330,7 +346,7 @@ SKIP: {
         my $conn = $a->{conn};
         $ARMED = sub { $_[0] eq '_h2_stream_alive' && $_[1] == $conn };
         h2_get($a, '/boom');
-        my $loop_error = pump(30, $a);
+        my $loop_error = pump(30, $a, sub { fault_landed(1) });
 
         is($loop_error, undef, 'the event loop kept running: the exception never reached invoke_error');
         is($ARMED, undef, 'the injected failure did fire');
@@ -356,7 +372,8 @@ SKIP: {
         my $b = h2_connect($server);
         h2_handshake($b);
         my $sid = h2_get($b, '/after');
-        is(pump(30, $b), undef, 'the loop still runs for the next connection');
+        is(pump(30, $b, sub { defined $b->{body}{$sid} }), undef,
+            'the loop still runs for the next connection');
         is($b->{status}{$sid}, '200', 'a connection opened afterwards is served');
         is($b->{body}{$sid}, 'ok', 'and gets its body');
 
@@ -387,7 +404,7 @@ SKIP: {
         my $conn = $a->{conn};
         $ARMED = sub { $_[0] eq '_h2_create_scope' && $_[1] == $conn };
         h2_get($a, '/boom');
-        my $loop_error = pump(30, $a);
+        my $loop_error = pump(30, $a, sub { fault_landed(1) });
 
         is($loop_error, undef, 'the event loop kept running: the exception never reached invoke_error');
         is($ARMED, undef, 'the injected failure did fire');
@@ -402,7 +419,8 @@ SKIP: {
         my $b = h2_connect($server);
         h2_handshake($b);
         my $sid = h2_get($b, '/after');
-        is(pump(30, $b), undef, 'the loop still runs for the next connection');
+        is(pump(30, $b, sub { defined $b->{body}{$sid} }), undef,
+            'the loop still runs for the next connection');
         is($b->{status}{$sid}, '200', 'a connection opened afterwards is served');
         is($b->{body}{$sid}, 'ok', 'and gets its body');
 
@@ -429,7 +447,8 @@ SKIP: {
         $ARMED = sub { $_[0] eq '_h2_stream_alive' && $_[1] == $conn };
         h2_get($a, '/boom');
         my $sid_b = h2_get($b, '/concurrent');
-        my $loop_error = pump(40, $a, $b);
+        my $loop_error = pump(40, $a, $b,
+                              sub { fault_landed(1) && defined $b->{body}{$sid_b} });
 
         is($loop_error, undef, 'the event loop kept running');
         is($b->{status}{$sid_b}, '200', "the concurrent connection's request was answered");
@@ -474,7 +493,7 @@ SKIP: {
         my $sid  = h2_get($a, '/boom');    # stream 3, whose tail is rigged
         my $conn = $a->{conn};
         $ARMED = sub { $_[0] eq '_h2_stream_alive' && $_[1] == $conn };
-        my $loop_error = pump(40, $a);
+        my $loop_error = pump(40, $a, sub { fault_landed(1) && $seen{'/slow'} });
 
         is($loop_error, undef, 'the event loop kept running');
         is($ARMED, undef, 'the injected failure did fire');
@@ -514,7 +533,8 @@ SKIP: {
 
         $ARMED = undef;   # nothing injected: the application itself throws
         my $sid = h2_get($a, '/throw');
-        is(pump(30, $a), undef, 'the event loop kept running');
+        is(pump(30, $a, sub { defined $a->{status}{$sid} && @{ app_log_errors() } }), undef,
+            'the event loop kept running');
 
         is($a->{status}{$sid}, '500', 'the application error is answered with 500');
         my $errors = app_log_errors();
@@ -545,7 +565,8 @@ subtest 'HTTP/1.1: an exception on the request tail ends that connection' => sub
     my $sock = h1_connect($server);
 
     $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom-sync' };
-    my ($wire, $loop_error) = h1_exchange($sock, "GET /boom-sync HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($wire, $loop_error) = h1_exchange($sock, "GET /boom-sync HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { fault_landed(2) });
 
     is($loop_error, undef, 'the event loop kept running');
     is($ARMED, undef, 'the injected failure did fire');
@@ -563,7 +584,8 @@ subtest 'HTTP/1.1: an exception on the request tail ends that connection' => sub
     is($obs->{disconnect}, ['injected: server tail failure'], 'on_disconnect fired once');
 
     # The connection that was open the whole time still works.
-    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
     is($idle_error, undef, 'the loop still runs');
     like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'the connection open at the time is still served');
     like($idle_wire, qr{ok\z}, 'and gets its body');
@@ -587,7 +609,8 @@ subtest 'a tail exception after delivery closes the connection without un-comple
     my $sock  = h1_connect($server);
 
     $ARMED = sub { $_[0] eq '_on_request_complete' };
-    my ($wire, $loop_error) = h1_exchange($sock, "GET /delivered HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($wire, $loop_error) = h1_exchange($sock, "GET /delivered HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { fault_landed(1) });
 
     is($loop_error, undef, 'HTTP/1.1: the event loop kept running');
     like($wire, qr{^HTTP/1\.1 200 OK\r\n}, 'the response the client already had is intact');
@@ -598,7 +621,8 @@ subtest 'a tail exception after delivery closes the connection without un-comple
     is($seen{'/delivered'}{state}->disconnect_reason, undef,
         'and disconnect_reason stays undef');
 
-    my ($other_wire, $other_error) = h1_exchange($other, "GET /next HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($other_wire, $other_error) = h1_exchange($other, "GET /next HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
     is($other_error, undef, 'the process survived');
     like($other_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'another connection is still served');
 
@@ -614,7 +638,8 @@ subtest 'a tail exception after delivery closes the connection without un-comple
         h2_handshake($a);
         $ARMED = sub { $_[0] eq '_on_request_complete' };
         my $sid = h2_get($a, '/delivered');
-        is(pump(30, $a), undef, 'HTTP/2: the event loop kept running');
+        is(pump(30, $a, sub { fault_landed(1) && defined $a->{body}{$sid} }), undef,
+            'HTTP/2: the event loop kept running');
         is($a->{status}{$sid}, '200', 'the delivered response is intact');
         is($a->{body}{$sid}, 'ok', 'with its body');
         is(app_log_errors(), [
@@ -650,7 +675,8 @@ subtest 'HTTP/1.1: an exception on a suspended application\'s tail ends that con
     my $sock = h1_connect($server);
 
     $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom' };
-    my ($wire, $loop_error) = h1_exchange($sock, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($wire, $loop_error) = h1_exchange($sock, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { fault_landed(2) });
 
     is($loop_error, undef, 'the event loop kept running');
     is($ARMED, undef, 'the injected failure did fire');
@@ -666,7 +692,8 @@ subtest 'HTTP/1.1: an exception on a suspended application\'s tail ends that con
     is($obs->{complete}, 0, 'on_complete never fired');
     is($obs->{disconnect}, [$INJECTED], 'on_disconnect fired once');
 
-    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
     is($idle_error, undef, 'the loop still runs');
     like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
     like($idle_wire, qr{ok\z}, 'and gets its body');
@@ -686,7 +713,8 @@ subtest 'SSE: an exception on a suspended application\'s tail ends that connecti
 
     $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom' };
     my ($wire, $loop_error) = h1_exchange($sock,
-        "GET /boom HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n");
+        "GET /boom HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n",
+        undef, sub { fault_landed(2) });
 
     is($loop_error, undef, 'the event loop kept running');
     is($ARMED, undef, 'the injected failure did fire');
@@ -702,7 +730,8 @@ subtest 'SSE: an exception on a suspended application\'s tail ends that connecti
     is($obs->{state}->disconnect_detail, $INJECTED, 'the exception is the disconnect detail');
     is($obs->{complete}, 0, 'on_complete never fired');
 
-    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
     is($idle_error, undef, 'the loop still runs');
     like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
 
@@ -723,7 +752,8 @@ subtest 'WebSocket: an exception on a suspended application\'s tail ends that co
     my ($wire, $loop_error) = h1_exchange($sock,
           "GET /boom HTTP/1.1\r\nHost: x\r\n"
         . "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-        . "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+        . "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        undef, sub { fault_landed(2) });
 
     is($loop_error, undef, 'the event loop kept running');
     is($ARMED, undef, 'the injected failure did fire');
@@ -739,7 +769,8 @@ subtest 'WebSocket: an exception on a suspended application\'s tail ends that co
     is($obs->{state}->disconnect_detail, $INJECTED, 'the exception is the disconnect detail');
     is($obs->{complete}, 0, 'on_complete never fired');
 
-    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
     is($idle_error, undef, 'the loop still runs');
     like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
 
