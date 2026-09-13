@@ -753,7 +753,7 @@ sub _h2_on_request {
         # builders throw here, where there is not yet a Future to carry the
         # failure and nothing but this eval between them and $loop->run.
         eval { $weak_self->_h2_dispatch_stream($stream_id); 1 }
-            or $weak_self && $weak_self->_h2_connection_handler_error($stream_id, $@);
+            or $weak_self && $weak_self->_connection_handler_error("HTTP/2 stream $stream_id", $@);
     });
 }
 
@@ -1482,25 +1482,27 @@ sub _h2_dispatch_stream {
             $weak_self->{server}->_on_request_complete if $weak_self && $weak_self->{server};
             1;
         } or do {
-            $self->_h2_connection_handler_error($stream_id, $@);
+            $self->_connection_handler_error("HTTP/2 stream $stream_id", $@);
         };
     })->();
 
     $self->{server}->adopt_future($future);
 }
 
-# What both HTTP/2 dispatch boundaries do with what they caught, and what the
+# What every connection-handler boundary does with what it caught -- the two
+# HTTP/2 dispatch sites and the three HTTP/1.1 request tails -- and what the
 # HTTP/1.1 read handler's eval has always done with what it catches: name the
-# fault once, then end this connection with server_error and the exception as
-# its disconnect_detail (Www.pod "Standard Disconnect Reasons").
+# fault once, $where saying which handler it was, then end this connection with
+# server_error and the exception as its disconnect_detail (Www.pod "Standard
+# Disconnect Reasons").
 #
 # The close is the default close_when_empty, not close_now: a response the
 # application had already delivered in full before the server's tail failed
 # still reaches the peer, exactly as it does on HTTP/1.1 where those bytes are
 # already in the stream's buffer, and _close reserves close_now for app_abort.
-sub _h2_connection_handler_error {
-    my ($self, $stream_id, $error) = @_;
-    $self->_log(error => "PAGI connection handler error (HTTP/2 stream $stream_id): $error");
+sub _connection_handler_error {
+    my ($self, $where, $error) = @_;
+    $self->_log(error => "PAGI connection handler error ($where): $error");
     $self->_handle_disconnect_and_close('server_error', detail => _detail_from_error($error));
     return;
 }
@@ -4735,133 +4737,149 @@ async sub _handle_request {
     eval {
         await $self->{app}->($scope, $receive, $send);
     };
+    my $error = $@;
 
-    if (my $error = $@) {
-        # Delivery defines completion (Www.pod:1156-1165): if the terminal
-        # response event already went out, an exception thrown afterward is
-        # not a disconnect. Fire on_complete (never on_disconnect), leave
-        # disconnect_reason() undef, still warn (SHOULD log), and still
-        # close (MAY close) -- mirrors _h2_dispatch_stream's own log-only
-        # branch for an error after the response is already complete: that
-        # stream's connection_state is likewise marked complete before the
-        # exception is even observed there.
-        if ($self->{response_started} && (($self->{h1_seq} // '') eq 'complete')) {
-            $self->_log(error => "PAGI application error (after response complete): $error");
-            $self->_write_access_log;
-            $self->{server}->_on_request_complete if $self->{server};
-            if (my $conn_state = $self->{current_connection_state}) {
-                $conn_state->_mark_complete;
+    # The boundary HTTP/2's dispatch tail has, for the reason HTTP/1.1 has
+    # needed it all along: Future::AsyncAwait runs this sub synchronously only
+    # until the application suspends, and every application that does I/O
+    # suspends. From there this tail resumes on the event loop's own stack,
+    # outside the read handler's eval, and an exception from it failed the
+    # adopted {request_future} -- which reaches IO::Async::Notifier::invoke_error
+    # and, with no on_error on PAGI::Server, is a bare die out of $loop->run.
+    #
+    # Caught the read handler's own way ($@ after the eval) rather than with
+    # `eval { ...; 1 } or do { ... }`: this tail returns early, and a return
+    # inside an eval BLOCK leaves the eval rather than the sub, which would
+    # make the or-block fire on every early return with $@ empty.
+    eval {
+        if ($error) {
+            # Delivery defines completion (Www.pod:1156-1165): if the terminal
+            # response event already went out, an exception thrown afterward is
+            # not a disconnect. Fire on_complete (never on_disconnect), leave
+            # disconnect_reason() undef, still warn (SHOULD log), and still
+            # close (MAY close) -- mirrors _h2_dispatch_stream's own log-only
+            # branch for an error after the response is already complete: that
+            # stream's connection_state is likewise marked complete before the
+            # exception is even observed there.
+            if ($self->{response_started} && (($self->{h1_seq} // '') eq 'complete')) {
+                $self->_log(error => "PAGI application error (after response complete): $error");
+                $self->_write_access_log;
+                $self->{server}->_on_request_complete if $self->{server};
+                if (my $conn_state = $self->{current_connection_state}) {
+                    $conn_state->_mark_complete;
+                }
+                $self->_close;
+                return;
             }
-            $self->_close;
+
+            # Handle application error - always close connection after exception
+            # If response already started, we can't send error page (3.17)
+            if ($self->{response_started}) {
+                $self->_flush_pending_headers;   # don't lose a started response's headers
+                $self->_log(error => "PAGI application error (after response started): $error");
+            } else {
+                $self->_send_error_response(500, "Internal Server Error");
+                $self->_log(error => "PAGI application error: $error");
+            }
+            # Always close connection after exception (3.2) - don't try keep-alive
+            $self->_end_scope('server_error', detail => _detail_from_error($error));
             return;
         }
 
-        # Handle application error - always close connection after exception
-        # If response already started, we can't send error page (3.17)
-        if ($self->{response_started}) {
-            $self->_flush_pending_headers;   # don't lose a started response's headers
-            $self->_log(error => "PAGI application error (after response started): $error");
+        # The application returned without starting a response. An incomplete
+        # response is a protocol error: if the client is still connected, synthesize
+        # a 500; either way do not keep-alive a connection on which no response was
+        # written (that would hang the client, which is waiting for a response). A
+        # response that was started but not completed is handled by the body-framing
+        # and keep-alive logic below.
+        if (!$self->{response_started}) {
+            unless ($self->{closed}) {
+                $self->_log(error => "PAGI application returned without starting a response");
+                $self->_send_error_response(500, "Internal Server Error");
+            }
+            $self->_end_scope('server_error', detail => 'no response was started');
+            return;
+        }
+
+        # The application resolved with a started but incomplete response
+        # (terminal body/file/fh — or promised trailers — never sent). Per the
+        # PAGI spec this is an abnormal end: never synthesize the terminal
+        # framing, never keep the connection alive, and report server_error
+        # through on_disconnect — a truncated response must be observable as
+        # truncated.
+        if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {
+            $self->_flush_pending_headers;   # headers may still be buffered; no terminator follows
+            unless ($self->{closed}) {
+                warn(($self->{h1_seq} // '') eq 'awaiting_trailers'
+                    ? "PAGI application returned with an incomplete response (trailers were declared but never sent)\n"
+                    : "PAGI application returned with an incomplete response\n");
+            }
+            $self->_end_scope('server_error',
+                detail => (($self->{h1_seq} // '') eq 'awaiting_trailers')
+                    ? 'trailers were declared but never sent'
+                    : 'response started but never completed');
+            return;
+        }
+
+        # Flush any headers buffered by response.start that were never paired with a
+        # body write (a started-but-bodyless response).
+        $self->_flush_pending_headers;
+
+        # Write access log entry
+        $self->_write_access_log;
+
+        # Notify server that request completed (for max_requests tracking)
+        $self->{server}->_on_request_complete if $self->{server};
+
+        # Stop stall timer - request completed successfully
+        $self->_stop_stall_timer;
+
+        # Request finished cleanly: fire on_complete (not on_disconnect) on the
+        # HTTP connection-state object. Must happen on BOTH the keep-alive and
+        # close paths, and before the keep-alive branch clears the state below.
+        # Once marked complete, the non-keep-alive _handle_disconnect_and_close
+        # call below no-ops the state transition, so on_disconnect never fires for
+        # a completed request.
+        if (my $conn_state = $self->{current_connection_state}) {
+            $conn_state->_mark_complete;
+        }
+
+        # A request has now completed on this connection: the idle timer's next
+        # expiry (if the connection stays open awaiting another request) reports
+        # keepalive_timeout rather than idle_timeout.
+        $self->{_served_a_request} = 1;
+
+        # Determine if we should keep the connection alive
+        my $keep_alive = $self->_should_keep_alive($request);
+
+        if ($keep_alive) {
+            # Reset for next request
+            $self->{handling_request} = 0;
+            $self->{response_started} = 0;
+            $self->{h1_seq} = 'initial';
+            $self->{_resp_pending} = undef;
+            $self->{response_status} = undef;
+            $self->{_response_size} = 0;
+            $self->{request_start} = undef;
+            $self->{current_request} = undef;
+            $self->{request_future} = undef;
+            $self->{current_connection_state} = undef;  # Clear for next request
+            $self->{current_transport_state}  = undef;  # New request gets a fresh handle
+
+            # Whatever the application left unread of the request body is this
+            # connection's to discard before it parses anything else.
+            $self->_begin_body_discard($request);
+
+            # Check if there's more data in the buffer (pipelining)
+            if (length($self->{buffer}) > 0) {
+                $self->_try_handle_request;
+            }
         } else {
-            $self->_send_error_response(500, "Internal Server Error");
-            $self->_log(error => "PAGI application error: $error");
+            # Not keeping alive - close connection
+            $self->_handle_disconnect_and_close('request_complete');
         }
-        # Always close connection after exception (3.2) - don't try keep-alive
-        $self->_end_scope('server_error', detail => _detail_from_error($error));
-        return;
-    }
-
-    # The application returned without starting a response. An incomplete
-    # response is a protocol error: if the client is still connected, synthesize
-    # a 500; either way do not keep-alive a connection on which no response was
-    # written (that would hang the client, which is waiting for a response). A
-    # response that was started but not completed is handled by the body-framing
-    # and keep-alive logic below.
-    if (!$self->{response_started}) {
-        unless ($self->{closed}) {
-            $self->_log(error => "PAGI application returned without starting a response");
-            $self->_send_error_response(500, "Internal Server Error");
-        }
-        $self->_end_scope('server_error', detail => 'no response was started');
-        return;
-    }
-
-    # The application resolved with a started but incomplete response
-    # (terminal body/file/fh — or promised trailers — never sent). Per the
-    # PAGI spec this is an abnormal end: never synthesize the terminal
-    # framing, never keep the connection alive, and report server_error
-    # through on_disconnect — a truncated response must be observable as
-    # truncated.
-    if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {
-        $self->_flush_pending_headers;   # headers may still be buffered; no terminator follows
-        unless ($self->{closed}) {
-            warn(($self->{h1_seq} // '') eq 'awaiting_trailers'
-                ? "PAGI application returned with an incomplete response (trailers were declared but never sent)\n"
-                : "PAGI application returned with an incomplete response\n");
-        }
-        $self->_end_scope('server_error',
-            detail => (($self->{h1_seq} // '') eq 'awaiting_trailers')
-                ? 'trailers were declared but never sent'
-                : 'response started but never completed');
-        return;
-    }
-
-    # Flush any headers buffered by response.start that were never paired with a
-    # body write (a started-but-bodyless response).
-    $self->_flush_pending_headers;
-
-    # Write access log entry
-    $self->_write_access_log;
-
-    # Notify server that request completed (for max_requests tracking)
-    $self->{server}->_on_request_complete if $self->{server};
-
-    # Stop stall timer - request completed successfully
-    $self->_stop_stall_timer;
-
-    # Request finished cleanly: fire on_complete (not on_disconnect) on the
-    # HTTP connection-state object. Must happen on BOTH the keep-alive and
-    # close paths, and before the keep-alive branch clears the state below.
-    # Once marked complete, the non-keep-alive _handle_disconnect_and_close
-    # call below no-ops the state transition, so on_disconnect never fires for
-    # a completed request.
-    if (my $conn_state = $self->{current_connection_state}) {
-        $conn_state->_mark_complete;
-    }
-
-    # A request has now completed on this connection: the idle timer's next
-    # expiry (if the connection stays open awaiting another request) reports
-    # keepalive_timeout rather than idle_timeout.
-    $self->{_served_a_request} = 1;
-
-    # Determine if we should keep the connection alive
-    my $keep_alive = $self->_should_keep_alive($request);
-
-    if ($keep_alive) {
-        # Reset for next request
-        $self->{handling_request} = 0;
-        $self->{response_started} = 0;
-        $self->{h1_seq} = 'initial';
-        $self->{_resp_pending} = undef;
-        $self->{response_status} = undef;
-        $self->{_response_size} = 0;
-        $self->{request_start} = undef;
-        $self->{current_request} = undef;
-        $self->{request_future} = undef;
-        $self->{current_connection_state} = undef;  # Clear for next request
-        $self->{current_transport_state}  = undef;  # New request gets a fresh handle
-
-        # Whatever the application left unread of the request body is this
-        # connection's to discard before it parses anything else.
-        $self->_begin_body_discard($request);
-
-        # Check if there's more data in the buffer (pipelining)
-        if (length($self->{buffer}) > 0) {
-            $self->_try_handle_request;
-        }
-    } else {
-        # Not keeping alive - close connection
-        $self->_handle_disconnect_and_close('request_complete');
-    }
+    };
+    $self->_connection_handler_error('HTTP/1.1', $@) if $@;
 }
 
 sub _should_keep_alive {
@@ -6318,120 +6336,127 @@ async sub _handle_sse_request {
     eval {
         await $self->{app}->($scope, $receive, $send);
     };
+    my $error = $@;
 
-    if (my $error = $@) {
-        $app_error = $error;
-        # If SSE not yet started, send HTTP error
-        if (!_sse_stream_started($self->{h1_seq})) {
-            $self->_send_error_response(500, "Internal Server Error");
+    # The boundary _handle_request's tail has, for the same reason and caught
+    # the same way: this tail also resumes on the event loop's stack once the
+    # application suspends, and its Future is adopted by the same call.
+    eval {
+        if ($error) {
+            $app_error = $error;
+            # If SSE not yet started, send HTTP error
+            if (!_sse_stream_started($self->{h1_seq})) {
+                $self->_send_error_response(500, "Internal Server Error");
+            }
+            $self->_log(error => "PAGI application error (SSE): $error");
+            # An exception is not a clean end -- never keep the connection alive
+            # after one, exactly as the plain HTTP request path does.
+            $app_failed = 1;
         }
-        $self->_log(error => "PAGI application error (SSE): $error");
-        # An exception is not a clean end -- never keep the connection alive
-        # after one, exactly as the plain HTTP request path does.
-        $app_failed = 1;
-    }
 
-    # Www.pod "Application Left a Response Incomplete": a stream
-    # started via sse.start but never ended via sse.close before the
-    # application's Future resolved -- whether it returned or threw -- is an
-    # incomplete response, never stream_complete. sse.close is the scope's
-    # one way to end cleanly (Www.pod "Meaning per scope"); write no
-    # terminator the application never asserted, and never keep this
-    # connection alive afterward.
-    if (($self->{h1_seq} // '') eq 'streaming' && !$self->{sse_finished}) {
-        $self->{sse_finished} = 1;   # matches _finish_sse_stream's own guard: no terminator goes out
-        $self->_stop_sse_keepalive;
-        $self->_stop_sse_idle_timer;
-        # Client-already-gone carve-out (mirrors Application Produced No
-        # Response): if the transport is already gone, this is not an
-        # application error, and the exception (if any) was already logged
-        # above.
-        $self->_log(error => "PAGI application returned after sse.start without sse.close")
-            unless $self->{closed} || $app_failed;
-        my $sse_detail = $app_failed ? _detail_from_error($app_error)
-                       : 'sse.start without sse.close';
-        $self->{current_connection_state}->_mark_disconnected('server_error', $sse_detail)
-            if $self->{current_connection_state};
-        $self->_end_scope('server_error', detail => $sse_detail);
-        return;
-    }
-
-    # A refusal (Www.pod "Refusing the stream") answers this scope with an
-    # ordinary HTTP response instead of a stream, and it ends the connection
-    # either way. Completed, it is a clean end and its response already
-    # carried Connection: close, so keep-alive is not on offer. Abandoned
-    # before its terminal event, it is an incomplete response under
-    # "Application Left a Response Incomplete": no terminator is synthesized
-    # and the connection must not serve another request.
-    my $refusal_state = $self->{h1_seq} // '';
-    if ($refusal_state eq 'refusing' || $refusal_state eq 'refusal_complete') {
-        $self->_stop_sse_idle_timer;
-        if ($refusal_state eq 'refusing') {
-            $self->_flush_pending_headers;   # no terminator follows these
-            # Client-already-gone carve-out, as everywhere else: a request
-            # that already ended abnormally is not an application error.
-            $self->_log(error => "PAGI application returned with an incomplete response")
+        # Www.pod "Application Left a Response Incomplete": a stream
+        # started via sse.start but never ended via sse.close before the
+        # application's Future resolved -- whether it returned or threw -- is an
+        # incomplete response, never stream_complete. sse.close is the scope's
+        # one way to end cleanly (Www.pod "Meaning per scope"); write no
+        # terminator the application never asserted, and never keep this
+        # connection alive afterward.
+        if (($self->{h1_seq} // '') eq 'streaming' && !$self->{sse_finished}) {
+            $self->{sse_finished} = 1;   # matches _finish_sse_stream's own guard: no terminator goes out
+            $self->_stop_sse_keepalive;
+            $self->_stop_sse_idle_timer;
+            # Client-already-gone carve-out (mirrors Application Produced No
+            # Response): if the transport is already gone, this is not an
+            # application error, and the exception (if any) was already logged
+            # above.
+            $self->_log(error => "PAGI application returned after sse.start without sse.close")
                 unless $self->{closed} || $app_failed;
-            $self->_end_scope('server_error',
-                detail => 'refusal started but never completed');
+            my $sse_detail = $app_failed ? _detail_from_error($app_error)
+                           : 'sse.start without sse.close';
+            $self->{current_connection_state}->_mark_disconnected('server_error', $sse_detail)
+                if $self->{current_connection_state};
+            $self->_end_scope('server_error', detail => $sse_detail);
             return;
         }
-        $self->{current_connection_state}->_mark_complete
-            if $self->{current_connection_state};
-        $self->_end_scope('session_complete');
-        return;
-    }
 
-    # End the stream (no-op if an explicit sse.close already finished it).
-    $self->_finish_sse_stream;
-
-    # The application produced no response at all: no sse.start, and no
-    # refusal. That is the same protocol error the plain HTTP path reports,
-    # and it must never reach the keep-alive branch below -- the client is
-    # still waiting for a response, so handing it back a connection with zero
-    # bytes written would hang it until the idle timeout, or forever when
-    # timeout => 0. Both refusal outcomes were answered above.
-    if (!_sse_stream_started($self->{h1_seq}) && !$self->{response_started}) {
-        unless ($self->{closed}) {
-            $self->_log(error => "PAGI application returned without starting an SSE stream or a response");
-            $self->_send_error_response(500, "Internal Server Error");
+        # A refusal (Www.pod "Refusing the stream") answers this scope with an
+        # ordinary HTTP response instead of a stream, and it ends the connection
+        # either way. Completed, it is a clean end and its response already
+        # carried Connection: close, so keep-alive is not on offer. Abandoned
+        # before its terminal event, it is an incomplete response under
+        # "Application Left a Response Incomplete": no terminator is synthesized
+        # and the connection must not serve another request.
+        my $refusal_state = $self->{h1_seq} // '';
+        if ($refusal_state eq 'refusing' || $refusal_state eq 'refusal_complete') {
+            $self->_stop_sse_idle_timer;
+            if ($refusal_state eq 'refusing') {
+                $self->_flush_pending_headers;   # no terminator follows these
+                # Client-already-gone carve-out, as everywhere else: a request
+                # that already ended abnormally is not an application error.
+                $self->_log(error => "PAGI application returned with an incomplete response")
+                    unless $self->{closed} || $app_failed;
+                $self->_end_scope('server_error',
+                    detail => 'refusal started but never completed');
+                return;
+            }
+            $self->{current_connection_state}->_mark_complete
+                if $self->{current_connection_state};
+            $self->_end_scope('session_complete');
+            return;
         }
-        $self->_end_scope('server_error', detail => 'no response was started');
-        return;
-    }
 
-    # Write access log entry (logs at stream end with total duration). Must
-    # precede the reset below, which clears the request it logs.
-    $self->_write_access_log;
+        # End the stream (no-op if an explicit sse.close already finished it).
+        $self->_finish_sse_stream;
 
-    # Notify server that request completed (for max_requests tracking). One
-    # call site covers both fates below (keep-alive and close) -- the SSE
-    # "request" completes here, when the stream ends, not at sse.start.
-    $self->{server}->_on_request_complete if $self->{server};
+        # The application produced no response at all: no sse.start, and no
+        # refusal. That is the same protocol error the plain HTTP path reports,
+        # and it must never reach the keep-alive branch below -- the client is
+        # still waiting for a response, so handing it back a connection with zero
+        # bytes written would hang it until the idle timeout, or forever when
+        # timeout => 0. Both refusal outcomes were answered above.
+        if (!_sse_stream_started($self->{h1_seq}) && !$self->{response_started}) {
+            unless ($self->{closed}) {
+                $self->_log(error => "PAGI application returned without starting an SSE stream or a response");
+                $self->_send_error_response(500, "Internal Server Error");
+            }
+            $self->_end_scope('server_error', detail => 'no response was started');
+            return;
+        }
 
-    # Design section 11.6: a CLEAN end -- a stream that never started, or a
-    # started stream properly ended with sse.close (the incomplete-response
-    # branch above already intercepted a bare return with no sse.close, which
-    # is never clean; both refusal outcomes closed the connection above) -- honors the "Connection: keep-alive"
-    # header the server itself emitted on sse.start; the terminator is written
-    # above and the connection returns to ordinary request handling.
-    # Keep-alive still yields to the usual overrides: an application
-    # exception, a transport already gone (client disconnect, timeout, write
-    # error, server shutdown), a client "Connection: close", and HTTP/1.0
-    # semantics.
-    if (!$app_failed && !$self->{closed} && $self->_should_keep_alive($request)) {
-        $self->_reset_after_sse_stream($request);
-        return;
-    }
+        # Write access log entry (logs at stream end with total duration). Must
+        # precede the reset below, which clears the request it logs.
+        $self->_write_access_log;
 
-    # The application ended this stream itself with sse.close: the connection
-    # ends under the reason it gave, or under the token that names the
-    # application as the closer. Anything else reaching here is an ordinary
-    # stream completion.
-    my $end_reason = (($self->{h1_seq} // '') eq 'closed')
-                   ? $self->_end_reason($self, 'app_closed')
-                   : 'stream_complete';
-    $self->_handle_disconnect_and_close($end_reason);
+        # Notify server that request completed (for max_requests tracking). One
+        # call site covers both fates below (keep-alive and close) -- the SSE
+        # "request" completes here, when the stream ends, not at sse.start.
+        $self->{server}->_on_request_complete if $self->{server};
+
+        # Design section 11.6: a CLEAN end -- a stream that never started, or a
+        # started stream properly ended with sse.close (the incomplete-response
+        # branch above already intercepted a bare return with no sse.close, which
+        # is never clean; both refusal outcomes closed the connection above) -- honors the "Connection: keep-alive"
+        # header the server itself emitted on sse.start; the terminator is written
+        # above and the connection returns to ordinary request handling.
+        # Keep-alive still yields to the usual overrides: an application
+        # exception, a transport already gone (client disconnect, timeout, write
+        # error, server shutdown), a client "Connection: close", and HTTP/1.0
+        # semantics.
+        if (!$app_failed && !$self->{closed} && $self->_should_keep_alive($request)) {
+            $self->_reset_after_sse_stream($request);
+            return;
+        }
+
+        # The application ended this stream itself with sse.close: the connection
+        # ends under the reason it gave, or under the token that names the
+        # application as the closer. Anything else reaching here is an ordinary
+        # stream completion.
+        my $end_reason = (($self->{h1_seq} // '') eq 'closed')
+                       ? $self->_end_reason($self, 'app_closed')
+                       : 'stream_complete';
+        $self->_handle_disconnect_and_close($end_reason);
+    };
+    $self->_connection_handler_error('HTTP/1.1', $@) if $@;
 }
 
 # Idempotently end an SSE stream: write the chunked terminator (HTTP/1.1) and
@@ -7063,90 +7088,97 @@ async sub _handle_websocket_request {
     eval {
         await $self->{app}->($scope, $receive, $send);
     };
+    my $error = $@;
 
-    my $app_failed = 0;
-    if (my $error = $@) {
-        # If neither the handshake nor a refusal response has begun, answer
-        # with an HTTP error; once a refusal has started there is no room on
-        # the wire for a second response.
-        if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
-            $self->_send_error_response(500, "Internal Server Error");
+    # The boundary _handle_request's tail has, for the same reason and caught
+    # the same way: this tail also resumes on the event loop's stack once the
+    # application suspends, and its Future is adopted by the same call.
+    eval {
+        my $app_failed = 0;
+        if ($error) {
+            # If neither the handshake nor a refusal response has begun, answer
+            # with an HTTP error; once a refusal has started there is no room on
+            # the wire for a second response.
+            if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
+                $self->_send_error_response(500, "Internal Server Error");
+            }
+            $self->_log(error => "PAGI application error (WebSocket): $error");
+            $app_failed = 1;
         }
-        $self->_log(error => "PAGI application error (WebSocket): $error");
-        $app_failed = 1;
-    }
 
-    # A refusal abandoned before its terminal event is an incomplete response
-    # (Www.pod "Application Left a Response Incomplete", which names the
-    # refusal case first): no terminator is synthesized, the connection ends,
-    # and the scope reports server_error. A completed refusal falls through to
-    # the clean-end mark below.
-    if (($self->{h1_seq} // '') eq 'refusing') {
-        $self->_flush_pending_headers;   # no terminator follows these
-        $self->_log(error => "PAGI application returned with an incomplete response")
-            unless $self->{closed} || $app_failed;
-        $self->_end_scope('server_error',
-            detail => 'refusal started but never completed');
-        return;
-    }
-
-    # Www.pod "Meaning per scope": returning from a websocket scope without
-    # websocket.accept or a refusal is governed by "Application Produced No
-    # Response" -- the 500 backstop, its log, and its client-gone carve-out,
-    # exactly as on an http or sse scope. Until sub-spec 0.6 a pre-accept
-    # websocket.close answered such a client with a 403; that event is now out
-    # of sequence, so nothing else covers this path and the client would be
-    # left waiting. _send_error_response is a no-op once a response started,
-    # so an exception already answered above cannot produce a second one.
-    if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
-        unless ($self->{closed}) {
-            $self->_log(error => "PAGI application returned without accepting the WebSocket or refusing the handshake")
-                unless $app_failed;
-            $self->_send_error_response(500, "Internal Server Error");
-        }
-        $self->_end_scope('server_error', detail => 'no response was started');
-        return;
-    }
-
-    # Write access log entry (logs at connection close with total duration)
-    $self->_write_access_log;
-    $self->{server}->_on_request_complete if $self->{server};
-
-    if (my $cs = $self->{current_connection_state}) {
-        if (_ws_handshake_accepted($self->{h1_seq})
-            && !PAGI::Server::EventValidator::scope_send_clean('websocket', $self->{h1_seq})
-            && !$self->{ws_peer_closed}
-            && !$self->{closed}) {
-            # App returned from an accepted socket without a closing
-            # handshake: an incomplete response (Www.pod "Application Left a
-            # Response Incomplete"). Close with 1011, report server_error,
-            # log; never a clean end. The guard asks the three facts the
-            # clean-end test asks: the handshake was accepted, the
-            # application's own send state never reached a clean end, and no
-            # peer Close frame validated. _send_close_frame records the code;
-            # flushed by _close's close_when_empty before the socket closes.
-            $self->_send_close_frame(1011, '');
-            $self->_record_end($self, reason => 'server_error');
-            $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
-            $self->_handle_disconnect_and_close('server_error',
-                detail => 'accepted socket left without a closing handshake');
+        # A refusal abandoned before its terminal event is an incomplete response
+        # (Www.pod "Application Left a Response Incomplete", which names the
+        # refusal case first): no terminator is synthesized, the connection ends,
+        # and the scope reports server_error. A completed refusal falls through to
+        # the clean-end mark below.
+        if (($self->{h1_seq} // '') eq 'refusing') {
+            $self->_flush_pending_headers;   # no terminator follows these
+            $self->_log(error => "PAGI application returned with an incomplete response")
+                unless $self->{closed} || $app_failed;
+            $self->_end_scope('server_error',
+                detail => 'refusal started but never completed');
             return;
         }
-        # Keyed on the app's own send state and the validated peer Close
-        # frame rather than close_sent||close_received: a server-initiated
-        # protocol close (which also sets close_sent, via _send_close_frame)
-        # never advances h1_seq to 'closed' and never sets ws_peer_closed, so
-        # it can never satisfy this guard -- robust by construction rather
-        # than by the ordering that currently marks the connection_state
-        # abnormal before this tail ever runs.
-        $cs->_mark_complete
-            if (_ws_handshake_accepted($self->{h1_seq})
-                && (($self->{h1_seq} // '') eq 'closed' || $self->{ws_peer_closed}))
-            || (($self->{h1_seq} // '') eq 'refusal_complete');
-    }
 
-    # Close connection after WebSocket session ends
-    $self->_handle_disconnect_and_close('session_complete');
+        # Www.pod "Meaning per scope": returning from a websocket scope without
+        # websocket.accept or a refusal is governed by "Application Produced No
+        # Response" -- the 500 backstop, its log, and its client-gone carve-out,
+        # exactly as on an http or sse scope. Until sub-spec 0.6 a pre-accept
+        # websocket.close answered such a client with a 403; that event is now out
+        # of sequence, so nothing else covers this path and the client would be
+        # left waiting. _send_error_response is a no-op once a response started,
+        # so an exception already answered above cannot produce a second one.
+        if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
+            unless ($self->{closed}) {
+                $self->_log(error => "PAGI application returned without accepting the WebSocket or refusing the handshake")
+                    unless $app_failed;
+                $self->_send_error_response(500, "Internal Server Error");
+            }
+            $self->_end_scope('server_error', detail => 'no response was started');
+            return;
+        }
+
+        # Write access log entry (logs at connection close with total duration)
+        $self->_write_access_log;
+        $self->{server}->_on_request_complete if $self->{server};
+
+        if (my $cs = $self->{current_connection_state}) {
+            if (_ws_handshake_accepted($self->{h1_seq})
+                && !PAGI::Server::EventValidator::scope_send_clean('websocket', $self->{h1_seq})
+                && !$self->{ws_peer_closed}
+                && !$self->{closed}) {
+                # App returned from an accepted socket without a closing
+                # handshake: an incomplete response (Www.pod "Application Left a
+                # Response Incomplete"). Close with 1011, report server_error,
+                # log; never a clean end. The guard asks the three facts the
+                # clean-end test asks: the handshake was accepted, the
+                # application's own send state never reached a clean end, and no
+                # peer Close frame validated. _send_close_frame records the code;
+                # flushed by _close's close_when_empty before the socket closes.
+                $self->_send_close_frame(1011, '');
+                $self->_record_end($self, reason => 'server_error');
+                $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
+                $self->_handle_disconnect_and_close('server_error',
+                    detail => 'accepted socket left without a closing handshake');
+                return;
+            }
+            # Keyed on the app's own send state and the validated peer Close
+            # frame rather than close_sent||close_received: a server-initiated
+            # protocol close (which also sets close_sent, via _send_close_frame)
+            # never advances h1_seq to 'closed' and never sets ws_peer_closed, so
+            # it can never satisfy this guard -- robust by construction rather
+            # than by the ordering that currently marks the connection_state
+            # abnormal before this tail ever runs.
+            $cs->_mark_complete
+                if (_ws_handshake_accepted($self->{h1_seq})
+                    && (($self->{h1_seq} // '') eq 'closed' || $self->{ws_peer_closed}))
+                || (($self->{h1_seq} // '') eq 'refusal_complete');
+        }
+
+        # Close connection after WebSocket session ends
+        $self->_handle_disconnect_and_close('session_complete');
+    };
+    $self->_connection_handler_error('HTTP/1.1', $@) if $@;
 }
 
 sub _create_websocket_scope {

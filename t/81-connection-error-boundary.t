@@ -12,14 +12,18 @@
 # a handle that is already gone. That exception belongs to one connection and
 # must end only that connection.
 #
-# HTTP/1.1 has had that boundary all along: everything the read handler drives
-# runs inside an eval, and what it catches is logged as "PAGI connection error"
-# and ends the connection with server_error. HTTP/2 dispatch does not run under
-# that eval -- it is an adopted Future -- so the same exception reached
-# IO::Async::Notifier's invoke_error, which, with no on_error registered on
-# PAGI::Server and no parent notifier, dies out of $loop->run and takes the
-# whole process with it. The failure handler attached before adopt_future gives
-# the HTTP/2 dispatch Future the boundary HTTP/1.1 already had.
+# Neither transport had that boundary where it mattered. Both run the request
+# under an adopted Future, and an exception failing an adopted Future reaches
+# IO::Async::Notifier's invoke_error, which -- with no on_error registered on
+# PAGI::Server and no parent notifier -- dies out of $loop->run and takes the
+# whole process with it. HTTP/1.1's read-handler eval covered its request tail
+# only while the application had not suspended: Future::AsyncAwait runs the
+# request's async sub synchronously until the first await, and every
+# application that does I/O passes one, after which the tail resumes on the
+# event loop's own stack, outside that eval. Each handler now carries the same
+# eval around its own tail, reporting through one helper, so the fault ends the
+# connection and never the process on either transport and whether or not the
+# application suspended.
 #
 # Both halves of the contract are pinned here, because they differ in what the
 # connection object is allowed to say:
@@ -152,7 +156,9 @@ my $app = async sub {
     # This application serves requests only; declining the listening server's
     # lifespan scope by raising on it is the interoperable default (auto mode)
     # and is not logged.
-    die "no lifespan handler\n" unless ($scope->{type} // '') eq 'http';
+    my $type = $scope->{type} // '';
+    die "no lifespan handler\n"
+        unless $type eq 'http' || $type eq 'sse' || $type eq 'websocket';
     my $path = $scope->{path};
     my $cs   = $scope->{'pagi.connection'};
     my $obs  = $seen{$path} = { complete => 0, disconnect => [], state => $cs };
@@ -528,7 +534,7 @@ SKIP: {
 }
 
 # =============================================================================
-# (4) The HTTP/1.1 twin: the boundary it already had, pinned
+# (4) The HTTP/1.1 twin: a tail that never left the read handler's own stack
 # =============================================================================
 subtest 'HTTP/1.1: an exception on the request tail ends that connection' => sub {
     reset_observations();
@@ -546,7 +552,7 @@ subtest 'HTTP/1.1: an exception on the request tail ends that connection' => sub
 
     is(app_log_errors(), [
         { level => 'error', message => 'PAGI application returned without starting a response' },
-        { level => 'error', message => "PAGI connection error: $INJECTED" },
+        { level => 'error', message => "PAGI connection handler error (HTTP/1.1): $INJECTED" },
     ], 'the existing no-response line, then the boundary line') or diag(log_lines());
 
     my $obs = $seen{'/boom-sync'};
@@ -586,7 +592,7 @@ subtest 'a tail exception after delivery closes the connection without un-comple
     is($loop_error, undef, 'HTTP/1.1: the event loop kept running');
     like($wire, qr{^HTTP/1\.1 200 OK\r\n}, 'the response the client already had is intact');
     is(app_log_errors(), [
-        { level => 'error', message => "PAGI connection error: $INJECTED" },
+        { level => 'error', message => "PAGI connection handler error (HTTP/1.1): $INJECTED" },
     ], 'one error line, the HTTP/1.1 boundary') or diag(log_lines());
     is($seen{'/delivered'}{complete}, 1, 'on_complete fired: the response was delivered');
     is($seen{'/delivered'}{state}->disconnect_reason, undef,
@@ -621,6 +627,125 @@ subtest 'a tail exception after delivery closes the connection without un-comple
         $loop->remove($h2_server);
         assert_no_warnings('h2 after delivery');
     }
+};
+
+# =============================================================================
+# (6) HTTP/1.1: the same tail, once the application has SUSPENDED
+# =============================================================================
+# Subtest (4) above pins the tail of an application that never suspends, which
+# still runs inside the read handler's own eval. Every real application does
+# I/O: it suspends, and it resumes on the event loop's own stack, outside that
+# eval. Its request Future is adopted exactly as HTTP/2's dispatch Future is,
+# so before the boundary in the request path's own async sub a throw from the
+# server's tail reached invoke_error and died out of $loop->run.
+#
+# The three h1 scope kinds are dispatched from the same place and adopted the
+# same way, so each one's tail is pinned here.
+subtest 'HTTP/1.1: an exception on a suspended application\'s tail ends that connection' => sub {
+    reset_observations();
+    my $server = create_server;
+    $server->listen->get;
+
+    my $idle = h1_connect($server);   # a second connection, open the whole time
+    my $sock = h1_connect($server);
+
+    $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom' };
+    my ($wire, $loop_error) = h1_exchange($sock, "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    is($loop_error, undef, 'the event loop kept running');
+    is($ARMED, undef, 'the injected failure did fire');
+
+    is(app_log_errors(), [
+        { level => 'error', message => 'PAGI application returned without starting a response' },
+        { level => 'error', message => "PAGI connection handler error (HTTP/1.1): $INJECTED" },
+    ], 'the existing no-response line, then exactly one boundary line') or diag(log_lines());
+
+    my $obs = $seen{'/boom'};
+    is($obs->{state}->disconnect_reason, 'server_error', 'the scope ended with server_error');
+    is($obs->{state}->disconnect_detail, $INJECTED, 'the exception is the disconnect detail');
+    is($obs->{complete}, 0, 'on_complete never fired');
+    is($obs->{disconnect}, [$INJECTED], 'on_disconnect fired once');
+
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    is($idle_error, undef, 'the loop still runs');
+    like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
+    like($idle_wire, qr{ok\z}, 'and gets its body');
+
+    close $_ for $sock, $idle;
+    $loop->remove($server);
+    assert_no_warnings('h1 suspended tail exception');
+};
+
+subtest 'SSE: an exception on a suspended application\'s tail ends that connection' => sub {
+    reset_observations();
+    my $server = create_server;
+    $server->listen->get;
+
+    my $idle = h1_connect($server);
+    my $sock = h1_connect($server);
+
+    $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom' };
+    my ($wire, $loop_error) = h1_exchange($sock,
+        "GET /boom HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n");
+
+    is($loop_error, undef, 'the event loop kept running');
+    is($ARMED, undef, 'the injected failure did fire');
+
+    is(app_log_errors(), [
+        { level => 'error',
+          message => 'PAGI application returned without starting an SSE stream or a response' },
+        { level => 'error', message => "PAGI connection handler error (HTTP/1.1): $INJECTED" },
+    ], 'the existing no-response line, then exactly one boundary line') or diag(log_lines());
+
+    my $obs = $seen{'/boom'};
+    is($obs->{state}->disconnect_reason, 'server_error', 'the scope ended with server_error');
+    is($obs->{state}->disconnect_detail, $INJECTED, 'the exception is the disconnect detail');
+    is($obs->{complete}, 0, 'on_complete never fired');
+
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    is($idle_error, undef, 'the loop still runs');
+    like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
+
+    close $_ for $sock, $idle;
+    $loop->remove($server);
+    assert_no_warnings('sse suspended tail exception');
+};
+
+subtest 'WebSocket: an exception on a suspended application\'s tail ends that connection' => sub {
+    reset_observations();
+    my $server = create_server;
+    $server->listen->get;
+
+    my $idle = h1_connect($server);
+    my $sock = h1_connect($server);
+
+    $ARMED = sub { $_[0] eq '_end_scope' && ($_[1]{current_request}{path} // '') eq '/boom' };
+    my ($wire, $loop_error) = h1_exchange($sock,
+          "GET /boom HTTP/1.1\r\nHost: x\r\n"
+        . "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        . "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+
+    is($loop_error, undef, 'the event loop kept running');
+    is($ARMED, undef, 'the injected failure did fire');
+
+    is(app_log_errors(), [
+        { level => 'error',
+          message => 'PAGI application returned without accepting the WebSocket or refusing the handshake' },
+        { level => 'error', message => "PAGI connection handler error (HTTP/1.1): $INJECTED" },
+    ], 'the existing no-response line, then exactly one boundary line') or diag(log_lines());
+
+    my $obs = $seen{'/boom'};
+    is($obs->{state}->disconnect_reason, 'server_error', 'the scope ended with server_error');
+    is($obs->{state}->disconnect_detail, $INJECTED, 'the exception is the disconnect detail');
+    is($obs->{complete}, 0, 'on_complete never fired');
+
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n");
+    is($idle_error, undef, 'the loop still runs');
+    like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
+
+    close $_ for $sock, $idle;
+    $loop->remove($server);
+    assert_no_warnings('websocket suspended tail exception');
 };
 
 alarm 0;
