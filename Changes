@@ -57,6 +57,14 @@
     refusal's status must be 300 or above; an sse refusal may carry any status.
 
   Bug fixes (measured against 0.002013)
+  - h2: a connection nghttp2 tore down for a peer protocol violation reported
+    client_closed with no detail. It now ends as protocol_error and carries
+    nghttp2's own account of the violation -- the rejected frame's RFC 9113
+    type and NGHTTP2_ERR_* code, or nghttp2's diagnostic in words.
+  - h2: a graceful shutdown terminated the session locally, which puts nothing
+    on the wire, so clients saw a bare TCP close. It now sends GOAWAY naming
+    the last stream the server took up (RFC 9113 section 6.8), so a client
+    knows which requests were never acted on.
   - h1: a pre-accept WebSocket disconnect delivered http.disconnect.
   - h1: receive() after a completed refusal delivered a fabricated
     websocket.disconnect.

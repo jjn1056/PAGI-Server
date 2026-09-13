@@ -186,7 +186,12 @@ C<idle_timeout>, the byte limit for C<body_too_large>, the OS error text for
 C<read_error> and C<write_error>, the C<RST_STREAM> error code for an HTTP/2
 C<client_closed>, the application's exception message or a one-line
 description for C<server_error>, and the application's own string for
-C<app_abort>. Pinned across C<t/69>, C<t/71>, C<t/72> and C<t/http2/31>.
+C<app_abort>. On HTTP/2 the violated rule comes from nghttp2, which parses
+the peer's frames and is the only party that knows which rule was broken: a
+frame it rejected is named by its RFC 9113 frame type and the
+C<NGHTTP2_ERR_*> constant nghttp2 reported, and a diagnostic it offers in
+words is passed through as it stands. Pinned across C<t/69>, C<t/71>,
+C<t/72>, C<t/http2/31> and C<t/http2/45>.
 
 =item * B<Error logging.> The spec says the server SHOULD log an incomplete
 response or a missing response at error level. PAGI::Server logs exactly one

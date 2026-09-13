@@ -577,10 +577,54 @@ sub _init_h2_session {
             return unless $weak_self;
             $weak_self->_h2_on_header_overflow($stream_id);
         },
+        on_nghttp2_error => sub {
+            my ($lib_error_code, $message) = @_;
+            return unless $weak_self;
+            $weak_self->_h2_record_nghttp2_diagnostic($message);
+        },
+        on_invalid_frame => sub {
+            my ($stream_id, $type, $lib_error_code) = @_;
+            return unless $weak_self;
+            $weak_self->_h2_record_nghttp2_diagnostic(sprintf(
+                'nghttp2 rejected a %s frame on stream %d (%s)',
+                _h2_frame_name($type), $stream_id,
+                _h2_lib_error_name($lib_error_code)));
+        },
     );
 
     # Send initial SETTINGS to client
     $self->_h2_write_pending;
+}
+
+# RFC 9113 section 6 frame types, by wire value: what an operator reads in a
+# disconnect_detail. Net::HTTP2::nghttp2 exports no names for these, so the
+# RFC's own are used; it does export the library error codes, so those are
+# looked up by the constant name the binding publishes rather than printed as
+# the ABI numbers they are.
+my @H2_FRAME_NAME = qw(DATA HEADERS PRIORITY RST_STREAM SETTINGS PUSH_PROMISE
+                       PING GOAWAY WINDOW_UPDATE CONTINUATION);
+my %H2_LIB_ERROR_NAME;
+
+sub _h2_frame_name { return $H2_FRAME_NAME[$_[0]] // "frame type $_[0]" }
+
+sub _h2_lib_error_name {
+    my ($code) = @_;
+    %H2_LIB_ERROR_NAME = map { Net::HTTP2::nghttp2->can($_)->() => $_ } qw(
+        NGHTTP2_ERR_WOULDBLOCK NGHTTP2_ERR_DEFERRED NGHTTP2_ERR_PROTO
+        NGHTTP2_ERR_STREAM_CLOSING NGHTTP2_ERR_HTTP_HEADER
+        NGHTTP2_ERR_CALLBACK_FAILURE NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE
+    ) unless %H2_LIB_ERROR_NAME;
+    return $H2_LIB_ERROR_NAME{$code} // "nghttp2 error $code";
+}
+
+# What nghttp2 last said about the peer's frames while this feed ran. A
+# diagnostic string on the connection, cleared at the start of every feed and
+# released with the connection: nghttp2 has already decided what to do about
+# the violation, and this only records how to describe it.
+sub _h2_record_nghttp2_diagnostic {
+    my ($self, $message) = @_;
+    $self->{h2_nghttp2_detail} = $message;
+    return;
 }
 
 sub _h2_process_data {
@@ -588,6 +632,7 @@ sub _h2_process_data {
     return unless $self->{h2_session};
 
     if (length($self->{buffer}) > 0) {
+        delete $self->{h2_nghttp2_detail};
         $self->_h2_session_call(sub { $self->{h2_session}->feed($self->{buffer}) });
         $self->{buffer} = '';
     }
@@ -596,6 +641,16 @@ sub _h2_process_data {
 
     # Close connection when session is done (GOAWAY received or sent)
     if ($self->{h2_session} && !$self->{h2_session}->want_read) {
+        # nghttp2 ends the session itself when the peer breaks HTTP/2, and it
+        # is the only party that knows which rule was broken. A diagnostic
+        # from the feed that just ended the session is that rule, and makes
+        # this a protocol_error rather than the ordinary peer-went-away close
+        # (Compliance.pod "disconnect_detail contents"). A diagnostic nghttp2
+        # answered per-stream does not survive the next feed, so it cannot
+        # blame a later, unrelated close.
+        return $self->_handle_disconnect_and_close('protocol_error',
+            detail => $self->{h2_nghttp2_detail})
+            if defined $self->{h2_nghttp2_detail};
         $self->_handle_disconnect_and_close;
     }
 }
@@ -6051,7 +6106,18 @@ sub _close {
         delete $self->{h2_streams};
     }
     if ($self->{h2_session}) {
-        eval { $self->{h2_session}->terminate(0) };
+        # A shutdown is the one ending the peer can still act on: RFC 9113
+        # section 6.8 has it read GOAWAY's last stream id to learn which of
+        # its requests this server never took up, and may retry elsewhere.
+        # terminate_session puts nothing on the wire, so those clients used to
+        # see a bare TCP close. Every other ending keeps it -- a protocol
+        # error nghttp2 already answered with its own GOAWAY, a socket that
+        # has gone away.
+        if ($self->_end_reason($self, '') eq 'server_shutdown') {
+            eval { $self->{h2_session}->graceful_shutdown; $self->_h2_write_pending };
+        } else {
+            eval { $self->{h2_session}->terminate(0) };
+        }
         delete $self->{h2_session};
     }
 

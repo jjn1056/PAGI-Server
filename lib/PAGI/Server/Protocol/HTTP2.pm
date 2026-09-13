@@ -149,6 +149,8 @@ sub create_session {
         on_close   => $callbacks{on_close},
         on_header_overflow => $callbacks{on_header_overflow},
         on_frame_sent      => $callbacks{on_frame_sent},
+        on_nghttp2_error   => $callbacks{on_nghttp2_error},
+        on_invalid_frame   => $callbacks{on_invalid_frame},
         settings   => {
             max_concurrent_streams  => $self->{max_concurrent_streams},
             initial_window_size     => $self->{initial_window_size},
@@ -182,6 +184,8 @@ sub new {
         on_close    => $args{on_close},
         on_header_overflow => $args{on_header_overflow},
         on_frame_sent      => $args{on_frame_sent},
+        on_nghttp2_error   => $args{on_nghttp2_error},
+        on_invalid_frame   => $args{on_invalid_frame},
         settings    => $args{settings},
         h2_rst_rate_limit => $args{h2_rst_rate_limit},
         streams     => {},  # stream_id => { headers => [], pseudo => {}, ... }
@@ -208,6 +212,14 @@ sub _init_nghttp2_session {
             on_begin_headers => sub {
                 my ($stream_id, $type, $flags) = @_;
                 return 0 unless $weak_self;
+
+                # The highest peer stream this session has taken up, which is
+                # what a GOAWAY has to name (RFC 9113 section 6.8). Recorded
+                # here rather than at dispatch because a stream the server
+                # only answers with a synthesized error (431, 501, 413) was
+                # still acted on.
+                $weak_self->{last_stream_id} = $stream_id
+                    if $stream_id > ($weak_self->{last_stream_id} // 0);
 
                 # HEADERS frame: the first block on a stream establishes the
                 # request accumulator (as before). A LATER HEADERS block on
@@ -456,6 +468,27 @@ sub _init_nghttp2_session {
                 return 0;
             },
 
+            # nghttp2 parses the peer's frames, so when the peer breaks HTTP/2
+            # it is nghttp2 that knows which rule was broken. These two hand
+            # that over: on_invalid_frame_recv names a frame nghttp2 rejected,
+            # on_error carries a human-readable diagnostic. Both are reports,
+            # not decisions -- nghttp2 has already chosen the RST_STREAM or
+            # GOAWAY the violation calls for.
+            on_invalid_frame_recv => sub {
+                my ($frame, $lib_error_code) = @_;
+                return 0 unless $weak_self && $weak_self->{on_invalid_frame};
+                $weak_self->{on_invalid_frame}->(
+                    $frame->{stream_id}, $frame->{type}, $lib_error_code);
+                return 0;
+            },
+
+            on_error => sub {
+                my ($lib_error_code, $message) = @_;
+                return 0 unless $weak_self && $weak_self->{on_nghttp2_error};
+                $weak_self->{on_nghttp2_error}->($lib_error_code, $message);
+                return 0;
+            },
+
             on_stream_close => sub {
                 my ($stream_id, $error_code) = @_;
                 return 0 unless $weak_self;
@@ -633,6 +666,27 @@ sub terminate {
     my ($self, $error_code) = @_;
     $error_code //= 0;  # NO_ERROR
     return $self->{nghttp2}->terminate_session($error_code);
+}
+
+=head2 graceful_shutdown
+
+    $session->graceful_shutdown;
+
+Queue a C<GOAWAY> announcing an orderly shutdown, naming the highest
+peer-initiated stream this session took up and C<NO_ERROR> as the reason.
+The caller flushes it like any other queued frame.
+
+Unlike C<terminate>, this leaves the session able to finish the streams it
+already accepted: RFC 9113 section 6.8 has the peer read the last stream id
+to learn which of its requests were never acted on and may safely be retried
+elsewhere.
+
+=cut
+
+sub graceful_shutdown {
+    my ($self) = @_;
+    return $self->{nghttp2}->submit_goaway(
+        last_stream_id => $self->{last_stream_id} // 0);
 }
 
 =head2 submit_rst_stream
