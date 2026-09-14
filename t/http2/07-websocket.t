@@ -488,4 +488,99 @@ subtest 'WebSocket close handshake over HTTP/2' => sub {
     $loop->remove($server);
 };
 
+# ============================================================
+# A Ping that arrives before the accept is ponged
+# ============================================================
+# RFC 6455 section 5.5.3: a Pong must be sent in response to a Ping "as soon
+# as is practical". A client may put the Ping in the same write as the
+# extended CONNECT, so the server holds it until the application accepts and
+# the pre-accept drain parses it. That drain runs on its own event-loop tick,
+# outside nghttp2's feed, so nothing else writes the session for it: a client
+# that pre-pings and then only reads must still get the Pong.
+subtest 'Ping received before the accept is ponged with no further client output' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+
+        await $send->({ type => 'websocket.accept' });
+
+        # The application sends nothing, so the Pong the pre-accept drain
+        # queues is the only DATA this stream can carry.
+        while (1) {
+            my $event = await $receive->();
+            last if $event->{type} eq 'websocket.disconnect';
+        }
+    };
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my %response_headers;
+    my $ws_data = '';
+
+    my $client = create_client(
+        on_header => sub {
+            my ($sid, $name, $value) = @_;
+            $response_headers{$name} = $value;
+            return 0;
+        },
+        on_data_chunk_recv => sub {
+            my ($sid, $data) = @_;
+            $ws_data .= $data;
+            return 0;
+        },
+    );
+
+    complete_h2_handshake($client, $client_sock);
+
+    # The Ping rides in the same write as the extended CONNECT: the data
+    # provider yields it on its first call and then defers forever, so the
+    # stream stays open and the client never writes again.
+    my $ping_bytes = Protocol::WebSocket::Frame->new(
+        type   => 'ping',
+        buffer => 'pre',
+        masked => 1,
+    )->to_bytes;
+    my $ping_sent = 0;
+
+    $client->submit_request(
+        method    => 'CONNECT',
+        path      => '/ws/pre-ping',
+        scheme    => 'https',
+        authority => 'localhost',
+        headers   => [
+            [':protocol', 'websocket'],
+            ['sec-websocket-version', '13'],
+        ],
+        body      => sub { return $ping_sent++ ? undef : ($ping_bytes, 0) },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    # Read-only from here: whatever the client's session would like to say
+    # back is never written, so only the server's own flush can deliver the
+    # Pong. Bounded at 1 s, a wide margin over the one tick the accept needs.
+    for (1 .. 20) {
+        $loop->loop_once(0.05);
+        my $buf = '';
+        $client_sock->sysread($buf, 16384);
+        $client->mem_recv($buf) if length($buf);
+        last if length $ws_data;
+    }
+
+    is($response_headers{':status'}, '200', 'WebSocket accepted');
+
+    ok(length($ws_data) > 0, 'Server wrote the queued Pong without further client output')
+        or diag('no DATA frame arrived within the wait');
+
+    if (length($ws_data) > 0) {
+        my $parser = Protocol::WebSocket::Frame->new;
+        $parser->append($ws_data);
+        my $bytes = $parser->next_bytes;
+        is($parser->opcode, 10, 'Frame is a Pong (opcode 0xA)');
+        is($bytes, 'pre', 'Pong carries the Ping payload (RFC 6455 section 5.5.3)');
+    }
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
 done_testing;

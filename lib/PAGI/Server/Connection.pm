@@ -3035,11 +3035,14 @@ sub _h2_create_websocket_send {
             );
             $weak_self->_h2_write_pending;
 
-            # Process any data that arrived before accept
+            # Process any data that arrived before accept. This arm runs
+            # outside a feed, so the drain's own output (a pong, a close echo)
+            # is flushed here -- nothing else will write it.
             if (length($ss->{body}) > 0) {
                 my $buffered = $ss->{body};
                 $ss->{body} = '';
                 $weak_self->_h2_process_ws_frames($stream_id, $ss, $buffered);
+                $weak_self->_h2_write_pending;
             }
         }
         elsif ($type eq 'websocket.send') {
