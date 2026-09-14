@@ -107,4 +107,4 @@ jobs:
         run: |
           perl -e 'print "PAGI::Server the downstreams will see: $PAGI::Server::VERSION\n" if eval { require PAGI::Server; 1 }'
           cpanm --mirror https://cpan.metacpan.org --mirror-only \
-            Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI
+            PAGI::Tools Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI
