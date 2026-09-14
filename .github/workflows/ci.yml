@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Perl ${{ matrix.perl }} on Linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        perl: ['5.42', '5.40', '5.38', '5.36']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Perl ${{ matrix.perl }}
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+
+      # libnghttp2 for Net::HTTP2::nghttp2 (HTTP/2 tests), OpenSSL headers
+      # for IO::Socket::SSL (TLS tests). Both are optional to the server, so
+      # they come in through the cpanfile's recommends.
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libnghttp2-dev libssl-dev
+
+      - name: Install dependencies
+        run: cpanm --notest --installdeps . --with-recommends
+
+      - name: Report what the server sees
+        run: |
+          perl -Ilib -MPAGI::Server -e 'print "PAGI::Server $PAGI::Server::VERSION\n"'
+          perl -MFuture -e 'print "Future $Future::VERSION (", (Future->isa("Future::XS") ? "XS" : "PP"), ")\n"'
+          perl -e 'print "Net::HTTP2::nghttp2 ", (eval { require Net::HTTP2::nghttp2; Net::HTTP2::nghttp2->VERSION } // "not installed"), "\n"'
+          perl -e 'print "IO::Socket::SSL ", (eval { require IO::Socket::SSL; IO::Socket::SSL->VERSION } // "not installed"), "\n"'
+
+      - name: Run tests
+        run: prove -lr t/
