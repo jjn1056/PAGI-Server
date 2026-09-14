@@ -2803,11 +2803,6 @@ sub _log {
     });
 }
 
-# The spec distribution's version, or undef. PAGI::Server has no runtime
-# dependency on PAGI, so the banner names it only when it is actually there.
-# Kept separate so a test can make the spec appear absent.
-sub _pagi_spec_version { return eval { require PAGI; PAGI->VERSION } }
-
 # A fact worth showing in the startup block rather than on a ragged line of its
 # own. Workers never reach the banner -- it is emitted from _create_loop, which
 # the worker path does not call -- so they report immediately instead, keeping
@@ -2830,9 +2825,6 @@ sub _startup_banner {
     my ($self, $where, $per_worker) = @_;
 
     my $identity = 'PAGI::Server ' . (__PACKAGE__->VERSION // 'unknown');
-    if (defined(my $spec = $self->_pagi_spec_version)) {
-        $identity .= " (PAGI $spec)";
-    }
 
     my $loop_class = ref($self->loop);
     $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display

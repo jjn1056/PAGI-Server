@@ -105,6 +105,15 @@
     out also closes the connection: its content may arrive at any moment and
     may never arrive, so it can be neither read nor skipped (RFC 9112
     section 9.3, RFC 9110 section 10.1.1).
+  - The startup banner no longer names the PAGI spec distribution's version.
+    PAGI::Server has no runtime dependency on it and it is normally not
+    installed alongside the server, so the line read differently from one
+    machine to the next for no operational reason.
+  - Two tests depended on the tester's environment (CPAN Testers on
+    0.002013): t/66 assumed the PAGI distribution was installed, and t/37
+    asserted that two disconnect_future calls return one object, which only
+    held under Test2's deep comparison of pure-perl Futures and failed under
+    Future::XS. Both now pin the contract rather than the environment.
 
   Limits
   - max_disconnect_receives (--max-disconnect-receives, default 100): the
