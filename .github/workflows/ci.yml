@@ -106,5 +106,12 @@ jobs:
           PERL5LIB: ${{ github.workspace }}/lib
         run: |
           perl -e 'print "PAGI::Server the downstreams will see: $PAGI::Server::VERSION\n" if eval { require PAGI::Server; 1 }'
-          cpanm --mirror https://cpan.metacpan.org --mirror-only \
-            PAGI::Tools Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI
+          if ! cpanm --mirror https://cpan.metacpan.org --mirror-only \
+              PAGI::Tools Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI; then
+            echo "=== a downstream did not install; the tail of each build log follows ==="
+            for f in $(ls -t ~/.cpanm/work/*/build.log 2>/dev/null); do
+              echo "----- $f"
+              tail -n 80 "$f"
+            done
+            exit 1
+          fi
