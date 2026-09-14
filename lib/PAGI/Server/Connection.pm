@@ -1580,9 +1580,10 @@ sub _h2_dispatch_stream {
 # What every connection-handler boundary does with what it caught -- the two
 # HTTP/2 dispatch sites and the three HTTP/1.1 request tails -- and what the
 # HTTP/1.1 read handler's eval has always done with what it catches: name the
-# fault once, $where saying which handler it was, then end this connection with
-# server_error and the exception as its disconnect_detail (Www.pod "Standard
-# Disconnect Reasons").
+# fault once, $where naming where the fault came from -- the literal 'HTTP/1.1'
+# at all three h1 sites, "HTTP/2 stream N" at the two h2 ones -- then end this
+# connection with server_error and the exception as its disconnect_detail
+# (Www.pod "Standard Disconnect Reasons").
 #
 # The close is the default close_when_empty, not close_now: a response the
 # application had already delivered in full before the server's tail failed
@@ -3652,6 +3653,12 @@ sub _h2_create_sse_send {
     };
 }
 
+# Parse one h2 stream's inbound WebSocket frames and act on them. Protocol
+# replies queued below (a pong, a close echo) are not flushed by this sub: from
+# _h2_on_body it runs inside feed's mem_recv and _h2_process_data flushes once
+# feed returns; from the websocket.accept arm's drain of frames that arrived
+# before the handshake it runs outside feed, and the reply waits for the next
+# flush.
 sub _h2_process_ws_frames {
     my ($self, $stream_id, $stream, $data) = @_;
 
@@ -3813,7 +3820,7 @@ sub _h2_process_ws_frames {
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
             $stream->{ws_eof_pending} = 1;
             $self->{h2_session}->resume_stream($stream_id);
-            # No flush here — _h2_process_data flushes after feed() returns
+            # No flush here — see this sub's note on who writes it
 
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"). Receive-side,
@@ -3839,7 +3846,7 @@ sub _h2_process_ws_frames {
             push @{$stream->{send_queue} ||= []}, $pong_bytes;
             $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $pong_bytes;
             $self->{h2_session}->resume_stream($stream_id);
-            # No flush here — _h2_process_data flushes after feed() returns
+            # No flush here — see this sub's note on who writes it
         }
         elsif ($opcode == 10) {
             # Pong — clear this stream's keepalive wait flag (response to
@@ -3859,8 +3866,9 @@ sub _h2_process_ws_frames {
 # outliving its stream (it would otherwise keep pinging a half-closed
 # stream for the life of the connection).
 #
-# Callers inside feed() need no flush (see _h2_session_call); callers outside
-# it must call _h2_write_pending themselves.
+# The Close frame is queued, never flushed here. Reached from inside feed's
+# mem_recv the flush is _h2_process_data's, once feed returns; reached from
+# outside feed the caller must call _h2_write_pending itself.
 sub _h2_ws_close {
     my ($self, $stream_id, %a) = @_;      # code, text, reason, detail
 

@@ -1171,6 +1171,84 @@ subtest 'a completed refusal is complete before the application returns, and a c
 };
 
 # ============================================================
+# (j) a refusal terminated by http.response.trailers
+# ============================================================
+# "with exactly the semantics those events have on an http scope" covers
+# http.response.trailers: a refusal whose start declares trailers is finished
+# by the trailer section, not by the terminal body chunk. Www.pod "Receiving
+# after the scope's end" then reads the same as it does in (h) -- the receive
+# after the completed refusal reports the scope's end and invents no reason.
+
+sub trailers_refusal_app {
+    my ($r) = @_;
+    return async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->() if $scope->{type} ne 'sse';
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_disconnect(sub { $r->{disconnect} = [@_] });
+        $conn->on_complete(sub { $r->{complete}++ });
+        # No content-length: HTTP/1.1 then frames the refusal chunked, the one
+        # framing a trailer section may ride (RFC 9112 section 7.1.2).
+        await $send->({ type => 'http.response.start', status => $STATUS,
+                        trailers => 1,
+                        headers  => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'nope' });
+        await $send->({ type => 'http.response.trailers',
+                        headers => [['x-refusal-trailer', 'yes']] });
+        my $after = $receive->();
+        await Future->wait_any($after->without_cancel, $loop->delay_future(after => 0.4));
+        $r->{after_event} = $after->is_ready ? $after->get : undef;
+        # As in (h): a receive that does not answer outlives this sub, so it is
+        # handed to the caller rather than reaped mid-run.
+        $r->{unanswered} = $after unless $after->is_ready;
+        $r->{conn} = $conn;
+        $r->{done} = 1;
+        return;
+    };
+}
+
+subtest 'a refusal terminated by http.response.trailers is a clean end' => sub {
+    for my $kind (@SCOPES) {
+        my %r;
+        my $server = create_server(trailers_refusal_app(\%r));
+        my ($wire) = h1_fetch($server->port, h1_request($kind), 40, sub { $r{done} });
+        $loop->loop_once(0.05) for 1 .. 10;
+        $server->shutdown->get;
+
+        is($r{done}, 1, "h1 $kind: the app ran to completion");
+        like($wire, qr/^transfer-encoding:\s*chunked\r$/mi,
+            "h1 $kind: the refusal is chunked-framed");
+        like($wire, qr/\r\n4\r\nnope\r\n0\r\nx-refusal-trailer: yes\r\n\r\n/,
+            "h1 $kind: the trailer section, not the body chunk, terminates the refusal");
+        is($r{after_event}, $END_EVENT{$kind},
+            "h1 $kind: a receive() after the trailers reports the scope's end, with no reason");
+        is($r{conn}->response_complete, 1, "h1 $kind: response_complete is true");
+        is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason is undef");
+        is($r{complete}, 1, "h1 $kind: on_complete fired exactly once");
+        is($r{disconnect}, undef, "h1 $kind: on_disconnect never fired");
+    }
+
+    SKIP: {
+        skip 'HTTP/2 not available', 14 unless $have_h2;
+        for my $kind (@SCOPES) {
+            my %r;
+            my ($h, $body) = h2_fetch(app => trailers_refusal_app(\%r), kind => $kind,
+                                      rounds => 40, done => sub { $r{done} });
+            is($r{done}, 1, "h2 $kind: the app ran to completion");
+            is($body, 'nope', "h2 $kind: the refusal body arrived");
+            is($h->{'x-refusal-trailer'}, 'yes',
+                "h2 $kind: the trailing HEADERS carried the trailer");
+            is($r{after_event}, $END_EVENT{$kind},
+                "h2 $kind: a receive() after the trailers reports the scope's end, with no reason");
+            is($r{conn}->response_complete, 1, "h2 $kind: response_complete is true");
+            is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
+            is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");
+            is($r{disconnect}, undef, "h2 $kind: on_disconnect never fired");
+        }
+    }
+};
+
+# ============================================================
 # Step 8: the connection closes after a refusal (D-A-I10)
 # ============================================================
 

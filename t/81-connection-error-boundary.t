@@ -186,6 +186,19 @@ my $app = async sub {
     }
     return if $path eq '/boom-sync';
     die "application blew up\n" if $path eq '/throw';
+    # /ws accepts the handshake and then does nothing but read. The frames it
+    # reads are parsed by the read handler itself, so a frame the parser
+    # refuses is caught by the read handler's own eval -- the boundary the
+    # last subtest pins -- with no request tail anywhere in the stack.
+    if ($path eq '/ws') {
+        await $receive->();                              # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        while (1) {
+            my $event = await $receive->();
+            last if $event->{type} eq 'websocket.disconnect';
+        }
+        return;
+    }
     # /slow is the in-flight sibling: it is still parked inside the
     # application when the boundary ends the connection under it, and returns
     # afterwards without ever having started a response.
@@ -777,6 +790,59 @@ subtest 'WebSocket: an exception on a suspended application\'s tail ends that co
     close $_ for $sock, $idle;
     $loop->remove($server);
     assert_no_warnings('websocket suspended tail exception');
+};
+
+# =============================================================================
+# (8) The OTHER boundary: what the read handler's own eval catches
+# =============================================================================
+# Everything above is a request tail. The read handler's eval catches a
+# different fault entirely -- one raised while the handler is still parsing
+# what arrived, before any tail exists -- and it reports that one under its own
+# string, "PAGI connection error". max_ws_frame_size is that line's documented
+# consumer (PAGI::Server, "When exceeded"), so the shape that reaches it is
+# pinned here: an inbound WebSocket frame whose declared payload is over the
+# cap, which Protocol::WebSocket::Frame refuses from inside
+# _process_websocket_frames.
+subtest 'HTTP/1.1: a frame the parser refuses is reported by the read handler itself' => sub {
+    reset_observations();
+    my $server = create_server(max_ws_frame_size => 64);
+    $server->listen->get;
+
+    my $idle = h1_connect($server);
+    my $sock = h1_connect($server);
+
+    my ($wire, $handshake_error) = h1_exchange($sock,
+          "GET /ws HTTP/1.1\r\nHost: x\r\n"
+        . "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        . "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        undef, sub { $_[0] =~ m{\r\n\r\n} });
+    is($handshake_error, undef, 'the handshake pump ran normally');
+    like($wire, qr{^HTTP/1\.1 101\b}, 'the WebSocket handshake was accepted');
+
+    # One masked binary frame declaring 100 payload bytes against a 64-byte
+    # cap. The declared length is refused before the mask is even read, so the
+    # payload never has to be over the cap on the wire.
+    my $frame = chr(0x82) . chr(0x80 | 100) . "\0\0\0\0" . ('x' x 100);
+    my (undef, $loop_error) = h1_exchange($sock, $frame, undef,
+        sub { scalar @{ app_log_errors() } });
+
+    is($loop_error, undef, 'the event loop kept running');
+    is(scalar @{ app_log_errors() }, 1, 'exactly one error line') or diag(log_lines());
+    like(app_log_errors()->[0]{message}, qr/^PAGI connection error: Payload is too big\./,
+        'the read handler reports it under its own string, as max_ws_frame_size documents');
+
+    my $obs = $seen{'/ws'};
+    is($obs->{state}->disconnect_reason, 'server_error', 'the scope ended with server_error');
+    is($obs->{complete}, 0, 'on_complete never fired');
+
+    my ($idle_wire, $idle_error) = h1_exchange($idle, "GET /concurrent HTTP/1.1\r\nHost: x\r\n\r\n",
+        undef, sub { $_[0] =~ /ok\z/ });
+    is($idle_error, undef, 'the loop still runs');
+    like($idle_wire, qr{^HTTP/1\.1 200 OK\r\n}, 'a second connection is still served');
+
+    close $_ for $sock, $idle;
+    $loop->remove($server);
+    assert_no_warnings('oversized websocket frame');
 };
 
 alarm 0;
