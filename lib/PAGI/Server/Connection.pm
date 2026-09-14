@@ -1096,7 +1096,7 @@ sub is_long_lived {
 True while this connection is still producing a response. HTTP/1.1 answers for
 the one request it can carry at a time; HTTP/2 answers for its stream table,
 and counts only C<http> streams -- a WebSocket or SSE stream never finishes on
-its own, so it is C<is_long_lived>'s business, not this one's. A graceful
+its own, so it does not make a connection worth waiting for. A graceful
 shutdown closes a connection that answers false at once and leaves one that
 answers true to drain.
 
