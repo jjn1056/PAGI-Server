@@ -101,17 +101,27 @@ jobs:
       # PERL5LIB puts this checkout's PAGI::Server ahead of any CPAN release, so
       # cpanm sees the downstreams' PAGI::Server requirement already satisfied
       # and their suites run against the code in this tree.
-      - name: Install and test the downstream ecosystem against this server
+      # PAGI::Tools is the linchpin every framework needs, so it installs on its
+      # own first and, on failure, its whole build log is printed -- one shared
+      # cpanm log across many dists buries the culprit's test output, so the
+      # toolkit gets an isolated, complete log.
+      - name: Install PAGI::Tools against this server
         env:
           PERL5LIB: ${{ github.workspace }}/lib
         run: |
           perl -e 'print "PAGI::Server the downstreams will see: $PAGI::Server::VERSION\n" if eval { require PAGI::Server; 1 }'
+          cpanm --mirror https://cpan.metacpan.org --mirror-only PAGI::Tools \
+            || { echo "=== PAGI::Tools build log ==="; cat ~/.cpanm/build.log; exit 1; }
+
+      - name: Install and test the frameworks against this server
+        env:
+          PERL5LIB: ${{ github.workspace }}/lib
+        run: |
           if ! cpanm --mirror https://cpan.metacpan.org --mirror-only \
-              PAGI::Tools Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI; then
-            echo "=== a downstream did not install; the tail of each build log follows ==="
+              Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI; then
+            echo "=== a framework did not install; the tail of each build log follows ==="
             for f in $(ls -t ~/.cpanm/work/*/build.log 2>/dev/null); do
-              echo "----- $f"
-              tail -n 80 "$f"
+              echo "----- $f"; tail -n 120 "$f"
             done
             exit 1
           fi
