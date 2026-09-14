@@ -30,7 +30,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libnghttp2-dev libssl-dev
 
       - name: Install dependencies
-        run: cpanm --notest --installdeps . --with-recommends
+        run: cpanm --notest --mirror https://cpan.metacpan.org --installdeps .
+
+      # The cpanfile lists these as recommends, which cpanm is allowed to fail
+      # quietly; installed here on their own so a failure fails the job instead
+      # of silently skipping the HTTP/2 and TLS tests.
+      - name: Install optional modules the tests exercise
+        run: cpanm --notest --mirror https://cpan.metacpan.org Net::HTTP2::nghttp2 IO::Async::SSL Future::IO
 
       - name: Report what the server sees
         run: |
