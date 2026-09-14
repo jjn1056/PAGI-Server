@@ -4,35 +4,52 @@ use warnings;
 
 our $VERSION = '0.002013';
 
-# Future::XS support - opt-in via PAGI_FUTURE_XS=1 environment variable
-# Must be loaded before Future to take effect, so we check env var in BEGIN
-# Note: We declare these without initialization so BEGIN block values persist
-our ($FUTURE_XS_AVAILABLE, $FUTURE_XS_ENABLED);
+# Future::XS is kept out for now. Future::XS 0.15 warns "lost a sequence
+# Future" whenever a without_cancel observer is dropped before its original
+# resolves -- the shape of Future->wait_any($work, $conn->disconnect_future)
+# on every race the work wins -- where Future::PP is silent; reported to the
+# Future-XS RT queue. Future reads PERL_FUTURE_NO_XS once, when it is
+# compiled, so this prevents XS only when PAGI::Server compiles first: a
+# Future already in memory keeps its implementation, and startup says so
+# loudly (_warn_if_future_xs). An operator who set the variable themselves
+# has decided, and is left alone.
 BEGIN {
-    $FUTURE_XS_AVAILABLE = eval { require Future::XS; 1 } ? 1 : 0;
-    $FUTURE_XS_ENABLED = 0;  # Default to disabled
-
-    if ($ENV{PAGI_FUTURE_XS}) {
-        if ($FUTURE_XS_AVAILABLE) {
-            # Future::XS is already loaded from the availability check
-            $FUTURE_XS_ENABLED = 1;
-        } else {
-            die <<"END_FUTURE_XS_ERROR";
-PAGI_FUTURE_XS=1 set but Future::XS is not installed.
-
-To install Future::XS:
-    cpanm Future::XS
-
-Or unset the PAGI_FUTURE_XS environment variable.
-END_FUTURE_XS_ERROR
-        }
-    } elsif ($FUTURE_XS_AVAILABLE) {
-        # Available but not requested - unload it
-        delete $INC{'Future/XS.pm'};
-    }
+    $ENV{PERL_FUTURE_NO_XS} //= 1;
+    warn "PAGI::Server: Future::XS support is currently unavailable; PAGI_FUTURE_XS is ignored\n"
+        if $ENV{PAGI_FUTURE_XS};
 }
 
+# The opt-in this replaces, kept for when Future::XS can be used again:
+# # Future::XS support - opt-in via PAGI_FUTURE_XS=1 environment variable
+# # Must be loaded before Future to take effect, so we check env var in BEGIN
+# # Note: We declare these without initialization so BEGIN block values persist
+# our ($FUTURE_XS_AVAILABLE, $FUTURE_XS_ENABLED);
+# BEGIN {
+#     $FUTURE_XS_AVAILABLE = eval { require Future::XS; 1 } ? 1 : 0;
+#     $FUTURE_XS_ENABLED = 0;  # Default to disabled
+#
+#     if ($ENV{PAGI_FUTURE_XS}) {
+#         if ($FUTURE_XS_AVAILABLE) {
+#             # Future::XS is already loaded from the availability check
+#             $FUTURE_XS_ENABLED = 1;
+#         } else {
+#             die <<"END_FUTURE_XS_ERROR";
+# PAGI_FUTURE_XS=1 set but Future::XS is not installed.
+#
+# To install Future::XS:
+#     cpanm Future::XS
+#
+# Or unset the PAGI_FUTURE_XS environment variable.
+# END_FUTURE_XS_ERROR
+#         }
+#     } elsif ($FUTURE_XS_AVAILABLE) {
+#         # Available but not requested - unload it
+#         delete $INC{'Future/XS.pm'};
+#     }
+# }
+
 use parent 'IO::Async::Notifier';
+
 use IO::Async::Listener;
 use IO::Async::Stream;
 use IO::Async::Loop;
@@ -2876,11 +2893,29 @@ sub _http2_status_string {
     return $HTTP2_AVAILABLE ? 'available' : 'not installed';
 }
 
-# Returns a human-readable Future::XS status string for the startup banner
+# Whether Future is actually XS-backed in this process: the fact, not the
+# setting, since a Future compiled before PAGI::Server keeps its implementation.
+sub _future_xs_in_use {
+    return $INC{'Future.pm'} && Future->isa('Future::XS') ? 1 : 0;
+}
+
+# The startup block's word for it. "on" can only mean the setting came too late.
 sub _future_xs_status_string {
-    return 'on' if $FUTURE_XS_ENABLED;
-    return 'available' if $FUTURE_XS_AVAILABLE;
-    return 'not installed';
+    return $_[0]->_future_xs_in_use ? 'on (loaded before PAGI::Server)' : 'off';
+}
+
+# Said once at startup, at warn level and outside the info block, because an
+# operator with Future::XS in the process will see its false alarm on every
+# disconnect an application raced (see the BEGIN block at the top).
+sub _warn_if_future_xs {
+    my ($self) = @_;
+    return unless $self->_future_xs_in_use;
+    my $version = eval { Future::XS->VERSION } // '?';
+    $self->_log(warn => "Future::XS $version is in use: Future was loaded before PAGI::Server, so "
+        . "PERL_FUTURE_NO_XS could not take effect. Future::XS 0.15 warns \"lost a sequence Future\" "
+        . "when a without_cancel observer is dropped, which applications racing disconnect_future do "
+        . "(reported upstream). Load PAGI::Server first, or set PERL_FUTURE_NO_XS=1.");
+    return;
 }
 
 # Check if TLS modules are available
@@ -3336,6 +3371,7 @@ async sub _listen_singleworker {
             : "$scheme://$s->{host}:$s->{port}/";
     }
     $self->_log(info => $_) for $self->_startup_banner(join(', ', @addrs));
+    $self->_warn_if_future_xs;
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
@@ -3520,6 +3556,7 @@ sub _listen_multiworker {
     }
     my $where = join(', ', @addrs) . " with $workers workers ($mode)";
     $self->_log(info => $_) for $self->_startup_banner($where, 'per worker');
+    $self->_warn_if_future_xs;
 
     # Warn in production if using default max_connections
     if (($ENV{PAGI_ENV} // '') eq 'production' && !$self->{max_connections}) {
@@ -4918,6 +4955,22 @@ sub effective_max_connections {
 __END__
 
 =head1 PERFORMANCE
+
+=head2 Future::XS
+
+Not used for now. PAGI::Server sets C<PERL_FUTURE_NO_XS=1> when it compiles
+(unless the environment already set it either way), because Future::XS 0.15
+warns C<lost a sequence Future> whenever a C<without_cancel> observer is
+dropped before its original resolves, which is what
+C<< Future->wait_any($work, $conn->disconnect_future) >> does on every race
+the work wins; Future::PP is silent for the same code, and the difference has
+been reported upstream. Future reads that variable once, when it is compiled,
+so the setting only takes effect when PAGI::Server (or C<pagi-server>) loads
+before Future does. If Future was already loaded, it keeps Future::XS, the
+startup block reports C<future_xs on (loaded before PAGI::Server)>, and one
+warn-level line says so. The former C<--future-xs> / C<PAGI_FUTURE_XS=1>
+opt-in answers "currently unavailable" and changes nothing.
+
 
 PAGI::Server is designed as a reference implementation prioritizing spec
 compliance and code clarity, yet delivers competitive performance suitable

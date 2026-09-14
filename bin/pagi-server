@@ -6,7 +6,10 @@ BEGIN {
     my @to_splice;
     for my $i (0 .. $#ARGV) {
         if ($ARGV[$i] eq '--future-xs') {
-            $ENV{PAGI_FUTURE_XS} = 1;
+            # Future::XS support is disabled for now; see "Future::XS" under
+            # PERFORMANCE in PAGI::Server. The flag is accepted and answered
+            # so an existing invocation keeps working.
+            warn "pagi-server: --future-xs is currently unavailable (Future::XS support is disabled for now); continuing without it\n";
             push @to_splice, $i;
         }
     }
@@ -474,10 +477,10 @@ See L<PAGI::Server/ACCESS LOG FORMAT> for the full atoms table.
 
 =item B<--future-xs>
 
-Enable L<Future::XS> for improved Future performance.
-Must be installed separately: C<cpanm Future::XS>
-
-Can also be enabled via environment variable: C<PAGI_FUTURE_XS=1>
+Currently unavailable. Future::XS support is disabled for now (see
+"Future::XS" under PERFORMANCE in L<PAGI::Server>); the flag, and the
+C<PAGI_FUTURE_XS=1> environment variable, are answered with a notice and
+otherwise ignored.
 
 =item B<--http2>
 

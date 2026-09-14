@@ -1,5 +1,8 @@
 use strict;
 use warnings;
+# Future::IO::Impl::IOAsync below loads Future before PAGI::Server can keep Future::XS out
+# (see "Future::XS" under PERFORMANCE in PAGI::Server); pin pure-perl here.
+BEGIN { $ENV{PERL_FUTURE_NO_XS} = 1 }
 use Test2::V0;
 use IO::Async::Loop;
 use IO::Socket::INET;

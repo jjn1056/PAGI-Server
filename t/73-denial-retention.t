@@ -1,6 +1,14 @@
 use strict;
 use warnings;
+
+# This file asserts a warning-free run around a dropped without_cancel
+# observer, which Future::XS 0.15 warns about ("lost a sequence Future";
+# reported to the Future-XS RT queue) and Future::PP does not. Future reads
+# PERL_FUTURE_NO_XS when it is compiled, so it is set before anything below
+# loads Future, and the file needs the pure-perl implementation to be there.
+BEGIN { $ENV{PERL_FUTURE_NO_XS} = 1 }
 use Test2::V0;
+BEGIN { eval { require Future::PP; 1 } or plan skip_all => 'Future::PP required' }
 use IO::Async::Loop;
 use IO::Async::Stream;
 use Future::AsyncAwait;

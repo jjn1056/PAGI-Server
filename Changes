@@ -114,6 +114,15 @@
     asserted that two disconnect_future calls return one object, which only
     held under Test2's deep comparison of pure-perl Futures and failed under
     Future::XS. Both now pin the contract rather than the environment.
+  - Future::XS is kept out for now: PAGI::Server sets PERL_FUTURE_NO_XS=1 when
+    it compiles. Future::XS 0.15 warns "lost a sequence Future" whenever a
+    without_cancel observer is dropped before its original resolves, the shape
+    of racing disconnect_future with wait_any; Future::PP is silent (reported
+    upstream). The former opt-in did not work either way: deleting Future::XS
+    from %INC after probing it left Future XS-backed whenever the module was
+    installed, while the banner read "available". Now the banner reports what
+    is in use, a Future loaded before the server draws one warn-level line at
+    startup, and --future-xs / PAGI_FUTURE_XS=1 answer "currently unavailable".
 
   Limits
   - max_disconnect_receives (--max-disconnect-receives, default 100): the

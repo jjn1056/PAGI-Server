@@ -51,6 +51,33 @@ subtest 'the capabilities are the last note in the block' => sub {
     like($loop, qr/future_xs /,        'and future_xs');
 };
 
+subtest 'Future::XS in use is named in the block and announced loudly' => sub {
+    my @events;
+    my $server = PAGI::Server->new(app => $app, logger => sub { push @events, $_[0] });
+
+    # PAGI::Server keeps Future pure-perl for now (Future::XS 0.15 warns on a
+    # dropped without_cancel observer, the shape of racing disconnect_future).
+    # Future reads PERL_FUTURE_NO_XS only when it is compiled, so a Future
+    # loaded before the server keeps XS, and the operator has to hear it.
+    no warnings 'redefine';
+    local *PAGI::Server::_future_xs_in_use = sub { 0 };
+    like(($server->_startup_banner('http://127.0.0.1:5000/'))[-1], qr/future_xs off\z/,
+        'pure-perl Future reads as off');
+    $server->_warn_if_future_xs;
+    is(\@events, [], 'and nothing is said');
+
+    local *PAGI::Server::_future_xs_in_use = sub { 1 };
+    like(($server->_startup_banner('http://127.0.0.1:5000/'))[-1],
+        qr/future_xs on \(loaded before PAGI::Server\)/,
+        'Future::XS in use reads as on, and says how it got there');
+    $server->_warn_if_future_xs;
+    is(scalar @events, 1, 'one line is logged');
+    is($events[0]{level}, 'warn', 'at warn level, not buried in the info block');
+    like($events[0]{message}, qr/Future::XS \S+ is in use/, 'it names what is in use');
+    like($events[0]{message}, qr/lost a sequence Future/, 'and the warning applications will see');
+    like($events[0]{message}, qr/PERL_FUTURE_NO_XS=1/, 'and the way out');
+};
+
 subtest 'contributed notes are rendered above it, aligned' => sub {
     my $server = PAGI::Server->new(
         app           => $app,
