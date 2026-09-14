@@ -1229,7 +1229,7 @@ subtest 'a refusal terminated by http.response.trailers is a clean end' => sub {
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 14 unless $have_h2;
+        skip 'HTTP/2 not available', 16 unless $have_h2;
         for my $kind (@SCOPES) {
             my %r;
             my ($h, $body) = h2_fetch(app => trailers_refusal_app(\%r), kind => $kind,
