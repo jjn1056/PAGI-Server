@@ -288,25 +288,42 @@ subtest 'nghttp2\'s own message reaches the scope that was open' => sub {
         headers => [['connection', 'A' x 4000]]);
     pump($client, $sock, 20, sub { $ENDED{'/open'} });
 
-    my $end = $ENDED{'/open'} // {};
-    is($end->{connected}, 0, 'the open scope ended');
-    is($end->{reason}, 'protocol_error', 'as a protocol error');
-    # Only the field name is asserted. Net::HTTP2::nghttp2::Session's POD for
-    # on_error says nghttp2's wording is free to change between library
-    # versions, so the sentence around the name is not a stable thing to pin.
-    like($end->{detail}, qr/\bconnection\b/,
-        'the detail names the field nghttp2 would not permit')
-        or diag('detail: ' . ($end->{detail} // '(undef)'));
-    is(length($end->{detail} // ''), 256,
-        'and the peer does not choose how much of it an application reads');
-    like($end->{detail}, qr/\Q...\E\z/, 'the truncation says it happened');
+    # How nghttp2 punishes a forbidden connection-specific header (RFC 9113
+    # 8.2.2) changed across versions. Newer nghttp2 (>= ~1.68) treats it as a
+    # connection error and ends the whole session with GOAWAY; older nghttp2
+    # (<= 1.59), following RFC 9113 8.1.1, treats the request as malformed and
+    # resets only that stream, leaving the session -- and any scope open on
+    # another stream -- untouched. This subtest is about what the server does
+    # with nghttp2's own message when the session ends under it; the
+    # diagnostic-reaches-an-open-scope path itself is covered on every library
+    # by the previous subtest (a zero-increment WINDOW_UPDATE is a connection
+    # error everywhere).
+    my $end = $ENDED{'/open'};
+    if ($end) {
+        is($end->{connected}, 0, 'the open scope ended');
+        is($end->{reason}, 'protocol_error', 'as a protocol error');
+        # Only the field name is asserted. Net::HTTP2::nghttp2::Session's POD
+        # for on_error says nghttp2's wording is free to change between library
+        # versions, so the sentence around the name is not stable to pin.
+        like($end->{detail}, qr/\bconnection\b/,
+            'the detail names the field nghttp2 would not permit')
+            or diag('detail: ' . ($end->{detail} // '(undef)'));
+        is(length($end->{detail} // ''), 256,
+            'and the peer does not choose how much of it an application reads');
+        like($end->{detail}, qr/\Q...\E\z/, 'the truncation says it happened');
 
-    my @logged = errors_since($mark);
-    is(scalar(@logged), 1, 'the violation put exactly one line in the log')
-        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } @logged);
-    is($logged[0]{level}, 'error', 'at error level');
-    like($logged[0]{message}, qr/\bconnection\b/,
-        'and the log and the object say the same thing');
+        my @logged = errors_since($mark);
+        is(scalar(@logged), 1, 'the violation put exactly one line in the log')
+            or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } @logged);
+        is($logged[0]{level}, 'error', 'at error level');
+        like($logged[0]{message}, qr/\bconnection\b/,
+            'and the log and the object say the same thing');
+    }
+    else {
+        ok(!$conn->{closed} && !$conn->{_disconnect_handled},
+            'a stream-level rejection leaves the session, and the scope open '
+          . 'on another stream, untouched (RFC 9113 8.1.1)');
+    }
     is($ALARM_FIRED, 0, 'no pump alarm');
 
     $stream_io->close_now;

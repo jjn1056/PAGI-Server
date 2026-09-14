@@ -322,11 +322,17 @@ subtest "request direction: a padded header value never reaches the app's scope-
     ], end_stream => 1));
     pump($client, $client_sock, sub { $captured_scope });
 
-    ok($captured_scope, 'app was dispatched for the hand-crafted request');
-    ok(!(grep { lc($_->[0]) eq 'x-padded' } @{$captured_scope->{headers} // []}),
-        "the app's scope->{headers} never observed the OWS-padded header -- "
-      . "nghttp2 dropped it on receipt, symmetric with the response-direction case above")
-        if $captured_scope;
+    # Whether the app is dispatched at all is nghttp2's call, and it changed
+    # across versions: RFC 9113 8.2.1 leaves the handling of a value padded
+    # with whitespace to the implementation. Older nghttp2 (<= 1.59) treats the
+    # padded value as a malformed request and resets the whole stream, so the
+    # app is never dispatched; newer nghttp2 (>= 1.68) drops just that field and
+    # lets the request through. The server's contract holds either way: the
+    # OWS-padded header never reaches scope->{headers}.
+    ok(!$captured_scope
+        || !(grep { lc($_->[0]) eq 'x-padded' } @{$captured_scope->{headers} // []}),
+        'the OWS-padded header never reaches the app, whether nghttp2 dropped '
+      . 'the field (>= 1.68) or reset the stream (<= 1.59)');
 
     $stream_io->close_now;
     $loop->remove($server);
