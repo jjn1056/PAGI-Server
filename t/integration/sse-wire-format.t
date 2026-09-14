@@ -55,6 +55,12 @@ my $app = async sub {
             });
         }
 
+        # sse.close is the scope's one terminal event (PAGI::Spec::Www,
+        # "Meaning per scope"); returning without it is an incomplete
+        # response (D12) and makes the server log one. None of the subtests
+        # below is about an incomplete end, so end every stream cleanly.
+        await $send->({ type => 'sse.close' });
+
         return;
     }
 

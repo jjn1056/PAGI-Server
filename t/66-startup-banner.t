@@ -27,20 +27,15 @@ subtest 'the first line names the server and where it is listening' => sub {
         'and ends with the address, which is what people are looking for');
 };
 
-subtest 'the spec version appears only when the spec is installed' => sub {
-    my $with = banner_for();
-    like($with->[0], qr/\(PAGI [0-9.]+\)/,
-        'PAGI is installed here, so it is named');
+subtest 'the identity line carries nothing but the server' => sub {
+    my $lines = banner_for();
 
-    # PAGI::Server has no runtime dependency on PAGI, so the banner has to
-    # degrade rather than print "unknown" or die.
-    no warnings 'redefine';
-    local *PAGI::Server::_pagi_spec_version = sub { undef };
-    my $without = banner_for();
-    unlike($without->[0], qr/\(PAGI/,
-        'and the parenthetical disappears entirely when it is not');
-    like($without->[0], qr/\APAGI::Server \S+ listening on/,
-        'leaving a well-formed line');
+    # The spec distribution is not a runtime dependency and is normally not
+    # installed alongside the server, so its version is not the operator's
+    # concern and never appears, present or not.
+    is($lines->[0],
+        "PAGI::Server $PAGI::Server::VERSION listening on http://127.0.0.1:5000/",
+        'server, version, address; nothing about the spec');
 };
 
 subtest 'the capabilities are the last note in the block' => sub {

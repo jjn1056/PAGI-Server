@@ -60,6 +60,43 @@ subtest 'Valid chunked bodies should parse correctly' => sub {
     is($complete, 1, 'Body complete');
 };
 
+# RFC 9112 section 7.1.2: the terminating chunk may be followed by trailer
+# fields, and the body ends at the blank line after them. Stopping at the
+# terminating chunk would leave those fields in the buffer, where the next
+# read of the connection takes them for something else entirely.
+subtest 'A trailer section is consumed as part of the body' => sub {
+    my $one = "5\r\nhello\r\n0\r\nX-Checksum: abc\r\n\r\n";
+    my ($data, $consumed, $complete) = $proto->parse_chunked_body($one);
+    is($data, 'hello', 'the body is the chunk data, without the trailer field');
+    is($consumed, length($one), 'and the trailer section was consumed with it');
+    is($complete, 1, 'the body is complete at the blank line');
+
+    my $two = "0\r\nX-Checksum: abc\r\nX-Rows: 4\r\n\r\n";
+    ($data, $consumed, $complete) = $proto->parse_chunked_body($two);
+    is($data, '', 'a body of nothing but a terminating chunk and its trailers');
+    is($consumed, length($two), 'consumes the whole section');
+    is($complete, 1, 'and is complete');
+
+    # What follows the blank line belongs to whoever reads the buffer next.
+    my $then = "0\r\nX: y\r\n\r\n";
+    ($data, $consumed, $complete) = $proto->parse_chunked_body($then . "GET / HTTP/1.1\r\n");
+    is($consumed, length($then), 'nothing past the blank line is consumed');
+    is($complete, 1, 'the body ended there');
+
+    # A section still arriving is not a complete body.
+    ($data, $consumed, $complete) = $proto->parse_chunked_body("5\r\nhello\r\n0\r\nX-Checksum: abc\r\n");
+    is($complete, 0, 'a trailer section without its blank line needs more data');
+    is($consumed, 10, 'so only the chunk before it was consumed');
+
+    ($data, $consumed, $complete) = $proto->parse_chunked_body("0\r\n");
+    is($complete, 0, 'and so does a terminating chunk with nothing after it yet');
+
+    # The section may be empty, which is the ordinary case.
+    ($data, $consumed, $complete) = $proto->parse_chunked_body("0\r\n\r\n");
+    is($consumed, 5, 'an empty trailer section is the blank line alone');
+    is($complete, 1, 'ending the body');
+};
+
 subtest 'Invalid chunk sizes should be rejected' => sub {
     # Test: "garbage\r\n\r\n" - should NOT be treated as valid end-of-body
     my $garbage = "garbage\r\n\r\n";

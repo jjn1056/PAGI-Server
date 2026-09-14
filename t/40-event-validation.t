@@ -427,11 +427,12 @@ subtest 'header tuple and byte safety validation' => sub {
     ok( lives { PAGI::Server::EventValidator::validate_http_send($start->([ ['content-type','text/plain'], ['set-cookie','a=1'], ['set-cookie','b=2'] ])) },
         'valid headers with duplicates ok');
 
-    # Shared across families: ws denial start and sse decline start use the same checks
-    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401, headers => [ ['h',"v\n"] ] }, { extensions => { 'websocket.http.response' => {} } }) },
-        qr/contains CR, LF, or null byte/, 'ws denial headers validated');
-    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.http.response.start', status => 404, headers => [ ['h',"v\0"] ] }) },
-        qr/contains CR, LF, or null byte/, 'sse decline headers validated');
+    # Shared across families: a refusal on either protocol scope runs the
+    # same http checks
+    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 401, headers => [ ['h',"v\n"] ] }) },
+        qr/contains CR, LF, or null byte/, 'ws refusal headers validated');
+    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.response.start', status => 404, headers => [ ['h',"v\0"] ] }) },
+        qr/contains CR, LF, or null byte/, 'sse refusal headers validated');
 };
 
 subtest 'unknown event types are rejected per family' => sub {
@@ -452,14 +453,51 @@ subtest 'extension-gated event types' => sub {
         qr/Extension not enabled: fullflush/, 'fullflush without extension throws');
     ok( lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.fullflush' }, { extensions => { fullflush => {} } }) },
         'fullflush with extension ok');
+    # A refusal is an ordinary HTTP response on the scope, not an extension:
+    # the protocol-prefixed event types are gone and nothing gates the real
+    # ones (Www.pod "Refusing the handshake": "there is nothing to advertise
+    # or detect").
     like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }) },
-        qr/Extension not enabled: websocket\.http\.response/, 'ws denial without extension throws');
-    ok( lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }, { extensions => { 'websocket.http.response' => {} } }) },
-        'ws denial with extension ok');
+        qr/Unrecognized event type 'websocket\.http\.response\.start' for websocket protocol/,
+        'the protocol-prefixed refusal start is not an event type');
+    like( dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.http.response.start', status => 401 }, { extensions => { 'websocket.http.response' => {} } }) },
+        qr/Unrecognized event type 'websocket\.http\.response\.start' for websocket protocol/,
+        'and no extension brings it back');
+    like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'sse.http.response.start', status => 404 }) },
+        qr/Unrecognized event type 'sse\.http\.response\.start' for sse protocol/,
+        'the sse twin is gone too');
     like( dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.fullflush' }) },
         qr/Extension not enabled: fullflush/, 'sse fullflush without extension throws');
     ok( lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.fullflush' }, { extensions => { fullflush => {} } }) },
         'sse fullflush with extension ok');
+};
+
+subtest 'HTTP response events are valid on websocket and sse scopes before accept/start' => sub {
+    for my $ev ({ type => 'http.response.start', status => 401, headers => [] },
+                { type => 'http.response.body', body => 'x', more => 0 },
+                { type => 'http.response.body', file => '/etc/hosts' },
+                { type => 'http.response.trailers', headers => [['x-t', '1']] }) {
+        ok(lives { PAGI::Server::EventValidator::validate_websocket_send($ev, {}) }, "websocket accepts $ev->{type}");
+        ok(lives { PAGI::Server::EventValidator::validate_sse_send($ev, {}) },       "sse accepts $ev->{type}");
+    }
+    # The rules are the http ones, not a parallel set.
+    like(dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start' }, {}) },
+        qr/http\.response\.start requires 'status'/, 'HTTP validation rules apply on websocket');
+    like(dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.response.start' }, {}) },
+        qr/http\.response\.start requires 'status'/, 'HTTP validation rules apply on sse');
+    like(dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 401, headers => [['bad name', "v\r\n"]] }, {}) },
+        qr/Invalid header value/, 'header byte safety applies on websocket');
+};
+
+subtest 'a WebSocket refusal status must be 300 or above; SSE refusals may use any status' => sub {
+    for my $status (101, 200, 204) {
+        like(dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => $status, headers => [] }, {}) },
+            qr/WebSocket refusal status must be 300 or above \(got $status\)/, "websocket refuses $status");
+        ok(lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.response.start', status => $status, headers => [] }, {}) },
+            "sse accepts $status");
+    }
+    ok(lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 300, headers => [] }, {}) }, 'websocket accepts 300');
+    ok(lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 401, headers => [] }, {}) }, 'websocket accepts 401');
 };
 
 subtest 'lifespan send validation' => sub {
@@ -546,39 +584,49 @@ subtest 'advance_sse close is idempotent, streams stay exclusive' => sub {
     like( dies { $adv->('initial', { type => 'http.fullflush' }) }, qr/before sse\.start/, 'fullflush before start');
     is( $adv->('streaming', { type => 'sse.close' }), 'closed', 'close -> closed');
     is( $adv->('closed', { type => 'sse.close' }), 'closed', 'second close idempotent');
-    is( $adv->('declining', { type => 'sse.http.response.body', more => 1 }), 'declining', 'decline body chunk keeps declining');
-    is( $adv->('declining', { type => 'sse.http.response.body' }), 'decline_complete', 'terminal decline body -> decline_complete');
     like( dies { $adv->('closed', { type => 'sse.send', data => 'x' }) }, qr/after sse\.close/, 'send after close');
-    is( $adv->('initial', { type => 'sse.http.response.start', status => 404 }), 'declining', 'decline start');
     like( dies { $adv->('initial', { type => 'sse.send', data => 'x' }) }, qr/before sse\.start/, 'send before start');
-    like( dies { $adv->('streaming', { type => 'sse.http.response.start', status => 404 }) }, qr/after sse\.start/, 'decline after start');
     like( dies { $adv->('streaming', { type => 'sse.start' }) }, qr/duplicate sse\.start/, 'duplicate start');
-    like( dies { $adv->('streaming', { type => 'sse.http.response.body', body => 'x' }) }, qr/after sse\.start/, 'decline body while streaming croaks');
-    like( dies { $adv->('declining', { type => 'sse.send', data => 'x' }) }, qr/after sse\.http\.response\.start/, 'stream event while declining');
-    like( dies { $adv->('decline_complete', { type => 'sse.close' }) }, qr/decline response already complete/, 'anything after decline complete');
 };
 
-subtest 'advance_websocket denial and accept are exclusive' => sub {
+subtest 'advance_sse: refusal states' => sub {
+    my $adv = \&PAGI::Server::EventValidator::advance_sse;
+    is($adv->('initial', { type => 'http.response.start', status => 404 }), 'refusing', 'start refuses');
+    is($adv->('refusing', { type => 'http.response.body', more => 1 }), 'refusing', 'more keeps refusing');
+    is($adv->('refusing', { type => 'http.response.body' }), 'refusal_complete', 'terminal');
+    is($adv->('refusing', { type => 'http.response.body', file => '/etc/hosts' }), 'refusal_complete', 'a file body is terminal');
+    is($adv->('refusing', { type => 'http.response.trailers' }), 'refusal_complete', 'trailers terminate');
+    like(dies { $adv->('streaming', { type => 'http.response.start', status => 404 }) }, qr/after sse\.start/, 'refusal after start');
+    like(dies { $adv->('streaming', { type => 'http.response.body', body => 'x' }) }, qr/after sse\.start/, 'refusal body while streaming');
+    like(dies { $adv->('refusing', { type => 'sse.send', data => 'x' }) }, qr/after http\.response\.start/, 'stream events after refusal start');
+    like(dies { $adv->('refusing', { type => 'sse.start' }) }, qr/after http\.response\.start/, 'sse.start after refusal start');
+    like(dies { $adv->('refusal_complete', { type => 'sse.close' }) }, qr/refusal already complete/, 'anything after refusal complete');
+    like(dies { $adv->('refusal_complete', { type => 'http.response.body' }) }, qr/refusal already complete/, 'another body after refusal complete');
+};
+
+subtest 'advance_websocket: refusal states and websocket.close before accept fails' => sub {
     my $adv = \&PAGI::Server::EventValidator::advance_websocket;
     is( $adv->('connecting', { type => 'websocket.accept' }), 'accepted', 'accept');
-    is( $adv->('connecting', { type => 'websocket.http.response.start', status => 401 }), 'denial', 'denial start');
-    is( $adv->('connecting', { type => 'websocket.close' }), 'closed', 'close while connecting');
     is( $adv->('accepted', { type => 'websocket.send', text => 'x' }), 'accepted', 'send keeps accepted');
     is( $adv->('accepted', { type => 'websocket.keepalive', interval => 30 }), 'accepted', 'keepalive keeps accepted');
     is( $adv->('accepted', { type => 'websocket.close' }), 'closed', 'close after accept');
-    is( $adv->('denial', { type => 'websocket.http.response.body', more => 1 }), 'denial', 'denial body chunk keeps denial');
-    is( $adv->('denial', { type => 'websocket.http.response.body' }), 'denial_complete', 'terminal denial body -> denial_complete');
+    is($adv->('connecting', { type => 'http.response.start', status => 401 }), 'refusing', 'start refuses');
+    is($adv->('refusing', { type => 'http.response.body', more => 1 }), 'refusing', 'more keeps refusing');
+    is($adv->('refusing', { type => 'http.response.body' }), 'refusal_complete', 'terminal completes');
+    is($adv->('refusing', { type => 'http.response.body', file => '/etc/hosts' }), 'refusal_complete', 'a file body is terminal');
+    is($adv->('refusing', { type => 'http.response.trailers' }), 'refusal_complete', 'trailers terminate');
+    like(dies { $adv->('connecting', { type => 'websocket.close' }) }, qr/before websocket\.accept/, 'close before accept is out of sequence');
+    like(dies { $adv->('refusing', { type => 'websocket.accept' }) }, qr/after http\.response\.start/, 'accept after refusal start');
+    like(dies { $adv->('accepted', { type => 'http.response.start', status => 401 }) }, qr/after websocket\.accept/, 'HTTP events after accept');
+    like(dies { $adv->('accepted', { type => 'http.response.body' }) }, qr/after websocket\.accept/, 'HTTP body after accept');
+    like(dies { $adv->('refusal_complete', { type => 'http.response.body' }) }, qr/refusal already complete/, 'nothing after completion');
     like( dies { $adv->('connecting', { type => 'websocket.keepalive', interval => 30 }) }, qr/before websocket\.accept/, 'keepalive before accept');
     like( dies { $adv->('connecting', { type => 'websocket.send', text => 'x' }) }, qr/before websocket\.accept/, 'send before accept');
     like( dies { $adv->('accepted', { type => 'websocket.accept' }) }, qr/after websocket\.accept/, 'duplicate accept');
-    like( dies { $adv->('accepted', { type => 'websocket.http.response.start', status => 401 }) }, qr/after websocket\.accept/, 'denial after accept');
-    like( dies { $adv->('accepted', { type => 'websocket.http.response.body' }) }, qr/after websocket\.accept/, 'denial body after accept');
-    like( dies { $adv->('denial', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.http\.response\.start/, 'frame while denying');
-    like( dies { $adv->('denial', { type => 'websocket.keepalive', interval => 30 }) }, qr/after websocket\.http\.response\.start/, 'keepalive while denying');
-    like( dies { $adv->('denial', { type => 'websocket.accept' }) }, qr/after websocket\.http\.response\.start/, 'accept while denying');
+    like( dies { $adv->('refusing', { type => 'websocket.send', text => 'x' }) }, qr/after http\.response\.start/, 'frame while refusing');
+    like( dies { $adv->('refusing', { type => 'websocket.keepalive', interval => 30 }) }, qr/after http\.response\.start/, 'keepalive while refusing');
     like( dies { $adv->('closed', { type => 'websocket.send', text => 'x' }) }, qr/after websocket\.close/, 'send after close');
     like( dies { $adv->('closed', { type => 'websocket.close' }) }, qr/after websocket\.close/, 'second close also croaks (websocket close is not idempotent)');
-    like( dies { $adv->('denial_complete', { type => 'websocket.close' }) }, qr/denial response already complete/, 'anything after denial complete');
 };
 
 subtest 'advance_lifespan phases' => sub {
@@ -590,6 +638,33 @@ subtest 'advance_lifespan phases' => sub {
     like( dies { $adv->('startup_pending', { type => 'lifespan.shutdown.complete' }) }, qr/during lifespan phase 'startup_pending'/, 'shutdown result during startup');
     like( dies { $adv->('running', { type => 'lifespan.startup.complete' }) }, qr/during lifespan phase 'running'/, 'late startup result');
     like( dies { $adv->('finished', { type => 'lifespan.startup.complete' }) }, qr/during lifespan phase 'finished'/, 'anything after finished');
+};
+
+subtest 'scope_started and scope_send_clean read the validator state' => sub {
+    my $started = \&PAGI::Server::EventValidator::scope_started;
+    my $clean   = \&PAGI::Server::EventValidator::scope_send_clean;
+    # websocket
+    ok(!$started->('websocket', 'connecting'), 'ws connecting: not started');
+    ok( $started->('websocket', $_), "ws $_: started") for qw(accepted refusing refusal_complete closed);
+    ok(!$clean->('websocket', $_),   "ws $_: not a clean send-side end") for qw(connecting accepted refusing);
+    ok( $clean->('websocket', $_),   "ws $_: clean send-side end") for qw(refusal_complete closed);
+    # sse
+    ok(!$started->('sse', 'initial'), 'sse initial: not started');
+    ok( $started->('sse', $_), "sse $_: started") for qw(streaming refusing refusal_complete closed);
+    ok(!$clean->('sse', $_),   "sse $_: not a clean send-side end") for qw(initial streaming refusing);
+    ok( $clean->('sse', $_),   "sse $_: clean send-side end") for qw(refusal_complete closed);
+    # http (delegates to the existing terminal notion)
+    ok(!$started->('http', 'initial'), 'http initial: not started');
+    ok( $started->('http', $_), "http $_: started")
+        for qw(started started_t started_i started_t_i awaiting_trailers complete);
+    ok( $clean->('http', 'complete'), 'http complete: clean');
+    ok(!$clean->('http', $_), "http $_: not a clean send-side end")
+        for qw(initial started started_t started_i started_t_i awaiting_trailers);
+    # every state advance_* can return is classified
+    ok(!$started->('websocket', undef), 'undef state: not started');
+    ok(!$clean->('sse', undef), 'undef state: not clean');
+    like(dies { $started->('bogus', 'x') }, qr/unknown scope kind/, 'unknown kind dies');
+    like(dies { $clean->('bogus', 'x') }, qr/unknown scope kind/, 'unknown kind dies for send_clean');
 };
 
 done_testing;

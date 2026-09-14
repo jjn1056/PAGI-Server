@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.002012';
+our $VERSION = '0.002013';
 
 # Future::XS support - opt-in via PAGI_FUTURE_XS=1 environment variable
 # Must be loaded before Future to take effect, so we check env var in BEGIN
@@ -1160,6 +1160,55 @@ you may increase to 5000-10000, but monitor memory usage.
 
 B<CLI:> C<--max-receive-queue 500>
 
+=item max_disconnect_receives => $count
+
+Maximum number of C<receive()> calls, on one scope, that the server will
+answer with a synthesized disconnect event before failing them instead.
+
+The spec has a scope's disconnect event re-delivered: once
+C<http.disconnect>, C<websocket.disconnect> or C<sse.disconnect> has been
+delivered, a further C<receive()> resolves with that event again, because
+the event reports the scope's terminal state rather than delivering a
+message. An application that loops on C<receive()> without ever checking for
+the event therefore never yields: the server answers each call from an
+already-resolved Future, the event loop never turns, and every other
+connection the process is serving is starved.
+
+B<Default:> 100 answers per scope
+
+B<What counts:> only calls the server answers by B<synthesizing> the
+disconnect event, i.e. calls made after the scope ended. The scope's one
+queued disconnect event, and every C<receive()> that was already pending
+when the disconnect was detected, are ordinary deliveries and are not
+counted. The count is per scope -- one HTTP/1.1 request, upgrade or stream,
+or one HTTP/2 stream -- and never resets.
+
+B<When exceeded:> the C<receive()> Future fails with
+
+    receive() called 101 times after the scope ended; the application is not
+    checking for it (PAGI::Server max_disconnect_receives=100)
+
+which, inside an C<async sub>, raises in the application. One error line is
+logged for the scope, naming the scope type and the transport; later calls
+on the same scope fail silently.
+
+B<Example:>
+
+    # Let a slow-draining application make 1000 such calls
+    my $server = PAGI::Server->new(
+        app                     => $app,
+        max_disconnect_receives => 1000,
+    );
+
+B<CLI:> C<--max-disconnect-receives 1000>
+
+B<Spec note:> this cap is the bound the spec allows.
+L<PAGI::Spec::Www/"Meaning per scope">, under "Receiving after the scope's
+end", lets a server bound how many receives it answers with the scope's end
+and fail the receive past that bound, leaving the number and its default to
+the server to choose and document. Set it to C<0> for unbounded re-delivery.
+See L<PAGI::Server::Compliance/"PAGI SPECIFICATION RULINGS">.
+
 =item max_ws_frame_size => $bytes
 
 Maximum size in bytes for a single WebSocket frame payload. When a client
@@ -1322,7 +1371,46 @@ Maximum request body size in bytes. Default: 10,000,000 (10MB).
 Set to 0 for unlimited (not recommended for public-facing servers).
 
 Requests with Content-Length exceeding this limit receive HTTP 413
-(Payload Too Large). Chunked requests are also checked as data arrives.
+(Payload Too Large). Chunked requests are also checked as data arrives; for a
+chunked body the limit counts the bytes received on the wire, chunk framing
+and trailers included, not just the decoded content.
+
+A body of undeclared length (chunked on HTTP/1.1, DATA without
+C<content-length> on HTTP/2) can cross the limit after the application has
+already started its response. A started response can never be replaced by a
+second one, so no 413 is written: the scope ends with C<disconnect_reason>
+C<body_too_large>, the application's disconnect event carries the same token,
+one line is logged, and the response is truncated on the wire (RST_STREAM on
+HTTP/2, a close with no terminal framing on HTTP/1.1) so the client sees it as
+incomplete. A streaming endpoint that accepts unknown-length uploads should
+enforce its own per-route limit while reading, so it can report in band
+instead:
+
+    my $read = 0;
+    while (1) {
+        my $event = await $receive->();
+        last if $event->{type} ne 'http.request';
+        $read += length($event->{body} // '');
+        if ($read > $MY_LIMIT) {
+            await $send->({ type => 'http.response.body',
+                            body => "upload too large\n", more => 1 });
+            $scope->{'pagi.connection'}->abort;
+            return;
+        }
+        last unless $event->{more};
+    }
+
+The limit also bounds a body the application never read at all. An
+application that answers before reading (a 401, a 413 of its own) leaves the
+rest of that body framed into an HTTP/1.1 connection, and the connection must
+consume it before it can take another request (RFC 9112 section 9.3). That
+discard stops at C<max_body_size>: within the limit the remainder is thrown
+away and the connection serves the next request as usual; over it the
+connection closes after the response, ending with C<body_too_large>. The scope
+itself is untouched either way -- it ended cleanly with its response, so
+C<on_complete> fired, C<disconnect_reason> is C<undef>, the client's response
+is complete rather than truncated, and the close is logged at debug level
+only.
 
 B<Example:>
 
@@ -2470,6 +2558,9 @@ sub _init {
     $self->{shutdown_timeout}  = delete $params->{shutdown_timeout} // 30;  # Graceful shutdown timeout (seconds)
     $self->{reuseport}         = delete $params->{reuseport} // 0;  # SO_REUSEPORT mode for multi-worker
     $self->{max_receive_queue} = delete $params->{max_receive_queue} // 1000;  # Max WebSocket receive queue size (messages)
+    $self->{max_disconnect_receives} = delete $params->{max_disconnect_receives} // 100;  # Receives answered with a synthesized disconnect event, per scope (0 = unlimited)
+    die "Invalid max_disconnect_receives '$self->{max_disconnect_receives}' - must be 0 (unlimited) or a positive count\n"
+        if $self->{max_disconnect_receives} < 0;
     $self->{max_ws_frame_size} = delete $params->{max_ws_frame_size} // 65536;  # Max WebSocket frame size in bytes (64KB default)
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = use default (1000)
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
@@ -2651,6 +2742,12 @@ sub configure {
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
     }
+    if (exists $params{max_disconnect_receives}) {
+        my $cap = delete $params{max_disconnect_receives};
+        die "Invalid max_disconnect_receives '$cap' - must be 0 (unlimited) or a positive count\n"
+            if $cap < 0;
+        $self->{max_disconnect_receives} = $cap;
+    }
     if (exists $params{max_ws_frame_size}) {
         $self->{max_ws_frame_size} = delete $params{max_ws_frame_size};
     }
@@ -2706,11 +2803,6 @@ sub _log {
     });
 }
 
-# The spec distribution's version, or undef. PAGI::Server has no runtime
-# dependency on PAGI, so the banner names it only when it is actually there.
-# Kept separate so a test can make the spec appear absent.
-sub _pagi_spec_version { return eval { require PAGI; PAGI->VERSION } }
-
 # A fact worth showing in the startup block rather than on a ragged line of its
 # own. Workers never reach the banner -- it is emitted from _create_loop, which
 # the worker path does not call -- so they report immediately instead, keeping
@@ -2733,9 +2825,6 @@ sub _startup_banner {
     my ($self, $where, $per_worker) = @_;
 
     my $identity = 'PAGI::Server ' . (__PACKAGE__->VERSION // 'unknown');
-    if (defined(my $spec = $self->_pagi_spec_version)) {
-        $identity .= " (PAGI $spec)";
-    }
 
     my $loop_class = ref($self->loop);
     $loop_class =~ s/^IO::Async::Loop:://;  # Shorten for display
@@ -3986,6 +4075,7 @@ sub _run_as_worker {
         sse_idle_timeout    => $self->{sse_idle_timeout},
         sync_file_threshold => $self->{sync_file_threshold},
         max_receive_queue   => $self->{max_receive_queue},
+        max_disconnect_receives => $self->{max_disconnect_receives},
         max_ws_frame_size   => $self->{max_ws_frame_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
@@ -4183,6 +4273,7 @@ sub _on_connection {
         access_log        => $self->{access_log},
         _access_log_formatter => $self->{_access_log_formatter},
         max_receive_queue => $self->{max_receive_queue},
+        max_disconnect_receives => $self->{max_disconnect_receives},
         max_ws_frame_size => $self->{max_ws_frame_size},
         sync_file_threshold => $self->{sync_file_threshold},
         validate_events   => $self->{validate_events},
@@ -4603,17 +4694,23 @@ async sub _drain_connections {
 
     # First, close all idle connections immediately (not processing a request)
     # Keep-alive connections waiting for next request should be closed
-    my @idle = grep { !$_->{handling_request} } values %{$self->{connections}};
+    my @idle = grep { !$_->has_requests_in_flight } values %{$self->{connections}};
     for my $conn (@idle) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }
 
     # Also close long-lived connections (SSE, WebSocket) immediately
     # These never become "idle" so would wait for full timeout otherwise
-    my @longlived = grep { $_->{sse_mode} || $_->{websocket_mode} } values %{$self->{connections}};
+    my @longlived = grep { $_->is_long_lived } values %{$self->{connections}};
     for my $conn (@longlived) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }
+
+    # Whatever is left is still answering a request. An HTTP/2 peer is told so
+    # now (RFC 9113 section 6.8: GOAWAY names the last stream taken up), so it
+    # stops opening streams on a connection that is about to go while the ones
+    # it already has finish. A no-op on HTTP/1.1, which has no such frame.
+    $_->_h2_announce_shutdown for values %{$self->{connections}};
 
     # If all connections are now closed, we're done
     return if keys %{$self->{connections}} == 0;
@@ -4636,7 +4733,11 @@ async sub _drain_connections {
         $self->_log(warn => "Shutdown timeout: force-closing $remaining active connections");
 
         for my $conn (values %{$self->{connections}}) {
-            $conn->_close if $conn && $conn->can('_close');
+            # The same ending the two passes above give, so a scope cut short
+            # by the timeout still names why it ended (Www.pod: a scope the
+            # server ends reports the reason) instead of being torn out from
+            # under an application that still sees a connected object.
+            $conn->_handle_disconnect_and_close('server_shutdown') if $conn;
         }
     }
 

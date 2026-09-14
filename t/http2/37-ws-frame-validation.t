@@ -13,7 +13,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -65,6 +65,33 @@ sub create_test_server {
     return $server;
 }
 
+# The answers to the app's two further receive() calls, the failure text of
+# the one the cap failed, and the log lines the subtest's server produced --
+# collected rather than printed so the cap's own error line can be asserted.
+our @WS_EXTRA_EVENTS;
+our $WS_EXTRA_FAILURE;
+our @WS_LOG;
+
+use constant WS_DISCONNECT_CAP => 1;
+
+# The cap's error line, verbatim (PAGI::Server "max_disconnect_receives").
+sub cap_message {
+    my ($n) = @_;
+    return "receive() called $n times after the scope ended; "
+         . "the application is not checking for it "
+         . "(PAGI::Server max_disconnect_receives=@{[ WS_DISCONNECT_CAP ]})";
+}
+
+sub create_ws_disconnect_server {
+    my ($app) = @_;
+    @WS_LOG = ();
+    return create_test_server(
+        app                     => $app,
+        logger                  => sub { push @WS_LOG, $_[0] },
+        max_disconnect_receives => WS_DISCONNECT_CAP,
+    );
+}
+
 sub create_h2_connection {
     my (%overrides) = @_;
 
@@ -87,6 +114,7 @@ sub create_h2_connection {
         app           => $app,
         protocol      => $protocol,
         server        => $server,
+        max_disconnect_receives => $server->{max_disconnect_receives},
         h2_protocol   => $server->{http2_protocol},
         alpn_protocol => 'h2',
         max_body_size => $server->{max_body_size},
@@ -204,15 +232,19 @@ sub close_codes {
 }
 
 # Build an app that accepts, drains receive() into $events until a
-# websocket.disconnect arrives, then makes ONE bounded extra receive()
-# call to catch a second queued event -- the queue property that proves
-# "exactly one" (mirrors t/http2/31-ws-keepalive-disconnect.t's
-# make_ws_app). A synthesized fallback surfacing here only happens if the
-# connection was already torn down, which these subtests don't do before
-# this check, so any second event caught here is a genuine
-# duplicate-enqueue regression.
+# websocket.disconnect arrives, then makes TWO further receive() calls --
+# the queue property that proves "exactly one" (mirrors
+# t/http2/31-ws-keepalive-disconnect.t's make_ws_app). Www.pod "Disconnect -
+# receive event": once the event has been delivered the scope is over and a
+# further receive() resolves with that same event again, and the servers
+# these subtests build cap those re-deliveries at one, so the first further
+# call is answered and the second fails. An answer taken off the receive
+# queue does not count against the cap, so a second queued copy would make
+# the second call the first COUNTED one and it would be answered instead.
 sub make_ws_app {
     my ($events) = @_;
+    @WS_EXTRA_EVENTS  = ();
+    $WS_EXTRA_FAILURE = undef;
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'websocket';
@@ -226,14 +258,48 @@ sub make_ws_app {
         }
         push @$events, $event;
 
-        my $extra = await Future->wait_any($receive->(), $loop->delay_future(after => 0.3));
-        push @$events, $extra if ref $extra eq 'HASH';
+        # Each call is bounded: one that parked would stop the app rather
+        # than hang the file, and leave its slot in @WS_EXTRA_EVENTS empty.
+        for my $try (1 .. 2) {
+            my $answer;
+            my $ok = eval {
+                $answer = await Future->wait_any(
+                    $receive->(), $loop->delay_future(after => 0.3));
+                1;
+            };
+            if (!$ok) {
+                $WS_EXTRA_FAILURE = "$@";
+                last;
+            }
+            last unless ref $answer eq 'HASH';
+            push @WS_EXTRA_EVENTS, $answer;
+        }
     };
 }
 
 sub disconnects_seen {
     my ($events) = @_;
     return grep { $_->{type} eq 'websocket.disconnect' } @$events;
+}
+
+# The app's two further receive() calls: the first answered with the scope's
+# terminal state again, the second one past the cap and failed, with the one
+# error line the cap emits.
+sub check_redelivery {
+    my ($disconnect) = @_;
+
+    is(\@WS_EXTRA_EVENTS, [$disconnect],
+        'the first further receive() resolved with that same event');
+
+    my $message = cap_message(WS_DISCONNECT_CAP + 1);
+    like($WS_EXTRA_FAILURE, qr/\Q$message\E/,
+        'the second further receive() failed with the cap message');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @WS_LOG;
+    is(scalar @errors, 1, 'the cap logged one error line');
+    like($errors[0]{message}, qr{^websocket scope on HTTP/2 stream \d+: \Q$message\E$},
+        'the error line names the scope, the transport and the count')
+        if @errors;
 }
 
 # Poll until the app has recorded a websocket.disconnect (or the ceiling is
@@ -263,7 +329,8 @@ sub wait_for_disconnect {
 subtest 'nonzero RSV bit closes h2 WebSocket stream with 1002' => sub {
     my @events;
     my $app = make_ws_app(\@events);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
 
     my $ws_stream_id;
     my $ws_data = '';
@@ -296,6 +363,7 @@ subtest 'nonzero RSV bit closes h2 WebSocket stream with 1002' => sub {
     if (@disconnects) {
         is($disconnects[0]{code}, 1002, 'code is 1002 (protocol error)');
         is($disconnects[0]{reason}, 'protocol_error', "reason is 'protocol_error'");
+        check_redelivery($disconnects[0]);
     }
 
     my @codes = close_codes($ws_data);
@@ -312,7 +380,8 @@ subtest 'nonzero RSV bit closes h2 WebSocket stream with 1002' => sub {
 subtest 'reserved opcode closes h2 WebSocket stream with 1002' => sub {
     my @events;
     my $app = make_ws_app(\@events);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
 
     my $ws_stream_id;
     my $ws_data = '';
@@ -343,6 +412,7 @@ subtest 'reserved opcode closes h2 WebSocket stream with 1002' => sub {
     if (@disconnects) {
         is($disconnects[0]{code}, 1002, 'code is 1002 (protocol error)');
         is($disconnects[0]{reason}, 'protocol_error', "reason is 'protocol_error'");
+        check_redelivery($disconnects[0]);
     }
 
     my @codes = close_codes($ws_data);
@@ -359,7 +429,8 @@ subtest 'reserved opcode closes h2 WebSocket stream with 1002' => sub {
 subtest 'oversized control frame closes h2 WebSocket stream with 1002' => sub {
     my @events;
     my $app = make_ws_app(\@events);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
 
     my $ws_stream_id;
     my $ws_data = '';
@@ -391,6 +462,7 @@ subtest 'oversized control frame closes h2 WebSocket stream with 1002' => sub {
     if (@disconnects) {
         is($disconnects[0]{code}, 1002, 'code is 1002 (protocol error)');
         is($disconnects[0]{reason}, 'protocol_error', "reason is 'protocol_error'");
+        check_redelivery($disconnects[0]);
     }
 
     my @codes = close_codes($ws_data);

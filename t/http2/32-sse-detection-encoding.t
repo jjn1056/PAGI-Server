@@ -13,7 +13,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -145,6 +145,8 @@ subtest 'SSE UTF-8 wire encoding: data/event/id/comment arrive as UTF-8 octets' 
         });
 
         await $send->({ type => 'sse.comment', comment => "r\x{e9}sum\x{e9}" });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -199,6 +201,8 @@ subtest 'SSE UTF-8 wire encoding: invalid string fails the send Future; stream s
         $invalid_err = $@;
 
         await $send->({ type => 'sse.send', event => 'after', data => 'still-fine' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -256,6 +260,8 @@ subtest 'SSE UTF-8 wire encoding: keepalive comment arrives as UTF-8 octets' => 
         await $delay_f;
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -373,6 +379,8 @@ subtest 'h2 POST-SSE: body delivered complete with truthful more when END_STREAM
         $received_more = $event->{more};
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'ack' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -445,6 +453,8 @@ subtest 'h2 POST-SSE: body already complete before the first receive() call (pin
         $received_more = $event->{more};
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'ack' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

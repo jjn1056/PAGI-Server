@@ -12,7 +12,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -137,9 +137,11 @@ subtest 'SSE request detected over HTTP/2' => sub {
         $got_path = $scope->{path};
         $got_pagi = $scope->{pagi};
 
-        # Minimal SSE session: start then close
+        # Minimal SSE session: start, send, then close
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -175,7 +177,7 @@ subtest 'SSE request detected over HTTP/2' => sub {
 
     is($got_scope_type, 'sse', 'Scope type is sse');
     is($got_pagi->{version}, '0.5', 'h2 SSE scope uses core PAGI version 0.5');
-    is($got_pagi->{spec_version}, '0.5', 'h2 SSE scope reports spec_version 0.5');
+    is($got_pagi->{spec_version}, '0.6', 'h2 SSE scope reports spec_version 0.6');
     is($got_http_version, '2', 'HTTP version is 2');
     is($got_path, '/events', 'Path is correct');
     is($response_headers{':status'}, '200', 'Got 200 status');
@@ -245,6 +247,8 @@ subtest 'SSE receive returns sse.request' => sub {
 
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'test' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -299,8 +303,8 @@ for my $row (@matrix) {
 
             if ($scope->{type} eq 'sse') {
                 # Decline cleanly so the client isn't left hanging.
-                await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-                await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+                await $send->({ type => 'http.response.start', status => 204, headers => [] });
+                await $send->({ type => 'http.response.body', body => '', more => 0 });
             }
             else {
                 await $receive->();
@@ -342,8 +346,8 @@ subtest 'h2: two Accept headers, only the second carries the range -> sse' => su
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         $got_scope_type = $scope->{type};
-        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-        await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+        await $send->({ type => 'http.response.start', status => 204, headers => [] });
+        await $send->({ type => 'http.response.body', body => '', more => 0 });
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);

@@ -14,7 +14,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -83,6 +83,7 @@ sub create_h2_connection {
         app           => $app,
         protocol      => $protocol,
         server        => $server,
+        max_disconnect_receives => $server->{max_disconnect_receives},
         h2_protocol   => $server->{http2_protocol},
         alpn_protocol => 'h2',
         max_body_size => $server->{max_body_size},
@@ -182,16 +183,61 @@ sub open_ws_stream {
 our @WS_EVENTS;
 
 # Build an app that accepts, drains receive() into @WS_EVENTS until a
-# websocket.disconnect arrives, then makes ONE bounded extra receive()
-# call to catch a second queued event -- the queue property that proves
-# "exactly one". A synthesized fallback 1006 surfacing here only happens
-# if the connection was already torn down, which none of these subtests
-# do before this check, so any second event caught here is a genuine
-# duplicate-enqueue regression.
+# websocket.disconnect arrives, then makes TWO further receive() calls.
+# Www.pod "Disconnect - receive event": "Once this event has been delivered
+# the scope is over, and a further receive() resolves with the same
+# websocket.disconnect again". PAGI::Server caps those re-deliveries at
+# max_disconnect_receives, which these subtests set to 1
+# (create_ws_disconnect_server), so the first further call is answered and
+# the second fails.
+#
+# That pair is what proves the event was QUEUED exactly once. An answer
+# taken off the receive queue is a delivery and does not count against the
+# cap, so a second queued copy would make the second call the first COUNTED
+# one -- it would be answered instead of failing. The answers themselves are
+# kept out of @WS_EVENTS (they are the scope's terminal state read again,
+# not a second enqueue) and must be the same event: a scope that enqueued one
+# disconnect from the close-frame path and another from _h2_on_close would
+# spell them differently -- the peer's code and reason against 1006/'' -- and
+# the deep comparison catches that even where the cap arithmetic would not.
+our $WS_APP_OBJECT_REASON;
+
+# The answers to those two calls, and the failure text of whichever one the
+# cap failed. Reset by make_ws_app, one app per subtest.
+our @WS_EXTRA_EVENTS;
+our $WS_EXTRA_FAILURE;
+
+# The log lines the subtest's server produced, collected rather than printed
+# so the cap's own error line can be asserted. Reset per server.
+our @WS_LOG;
+
+use constant WS_DISCONNECT_CAP => 1;
+
+# The cap's error line, verbatim (PAGI::Server "max_disconnect_receives").
+sub cap_message {
+    my ($n) = @_;
+    return "receive() called $n times after the scope ended; "
+         . "the application is not checking for it "
+         . "(PAGI::Server max_disconnect_receives=@{[ WS_DISCONNECT_CAP ]})";
+}
+
+sub create_ws_disconnect_server {
+    my ($app) = @_;
+    @WS_LOG = ();
+    return create_test_server(
+        app                     => $app,
+        logger                  => sub { push @WS_LOG, $_[0] },
+        max_disconnect_receives => WS_DISCONNECT_CAP,
+    );
+}
+
 sub make_ws_app {
+    @WS_EXTRA_EVENTS  = ();
+    $WS_EXTRA_FAILURE = undef;
     return async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'websocket';
+        my $c = $scope->{'pagi.connection'};
 
         await $send->({ type => 'websocket.accept' });
 
@@ -200,15 +246,53 @@ sub make_ws_app {
             push @WS_EVENTS, $event;
             $event = await $receive->();
         }
+        # Www.pod "State Transition Order": steps 1-4 (including
+        # disconnect_reason()) MUST precede step 5 (delivering this event),
+        # so await-then-check is race-free by construction.
+        $WS_APP_OBJECT_REASON = $c->disconnect_reason;
         push @WS_EVENTS, $event;
 
-        my $extra = await Future->wait_any($receive->(), $loop->delay_future(after => 0.3));
-        push @WS_EVENTS, $extra if ref $extra eq 'HASH';
+        # Each call is bounded: one that parked would stop the app rather
+        # than hang the file, and leave its slot in @WS_EXTRA_EVENTS empty.
+        for my $try (1 .. 2) {
+            my $answer;
+            my $ok = eval {
+                $answer = await Future->wait_any(
+                    $receive->(), $loop->delay_future(after => 0.3));
+                1;
+            };
+            if (!$ok) {
+                $WS_EXTRA_FAILURE = "$@";
+                last;
+            }
+            last unless ref $answer eq 'HASH';
+            push @WS_EXTRA_EVENTS, $answer;
+        }
     };
 }
 
 sub disconnects_seen {
     return grep { $_->{type} eq 'websocket.disconnect' } @WS_EVENTS;
+}
+
+# The app's two further receive() calls: the first answered with the scope's
+# terminal state again, the second one past the cap and failed, with the one
+# error line the cap emits.
+sub check_redelivery {
+    my ($disconnect) = @_;
+
+    is(\@WS_EXTRA_EVENTS, [$disconnect],
+        'the first further receive() resolved with that same event');
+
+    my $message = cap_message(WS_DISCONNECT_CAP + 1);
+    like($WS_EXTRA_FAILURE, qr/\Q$message\E/,
+        'the second further receive() failed with the cap message');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @WS_LOG;
+    is(scalar @errors, 1, 'the cap logged one error line');
+    like($errors[0]{message}, qr{^websocket scope on HTTP/2 stream \d+: \Q$message\E$},
+        'the error line names the scope, the transport and the count')
+        if @errors;
 }
 
 # ============================================================
@@ -327,6 +411,9 @@ sub close_codes {
 # A '/get' (or any non-websocket) path gets an immediate 200 "sibling-ok" --
 # used to prove the h2 connection/session keeps serving other streams
 # regardless of what happens to a WS stream's keepalive.
+our %WS_DISCONNECT_OBJECT_REASON;
+our %WS_DISCONNECT_OBJECT_DETAIL;
+
 sub make_keepalive_router_app {
     my (%path_events) = @_;
     return async sub {
@@ -345,6 +432,7 @@ sub make_keepalive_router_app {
         return unless $scope->{type} eq 'websocket';
         my $events = $path_events{$scope->{path}};
         return unless $events;
+        my $c = $scope->{'pagi.connection'};
 
         await $send->({ type => 'websocket.accept' });
 
@@ -379,7 +467,16 @@ sub make_keepalive_router_app {
                 next;
             }
             push @$events, $event;
-            last if $event->{type} eq 'websocket.disconnect';
+            if ($event->{type} eq 'websocket.disconnect') {
+                # Www.pod "State Transition Order": steps 1-4 (including
+                # disconnect_reason()) MUST precede step 5 (delivering this
+                # very event), so await-then-check is race-free by
+                # construction -- reading it here proves that, not just
+                # trusts it.
+                $WS_DISCONNECT_OBJECT_REASON{$scope->{path}} = $c->disconnect_reason;
+                $WS_DISCONNECT_OBJECT_DETAIL{$scope->{path}} = $c->disconnect_detail;
+                last;
+            }
         }
     };
 }
@@ -495,6 +592,12 @@ subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 interval
     is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
         'no disconnect event while pongs were answered');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport, rather than yanking it out from under a still
+    # -healthy app.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -505,8 +608,17 @@ subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 interval
 # ============================================================
 subtest 'withheld pong times out exactly one disconnect; sibling GET still serves' => sub {
     my @events;
+    my @log_events;
     my $app = make_keepalive_router_app('/ws' => \@events);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # A keepalive timeout ends the stream with no WS closing handshake at
+    # all (a bare abnormal drop, RFC 6455 code 1006). The timer marks the
+    # connection_state object with 'keepalive_timeout' BEFORE waking the
+    # app's parked receive() (Www.pod "State Transition Order"), so the
+    # dispatch wrapper's D13 check sees the object already disconnected
+    # for a reason other than 'server_error' and treats this as the client
+    # having gone away -- no incomplete-response log.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
 
     my $ws_stream_id;
     my $ws_data = '';
@@ -570,6 +682,17 @@ subtest 'withheld pong times out exactly one disconnect; sibling GET still serve
     is($get_headers{':status'}, '200', 'sibling GET stream still gets a response');
     is($get_body, 'sibling-ok', 'sibling GET stream still gets its body');
 
+    is($WS_DISCONNECT_OBJECT_REASON{'/ws'}, 'keepalive_timeout',
+        'pagi.connection agrees with the event: keepalive_timeout, read at the moment the app received it');
+    # The token says what happened; disconnect_detail says which timeout
+    # it was (Www.pod: disconnect_detail supplements the standard reason).
+    like($WS_DISCONNECT_OBJECT_DETAIL{'/ws'}, qr/^no pong within \d+(\.\d+)?s$/,
+        'disconnect_detail names the keepalive timeout that fired');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 0,
+        'no error log line: a keepalive timeout is a server-initiated close, not an incomplete response');
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -613,6 +736,12 @@ subtest 'keepalive on one stream does not leak pings to a sibling WS stream' => 
     ok($a_saw_ping, 'stream A (keepalive enabled) received at least one ping');
     is(ping_count($b_data), 0, 'stream B (no keepalive) received zero ping frames');
     is(length($b_data), 0, 'stream B received no DATA at all (nothing else to send)');
+
+    # End both scopes cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $a_stream_id, 'close:1000,done');
+    send_ws_text($client, $client_sock, $b_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -672,6 +801,11 @@ subtest 'interval => 0 stops further pings' => sub {
         'no-timeout keepalive delivered zero disconnect events');
     is([map { $_->{type} } @events], ['websocket.connect'],
         'the only app-visible event was the opening websocket.connect');
+
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -734,6 +868,11 @@ subtest 'a second keepalive event supersedes the first: the ping cadence changes
     is(scalar(grep { $_->{type} eq 'websocket.disconnect' } @events), 0,
         'no disconnect while re-arming keepalive (old pong-timer state did not wedge)');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -778,6 +917,11 @@ subtest 'an inbound ws ping frame is answered with a pong carrying its payload' 
         if @pongs;
     is(ping_count($ws_data), 0, 'server sent no pings of its own (no keepalive armed)');
 
+    # End the scope cleanly (Www.pod "Meaning per scope") before tearing
+    # down the raw transport.
+    send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
     $stream_io->close_now;
     $loop->remove($server);
 };
@@ -789,8 +933,14 @@ subtest 'an inbound ws ping frame is answered with a pong carrying its payload' 
 subtest 'a keepalive timeout on one armed stream leaves its ponging sibling working' => sub {
     my @events_a;
     my @events_b;
+    my @log_events;
     my $app = make_keepalive_router_app('/ws/a' => \@events_a, '/ws/b' => \@events_b);
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # Stream A's keepalive timeout ends it with no WS closing handshake (a
+    # bare abnormal drop, RFC 6455 code 1006) -- see the withheld-pong
+    # subtest above: the object is marked before the app's receive() wakes,
+    # so this does not log.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
 
     my ($a_stream_id, $b_stream_id);
     my $a_data = '';
@@ -857,6 +1007,18 @@ subtest 'a keepalive timeout on one armed stream leaves its ponging sibling work
         }
     }
     ok($echoed, 'stream B round-tripped a text message after A timed out');
+
+    # A already ended (its own timeout). End B's scope cleanly (Www.pod
+    # "Meaning per scope") too before tearing down the raw transport.
+    send_ws_text($client, $client_sock, $b_stream_id, 'close:1000,done');
+    exchange_frames($client, $client_sock, 10);
+
+    is($WS_DISCONNECT_OBJECT_REASON{'/ws/a'}, 'keepalive_timeout',
+        "stream A's pagi.connection agrees with the event: keepalive_timeout, read at the moment the app received it");
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 0,
+        "no error log line: stream A's keepalive timeout is a server-initiated close, not an incomplete response");
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -957,7 +1119,8 @@ subtest 'invalid-UTF-8 protocol close releases the keepalive timer' => sub {
 subtest 'peer Close(4321, "bye") delivers exactly one disconnect with the peer code/reason' => sub {
     @WS_EVENTS = ();
     my $app = make_ws_app();
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -976,6 +1139,7 @@ subtest 'peer Close(4321, "bye") delivers exactly one disconnect with the peer c
     if (@disconnects) {
         is($disconnects[0]{code}, 4321, 'code is the peer\'s code');
         is($disconnects[0]{reason}, 'bye', 'reason is the peer\'s reason text');
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
@@ -988,7 +1152,8 @@ subtest 'peer Close(4321, "bye") delivers exactly one disconnect with the peer c
 subtest 'peer Close with empty payload delivers exactly one disconnect, code 1005' => sub {
     @WS_EVENTS = ();
     my $app = make_ws_app();
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -1007,6 +1172,7 @@ subtest 'peer Close with empty payload delivers exactly one disconnect, code 100
     if (@disconnects) {
         is($disconnects[0]{code}, 1005, 'code is 1005 (no status received)');
         is($disconnects[0]{reason}, '', 'reason is empty');
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
@@ -1018,8 +1184,16 @@ subtest 'peer Close with empty payload delivers exactly one disconnect, code 100
 # ============================================================
 subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' => sub {
     @WS_EVENTS = ();
+    $WS_APP_OBJECT_REASON = undef;
     my $app = make_ws_app();
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    # A bare END_STREAM (no WS closing handshake at all) is precisely the
+    # abnormal drop this subtest names. _h2_on_body marks the object
+    # 'client_closed' BEFORE waking the app's parked receive() (Www.pod
+    # "State Transition Order"), so the dispatch wrapper's D13 check sees
+    # the object already disconnected for a reason other than
+    # 'server_error' and does not log an incomplete response.
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -1035,7 +1209,15 @@ subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' =>
     if (@disconnects) {
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'client_closed', "reason is 'client_closed'");
+        check_redelivery($disconnects[0]);
     }
+
+    is($WS_APP_OBJECT_REASON, 'client_closed',
+        'pagi.connection agrees with the event: client_closed, read at the moment the app received it');
+
+    my @other_errors = grep { ($_->{level} // '') eq 'error' && $_->{message} !~ /max_disconnect_receives/ } @WS_LOG;
+    is(scalar(@other_errors), 0,
+        'the cap line is the only error: a bare END_STREAM is a client-gone close, not an incomplete response');
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -1047,7 +1229,8 @@ subtest 'bare END_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' => sub {
     @WS_EVENTS = ();
     my $app = make_ws_app();
-    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(
+        app => $app, server => create_ws_disconnect_server($app));
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -1062,6 +1245,7 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
     if (@disconnects) {
         is($disconnects[0]{code}, 1006, 'code is 1006 (abnormal closure)');
         is($disconnects[0]{reason}, 'client_closed', "reason is 'client_closed'");
+        check_redelivery($disconnects[0]);
     }
 
     $stream_io->close_now;
@@ -1069,7 +1253,7 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 };
 
 # ============================================================
-# receive() fallback prefers a recorded server_close_reason over ''
+# receive() fallback prefers a recorded end_reason over ''
 # (design section 6.1's transport-neutral disconnect reasons)
 # ============================================================
 # White-box: exercises _h2_create_websocket_receive's OWN fallback branch
@@ -1077,16 +1261,18 @@ subtest 'peer RST_STREAM delivers exactly one disconnect, 1006/client_closed' =>
 # $weak_self->{closed} is already true (e.g. a whole-connection teardown,
 # such as a server shutdown, racing an already-pending receive()), rather
 # than through the primary enqueue+dedup path the subtests above already
-# cover. The fallback must report whatever server_close_reason a
+# cover. The fallback must report whatever end_reason a
 # server-initiated per-stream teardown recorded, as long as the stream's
-# own state (its h2_streams entry) is still reachable, defaulting to ''
-# when it is not.
-subtest 'receive() fallback after connection close reports the recorded server_close_reason, not empty' => sub {
+# own state (its h2_streams entry) is still reachable, defaulting to the
+# 'client_closed' token when it is not (Www.pod "Disconnect - receive
+# event": an abnormal drop with no close handshake pairs 1006 with the
+# standard token for the condition, never with an empty reason).
+subtest 'receive() fallback after connection close reports the recorded end_reason, not empty' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
         protocol => $protocol,
     );
-    $conn->{h2_streams}{7} = { server_close_reason => 'keepalive_timeout' };
+    $conn->{h2_streams}{7} = { end_reason => 'keepalive_timeout' };
     $conn->{closed} = 1;
 
     my $receive = $conn->_h2_create_websocket_receive(7, $conn->{h2_streams}{7});
@@ -1098,7 +1284,7 @@ subtest 'receive() fallback after connection close reports the recorded server_c
         "fallback reason is the recorded token, not ''");
 };
 
-subtest 'receive() fallback with no reachable stream state still falls back to empty reason' => sub {
+subtest 'receive() fallback with no reachable stream state reports client_closed' => sub {
     my $conn = PAGI::Server::Connection->new(
         app      => sub { },
         protocol => $protocol,
@@ -1110,7 +1296,8 @@ subtest 'receive() fallback with no reachable stream state still falls back to e
     my $event = $receive->()->get;
 
     is($event->{code}, 1006, 'fallback code is still 1006');
-    is($event->{reason}, '', "fallback reason is '' when no stream state is reachable");
+    is($event->{reason}, 'client_closed',
+        "fallback reason is 'client_closed' when no stream state is reachable");
 };
 
 # ============================================================
@@ -1123,7 +1310,8 @@ subtest 'receive() fallback with no reachable stream state still falls back to e
 # _h2_on_body's max_body_size overrun branch delivers a scope-appropriate
 # disconnect for the sse and http arms, but excluded pre-accept websocket
 # streams: an accepted ws stream returns early at the top of _h2_on_body
-# (the `$stream->{is_websocket} && $stream->{ws_accepted}` guard) before
+# (the `$stream->{is_websocket} && _ws_handshake_accepted($stream->{seq_state})`
+# guard) before
 # ever reaching this size check, so `is_websocket` true at the overrun
 # branch always means pre-accept. Before this fix, that pre-accept case got
 # its 413 and stream-state deletion but no receive_queue event, so an app
@@ -1178,12 +1366,17 @@ subtest 'max_body_size 413 overrun on a pre-accept ws stream wakes pending recei
     }
     ok($dispatched, 'app consumed websocket.connect and parked on a second, pre-accept receive()')
         or diag('app never reached the parked-receive state -- cannot exercise wake-on-overrun');
-    ok(!$conn->{h2_streams}{$ws_stream_id}{ws_accepted}, 'stream is still pre-accept (ws_accepted false)');
+    # The send state is the accept fact since sub-spec 0.6 (there is no longer a
+    # separate flag): 'accepted' and 'closed' are the accepted states, and a
+    # stream still in the handshake is 'connecting'.
+    ok(!PAGI::Server::Connection::_ws_handshake_accepted(
+            $conn->{h2_streams}{$ws_stream_id}{seq_state}),
+        'stream is still pre-accept (send state is not accepted)');
 
     # Push body data past max_body_size (40 bytes) as raw h2 DATA -- for a
     # pre-accept ws stream this is accumulated as an ordinary request body
-    # (the ws-frame-parsing branch in _h2_on_body only runs once ws_accepted
-    # is true), so it drives the SAME max_body_size overrun branch the
+    # (the ws-frame-parsing branch in _h2_on_body only runs once the send state
+    # says accepted), so it drives the SAME max_body_size overrun branch the
     # sse/http arms use.
     send_stream_data($client, $client_sock, $ws_stream_id, ('X' x 100));
 

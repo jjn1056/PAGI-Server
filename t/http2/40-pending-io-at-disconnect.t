@@ -12,7 +12,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -308,6 +308,89 @@ subtest 'RST_STREAM resolves a pending receive with http.disconnect' => sub {
     ok(pump_until(sub { $obs{app_completed} }, 10),
         'application completed after RST_STREAM (pending receive did not hang)');
     is($obs{next_type}, 'http.disconnect', 'pending receive resolved with http.disconnect');
+
+    $server->shutdown->get;
+    eval { $loop->remove($server) };
+};
+
+# ============================================================
+# Connection-level teardown: every event names the object's own reason
+# ============================================================
+# Www.pod "Meaning per scope", Agreement with disconnect events, is a MUST:
+# "the event's reason and the object's disconnect_reason MUST be the same
+# token". A per-stream teardown records its token on the stream, but a
+# CONNECTION-level one (read_error, write_error, server_shutdown,
+# client_timeout, idle_timeout) never does -- so the sweep that settles parked
+# receives has to take the reason from the teardown itself. It previously
+# hardcoded 'client_closed' there while _handle_disconnect marked the very
+# same objects with the real token, and the two disagreed.
+#
+# One connection, one sse stream and one websocket stream, both parked on
+# receive, then the connection dies with a read error.
+
+subtest 'connection-level teardown: sse and websocket events agree with their objects' => sub {
+    my %obs;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $kind = $scope->{type};
+        return unless $kind eq 'sse' || $kind eq 'websocket';
+        my $c = $scope->{'pagi.connection'};
+
+        await $receive->();                          # sse.request / websocket.connect
+        if ($kind eq 'websocket') {
+            await $send->({ type => 'websocket.accept' });
+        }
+        else {
+            await $send->({ type => 'sse.start' });
+        }
+        $obs{"${kind}_started"} = 1;
+
+        my $ev = await $receive->();                 # parks until the connection dies
+        $obs{"${kind}_event"}  = $ev;
+        # State Transition Order: steps 1-4 precede step 5, so reading the
+        # object here is race-free by construction.
+        $obs{"${kind}_reason"} = $c->disconnect_reason;
+        $obs{"${kind}_done"}   = 1;
+    };
+
+    my ($conn, $stream, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+
+    $client->submit_request(
+        method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
+        headers => [['accept', 'text/event-stream']],
+    );
+    $client->submit_request(
+        method => 'CONNECT', path => '/socket', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body    => sub { undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+
+    ok(pump_until(sub { $obs{sse_started} && $obs{websocket_started} }, 10),
+        'both streams reached the application and started their responses');
+
+    # The exact entry point IO::Async uses for a failed read on this socket.
+    # A connection-level end: nothing names a per-stream reason.
+    $conn->{stream}->maybe_invoke_event(on_read_error => 32);   # EPIPE
+
+    ok(pump_until(sub { $obs{sse_done} && $obs{websocket_done} }, 10),
+        'both parked receives settled');
+
+    is($obs{sse_event}{type}, 'sse.disconnect', 'sse scope got sse.disconnect');
+    is($obs{sse_event}{reason}, $obs{sse_reason},
+        'sse event reason equals the object disconnect_reason');
+    isnt($obs{sse_reason}, 'client_closed',
+        'and it is the real teardown reason, not the client_closed default');
+
+    is($obs{websocket_event}{type}, 'websocket.disconnect', 'websocket scope got websocket.disconnect');
+    is($obs{websocket_event}{code}, 1006, 'code 1006: no close handshake');
+    is($obs{websocket_event}{reason}, $obs{websocket_reason},
+        'websocket event reason equals the object disconnect_reason');
+    isnt($obs{websocket_reason}, 'client_closed',
+        'and it is the real teardown reason, not the client_closed default');
 
     $server->shutdown->get;
     eval { $loop->remove($server) };

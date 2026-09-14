@@ -124,6 +124,8 @@ subtest 'SSE scope type is sse' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'test', data => 'done' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -156,7 +158,7 @@ subtest 'SSE scope type is sse' => sub {
 
         is($scope_type, 'sse', 'Scope type is sse');
         is($pagi->{version}, '0.5', 'SSE scope uses core PAGI version 0.5');
-        is($pagi->{spec_version}, '0.5', 'SSE scope reports spec_version 0.5');
+        is($pagi->{spec_version}, '0.6', 'SSE scope reports spec_version 0.6');
     }
 
     $server->shutdown->get;
@@ -179,6 +181,8 @@ subtest 'SSE multi-line data formatting' => sub {
             event => 'multiline',
             data  => "line1\nline2\nline3",
         });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -315,7 +319,13 @@ subtest 'SSE chunked encoding properly terminated' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'test', data => 'hello' });
-        # App returns normally - server should send chunked terminator
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end. sse.close still honors keep-alive (design 11.6), so the
+        # chunked terminator this subtest checks for is unaffected.
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -404,6 +414,8 @@ subtest 'SSE id and retry fields' => sub {
             id    => 'msg-123',
             retry => 5000,
         });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -464,6 +476,8 @@ subtest 'SSE app-supplied Cache-Control and Date are preserved' => sub {
         });
 
         await $send->({ type => 'sse.send', data => 'hello' });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);
@@ -556,6 +570,8 @@ subtest 'SSE with POST method' => sub {
         });
 
         await $send->({ type => 'sse.send', event => 'echo', data => $body_received });
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = create_server($test_app);

@@ -323,6 +323,13 @@ subtest 'Fullflush extension works with SSE' => sub {
             event => 'done',
             data  => 'finished',
         });
+
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
+        return;
     };
 
     my $server = PAGI::Server->new(
@@ -387,8 +394,8 @@ subtest 'WebSocket scopes do not advertise fullflush even when configured' => su
 
         my $scope = $conn->_create_websocket_scope($request);
         is($scope->{type}, 'websocket', 'built a websocket scope');
-        ok(exists $scope->{extensions}{'websocket.http.response'},
-            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{'websocket.http.response'},
+            'refusing a handshake is not an extension: nothing is advertised for it');
         ok(!exists $scope->{extensions}{fullflush},
             'websocket scope must NOT advertise fullflush (no validator arm for it)');
     };
@@ -416,8 +423,8 @@ subtest 'WebSocket scopes do not advertise fullflush even when configured' => su
 
         my $scope = $conn->_h2_create_websocket_scope(1, $stream_state);
         is($scope->{type}, 'websocket', 'built a websocket scope');
-        ok(exists $scope->{extensions}{'websocket.http.response'},
-            'websocket scope still advertises websocket.http.response');
+        ok(!exists $scope->{extensions}{'websocket.http.response'},
+            'refusing a handshake is not an extension: nothing is advertised for it');
         ok(!exists $scope->{extensions}{fullflush},
             'websocket scope must NOT advertise fullflush (no validator arm for it)');
     };

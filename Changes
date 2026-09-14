@@ -1,5 +1,183 @@
 # Revision history for PAGI-Server
 
+0.002014 - UNRELEASED
+
+  Specification
+  - max_body_size: a request body of undeclared length that crosses the limit
+    after the application has started its response now ends the scope with
+    body_too_large and truncates the response (RST_STREAM INTERNAL_ERROR on
+    HTTP/2, connection close on HTTP/1.1) instead of writing a 413 as a second
+    response, which nghttp2 refused and which tore the whole HTTP/2 connection
+    down. A declared Content-Length over the limit is still answered 413 before
+    the application runs. One error line names the cause. The max_body_size
+    documentation describes the app-owned-limit pattern for streaming uploads.
+  - HTTP/2 support now requires Net::HTTP2::nghttp2 0.011 (on_frame_send and the
+    stream-close queries the server uses to end a scope whose request body the
+    client never finished; 0.011 makes a submit from inside a callback safe and
+    refuses a re-entrant mem_send instead of corrupting its buffer).
+  - Implements HTTP/WebSocket/SSE sub-spec 0.6 (PAGI 0.002009); scopes report
+    spec_version '0.6'. The core PAGI version key is unchanged at '0.5'.
+    See PAGI::Upgrading.
+
+  Connection state
+  - The terminal response event ends the http scope on both transports, whether
+    or not the application read the request body: the object is complete at
+    that event, and a receive pending or made afterwards reports http.disconnect
+    instead of parking or handing back an unread body. On HTTP/2 the server then
+    asks the client to abandon an unfinished request with RST_STREAM NO_ERROR
+    (RFC 9113 section 8.1), which nghttp2 does not send on its own.
+  - pagi.connection on websocket and sse scopes on HTTP/1.1 and HTTP/2, with
+    abort($detail), disconnect_detail, response_complete as a boolean, and
+    on_disconnect callbacks receiving (reason, detail). New reason app_abort.
+  - Accepted-socket clean end is a completed closing handshake; a bare drop
+    is client_closed on both transports (was an empty reason on h2 socket
+    close).
+  - sse.close is the only clean end of a started SSE stream; returning
+    without it is an incomplete response, not a clean end.
+  - A receive after a clean end the application produced -- a completed
+    WebSocket or SSE refusal, or sse.close -- reports that end instead of
+    parking or naming a reason the scope never had: sse.disconnect with no
+    reason on an sse scope, http.disconnect after a WebSocket refusal. This
+    holds for a call reading the scope's request body when the end arrives,
+    including a chunked body on HTTP/1.1 and a request half the client never
+    finished on HTTP/2, and for a call the application abandons as it returns
+    in the same turn. The awaiting code may resume inside the terminal send
+    that produced the answer, on a scope that has already ended.
+  - h2: an sse scope closed with sse.close while the client's request half is
+    still open ends its stream with RST_STREAM NO_ERROR (RFC 9113 section
+    8.1) once the response is on the wire, instead of leaving a finished
+    stream open for the life of the connection.
+
+  Refusals
+  - Refusing a handshake or stream is an ordinary HTTP response: http.response.*
+    before websocket.accept or sse.start, through the ordinary HTTP path
+    (streams when more => 1; file/fh/trailers allowed). websocket.http.response.*
+    and sse.http.response.* removed; the websocket.http.response extension is
+    no longer advertised; websocket.close before accept fails. A websocket
+    refusal's status must be 300 or above; an sse refusal may carry any status.
+
+  Bug fixes (measured against 0.002013)
+  - h2: a connection nghttp2 tore down for a peer protocol violation reported
+    client_closed with no detail and logged nothing. It now ends as
+    protocol_error, logs one error line, and carries nghttp2's own account of
+    the violation -- the rejected frame's RFC 9113 type and NGHTTP2_ERR_* code,
+    or nghttp2's diagnostic in words, truncated to 256 bytes. A peer that ends
+    the connection with its own GOAWAY still reports its own reason: nghttp2
+    reports the header fields it merely ignores the same way it reports the
+    ones it rejects, so a diagnostic alone is not a violation.
+  - h2: a graceful shutdown terminated the session locally, which puts nothing
+    on the wire, so clients saw a bare TCP close. It now sends GOAWAY naming
+    the last stream the server took up (RFC 9113 section 6.8), so a client
+    knows which requests were never acted on and may retry them elsewhere.
+    The connection is still closed by the shutdown itself; the GOAWAY does not
+    hold it open for in-flight streams.
+  - h1: a pre-accept WebSocket disconnect delivered http.disconnect.
+  - h1: receive() after a completed refusal delivered a fabricated
+    websocket.disconnect.
+  - h2: a completed SSE refusal delivered sse.disconnect client_closed.
+  - h2: a completed WebSocket denial was marked server_error rather than a
+    clean end.
+  - h2: a bare socket close reported an empty websocket.disconnect reason.
+  - h2: spurious "returned without starting a response" after the client left.
+  - h1: receive() after a completed HTTP response parked instead of resolving
+    with http.disconnect.
+  - h2: nine server-detected protocol closes (1002/1007/1008, queue overflow)
+    were reported as a clean end.
+  - h2: server-initiated WebSocket ends (keepalive and idle timeouts, protocol
+    closes) woke the application's pending receive before the connection
+    object was marked, so the object could read server_error.
+  - h2: a stream closed with no error code was marked server_error regardless
+    of the recorded reason (idle timeout), which could issue RST_STREAM on a
+    stream nghttp2 no longer tracked.
+  - h2: connection-level teardown delivered client_closed to parked receives
+    while the object carried the real reason.
+  - h2: an incomplete SSE stream or refusal was not reset or reported.
+  - h1: a request body the application never read became the next request. An
+    application that answers before reading (a 401 on an upload) left the
+    remainder framed into the kept-alive connection, and the next parse took it
+    for a request line, dispatching a client-controlled method and losing the
+    request that really followed. The connection now discards what is left --
+    after a response and after an SSE stream, through the terminating chunk's
+    trailer section -- before it parses anything else, bounded by
+    max_body_size; over that bound, or on chunk framing it cannot read, the
+    connection closes after the response the scope already completed. A
+    request refused under Expect: 100-continue without a 100 Continue going
+    out also closes the connection: its content may arrive at any moment and
+    may never arrive, so it can be neither read nor skipped (RFC 9112
+    section 9.3, RFC 9110 section 10.1.1).
+  - The startup banner no longer names the PAGI spec distribution's version.
+    PAGI::Server has no runtime dependency on it and it is normally not
+    installed alongside the server, so the line read differently from one
+    machine to the next for no operational reason.
+  - Two tests depended on the tester's environment (CPAN Testers on
+    0.002013): t/66 assumed the PAGI distribution was installed, and t/37
+    asserted that two disconnect_future calls return one object, which only
+    held under Test2's deep comparison of pure-perl Futures and failed under
+    Future::XS. Both now pin the contract rather than the environment.
+
+  Limits
+  - max_disconnect_receives (--max-disconnect-receives, default 100): the
+    bound the spec allows on how many receives one scope may have answered
+    with the scope's end before they fail instead. Every receive after the
+    scope's end reports that end, so an application that never checks for it
+    loops on already-resolved Futures and starves every other connection in
+    the process. Set to 0 for unbounded re-delivery. The failure message
+    names the scope's end rather than a disconnect event, because a clean
+    end delivers none.
+
+  Internal
+  - One lifecycle state per scope: the validator's per-scope state machine is
+    mirrored for websocket and sse as it was for http; ten hand-maintained
+    flags removed.
+  - websocket.accept builds and writes under advance-then-rollback, so an
+    accept rejected by subprotocol or header validation does not leave the
+    scope reading as accepted.
+
+0.002013 - 2026-09-03
+
+  Bug fixes
+  - Daemonizing no longer discards every diagnostic in the process.
+    _daemonize reopened STDERR on /dev/null and nothing named an
+    alternative, so `pagi-server -D` produced no diagnostics at all -- and
+    none from any distribution running on it. Production mode also
+    disables the access log by default, so a daemonized production server
+    wrote no log output whatsoever.
+  - log_level now reaches workers. Workers were started quiet, and all
+    request handling happens in workers, so `--log-level debug --workers N`
+    reported nothing from the processes actually serving traffic.
+  - The server's own most valuable diagnostics -- application errors after
+    a response started, connection errors, protocol anomalies, TLS
+    failures -- reported straight to STDERR. Twenty-two such sites now pass
+    through the server's logger, so log_level governs them and a replaced
+    sink sees them.
+
+  New
+  - --error-log FILE: where diagnostics go. Opened immediately after the
+    command line is parsed, so it captures app-loading failures and bind
+    errors, and the descriptor survives both --daemonize forks.
+  - PAGI::Server->new(logger => sub {...}): the destination is replaceable.
+    One hashref per message with level, message and category. A coderef
+    rather than a logging object because frameworks disagree about level
+    names -- Log::Dispatch has no 'fatal' and discards such a message
+    silently -- so the closure is where translation belongs. See
+    examples/13-custom-logging.
+  - Startup is one aligned block, led by the address, naming what is being
+    served and which mode resolved and why -- including in production,
+    which previously reported no mode at all. A graceful shutdown now says
+    so; Ctrl-C was silent, indistinguishable from being killed.
+
+  What may break
+  - `quiet` is deprecated. It was a second control over the same axis as
+    log_level and overrode it; it is now a spelling of
+    log_level => 'error', and an explicit log_level wins. Anything relying
+    on quiet suppressing a more verbose log_level should set log_level
+    directly.
+  - Tests that both quiet a server and assert on a warn-level diagnostic
+    now contradict themselves, because those diagnostics answer to the
+    threshold for the first time. Set log_level => 'warn' instead.
+  - Startup and shutdown message text changed. Anything matching on the old
+    banner, or on "PAGI development mode - ...", needs updating.
+
 0.002012 - 2026-09-01
 
   Conformance

@@ -12,7 +12,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -200,6 +200,13 @@ subtest 'connection close during SSE does not crash' => sub {
         eval {
             await $send->({ type => 'sse.send', data => 'third' });
         };
+
+        # Wait for the disconnect to be recorded rather than returning
+        # immediately: a bare return here, before the transport is known
+        # gone, would race the incomplete-response check (Www.pod 0.6
+        # "Application Left a Response Incomplete", D12) against the
+        # connection's own abnormal-end processing.
+        await $scope->{'pagi.connection'}->disconnect_future;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -310,6 +317,7 @@ subtest 'keepalive timers cleaned up on disconnect' => sub {
 # unfixed, the timer keeps firing for the life of the process.
 subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' => sub {
     my $sse_started = 0;
+    my @log;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -329,17 +337,29 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
         });
         $sse_started = 1;
 
-        # Nothing else to do: the client will overrun max_body_size and the
-        # server tears the stream down without this app ever calling
-        # receive() at all.
+        # Hold the stream open: returning here would leave an incomplete
+        # response (Www.pod 0.6 "Application Left a Response Incomplete",
+        # D12) and the dispatch wrapper would RST it immediately, before
+        # this test ever gets to drive the max_body_size overrun. The
+        # overrun itself ends the stream; the app never calls receive().
+        # disconnect_future rather than a bare Future->new: the connection's
+        # own abort/disconnect processing resolves it, so no coroutine is
+        # left dangling (and no crash at process exit) if this stream
+        # somehow outlives the subtest.
+        await $scope->{'pagi.connection'}->disconnect_future;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
         app           => $app,
         max_body_size => 40,
+        logger        => sub { push @log, $_[0] },
     );
 
-    my $client = create_client();
+    my ($status, $closed_code);
+    my $client = create_client(
+        on_header       => sub { my (undef, $n, $v) = @_; $status = $v if lc($n) eq ':status'; 0 },
+        on_stream_close => sub { $closed_code = $_[1]; 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     my $stream_id = $client->submit_request(
@@ -385,9 +405,24 @@ subtest 'max_body_size 413 during active SSE stops the stream keepalive timer' =
     }
 
     ok(!exists $conn->{h2_streams}{$stream_id},
-        'stream entry reclaimed after max_body_size 413');
+        'stream entry reclaimed after the overrun');
     ok(!$timer->is_running,
-        'the stream keepalive timer was stopped, not leaked, by the 413 teardown');
+        'the stream keepalive timer was stopped, not leaked, by the teardown');
+
+    # The overrun landed on a stream whose response had already started, so
+    # there is no 413 to send: PAGI::Spec::Www "Application Left a Response
+    # Incomplete" forbids replacing a started response, and the stream is
+    # truncated instead. Without these four the subtest passed while the whole
+    # connection was being destroyed by a second submit_response and the
+    # client got nothing -- the two surviving assertions above were swept by
+    # the connection teardown rather than reached by this path.
+    is($status, '200', 'the client keeps the SSE 200; no 413 was written over it');
+    is($closed_code, 2, 'the stream ended with RST_STREAM INTERNAL_ERROR');
+    ok(!$conn->{closed}, 'the connection survived: only the stream was reset');
+    is([map { $_->{message} } @log],
+       ['request body exceeded max_body_size (40 bytes) after the response'
+        . " had started (HTTP/2 stream $stream_id); response truncated"],
+       'exactly one log line, naming the limit, the transport and the truncation');
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -499,10 +534,12 @@ subtest 'max_body_size 413 with SSE app parked on receive() before any send: no 
 # stream is the server's own per-stream idle timer. The stream ends via a
 # clean END_STREAM (design section 11.3's "end THIS stream only"), which
 # _h2_on_close's error-code-0 arms must attribute to 'idle_timeout' via
-# server_close_reason, not the generic 'client_closed' fallback.
+# end_reason, not the generic 'client_closed' fallback.
 subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_timeout' => sub {
     my $sse_started = 0;
     my $disconnect_event;
+    my $object_reason;
+    my @log_events;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -515,11 +552,21 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
         # ends this stream.
         my $event = await $receive->();
         $disconnect_event = $event;
+        $object_reason = $scope->{'pagi.connection'}->disconnect_reason;
     };
 
+    # The idle timer records its own token (end_reason=idle_timeout)
+    # BEFORE it ends the stream with a clean END_STREAM, so _h2_on_close's
+    # zero-error-code arm attributes both the queued sse.disconnect event and
+    # the connection_state object to 'idle_timeout' -- and, because the
+    # object then disagrees with $client_gone's 'server_error' exclusion,
+    # the dispatch wrapper's D12 incomplete-response arm never runs for this
+    # stream: no RST_STREAM into a stream _h2_on_close already closed, and no
+    # error log blaming the application for a teardown the server initiated.
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
         app              => $app,
         sse_idle_timeout => 0.3,
+        logger           => sub { push @log_events, $_[0] },
     );
 
     my $client = create_client();
@@ -553,6 +600,12 @@ subtest 'server-initiated SSE idle timeout delivers sse.disconnect reason=idle_t
     is($disconnect_event->{reason}, 'idle_timeout',
         "Reason is 'idle_timeout', not misattributed to 'client_closed'")
         if $disconnect_event;
+    is($object_reason, 'idle_timeout',
+        'pagi.connection agrees with the event: idle_timeout, not server_error');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 0,
+        'no error log line: the idle timer is a server-initiated close, not an incomplete response');
 
     $stream_io->close_now;
     $loop->remove($server);

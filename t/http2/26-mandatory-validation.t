@@ -13,7 +13,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -32,7 +32,7 @@ BEGIN {
 #    before the body is terminal still fails, via advance_http's own
 #    'awaiting_trailers' precondition rather than a stub.)
 #  - Once a stream's terminal state is reached (http 'complete', sse
-#    'closed'/'decline_complete'), the h2_streams entry for that stream is
+#    'closed'/'refusal_complete'), the h2_streams entry for that stream is
 #    reclaimed asynchronously; a further send must still raise through the
 #    state machine, not silently no-op just because the entry is gone.
 
@@ -293,7 +293,7 @@ is( $body, 'NO-ERROR', 'a conforming app is unaffected' );
 # ============================================================
 # SSE: mis-sequencing after a terminal state raises, not swallowed
 # ============================================================
-# Once a stream is 'closed' (sse.close) or 'decline_complete', its
+# Once a stream is 'closed' (sse.close) or 'refusal_complete', its
 # h2_streams entry is reclaimed asynchronously by _h2_on_close. These probe
 # sends happen on the very next tick of the same app coroutine -- before
 # that reclaim can plausibly have run -- but the sequence check must not
@@ -335,14 +335,14 @@ like( $sse_after_close_err // '', qr/after sse\.close/,
 my $sse_decline_complete_err;
 my $sse_app2 = async sub {
     my ($scope, $receive, $send) = @_;
-    await $send->({ type => 'sse.http.response.start', status => 200, headers => [['content-type','text/plain']] });
-    await $send->({ type => 'sse.http.response.body', body => 'done', more => 0 });
-    my $err = do { local $@; eval { await $send->({ type => 'sse.http.response.body', body => 'extra', more => 0 }) }; $@ };
+    await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
+    await $send->({ type => 'http.response.body', body => 'done', more => 0 });
+    my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => 'extra', more => 0 }) }; $@ };
     $sse_decline_complete_err = $err;
 };
 sse_probe(app => $sse_app2);
-like( $sse_decline_complete_err // '', qr/decline response already complete/,
-    'sse.http.response.body after a completed decline raises on h2, not silently swallowed' );
+like( $sse_decline_complete_err // '', qr/refusal already complete/,
+    'http.response.body after a completed refusal raises on h2, not silently swallowed' );
 
 # ============================================================
 # WebSocket: mis-sequencing after a terminal state raises, not swallowed
@@ -350,7 +350,7 @@ like( $sse_decline_complete_err // '', qr/decline response already complete/,
 # Same class of bug as the SSE/HTTP carve-outs above: websocket.close itself
 # ends the stream (submit_data with END_STREAM), and _h2_on_close reclaims
 # the h2_streams entry for that stream asynchronously -- independent of
-# protocol family. A post-close/post-denial-complete send must still raise
+# protocol family. A post-close/post-refusal-complete send must still raise
 # through advance_websocket, not silently no-op on a "stream gone" check.
 
 sub ws_probe {
@@ -391,14 +391,14 @@ like( $ws_after_close_err // '', qr/after websocket\.close/,
 my $ws_denial_complete_err;
 my $ws_app2 = async sub {
     my ($scope, $receive, $send) = @_;
-    await $send->({ type => 'websocket.http.response.start', status => 403,
+    await $send->({ type => 'http.response.start', status => 403,
                     headers => [['content-type','text/plain']] });
-    await $send->({ type => 'websocket.http.response.body', body => 'no', more => 0 });
-    my $err = do { local $@; eval { await $send->({ type => 'websocket.http.response.body', body => 'extra', more => 0 }) }; $@ };
+    await $send->({ type => 'http.response.body', body => 'no', more => 0 });
+    my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => 'extra', more => 0 }) }; $@ };
     $ws_denial_complete_err = $err;
 };
 ws_probe(app => $ws_app2);
-like( $ws_denial_complete_err // '', qr/denial response already complete/,
-    'websocket.http.response.body after a completed denial raises on h2, not silently swallowed' );
+like( $ws_denial_complete_err // '', qr/refusal already complete/,
+    'http.response.body after a completed refusal raises on h2, not silently swallowed' );
 
 done_testing;

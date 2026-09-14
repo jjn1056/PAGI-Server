@@ -37,8 +37,8 @@ sub create_server {
 
         if ($scope->{type} eq 'sse') {
             # Decline cleanly so the client isn't left hanging.
-            await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-            await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+            await $send->({ type => 'http.response.start', status => 204, headers => [] });
+            await $send->({ type => 'http.response.body', body => '', more => 0 });
         }
         else {
             await $receive->();
@@ -282,6 +282,7 @@ subtest 'SSE UTF-8 wire encoding: keepalive comment is UTF-8-encoded on the wire
         await $loop->delay_future(after => 0.5);
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
     };
 
     my $server = create_server($test_app);
@@ -358,6 +359,7 @@ subtest 'SSE keepalive: unencodable comment fails the send Future at arm time, n
         await $loop->delay_future(after => 0.5);
 
         await $send->({ type => 'sse.send', data => 'end' });
+        await $send->({ type => 'sse.close' });
     };
 
     my $server = create_server($test_app);
@@ -818,12 +820,17 @@ sub reuse_server {
     });
 }
 
-subtest 'clean SSE end by returning: connection stays open and serves the next request' => sub {
+subtest 'clean SSE end via sse.close (one send, then close): connection stays open and serves the next request' => sub {
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', event => 'tick', data => 'one' });
-        return;   # clean end by returning
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
+        return;
     });
     my $port = $server->port;
 
@@ -941,11 +948,16 @@ subtest 'SSE keepalive from the finished stream does not leak into the next requ
     $server->shutdown->get;
 };
 
-subtest 'client Connection: close still closes after a clean SSE end (control)' => sub {
+subtest 'client Connection: close still closes after a clean SSE end via sse.close (control)' => sub {
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'five' });
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
         return;
     });
     my $port = $server->port;
@@ -968,6 +980,11 @@ subtest 'HTTP/1.0 still closes after a clean SSE end (control)' => sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
         await $send->({ type => 'sse.send', data => 'six' });
+        # Explicit sse.close: the scope's one way to end a started stream
+        # cleanly (Www.pod 0.6 "Application Left a Response Incomplete", D12,
+        # superseded D3 2026-09-09) -- a bare return is now incomplete, not a
+        # clean end.
+        await $send->({ type => 'sse.close' });
         return;
     });
     my $port = $server->port;
@@ -1014,25 +1031,32 @@ subtest 'SSE app that returns without any response: 500 and close, never a silen
     $server->shutdown->get;
 };
 
-subtest 'SSE decline that starts but never sends its terminal body: closes, does not hang' => sub {
+subtest 'SSE refusal that starts but never sends its terminal body: closes, does not hang' => sub {
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
     my $server = reuse_server(async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 204, headers => [] });
-        return;   # the terminal sse.http.response.body never comes
+        await $send->({ type => 'http.response.start', status => 204, headers => [] });
+        return;   # the terminal http.response.body never comes
     });
     my $port = $server->port;
 
     my $sock = sse_socket($port);
     SKIP: {
-        skip "Cannot connect", 2 unless $sock;
+        skip "Cannot connect", 4 unless $sock;
 
+        # A refusal is an ordinary HTTP response (Www.pod "Refusing the
+        # stream"), so its accepted start has committed status and headers and
+        # they go on the wire -- exactly as on an http scope. Abandoning it is
+        # an incomplete response: the chunked terminator is never synthesized
+        # and the connection must not be kept alive.
         my ($wire, $eof) = read_until($sock, undef, 3);
-        ok($eof, 'an unfinished decline closes the connection rather than hanging');
-        like($wire, qr{^HTTP/1\.1 500}, 'and reports the incomplete response as a 500');
-        unlike($wire, qr/204/, 'the never-completed decline status was not sent');
+        ok($eof, 'an unfinished refusal closes the connection rather than hanging');
+        like($wire, qr{^HTTP/1\.1 204}, 'the committed status reached the client');
+        unlike($wire, qr/0\r\n\r\n\z/, 'no chunked terminator was synthesized');
+        ok((scalar grep { /incomplete response/i } @warnings),
+            'the incomplete response was logged') or diag("warnings: @warnings");
         close $sock;
     }
 

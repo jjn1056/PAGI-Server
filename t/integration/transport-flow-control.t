@@ -56,7 +56,7 @@ my $app = async sub {
 
     if ($type eq 'websocket') {
         await $send->({ type => 'websocket.accept' });
-        $capture->('websocket', $scope);   # after accept: websocket_mode is on
+        $capture->('websocket', $scope);   # after accept: scope_kind is websocket
         while (1) {
             my $e = await $receive->();
             last if $e->{type} eq 'websocket.disconnect';

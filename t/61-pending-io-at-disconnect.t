@@ -377,4 +377,56 @@ subtest 'sse: parked send resolves at abrupt disconnect' => sub {
     shutdown_server($server);
 };
 
+# =============================================================================
+# 4. HTTP: a receive after the response is finished resolves, never parks
+# =============================================================================
+# Www.pod "Disconnected Client": http.disconnect is what a receive() made
+# after the response completed gets. Parking it until the transport happens
+# to close is wrong on a keep-alive connection, where that could be the next
+# request's lifetime away. The h2 twin is t/http2/40's RST_STREAM subtest;
+# this is the h1 case, and the client here stays connected throughout.
+
+subtest 'h1 http: receive after a completed response resolves with http.disconnect' => sub {
+    my %obs;
+
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "Unsupported scope type: $scope->{type}" unless $scope->{type} eq 'http';
+
+        # Drain the request body first; the point of the test is the call
+        # made after the RESPONSE is finished, not the one that reads it.
+        my $req = await $receive->();
+        $req = await $receive->() while $req->{type} eq 'http.request' && $req->{more};
+
+        await $send->({
+            type    => 'http.response.start',
+            status  => 200,
+            headers => [['content-type', 'text/plain'], ['content-length', 2]],
+        });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+        $obs{response_done} = 1;
+
+        my $f = $receive->();
+        # One loop turn is all a correct server needs; the delay is the
+        # failure mode's escape hatch, not the expected path.
+        my $ev = await Future->wait_any($f->without_cancel, $loop->delay_future(after => 2));
+        $obs{settled}  = $f->is_ready ? 1 : 0;
+        $obs{type}     = $f->is_ready && !$f->is_failed ? $f->get->{type} : undef;
+        $obs{app_done} = 1;
+        return;
+    };
+
+    my $server = start_server($app);
+    my $sock = connect_client($server->port);
+    print $sock "GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+
+    ok(pump_until(sub { $obs{app_done} }, 10), 'application finished');
+    is($obs{response_done}, 1, 'the response was fully sent');
+    is($obs{settled}, 1, 'the receive resolved instead of parking until close (S7)');
+    is($obs{type}, 'http.disconnect', 'it resolved with http.disconnect');
+
+    close($sock);
+    shutdown_server($server);
+};
+
 done_testing;

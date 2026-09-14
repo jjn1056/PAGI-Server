@@ -31,7 +31,7 @@ subtest 'server implements disconnect reason code paths' => sub {
     # Verify protocol_error is set on parse failures
     like(
         $source,
-        qr/_handle_disconnect\('protocol_error'\)/,
+        qr/_handle_disconnect\('protocol_error',/,
         'protocol_error reason used for parse failures'
     );
 

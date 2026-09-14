@@ -14,15 +14,15 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
-# Test: Declining an SSE request over HTTP/2 (sse.http.response.*)
+# Test: Declining an SSE request over HTTP/2 (http.response.*)
 # ============================================================
 # Before sse.start, an application may DECLINE the stream and return a
-# normal HTTP response (404/401/204/...) via sse.http.response.start /
-# sse.http.response.body. First-send-wins: a stream event after a decline,
+# normal HTTP response (404/401/204/...) via http.response.start /
+# http.response.body. First-send-wins: a stream event after a decline,
 # and a decline after sse.start, MUST raise.
 
 use PAGI::Server::Connection;
@@ -149,12 +149,12 @@ sub decline_request {
     return (\%headers, $body);
 }
 
-subtest 'sse.http.response.* returns a plain HTTP 404 (declines the stream)' => sub {
+subtest 'http.response.* returns a plain HTTP 404 (declines the stream)' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 404,
+        await $send->({ type => 'http.response.start', status => 404,
                         headers => [['content-type', 'text/plain']] });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
         return;
     };
     my ($headers, $body) = decline_request(app => $app);
@@ -163,19 +163,55 @@ subtest 'sse.http.response.* returns a plain HTTP 404 (declines the stream)' => 
     like($body, qr/No such stream/, 'decline body delivered');
 };
 
-subtest 'multi-chunk decline body buffers until more=>0' => sub {
+# Reversed deliberately (spec decision D11), the sse twin of
+# t/http2/22's 'h2 refusal streams multiple body chunks': nothing is buffered
+# any more. Www.pod "Refusing the handshake", whose body semantics "Refusing
+# the stream" inherits -- "more => 1 streams under the transport's ordinary
+# body, flow-control, and framing rules ... Nothing is buffered specially" --
+# so the first chunk must be a DATA frame at the client before the terminal one
+# is sent. Written inline rather than through decline_request, which tears the
+# connection down before the test could look.
+subtest 'multi-chunk refusal body streams, it is not buffered' => sub {
+    my $gate = $loop->new_future;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 401,
+        await $send->({ type => 'http.response.start', status => 401,
                         headers => [['x-deny', 'auth']] });
-        await $send->({ type => 'sse.http.response.body', body => 'go ',   more => 1 });
-        await $send->({ type => 'sse.http.response.body', body => 'away', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'go ',   more => 1 });
+        await $gate;
+        await $send->({ type => 'http.response.body', body => 'away', more => 0 });
         return;
     };
-    my ($headers, $body) = decline_request(app => $app);
-    is($headers->{':status'}, '401', '401 status');
-    is($headers->{'x-deny'},  'auth', 'custom header present');
-    is($body, 'go away', 'body chunks concatenated before submission');
+
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+
+    my %headers;
+    my $body = '';
+    my $client = create_client(
+        on_header          => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
+        on_data_chunk_recv => sub { my ($sid, $d)    = @_; $body .= $d;         return 0 },
+    );
+    complete_h2_handshake($client, $client_sock);
+    $client->submit_request(
+        method    => 'GET',
+        path      => '/events',
+        scheme    => 'http',
+        authority => 'localhost',
+        headers   => [['accept', 'text/event-stream']],
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($headers{':status'}, '401', '401 status');
+    is($headers{'x-deny'},  'auth', 'custom header present');
+    is($body, 'go ', 'the first chunk reaches the client before the terminal one is sent');
+
+    $gate->done;
+    exchange_frames($client, $client_sock, 20);
+    is($body, 'go away', 'the terminal chunk follows');
+
+    $stream_io->close_now;
+    $loop->remove($server);
 };
 
 subtest 'first-send-wins: stream after decline, and decline after stream, raise' => sub {
@@ -183,23 +219,24 @@ subtest 'first-send-wins: stream after decline, and decline after stream, raise'
 
     my $app1 = async sub {
         my ($scope, $receive, $send) = @_;
-        await $send->({ type => 'sse.http.response.start', status => 404, headers => [] });
+        await $send->({ type => 'http.response.start', status => 404, headers => [] });
         eval { await $send->({ type => 'sse.send', data => 'x' }); 1 } or $after_decline_raised = 1;
-        await $send->({ type => 'sse.http.response.body', body => '', more => 0 });
+        await $send->({ type => 'http.response.body', body => '', more => 0 });
         return;
     };
     decline_request(app => $app1);
-    ok($after_decline_raised, 'sse.send after sse.http.response.start raised');
+    ok($after_decline_raised, 'sse.send after http.response.start raised');
 
     my $app2 = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({ type => 'sse.start', status => 200 });
-        eval { await $send->({ type => 'sse.http.response.start', status => 404, headers => [] }); 1 }
+        eval { await $send->({ type => 'http.response.start', status => 404, headers => [] }); 1 }
             or $after_start_raised = 1;
+        await $send->({ type => 'sse.close' });
         return;
     };
     decline_request(app => $app2);
-    ok($after_start_raised, 'sse.http.response.start after sse.start raised');
+    ok($after_start_raised, 'http.response.start after sse.start raised');
 };
 
 # ============================================================

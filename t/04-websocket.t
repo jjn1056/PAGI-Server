@@ -298,7 +298,7 @@ subtest 'WebSocket scope type is websocket' => sub {
 
     is($scope_type, 'websocket', 'Scope type is websocket');
     is($pagi->{version}, '0.5', 'WebSocket scope uses core PAGI version 0.5');
-    is($pagi->{spec_version}, '0.5', 'WebSocket scope reports spec_version 0.5');
+    is($pagi->{spec_version}, '0.6', 'WebSocket scope reports spec_version 0.6');
 
     $server->shutdown->get;
 };
@@ -375,8 +375,11 @@ subtest 'Subprotocol parsing' => sub {
     $server->shutdown->get;
 };
 
-# Test 7: WebSocket upgrade rejection returns 403
-subtest 'WebSocket rejection returns 403' => sub {
+# Test 7: websocket.close before accept is out of sequence (Www.pod "Close -
+# send event"): the server fails the $send Future without mutating state, and
+# refusing a handshake is done with an HTTP response instead.
+my ($ws_close_err, $ws_close_state);
+subtest 'websocket.close before accept fails the send' => sub {
     my $test_app = async sub  {
         my ($scope, $receive, $send) = @_;
         # Handle lifespan scope
@@ -395,8 +398,11 @@ subtest 'WebSocket rejection returns 403' => sub {
         }
 
         my $event = await $receive->();
-        # Reject the connection before accepting
-        await $send->({ type => 'websocket.close' });
+        my $conn = $scope->{'pagi.connection'};
+        $ws_close_err = do { local $@;
+            eval { await $send->({ type => 'websocket.close' }) }; $@ };
+        # Nothing was mutated: no response has started on this scope.
+        $ws_close_state = $conn->response_started;
     };
 
     my $server = create_server($test_app);
@@ -412,7 +418,10 @@ subtest 'WebSocket rejection returns 403' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 1 unless $sock;
+        skip "Cannot connect", 4 unless $sock;
+
+        my @warnings;
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
         my $key = 'dGhlIHNhbXBsZSBub25jZQ==';
         print $sock "GET / HTTP/1.1\r\n";
@@ -438,7 +447,13 @@ subtest 'WebSocket rejection returns 403' => sub {
         }
         close $sock;
 
-        like($response, qr/HTTP\/1\.1 403/, 'Rejection returns 403 Forbidden');
+        like($ws_close_err, qr/before websocket\.accept/, 'the send failed as out of sequence');
+        is($ws_close_state, 0, 'and mutated nothing: no response started');
+        # The app then returned having produced no response at all, so the
+        # server answers with its own 500 -- never a 403 the app never asked for.
+        like($response, qr/HTTP\/1\.1 500/, 'no 403 is synthesized for a failed close');
+        is(scalar(grep { /without accepting the WebSocket or refusing the handshake/ } @warnings), 1,
+            'the backstop logged exactly once') or diag("warnings: @warnings");
     }
 
     $server->shutdown->get;

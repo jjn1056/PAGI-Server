@@ -255,21 +255,22 @@ subtest 'h1 sse.start: app TE/Connection stripped, server-owned values survive u
 };
 
 # ---------------------------------------------------------------------------
-# (d) h1 SSE decline (sse.http.response.start / .body)
+# (d) h1 SSE refusal (http.response.start / .body)
 # ---------------------------------------------------------------------------
-subtest 'h1 SSE decline: app TE/Connection stripped, server-owned Connection: close survives' => sub {
+subtest 'h1 SSE refusal: app TE/Connection stripped, server-owned Connection: close survives' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $send->({
-            type    => 'sse.http.response.start',
+            type    => 'http.response.start',
             status  => 404,
             headers => [
                 [ 'connection',        'keep-alive' ],
                 [ 'transfer-encoding', 'chunked' ],
                 [ 'content-type',      'text/plain' ],
+                [ 'content-length',    14 ],
             ],
         });
-        await $send->({ type => 'sse.http.response.body', body => 'No such stream', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'No such stream', more => 0 });
     };
 
     my $server = create_server($app);
@@ -292,10 +293,10 @@ subtest 'h1 SSE decline: app TE/Connection stripped, server-owned Connection: cl
         is(scalar(@{header_lines_matching($wire, 'connection')}), 1,
             'exactly one Connection header (app duplicate stripped, server-owned close survives)');
         like(header_lines_matching($wire, 'connection')->[0] // '', qr/close/i,
-            "the surviving Connection header is the server's own 'close' (a decline always disconnects)");
+            "the surviving Connection header is the server's own 'close' (a refusal always disconnects)");
         is(header_lines_matching($wire, 'transfer-encoding'), [],
             'app-supplied Transfer-Encoding does not reach the wire alongside Content-Length');
-        like($wire, qr/No such stream/, 'decline body arrives intact');
+        like($wire, qr/No such stream/, 'refusal body arrives intact');
 
         is(scalar(@{strip_warnings_matching(\@warnings, 'transfer-encoding')}), 1,
             "warns once for stripped 'transfer-encoding'");
@@ -307,22 +308,23 @@ subtest 'h1 SSE decline: app TE/Connection stripped, server-owned Connection: cl
 };
 
 # ---------------------------------------------------------------------------
-# (e) h1 WebSocket denial (websocket.http.response.start / .body)
+# (e) h1 WebSocket refusal (http.response.start / .body)
 # ---------------------------------------------------------------------------
-subtest 'h1 WebSocket denial: app TE/Connection stripped' => sub {
+subtest 'h1 WebSocket refusal: app TE/Connection stripped, server-owned Connection: close added' => sub {
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();   # websocket.connect
         await $send->({
-            type    => 'websocket.http.response.start',
+            type    => 'http.response.start',
             status  => 401,
             headers => [
                 [ 'connection',        'keep-alive' ],
                 [ 'transfer-encoding', 'chunked' ],
                 [ 'x-deny',            'auth' ],
+                [ 'content-length',    4 ],
             ],
         });
-        await $send->({ type => 'websocket.http.response.body', body => 'nope' });
+        await $send->({ type => 'http.response.body', body => 'nope' });
         return;
     };
 
@@ -334,7 +336,7 @@ subtest 'h1 WebSocket denial: app TE/Connection stripped' => sub {
     );
 
     SKIP: {
-        skip "Cannot connect", 5 unless $sock;
+        skip "Cannot connect", 6 unless $sock;
 
         my @warnings;
         local $SIG{__WARN__} = sub { push @warnings, $_[0] };
@@ -351,12 +353,14 @@ subtest 'h1 WebSocket denial: app TE/Connection stripped' => sub {
         my $wire = read_until($sock, sub { $_[0] =~ /nope/ });
         close $sock;
 
-        is(header_lines_matching($wire, 'connection'), [],
-            'app-supplied Connection is stripped (denial adds none of its own)');
+        is(scalar(@{header_lines_matching($wire, 'connection')}), 1,
+            'exactly one Connection header (app duplicate stripped, server-owned close survives)');
+        like(header_lines_matching($wire, 'connection')->[0] // '', qr/close/i,
+            "the surviving Connection header is the server's own 'close' (a refusal always disconnects)");
         is(header_lines_matching($wire, 'transfer-encoding'), [],
             'app-supplied Transfer-Encoding does not reach the wire alongside Content-Length');
         like($wire, qr/x-deny:\s*auth/i, 'ordinary app header preserved');
-        like($wire, qr/nope\z/, 'denial body arrives intact');
+        like($wire, qr/nope\z/, 'refusal body arrives intact');
 
         is(scalar(@{strip_warnings_matching(\@warnings, 'transfer-encoding')}), 1,
             "warns once for stripped 'transfer-encoding'");

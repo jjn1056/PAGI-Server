@@ -13,7 +13,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -122,6 +122,15 @@ subtest 'on_high_water and on_drain fire on an SSE-over-h2 stream' => sub {
         # fires on_high_water before nghttp2 pulls; nghttp2 then drains the
         # per-stream queue below the 16 KB low mark, firing on_drain (deferred).
         await $send->({ type => 'sse.send', data => ('x' x (70 * 1024)) });
+
+        # Hold the stream open: returning here would leave an incomplete
+        # response (Www.pod 0.6 "Application Left a Response Incomplete",
+        # D12) and the dispatch wrapper would RST it, pre-empting nghttp2's
+        # own pacing before on_drain has a chance to fire naturally.
+        # disconnect_future rather than a bare Future->new: the test's own
+        # close_now/remove teardown resolves it via the connection's
+        # abort/disconnect processing, so no coroutine is left dangling.
+        await $scope->{'pagi.connection'}->disconnect_future;
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -146,6 +155,7 @@ subtest 'SSE-over-h2 transport handle (and its $ss cycle) is collected at teardo
     # break the cycle -- otherwise the stream state leaks for the life of the
     # process (one per SSE request).
     my ($saw_handle, $probe);
+    my @log_events;
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -159,9 +169,16 @@ subtest 'SSE-over-h2 transport handle (and its $ss cycle) is collected at teardo
         for my $i (1 .. 3) {
             await $send->({ type => 'sse.send', data => "event$i" });
         }
+        # Returning here without sse.close is an incomplete response
+        # (Www.pod 0.6 "Application Left a Response Incomplete", D12) --
+        # deliberate: this subtest's own point is that the app coroutine
+        # completes and releases its references before the client's RST
+        # drives _h2_on_close, so cycle-breaking is exercised regardless of
+        # which side's RST actually lands first.
     };
 
-    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(
+        app => $app, server => create_test_server(app => $app, logger => sub { push @log_events, $_[0] }));
     my $client = create_client;
 
     do_handshake($client, $client_sock);
@@ -182,6 +199,10 @@ subtest 'SSE-over-h2 transport handle (and its $ss cycle) is collected at teardo
     }
 
     is($probe, undef, 'transport handle (and its $ss cycle) collected after teardown; no leak');
+
+    my @errors = grep { ($_->{level} // '') eq 'error' } @log_events;
+    is(scalar(@errors), 1,
+        'one error log line for the app returning without sse.close (D12), independent of the RST race');
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -12,15 +12,15 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
-# Test: WebSocket Denial Response over HTTP/2 (SYNC E1)
+# Test: WebSocket handshake refusal over HTTP/2
 # ============================================================
-# Verifies that the server handles websocket.http.response.start/.body
+# Verifies that the server handles http.response.start/.body
 # events, returning a custom HTTP response (not 200/403) when the app
-# rejects the WebSocket handshake before accepting it.
+# refuses the WebSocket handshake before accepting it.
 
 use PAGI::Server::Connection;
 use PAGI::Server;
@@ -124,9 +124,9 @@ sub exchange_frames {
 }
 
 # ============================================================
-# Extension is advertised on h2 WebSocket scope; custom denial response
+# Custom refusal response on an h2 WebSocket scope
 # ============================================================
-subtest 'h2 WebSocket scope advertises denial-response extension' => sub {
+subtest 'h2 WebSocket scope answers a refusal with the custom response' => sub {
     my $captured_scope;
 
     my $app = async sub {
@@ -134,12 +134,12 @@ subtest 'h2 WebSocket scope advertises denial-response extension' => sub {
         $captured_scope = $scope if $scope->{type} eq 'websocket';
         await $receive->();  # websocket.connect
         await $send->({
-            type    => 'websocket.http.response.start',
+            type    => 'http.response.start',
             status  => 401,
             headers => [['x-deny', 'auth']],
         });
         await $send->({
-            type => 'websocket.http.response.body',
+            type => 'http.response.body',
             body => 'nope',
         });
         return;
@@ -173,12 +173,15 @@ subtest 'h2 WebSocket scope advertises denial-response extension' => sub {
     exchange_frames($client, $client_sock, 20);
 
     ok(defined $captured_scope, 'app was called with a websocket scope');
+    # Reversed deliberately (spec decision D11): "Every server offering
+    # websocket scopes MUST support it; there is nothing to advertise or
+    # detect" (Www.pod "Refusing the handshake").
     ok(
-        $captured_scope && $captured_scope->{extensions}{'websocket.http.response'},
-        'extension websocket.http.response is advertised on h2 ws scope',
+        $captured_scope && !$captured_scope->{extensions}{'websocket.http.response'},
+        'refusing a handshake is not an extension: nothing is advertised for it',
     );
-    is($headers{':status'}, '401', 'h2 denial uses custom 401, not 200 or 403');
-    is($headers{'x-deny'},  'auth', 'custom denial header is present');
+    is($headers{':status'}, '401', 'h2 refusal uses custom 401, not 200 or 403');
+    is($headers{'x-deny'},  'auth', 'custom refusal header is present');
     like($body, qr/nope/, 'custom body is present');
 
     $stream_io->close_now;
@@ -186,19 +189,26 @@ subtest 'h2 WebSocket scope advertises denial-response extension' => sub {
 };
 
 # ============================================================
-# Denial with multi-chunk body (more => 1 then more => 0)
+# Refusal with multi-chunk body (more => 1 then more => 0)
 # ============================================================
-subtest 'h2 denial buffers multiple body chunks until more=>0' => sub {
+# Reversed deliberately (spec decision D11): nothing is buffered any more.
+# Www.pod "Refusing the handshake" -- "more => 1 streams under the transport's
+# ordinary body, flow-control, and framing rules ... Nothing is buffered
+# specially" -- so the first chunk must be on the wire before the terminal one
+# is sent. The app parks between chunks on a Future this test resolves.
+subtest 'h2 refusal streams multiple body chunks' => sub {
+    my $gate = $loop->new_future;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();
         await $send->({
-            type    => 'websocket.http.response.start',
+            type    => 'http.response.start',
             status  => 429,
             headers => [['retry-after', '60']],
         });
-        await $send->({ type => 'websocket.http.response.body', body => 'try ', more => 1 });
-        await $send->({ type => 'websocket.http.response.body', body => 'later', more => 0 });
+        await $send->({ type => 'http.response.body', body => 'try ', more => 1 });
+        await $gate;
+        await $send->({ type => 'http.response.body', body => 'later', more => 0 });
         return;
     };
 
@@ -230,20 +240,30 @@ subtest 'h2 denial buffers multiple body chunks until more=>0' => sub {
 
     is($headers{':status'},     '429', '429 status used');
     is($headers{'retry-after'}, '60',  'custom retry-after header present');
-    is($body, 'try later', 'body chunks were concatenated before submission');
+    is($body, 'try ', 'the first chunk reaches the client before the terminal one is sent');
+
+    $gate->done;
+    exchange_frames($client, $client_sock, 20);
+    is($body, 'try later', 'the terminal chunk follows');
 
     $stream_io->close_now;
     $loop->remove($server);
 };
 
 # ============================================================
-# websocket.close-before-accept bare 403 path is unaffected
+# websocket.close before accept
 # ============================================================
-subtest 'bare-403 fallback (websocket.close before accept) still works' => sub {
+# Reversed deliberately (spec decision D11): the old bare-403 fallback is
+# gone. Www.pod "Close - send event" -- "Sent before accept it is an
+# out-of-sequence event and the server MUST fail the $send Future without
+# mutating state; refusing a handshake is done with an HTTP response."
+subtest 'websocket.close before accept fails the send' => sub {
+    my $send_error;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();  # websocket.connect
-        await $send->({ type => 'websocket.close' });
+        $send_error = do { local $@;
+            eval { await $send->({ type => 'websocket.close' }) }; $@ };
         return;
     };
 
@@ -271,7 +291,11 @@ subtest 'bare-403 fallback (websocket.close before accept) still works' => sub {
     $client_sock->syswrite($client->mem_send);
     exchange_frames($client, $client_sock, 20);
 
-    is($headers{':status'}, '403', 'bare websocket.close still gives 403');
+    like($send_error, qr/before websocket\.accept/, 'the send failed as out of sequence');
+    # No response was ever started, so the app returning is "Application
+    # Produced No Response": the server's own 500, not a 403 the app never
+    # asked for.
+    is($headers{':status'}, '500', 'no 403 is synthesized for a failed close');
 
     $stream_io->close_now;
     $loop->remove($server);

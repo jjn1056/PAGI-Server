@@ -14,7 +14,7 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.008+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
 # ============================================================
@@ -190,7 +190,7 @@ subtest 'GET request produces correct PAGI scope' => sub {
         my $scope = $scopes[0];
         is($scope->{type}, 'http', 'scope type is http');
         is($scope->{pagi}{version}, '0.5', 'h2 HTTP scope uses core PAGI version 0.5');
-        is($scope->{pagi}{spec_version}, '0.5', 'h2 HTTP scope reports spec_version 0.5');
+        is($scope->{pagi}{spec_version}, '0.6', 'h2 HTTP scope reports spec_version 0.6');
         is($scope->{method}, 'GET', 'method is GET');
         is($scope->{path}, '/hello', 'path is /hello');
         is($scope->{query_string}, 'foo=bar', 'query_string is foo=bar');

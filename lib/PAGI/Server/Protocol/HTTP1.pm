@@ -2,7 +2,7 @@ package PAGI::Server::Protocol::HTTP1;
 use strict;
 use warnings;
 
-our $VERSION = '0.002012';
+our $VERSION = '0.002013';
 
 use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
@@ -495,11 +495,30 @@ sub format_date {
 Parses chunked Transfer-Encoding body from the buffer. Returns:
 - $data: decoded body data (may be empty string)
 - $bytes_consumed: number of bytes consumed from buffer
-- $complete: 1 if final chunk (0-length) was seen, 0 otherwise
+- $complete: 1 once the terminating chunk and the trailer section that follows
+  it have been consumed, 0 otherwise
+
+The trailer section (RFC 9112 section 7.1.2) is field lines, which may be
+none, followed by a blank line; its fields are consumed as framing and are not
+returned. The body ends at that blank line, so a terminating chunk whose
+trailer section has not fully arrived is not yet complete.
 
 Returns (undef, 0, 0) if more data is needed.
 
 =cut
+
+# The offset just past the blank line that ends a trailer section starting at
+# $pos, or undef while that section is still arriving.
+sub _trailer_section_end {
+    my ($buffer, $pos) = @_;
+
+    while (1) {
+        my $crlf = index($buffer, "\r\n", $pos);
+        return undef if $crlf < 0;
+        return $crlf + 2 if $crlf == $pos;  # the blank line, and the body ends
+        $pos = $crlf + 2;                   # a trailer field line
+    }
+}
 
 sub parse_chunked_body {
     my ($self, $buffer_ref) = @_;
@@ -537,26 +556,29 @@ sub parse_chunked_body {
             return ({ error => 413, message => 'Chunk Too Large' }, 0, 0);
         }
 
-        # Check if we have the full chunk + trailing CRLF
         my $chunk_start = $crlf + 2;
+
+        # The terminating chunk is followed by a trailer section rather than a
+        # trailing CRLF: zero or more field lines, then the blank line that
+        # ends the body (RFC 9112 section 7.1.2). Nothing here reads the
+        # fields; the body ends where the blank line does, and not before.
+        if ($chunk_size == 0) {
+            my $trailer_end = _trailer_section_end($buffer, $chunk_start);
+            last unless defined $trailer_end;  # Need more data
+            $total_consumed = $trailer_end;
+            $complete = 1;
+            last;
+        }
+
+        # Check if we have the full chunk + trailing CRLF
         my $chunk_end = $chunk_start + $chunk_size + 2;  # +2 for trailing CRLF
 
         if (length($buffer) < $chunk_end) {
             last;  # Need more data
         }
 
-        # Extract chunk data
-        if ($chunk_size > 0) {
-            $data .= substr($buffer, $chunk_start, $chunk_size);
-        }
-
+        $data .= substr($buffer, $chunk_start, $chunk_size);
         $total_consumed = $chunk_end;
-
-        # Check for final chunk
-        if ($chunk_size == 0) {
-            $complete = 1;
-            last;
-        }
     }
 
     return ($data, $total_consumed, $complete);
