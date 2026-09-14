@@ -73,6 +73,7 @@ sub create_h2_connection {
         app => $app, host => '127.0.0.1', port => 0, http2 => 1,
         log_level => 'debug', access_log => undef,
         logger => sub { push @LOG, $_[0] },
+        ($o{shutdown_timeout} ? (shutdown_timeout => $o{shutdown_timeout}) : ()),
     );
     $loop->add($server);
     my $stream = IO::Async::Stream->new(
@@ -319,7 +320,12 @@ subtest 'a graceful shutdown announces GOAWAY naming the last stream taken up' =
     %ENDED = (); $ALARM_FIRED = 0;
     my $mark = scalar @LOG;
 
-    my ($conn, $stream_io, $sock, $server) = create_h2_connection(app => $parked_app);
+    # Both streams stay open on a request the client never finishes, so the
+    # drain sweep leaves this connection alone (it has work in flight) and the
+    # shutdown timeout is what ends it. A one-second timeout keeps the case
+    # quick; what the timeout does when it fires is asserted below.
+    my ($conn, $stream_io, $sock, $server)
+        = create_h2_connection(app => $parked_app, shutdown_timeout => 1);
     my $client = create_client;
     handshake($client, $sock);
     my $first  = submit_open_request($client, $sock, '/one');
@@ -342,8 +348,17 @@ subtest 'a graceful shutdown announces GOAWAY naming the last stream taken up' =
     }
 
     is($ENDED{'/two'}{reason}, 'server_shutdown', 'the scope ends as a shutdown');
-    is(scalar(errors_since($mark)), 0, 'the shutdown logged nothing at warn or error')
-        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } errors_since($mark));
+
+    # The timeout announces itself and nothing else. A forced close ends its
+    # scopes the way the sweep's own passes do, so the applications it wakes
+    # are told why they ended and the dispatch wrapper has no incomplete
+    # response to report.
+    my @logged = errors_since($mark);
+    is(scalar(@logged), 1, 'the timeout put exactly one line in the log')
+        or diag(join qq{\n}, map { "$_->{level}: " . ($_->{message} // q{}) } @logged);
+    is($logged[0]{level}, 'warn', 'at warn level');
+    like($logged[0]{message}, qr/Shutdown timeout: force-closing 1 active connections/,
+        'and it is the timeout naming what it closed');
     is($ALARM_FIRED, 0, 'no pump alarm');
 
     $stream_io->close_now;

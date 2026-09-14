@@ -701,9 +701,10 @@ The caller flushes it like any other queued frame.
 Unlike C<terminate>, which puts nothing on the wire, this tells the peer where
 the server stopped: RFC 9113 section 6.8 has it read the last stream id to
 learn which of its requests were never acted on and may safely be retried
-elsewhere. It does not itself keep the connection open. The server closes the
-connection as part of the same shutdown, so streams still in flight end with
-it.
+elsewhere. It does not itself keep the connection open: what the streams at or
+below that id get to finish is the server's shutdown drain, which leaves a
+connection with work in flight alone until its last stream ends or
+C<shutdown_timeout> expires.
 
 =cut
 

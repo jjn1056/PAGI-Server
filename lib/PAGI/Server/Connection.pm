@@ -1089,6 +1089,30 @@ sub is_long_lived {
     return _ws_handshake_accepted($self->{h1_seq});
 }
 
+=head2 has_requests_in_flight
+
+    if ($conn->has_requests_in_flight) { ... }
+
+True while this connection is still producing a response. HTTP/1.1 answers for
+the one request it can carry at a time; HTTP/2 answers for its stream table,
+and counts only C<http> streams -- a WebSocket or SSE stream never finishes on
+its own, so it is C<is_long_lived>'s business, not this one's. A graceful
+shutdown closes a connection that answers false at once and leaves one that
+answers true to drain.
+
+=cut
+
+sub has_requests_in_flight {
+    my ($self) = @_;
+    if ($self->{is_h2}) {
+        for my $stream (values %{$self->{h2_streams} // {}}) {
+            return 1 if !$stream->{is_websocket} && !$stream->{is_sse};
+        }
+        return 0;
+    }
+    return $self->{handling_request} ? 1 : 0;
+}
+
 # Did this h2 WebSocket scope reach a clean end? Two ways, and Www.pod
 # "Meaning per scope" names both: the accepted socket completed a closing
 # handshake -- the application sent websocket.close (send state 'closed') or
@@ -1345,6 +1369,19 @@ sub _h2_on_close {
     $self->{server}->loop->later(sub {
         return unless $weak_self;
         delete $weak_self->{h2_streams}{$stream_id};
+
+        # The last stream of a connection the shutdown sweep left to drain.
+        # Same rule as _h2_process_data's post-feed check -- a session that
+        # wants no more input has nothing left to do -- applied at the one
+        # other moment a stream can end with no inbound bytes to trigger it.
+        # nghttp2 reports want_read false once its GOAWAY is sent and no
+        # stream is active, so this can only fire after the sweep's
+        # announcement. _handle_disconnect_and_close names the reason itself
+        # (server_shutdown, from the shutting_down flag).
+        return unless $weak_self->{server} && $weak_self->{server}{shutting_down};
+        return if keys %{$weak_self->{h2_streams} // {}};
+        return unless $weak_self->{h2_session} && !$weak_self->{h2_session}->want_read;
+        $weak_self->_handle_disconnect_and_close;
     });
 }
 
@@ -6104,6 +6141,23 @@ sub _send_close_frame {
     $self->{close_sent} = 1;
 }
 
+# Tell an HTTP/2 peer that this session is shutting down: GOAWAY naming the
+# highest stream taken up, queued and flushed. True once it is on its way out;
+# an announcement that could not be queued or flushed leaves the session
+# running in nghttp2, so a caller that is ending the connection still needs the
+# ordinary ending. Called twice on a connection the drain sweep announced to
+# and then closed -- RFC 9113 section 6.8 permits a repeated GOAWAY as long as
+# the last stream id does not rise, and nghttp2 sends the lower of the two.
+sub _h2_announce_shutdown {
+    my ($self) = @_;
+    return 0 unless $self->{h2_session};
+    return eval {
+        $self->{h2_session}->graceful_shutdown;
+        $self->_h2_write_pending;
+        1;
+    } ? 1 : 0;
+}
+
 sub _close {
     my ($self, %opt) = @_;
 
@@ -6168,11 +6222,7 @@ sub _close {
         # a socket that has gone away.
         my $announced = 0;
         if ($self->_end_reason($self, '') eq 'server_shutdown') {
-            $announced = eval {
-                $self->{h2_session}->graceful_shutdown;
-                $self->_h2_write_pending;
-                1;
-            };
+            $announced = $self->_h2_announce_shutdown;
         }
         # An announcement that could not be queued or flushed leaves the
         # session running in nghttp2, so it still needs the ordinary ending.

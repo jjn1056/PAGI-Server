@@ -4694,7 +4694,7 @@ async sub _drain_connections {
 
     # First, close all idle connections immediately (not processing a request)
     # Keep-alive connections waiting for next request should be closed
-    my @idle = grep { !$_->{handling_request} } values %{$self->{connections}};
+    my @idle = grep { !$_->has_requests_in_flight } values %{$self->{connections}};
     for my $conn (@idle) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }
@@ -4705,6 +4705,12 @@ async sub _drain_connections {
     for my $conn (@longlived) {
         $conn->_handle_disconnect_and_close('server_shutdown');
     }
+
+    # Whatever is left is still answering a request. An HTTP/2 peer is told so
+    # now (RFC 9113 section 6.8: GOAWAY names the last stream taken up), so it
+    # stops opening streams on a connection that is about to go while the ones
+    # it already has finish. A no-op on HTTP/1.1, which has no such frame.
+    $_->_h2_announce_shutdown for values %{$self->{connections}};
 
     # If all connections are now closed, we're done
     return if keys %{$self->{connections}} == 0;
@@ -4727,7 +4733,11 @@ async sub _drain_connections {
         $self->_log(warn => "Shutdown timeout: force-closing $remaining active connections");
 
         for my $conn (values %{$self->{connections}}) {
-            $conn->_close if $conn && $conn->can('_close');
+            # The same ending the two passes above give, so a scope cut short
+            # by the timeout still names why it ended (Www.pod: a scope the
+            # server ends reports the reason) instead of being torn out from
+            # under an application that still sees a connected object.
+            $conn->_handle_disconnect_and_close('server_shutdown') if $conn;
         }
     }
 
