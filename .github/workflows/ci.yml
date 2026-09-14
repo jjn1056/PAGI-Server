@@ -29,14 +29,25 @@ jobs:
       - name: Install system libraries
         run: sudo apt-get update && sudo apt-get install -y libnghttp2-dev libssl-dev
 
+      # --mirror-only: resolve versions from the mirror's own index rather than
+      # cpanm's metadata service, which can name a release the mirrors have
+      # not synced yet (the first run failed on exactly that).
       - name: Install dependencies
-        run: cpanm --notest --mirror https://cpan.metacpan.org --installdeps .
+        run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only --installdeps .
 
       # The cpanfile lists these as recommends, which cpanm is allowed to fail
       # quietly; installed here on their own so a failure fails the job instead
       # of silently skipping the HTTP/2 and TLS tests.
       - name: Install optional modules the tests exercise
-        run: cpanm --notest --mirror https://cpan.metacpan.org Net::HTTP2::nghttp2 IO::Async::SSL Future::IO
+        run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only IO::Async::SSL Future::IO Alien::nghttp2
+
+      # PAGI::Server needs Net::HTTP2::nghttp2 0.011. Until the CPAN mirrors
+      # carry it, the pinned commit is the 0.011 tree from the binding's repo;
+      # the CPAN install wins as soon as the mirrors catch up.
+      - name: Install Net::HTTP2::nghttp2 0.011
+        run: |
+          cpanm --notest --mirror https://cpan.metacpan.org --mirror-only 'Net::HTTP2::nghttp2~0.011' \
+            || cpanm --notest https://github.com/jjn1056/Net-HTTP2-nghttp2/archive/92e7f9e.tar.gz
 
       - name: Report what the server sees
         run: |
