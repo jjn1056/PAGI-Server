@@ -856,11 +856,16 @@ sub _h2_on_body {
         $self->_h2_process_ws_frames($stream_id, $stream, $data) if length($data);
 
         if ($eof) {
-            # END_STREAM with no close handshake (bare END_STREAM): abnormal
-            # closure per RFC 6455 (Www.pod "Disconnect - receive event").
-            # The client went away and named nothing, so the ending record's
-            # own defaults -- 1006 and 'client_closed' -- are the answer.
-            $self->_h2_end_ws_stream($stream);
+            # A completed closing handshake is a clean end (Www.pod "Meaning
+            # per scope"); the peer's Close set ws_peer_closed here and queued
+            # the server's reciprocal Close + END_STREAM, so _h2_on_close runs
+            # on this now-closing stream and marks it complete. Leave it for
+            # that mark -- routing it through _h2_end_ws_stream's abnormal
+            # _mark_disconnected here would land first and make _h2_on_close's
+            # clean _mark_complete a no-op. Only a bare END_STREAM with no
+            # completed handshake is the abnormal client_closed the ending
+            # record's defaults (1006 / client_closed) describe.
+            $self->_h2_end_ws_stream($stream) unless _h2_ws_clean_end($stream);
         }
         return;
     }
@@ -1015,8 +1020,14 @@ sub _h2_wake_pending {
 sub _h2_end_ws_stream {
     my ($self, $stream, %end) = @_;
     $self->_record_end($stream, %end);
-    $stream->{connection_state}->_mark_disconnected($self->_end_reason($stream), $self->_end_detail($stream))
-        if $stream->{connection_state};
+    if ($stream->{connection_state}) {
+        # Populate the peer's Close before the mark, so a callback reading
+        # close_code/close_reason sees the final value (Www.pod "State
+        # Transition Order"). _set_ws_close no-ops once terminal, so a stream
+        # _h2_on_close already ended keeps its recorded peer Close.
+        $stream->{connection_state}->_set_ws_close($self->_ws_peer_close_pair($stream));
+        $stream->{connection_state}->_mark_disconnected($self->_end_reason($stream), $self->_end_detail($stream));
+    }
     $self->_h2_ws_enqueue_disconnect($stream, $self->_end_code($stream), $self->_end_reason($stream));
     return;
 }
@@ -1154,6 +1165,21 @@ sub _record_end {
 sub _end_reason { my ($self, $scope, $default) = @_; return $scope->{end_reason} // $default // 'client_closed' }
 sub _end_detail { my ($self, $scope) = @_; return $scope->{end_detail} }
 sub _end_code   { my ($self, $scope) = @_; return $scope->{end_code} // 1006 }
+
+# The peer's WebSocket Close code and reason text for an h2 stream's
+# connection object (Www.pod close_code/close_reason). The peer's own values
+# when it validly closed -- read from the disconnect event that the peer-Close
+# handler cached, whose code is the frame's own (1005 when it carried none) and
+# whose reason text is empty when the frame carried none -- otherwise the RFC
+# 6455 "abnormal closure, no status received" 1006 with no reason, used when
+# the transport ended with no peer Close. Never the code the server itself sent.
+sub _ws_peer_close_pair {
+    my ($self, $stream) = @_;
+    my $ev = $stream->{ws_disconnect_event};
+    return (1006, undef) unless $stream->{ws_peer_closed} && $ev;
+    my $reason = $ev->{reason};
+    return ($ev->{code}, (defined $reason && length $reason) ? $reason : undef);
+}
 
 # A refusal this stream carried to completion -- the one ending that delivers
 # no disconnect event at all (Www.pod "Disconnect - receive event"). See
@@ -1302,6 +1328,13 @@ sub _h2_on_close {
     # h2 error code is the server's own doing, so its fallback is
     # 'server_error', not 'client_closed'.
     if (my $cs = $stream->{connection_state}) {
+        # Populate the peer's WebSocket Close before any _mark_* below, so the
+        # first terminal callback reading close_code/close_reason sees the
+        # final value (Www.pod "State Transition Order"). The clean path marks
+        # complete after a peer Close; the abnormal paths end with 1006 (no
+        # peer Close, or a reset), never the server's own code.
+        $cs->_set_ws_close($self->_ws_peer_close_pair($stream))
+            if $stream->{is_websocket};
         my $clean = $stream->{is_websocket}
                   ? _h2_ws_clean_end($stream)
                   : PAGI::Server::EventValidator::scope_send_clean(
@@ -6034,7 +6067,13 @@ sub _disconnect_receive_future {
 # event, so an h2 connection-level teardown hands the same words to every
 # stream it ends.
 sub _handle_disconnect {
-    my ($self, $reason, $detail) = @_;
+    my ($self, $reason, $detail, $sync) = @_;
+
+    # $sync is threaded to the terminal marks below and on to _deliver_terminal:
+    # the server-driven teardown path (a graceful shutdown's drain and its
+    # timeout force-close) sets it so the terminal callbacks fire synchronously
+    # from the server's own stack, before the loop stops. Every other caller
+    # leaves it false and keeps deferring.
 
     # Idempotency guard - prevent duplicate disconnect handling
     # Multiple paths can trigger disconnect (timeout, protocol error, session end)
@@ -6065,8 +6104,15 @@ sub _handle_disconnect {
         # Applies uniformly to http, websocket, and sse scopes: every scope's
         # pagi.connection attaches at scope creation (Www.pod "Connection State").
         if ($self->{current_connection_state}) {
+            # A websocket scope that ends here never completed a peer closing
+            # handshake (the Close parser sets _disconnect_handled, so this
+            # guard would have returned). The transport ended with no peer
+            # Close: close_code is RFC 6455 1006, never the server's own code.
+            # Populated before the mark so a callback sees the final value.
+            $self->{current_connection_state}->_set_ws_close(1006, undef)
+                if ($self->{scope_kind} // '') eq 'websocket';
             $self->{current_connection_state}->_mark_disconnected(
-                $self->_end_reason($self), $self->_end_detail($self));
+                $self->_end_reason($self), $self->_end_detail($self), $sync);
         }
 
         # HTTP/2: connection-level teardown (server shutdown, socket error, ...)
@@ -6082,9 +6128,16 @@ sub _handle_disconnect {
         if ($self->{is_h2} && $self->{h2_streams}) {
             for my $stream (values %{$self->{h2_streams}}) {
                 $self->_record_end($stream, reason => $reason, detail => $detail);
-                $stream->{connection_state}->_mark_disconnected(
-                    $self->_end_reason($stream), $self->_end_detail($stream))
-                    if $stream->{connection_state};
+                if ($stream->{connection_state}) {
+                    # Populate the peer's Close before the mark. A websocket
+                    # stream torn down at the connection level keeps a peer
+                    # Close already recorded (_set_ws_close no-ops once
+                    # terminal), else reports 1006 -- no peer Close observed.
+                    $stream->{connection_state}->_set_ws_close($self->_ws_peer_close_pair($stream))
+                        if $stream->{is_websocket};
+                    $stream->{connection_state}->_mark_disconnected(
+                        $self->_end_reason($stream), $self->_end_detail($stream), $sync);
+                }
             }
         }
     }
@@ -6316,7 +6369,10 @@ sub _handle_disconnect_and_close {
     # flag so it isn't skipped by this early flip.
     $self->{closed} = 1;
 
-    $self->_handle_disconnect($reason, $opt{detail});
+    # $opt{sync} (set by the graceful-shutdown drain and its timeout force-close)
+    # asks for synchronous terminal delivery, since this runs from the server's
+    # own stack and the loop stops right after.
+    $self->_handle_disconnect($reason, $opt{detail}, $opt{sync});
     $self->_close(close_now => $opt{close_now});
 }
 
@@ -7977,6 +8033,30 @@ sub _process_websocket_frames {
             # nobody asked for and nobody drains (h2's equivalent guard is
             # ws_disconnect_delivered / _h2_ws_enqueue_disconnect).
             $self->{_disconnect_handled} = 1;
+
+            # Mark the scope's connection state complete now, at the moment the
+            # closing handshake finishes, rather than waiting for the app to
+            # return. Www.pod ("Observing the end of a scope") requires the
+            # terminal notification to reach the scope on every ending, without
+            # the app draining the queue -- an accepted app that parks on
+            # unrelated work and never calls receive() again must still see its
+            # on_complete fire. This mirrors the app-return tail's own
+            # ws_peer_closed-driven _mark_complete; _mark_complete is
+            # idempotent, so that tail stays a correct backstop and nothing
+            # double-fires. h2 marks its ConnectionState independently in the
+            # same way (_h2_on_close). A pre-accept Close ends no accepted scope,
+            # so the mark is gated on the handshake having been accepted.
+            #
+            # Record the peer's Close for close_code/close_reason BEFORE the
+            # mark, so a callback reading them sees the final value (Www.pod
+            # "State Transition Order"). $code is the peer's own (1005 when the
+            # frame carried none); an empty reason text is reported as undef.
+            if ($self->{current_connection_state}
+                && _ws_handshake_accepted($self->{h1_seq})) {
+                $self->{current_connection_state}->_set_ws_close(
+                    $code, (length($reason) ? $reason : undef));
+                $self->{current_connection_state}->_mark_complete;
+            }
         }
         elsif ($opcode == 9) {
             # Ping - respond with pong (transparent to app)

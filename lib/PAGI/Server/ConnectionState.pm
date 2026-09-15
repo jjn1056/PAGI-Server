@@ -105,6 +105,12 @@ sub new {
 
         # Callbacks registered via on_complete()
         _complete_callbacks => [],
+
+        # Lazy all-outcome terminal Future (only created if end_future() called)
+        _end_future => undef,
+
+        # Callbacks registered via on_end()
+        _end_callbacks => [],
     }, $class;
 
     # Weaken to avoid circular reference: Connection -> ConnectionState -> Connection
@@ -220,6 +226,93 @@ sub disconnect_detail {
     return $self->{_detail};
 }
 
+=head2 close_code
+
+    my $code = $conn->close_code;   # e.g. 1000, 1005, 1006, or undef
+
+On a C<websocket> scope, the B<peer's> WebSocket Close-frame code as an
+integer, or C<undef> before a Close has been observed. It reports what the
+peer sent, never the code the server itself sent: a server-initiated protocol
+close (for example C<1011> for an abandoned socket, or C<1002> for a protocol
+error) where the peer never replies leaves this at C<1006>, not the server's
+code. Per RFC 6455 section 7.1.5 it is C<1005> when the handshake completed but
+the peer's Close carried no code, and C<1006> when the transport ended with no
+Close frame at all. On C<http> and C<sse> scopes it is always C<undef>.
+
+Like every terminal fact it is populated before C<on_complete>/C<on_disconnect>
+and C<on_end> fire, so the first callback sees the final value. The same code
+is also delivered in the C<websocket.disconnect> receive event; this accessor
+lets a component that does not own the receive queue read it without consuming
+it. See L<PAGI::Spec::Www/"Connection State">.
+
+=cut
+
+sub close_code { return $_[0]->{_close_code} }
+
+=head2 close_reason
+
+    my $reason = $conn->close_reason;   # peer's reason text, or undef
+
+On a C<websocket> scope, the B<peer's> WebSocket Close-frame reason text, or
+C<undef> when the peer sent no reason, sent no code (C<close_code> C<1005>), or
+sent no Close at all (C<close_code> C<1006>). Like L</close_code> it reflects
+the peer's Close only and is C<undef> on C<http> and C<sse> scopes. Populated
+before the terminal callbacks fire. See L<PAGI::Spec::Www/"Connection State">.
+
+=cut
+
+sub close_reason { return $_[0]->{_close_reason} }
+
+# Server-internal: record the peer's WebSocket Close code and reason text for
+# close_code()/close_reason(). Called at a websocket terminal site BEFORE the
+# _mark_* transition, so the first callback sees the final value (Www.pod
+# "State Transition Order"). The caller derives the code (the peer's code, 1005
+# for a codeless Close, or 1006 for no Close) and passes undef for a reason it
+# did not carry. Set only while still connected: once the scope is terminal the
+# record is final and a later call (a stale abnormal-end fallback, an abort) is
+# a no-op, so a peer Close already recorded is never clobbered.
+sub _set_ws_close {
+    my ($self, $code, $reason) = @_;
+    return unless ${$self->{_connected}};
+    $self->{_close_code}   = $code;
+    $self->{_close_reason} = $reason;
+    return;
+}
+
+# Server-internal: deliver a terminal signal -- resolve the terminal Futures and
+# invoke the registered callbacks. Per L<PAGI::Spec::Www/"Callback invocation
+# context"> the callback families (on_disconnect, on_complete, on_end) are
+# delivered on the event loop, never synchronously inside an application's call
+# into $send or $receive, so the delivery step runs on a later loop turn via the
+# loop reachable through the connection (the same loop lookup disconnect_future
+# uses). When no loop is reachable (a unit-test ConnectionState with no
+# connection), it runs synchronously, mirroring the disconnect_future fallback,
+# so pure unit tests are unaffected. The terminal facts are set by the caller
+# BEFORE this is scheduled, so they are immediate: a synchronous check right
+# after the terminal transition is race-free. The scheduled closure holds a
+# strong reference to $self, so delivery still happens even if the transport is
+# torn down first ("deferral changes when, never whether").
+#
+# $sync forces synchronous delivery for the server-driven teardown path (a
+# graceful shutdown's drain and its timeout force-close): those marks run from
+# the server's own stack, never inside an application's $send/$receive, and the
+# loop stops right after them, so a deferred loop->later would never run. The
+# app path leaves $sync false and keeps deferring -- including a mark triggered
+# by an app that is actively sending during shutdown.
+sub _deliver_terminal {
+    my ($self, $code, $sync) = @_;
+
+    my $conn = $self->{_connection};
+    my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
+
+    if ($loop && !$sync) {
+        $loop->later($code);
+    } else {
+        $code->();
+    }
+    return;
+}
+
 =head2 disconnect_future
 
     my $future = $conn->disconnect_future;  # always a Future
@@ -298,6 +391,72 @@ sub disconnect_future {
     # disturb the connection's signal or other consumers. The cached master
     # stays private; it alone is resolved at transition step 3.
     return $self->{_future}->without_cancel;
+}
+
+=head2 end_future
+
+    my $future = $conn->end_future;  # always a Future
+    my $reason = await $future;      # reason token on abnormal end, undef on clean
+
+Returns a Future that resolves when the scope reaches B<either> terminal
+outcome: with the C<disconnect_reason> token on an abnormal end, and with
+C<undef> on a clean completion. Termination is the event being observed, not a
+failure of the observer, so this Future B<resolves> for both outcomes and never
+fails. It is the all-outcome sibling of L</disconnect_future> (which resolves
+only on an abnormal end), for a background producer or framework to observe a
+scope's end while any active receive loop keeps using C<receive()>.
+
+The Future is created lazily on first call. Its behavior depends on which of the
+three connection states is current at call time:
+
+=over 4
+
+=item * B<connected> — a fresh, pending Future is returned; it resolves later
+when the scope ends, either way.
+
+=item * B<disconnected (abnormal)> — a Future already resolved with the
+disconnect reason is returned.
+
+=item * B<completed (clean)> — a Future already resolved with C<undef> is
+returned.
+
+=back
+
+Each call returns a B<cancellation-isolated> observer of one private master
+future, on the same terms as L</disconnect_future>: cancelling a returned
+Future — directly, or implicitly as the losing component of a combinator such
+as C<< Future->wait_any >> — never disturbs the connection's terminal
+processing or a Future returned by another call. Take a fresh one for each race.
+
+=cut
+
+sub end_future {
+    my $self = shift;
+
+    unless ($self->{_end_future}) {
+        # Create new Future (lazy), mirroring disconnect_future's loop lookup.
+        my $conn = $self->{_connection};
+        my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
+
+        if ($loop) {
+            $self->{_end_future} = $loop->new_future;
+        } else {
+            # Fallback if no loop available (shouldn't happen in practice)
+            require Future;
+            $self->{_end_future} = Future->new;
+        }
+
+        # Resolve immediately for BOTH terminal outcomes. Unlike disconnect_future,
+        # a clean completion also resolves this Future — with undef, since _reason
+        # stays undef on the clean path and carries the token on the abnormal one.
+        if (!${$self->{_connected}}) {
+            $self->{_end_future}->done(${$self->{_reason}});
+        }
+    }
+
+    # Cancellation-isolated observer per call (spec, Connection State): the
+    # cached master stays private; it alone is resolved at transition step 3.
+    return $self->{_end_future}->without_cancel;
 }
 
 =head2 on_disconnect
@@ -391,6 +550,55 @@ sub on_complete {
     $self->_log(error => "on_complete callback error: $@") if $@;
 }
 
+=head2 on_end
+
+    $conn->on_end(sub {
+        my ($reason, $detail) = @_;
+        release_subscription();   # runs on whichever ending occurred
+    });
+
+Registers a callback invoked once when the scope reaches its terminal outcome,
+B<clean or abnormal>. Exactly one terminal outcome occurs for a scope, and
+C<on_end> observes whichever it was, so a consumer that must act on either
+ending -- subscription cleanup, a framework's close hook -- registers it instead
+of both L</on_disconnect> and L</on_complete>.
+
+=over 4
+
+=item * May be called multiple times to register multiple callbacks
+
+=item * Callbacks are invoked in registration order
+
+=item * Callbacks receive C<($reason, $detail)>: on an abnormal end C<$reason>
+is the L</disconnect_reason> token and C<$detail> is the L</disconnect_detail>;
+on a clean end both are C<undef>. The full terminal record (including a
+WebSocket's L</close_code>/L</close_reason>) is read from the object.
+
+=item * If registered after the scope already ended, the callback is invoked
+immediately with the recorded reason and detail
+
+=item * One callback's failure does not prevent other callbacks from being
+invoked
+
+=back
+
+=cut
+
+sub on_end {
+    my ($self, $cb) = @_;
+
+    # Still in flight: register for later.
+    if (${$self->{_connected}}) {
+        push @{$self->{_end_callbacks}}, $cb;
+        return;
+    }
+
+    # Terminal: fire for either outcome. _reason/_detail carry the abnormal
+    # token/detail and are both undef on a clean end, so one path serves both.
+    eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+    $self->_log(error => "on_end callback error: $@") if $@;
+}
+
 =head2 _mark_disconnected
 
     $conn->_mark_disconnected($reason, $detail);
@@ -408,40 +616,70 @@ State transitions occur in this order:
 
 =item 2. C<disconnect_reason()> returns the reason string
 
-=item 3. C<disconnect_future()> resolves with the reason (if it was created)
+=item 3. C<disconnect_future()> and C<end_future()> resolve with the reason
+(each if it was created)
 
-=item 4. C<on_disconnect> callbacks are invoked in registration order
+=item 4. C<on_disconnect> and C<on_end> callbacks are invoked in registration
+order
 
 =back
+
+Steps 1-2 (the facts) happen synchronously at the transition; steps 3-4 (the
+Future resolution and callback invocation) are delivered on the event loop, not
+synchronously within the application's call into C<$send>/C<$receive>. The
+optional fourth argument (a "deliver synchronously" flag) is set only on the
+server-driven teardown path -- a graceful shutdown's drain and its timeout
+force-close -- where the mark runs from the server's own stack, not inside an
+application's C<$send>/C<$receive>, and the loop stops right after; there,
+steps 3-4 run synchronously so the shutdown never drops them. See
+the C<_deliver_terminal> helper and L<PAGI::Spec::Www/"Callback invocation context">.
 
 =cut
 
 sub _mark_disconnected {
-    my ($self, $reason, $detail) = @_;
+    my ($self, $reason, $detail, $sync) = @_;
 
     # Already terminal - no-op (idempotent)
     return unless ${$self->{_connected}};
 
-    # 1. Update state
+    # 1. Update state (the synchronous facts, immediate at the transition).
     ${$self->{_connected}} = 0;
     ${$self->{_reason}} = $reason // 'unknown';
     $self->{_detail} = $detail;
 
-    # 2. Resolve future if it exists (lazy - may not have been created)
-    if ($self->{_future} && !$self->{_future}->is_ready) {
-        $self->{_future}->done(${$self->{_reason}});
-    }
+    # 2. Deliver the signal on the event loop, never synchronously inside the
+    # application's call into $send/$receive (Www.pod "Callback invocation
+    # context"). A callback registered AFTER this transition still fires
+    # immediately in its own registering call (the spec's one exception); it is
+    # handled by on_disconnect/on_end, not by these lists.
+    $self->_deliver_terminal(sub {
+        # Resolve futures if they exist (lazy - may not have been created).
+        # end_future is the all-outcome sibling; on this path it carries the reason.
+        if ($self->{_future} && !$self->{_future}->is_ready) {
+            $self->{_future}->done(${$self->{_reason}});
+        }
+        if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
+            $self->{_end_future}->done(${$self->{_reason}});
+        }
 
-    # 3. Invoke callbacks with (reason, detail)
-    for my $cb (@{$self->{_callbacks}}) {
-        eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
-        $self->_log(error => "on_disconnect callback error: $@") if $@;
-    }
+        # Invoke on_disconnect callbacks with (reason, detail).
+        for my $cb (@{$self->{_callbacks}}) {
+            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            $self->_log(error => "on_disconnect callback error: $@") if $@;
+        }
 
-    # 4. Release both families
-    $self->{_callbacks}          = [];
-    $self->{_complete_callbacks} = [];
-    $self->{_on_abort}           = undef;
+        # Invoke on_end callbacks (the all-outcome observer) with (reason, detail).
+        for my $cb (@{$self->{_end_callbacks}}) {
+            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            $self->_log(error => "on_end callback error: $@") if $@;
+        }
+
+        # Release all families.
+        $self->{_callbacks}          = [];
+        $self->{_complete_callbacks} = [];
+        $self->{_end_callbacks}      = [];
+        $self->{_on_abort}           = undef;
+    }, $sync);
 }
 
 =head2 _mark_complete
@@ -453,9 +691,18 @@ successfully (the response was fully delivered). Applications should not call
 this method directly.
 
 Transitions to the C<completed> terminal state and invokes C<on_complete>
-callbacks in registration order. Unlike L</_mark_disconnected>, it leaves
-C<disconnect_reason()> as C<undef> and does B<not> resolve C<disconnect_future()>
-or fire C<on_disconnect> callbacks -- a clean completion is not a disconnect.
+callbacks in registration order. It also fires C<on_end> and resolves
+C<end_future()> -- the all-outcome terminal observer -- with C<(undef, undef)>
+and C<undef> respectively, since a clean end carries no reason. Unlike
+L</_mark_disconnected>, it leaves C<disconnect_reason()> as C<undef> and does
+B<not> resolve C<disconnect_future()> or fire C<on_disconnect> callbacks -- a
+clean completion is not a disconnect.
+
+The C<completed> fact (C<response_complete()> true) is set synchronously at the
+transition; the C<on_complete>/C<on_end> invocation and C<end_future()>
+resolution are delivered on the event loop, not synchronously within the
+application's terminal C<$send>. See the C<_deliver_terminal> helper and
+L<PAGI::Spec::Www/"Callback invocation context">.
 
 Idempotent, and a no-op once the connection has already reached a terminal
 state (so a stray completion after an abnormal disconnect is ignored).
@@ -468,21 +715,40 @@ sub _mark_complete {
     # Already terminal (disconnected or completed) - no-op (idempotent).
     return unless ${$self->{_connected}};
 
-    # Mark the completed terminal state. Reason stays undef; the disconnect
-    # Future is deliberately left pending (completion is not a disconnect).
+    # Mark the completed terminal state (the synchronous facts, immediate at the
+    # transition: response_complete() is true before any delivery). Reason stays
+    # undef; the disconnect Future is deliberately left pending (completion is
+    # not a disconnect).
     ${$self->{_connected}} = 0;
     $self->{_completed}    = 1;
 
-    # Invoke completion callbacks (no reason argument).
-    for my $cb (@{$self->{_complete_callbacks}}) {
-        eval { $cb->() };
-        $self->_log(error => "on_complete callback error: $@") if $@;
-    }
+    # Deliver the signal on the event loop, never synchronously inside the
+    # application's terminal $send (Www.pod "Callback invocation context").
+    $self->_deliver_terminal(sub {
+        # Resolve end_future if it exists. _reason stays undef on the clean path,
+        # so the all-outcome sibling resolves with undef here.
+        if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
+            $self->{_end_future}->done(${$self->{_reason}});
+        }
 
-    # Clear both lists to release references.
-    $self->{_complete_callbacks} = [];
-    $self->{_callbacks}          = [];
-    $self->{_on_abort}           = undef;
+        # Invoke completion callbacks (no reason argument).
+        for my $cb (@{$self->{_complete_callbacks}}) {
+            eval { $cb->() };
+            $self->_log(error => "on_complete callback error: $@") if $@;
+        }
+
+        # Invoke on_end callbacks with (undef, undef) -- a clean end carries neither.
+        for my $cb (@{$self->{_end_callbacks}}) {
+            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            $self->_log(error => "on_end callback error: $@") if $@;
+        }
+
+        # Clear all lists to release references.
+        $self->{_complete_callbacks} = [];
+        $self->{_callbacks}          = [];
+        $self->{_end_callbacks}      = [];
+        $self->{_on_abort}           = undef;
+    });
 }
 
 =head2 abort
@@ -493,8 +759,11 @@ Ends this scope's transport now (see L<PAGI::Spec::Www/"Connection Object
 Interface">): marks the scope abnormal with token C<app_abort>, records
 C<$detail> as C<disconnect_detail>, and asks the owning connection to tear
 the transport down without waiting for an in-flight write. Synchronous; no
-meaningful return value. A no-op once the scope has reached either terminal
-state.
+meaningful return value: it marks the scope, runs the teardown hook, and
+returns at once. Its C<on_disconnect>/C<on_end> callbacks are delivered on the
+event loop like every other terminal callback (Www.pod "Callback invocation
+context"), never synchronously inside this call. A no-op once the scope has
+reached either terminal state.
 
 =cut
 

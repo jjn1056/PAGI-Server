@@ -1099,7 +1099,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
         is($r{returned}, undef, "h1 $kind: the application has not returned yet");
         is($r{at_terminal}{connected}, 0, "h1 $kind: is_connected is false at the terminal event");
         is($r{at_terminal}{complete}, 1, "h1 $kind: response_complete is true at the terminal event");
-        is($r{at_terminal}{fired}, 1, "h1 $kind: on_complete had fired exactly once by then");
+        ok(!$r{at_terminal}{fired}, "h1 $kind: on_complete had NOT fired synchronously at the terminal event (delivered on the loop, Www.pod 'Callback invocation context')");
         is($r{at_terminal}{disconnects}, 0, "h1 $kind: on_disconnect had not fired");
 
         # The client goes away after the refusal but before the app returns:
@@ -1109,6 +1109,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
         is($r{conn}->response_complete, 1, "h1 $kind: still complete after the client closed");
         is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason stayed undef");
         is(scalar @{$r{disconnect} // []}, 0, "h1 $kind: on_disconnect never fired");
+        is($r{complete}, 1, "h1 $kind: on_complete fired exactly once, on a later loop turn");
 
         $released->done;
         $loop->loop_once(0.05) for 1 .. 20;
@@ -1138,7 +1139,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
                 is($r{returned}, undef, "h2 $kind/$ending: the application has not returned yet");
                 is($r{at_terminal}{connected}, 0, "h2 $kind/$ending: is_connected is false at the terminal event");
                 is($r{at_terminal}{complete}, 1, "h2 $kind/$ending: response_complete is true at the terminal event");
-                is($r{at_terminal}{fired}, 1, "h2 $kind/$ending: on_complete had fired exactly once by then");
+                ok(!$r{at_terminal}{fired}, "h2 $kind/$ending: on_complete had NOT fired synchronously at the terminal event (delivered on the loop, Www.pod 'Callback invocation context')");
                 is($r{at_terminal}{disconnects}, 0, "h2 $kind/$ending: on_disconnect had not fired");
 
                 my $closed_connection = 0;
@@ -1156,6 +1157,7 @@ subtest 'a completed refusal is complete before the application returns, and a c
                 is($r{conn}->response_complete, 1, "h2 $kind/$ending: still complete after the client went away");
                 is($r{conn}->disconnect_reason, undef, "h2 $kind/$ending: disconnect_reason stayed undef");
                 is(scalar @{$r{disconnect} // []}, 0, "h2 $kind/$ending: on_disconnect never fired");
+                is($r{complete}, 1, "h2 $kind/$ending: on_complete fired exactly once, on a later loop turn");
 
                 $released->done;
                 if ($closed_connection) { $loop->loop_once(0.05) for 1 .. 20 }
