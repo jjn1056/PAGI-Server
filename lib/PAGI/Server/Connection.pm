@@ -6067,7 +6067,13 @@ sub _disconnect_receive_future {
 # event, so an h2 connection-level teardown hands the same words to every
 # stream it ends.
 sub _handle_disconnect {
-    my ($self, $reason, $detail) = @_;
+    my ($self, $reason, $detail, $sync) = @_;
+
+    # $sync is threaded to the terminal marks below and on to _deliver_terminal:
+    # the server-driven teardown path (a graceful shutdown's drain and its
+    # timeout force-close) sets it so the terminal callbacks fire synchronously
+    # from the server's own stack, before the loop stops. Every other caller
+    # leaves it false and keeps deferring.
 
     # Idempotency guard - prevent duplicate disconnect handling
     # Multiple paths can trigger disconnect (timeout, protocol error, session end)
@@ -6106,7 +6112,7 @@ sub _handle_disconnect {
             $self->{current_connection_state}->_set_ws_close(1006, undef)
                 if ($self->{scope_kind} // '') eq 'websocket';
             $self->{current_connection_state}->_mark_disconnected(
-                $self->_end_reason($self), $self->_end_detail($self));
+                $self->_end_reason($self), $self->_end_detail($self), $sync);
         }
 
         # HTTP/2: connection-level teardown (server shutdown, socket error, ...)
@@ -6130,7 +6136,7 @@ sub _handle_disconnect {
                     $stream->{connection_state}->_set_ws_close($self->_ws_peer_close_pair($stream))
                         if $stream->{is_websocket};
                     $stream->{connection_state}->_mark_disconnected(
-                        $self->_end_reason($stream), $self->_end_detail($stream));
+                        $self->_end_reason($stream), $self->_end_detail($stream), $sync);
                 }
             }
         }
@@ -6363,7 +6369,10 @@ sub _handle_disconnect_and_close {
     # flag so it isn't skipped by this early flip.
     $self->{closed} = 1;
 
-    $self->_handle_disconnect($reason, $opt{detail});
+    # $opt{sync} (set by the graceful-shutdown drain and its timeout force-close)
+    # asks for synchronous terminal delivery, since this runs from the server's
+    # own stack and the loop stops right after.
+    $self->_handle_disconnect($reason, $opt{detail}, $opt{sync});
     $self->_close(close_now => $opt{close_now});
 }
 

@@ -292,13 +292,20 @@ sub _set_ws_close {
 # after the terminal transition is race-free. The scheduled closure holds a
 # strong reference to $self, so delivery still happens even if the transport is
 # torn down first ("deferral changes when, never whether").
+#
+# $sync forces synchronous delivery for the server-driven teardown path (a
+# graceful shutdown's drain and its timeout force-close): those marks run from
+# the server's own stack, never inside an application's $send/$receive, and the
+# loop stops right after them, so a deferred loop->later would never run. The
+# app path leaves $sync false and keeps deferring -- including a mark triggered
+# by an app that is actively sending during shutdown.
 sub _deliver_terminal {
-    my ($self, $code) = @_;
+    my ($self, $code, $sync) = @_;
 
     my $conn = $self->{_connection};
     my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
 
-    if ($loop) {
+    if ($loop && !$sync) {
         $loop->later($code);
     } else {
         $code->();
@@ -619,13 +626,18 @@ order
 
 Steps 1-2 (the facts) happen synchronously at the transition; steps 3-4 (the
 Future resolution and callback invocation) are delivered on the event loop, not
-synchronously within the application's call into C<$send>/C<$receive>. See
+synchronously within the application's call into C<$send>/C<$receive>. The
+optional fourth argument (a "deliver synchronously" flag) is set only on the
+server-driven teardown path -- a graceful shutdown's drain and its timeout
+force-close -- where the mark runs from the server's own stack, not inside an
+application's C<$send>/C<$receive>, and the loop stops right after; there,
+steps 3-4 run synchronously so the shutdown never drops them. See
 the C<_deliver_terminal> helper and L<PAGI::Spec::Www/"Callback invocation context">.
 
 =cut
 
 sub _mark_disconnected {
-    my ($self, $reason, $detail) = @_;
+    my ($self, $reason, $detail, $sync) = @_;
 
     # Already terminal - no-op (idempotent)
     return unless ${$self->{_connected}};
@@ -667,7 +679,7 @@ sub _mark_disconnected {
         $self->{_complete_callbacks} = [];
         $self->{_end_callbacks}      = [];
         $self->{_on_abort}           = undef;
-    });
+    }, $sync);
 }
 
 =head2 _mark_complete

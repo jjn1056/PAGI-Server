@@ -4733,14 +4733,14 @@ async sub _drain_connections {
     # Keep-alive connections waiting for next request should be closed
     my @idle = grep { !$_->has_requests_in_flight } values %{$self->{connections}};
     for my $conn (@idle) {
-        $conn->_handle_disconnect_and_close('server_shutdown');
+        $conn->_handle_disconnect_and_close('server_shutdown', sync => 1);
     }
 
     # Also close long-lived connections (SSE, WebSocket) immediately
     # These never become "idle" so would wait for full timeout otherwise
     my @longlived = grep { $_->is_long_lived } values %{$self->{connections}};
     for my $conn (@longlived) {
-        $conn->_handle_disconnect_and_close('server_shutdown');
+        $conn->_handle_disconnect_and_close('server_shutdown', sync => 1);
     }
 
     # Whatever is left is still answering a request. An HTTP/2 peer is told so
@@ -4774,7 +4774,7 @@ async sub _drain_connections {
             # by the timeout still names why it ended (Www.pod: a scope the
             # server ends reports the reason) instead of being torn out from
             # under an application that still sees a connected object.
-            $conn->_handle_disconnect_and_close('server_shutdown') if $conn;
+            $conn->_handle_disconnect_and_close('server_shutdown', sync => 1) if $conn;
         }
     }
 
