@@ -856,11 +856,16 @@ sub _h2_on_body {
         $self->_h2_process_ws_frames($stream_id, $stream, $data) if length($data);
 
         if ($eof) {
-            # END_STREAM with no close handshake (bare END_STREAM): abnormal
-            # closure per RFC 6455 (Www.pod "Disconnect - receive event").
-            # The client went away and named nothing, so the ending record's
-            # own defaults -- 1006 and 'client_closed' -- are the answer.
-            $self->_h2_end_ws_stream($stream);
+            # A completed closing handshake is a clean end (Www.pod "Meaning
+            # per scope"); the peer's Close set ws_peer_closed here and queued
+            # the server's reciprocal Close + END_STREAM, so _h2_on_close runs
+            # on this now-closing stream and marks it complete. Leave it for
+            # that mark -- routing it through _h2_end_ws_stream's abnormal
+            # _mark_disconnected here would land first and make _h2_on_close's
+            # clean _mark_complete a no-op. Only a bare END_STREAM with no
+            # completed handshake is the abnormal client_closed the ending
+            # record's defaults (1006 / client_closed) describe.
+            $self->_h2_end_ws_stream($stream) unless _h2_ws_clean_end($stream);
         }
         return;
     }
