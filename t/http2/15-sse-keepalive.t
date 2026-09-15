@@ -527,8 +527,11 @@ subtest 'per-stream SSE idle timeout: an idle stream closes without killing an a
 # receive(). The idle timer therefore records, marks and enqueues in one
 # step rather than leaving the mark to _h2_on_close. The probe below is an
 # await-then-check: everything it reads is read synchronously on the tick
-# that resumed it, so a mark that moved after the wake shows up as an undef
-# reason and an on_disconnect callback that has not run yet.
+# that resumed it, so a mark that moved after the wake would show up as an
+# undef reason. The FACTS (reason, detail, is_connected) must be final at the
+# wake; the on_disconnect CALLBACK, by contrast, is delivered on the event
+# loop (Www.pod "Callback invocation context") and so has NOT run yet on the
+# resuming tick -- it fires on a later loop turn, which the probe confirms.
 subtest 'h2 SSE idle timeout: the object is terminal when the app wakes' => sub {
     my %probe;
     my $app = async sub {
@@ -575,7 +578,12 @@ subtest 'h2 SSE idle timeout: the object is terminal when the app wakes' => sub 
     is($probe{detail_at_wake}, 'no traffic for 0.3s',
         'disconnect_detail already carries the idle timer\'s own words');
     is($probe{connected_at_wake}, 0, 'the object is already terminal at the wake');
-    is($probe{fired_at_wake}, 1, 'on_disconnect had already fired before the app resumed');
+    is($probe{fired_at_wake}, 0,
+        'on_disconnect had NOT fired on the resuming tick (delivered on the loop, Www.pod "Callback invocation context")');
+
+    # The callback is delivered on a later loop turn, not synchronously at the wake.
+    $loop->loop_once(0.05) for 1 .. 10;
+    is($probe{callback_fired}, 1, 'on_disconnect fired on a later loop turn');
 
     $stream_io->close_now;
     $loop->remove($server);
