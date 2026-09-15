@@ -105,6 +105,12 @@ sub new {
 
         # Callbacks registered via on_complete()
         _complete_callbacks => [],
+
+        # Lazy all-outcome terminal Future (only created if end_future() called)
+        _end_future => undef,
+
+        # Callbacks registered via on_end()
+        _end_callbacks => [],
     }, $class;
 
     # Weaken to avoid circular reference: Connection -> ConnectionState -> Connection
@@ -353,6 +359,72 @@ sub disconnect_future {
     return $self->{_future}->without_cancel;
 }
 
+=head2 end_future
+
+    my $future = $conn->end_future;  # always a Future
+    my $reason = await $future;      # reason token on abnormal end, undef on clean
+
+Returns a Future that resolves when the scope reaches B<either> terminal
+outcome: with the C<disconnect_reason> token on an abnormal end, and with
+C<undef> on a clean completion. Termination is the event being observed, not a
+failure of the observer, so this Future B<resolves> for both outcomes and never
+fails. It is the all-outcome sibling of L</disconnect_future> (which resolves
+only on an abnormal end), for a background producer or framework to observe a
+scope's end while any active receive loop keeps using C<receive()>.
+
+The Future is created lazily on first call. Its behavior depends on which of the
+three connection states is current at call time:
+
+=over 4
+
+=item * B<connected> — a fresh, pending Future is returned; it resolves later
+when the scope ends, either way.
+
+=item * B<disconnected (abnormal)> — a Future already resolved with the
+disconnect reason is returned.
+
+=item * B<completed (clean)> — a Future already resolved with C<undef> is
+returned.
+
+=back
+
+Each call returns a B<cancellation-isolated> observer of one private master
+future, on the same terms as L</disconnect_future>: cancelling a returned
+Future — directly, or implicitly as the losing component of a combinator such
+as C<< Future->wait_any >> — never disturbs the connection's terminal
+processing or a Future returned by another call. Take a fresh one for each race.
+
+=cut
+
+sub end_future {
+    my $self = shift;
+
+    unless ($self->{_end_future}) {
+        # Create new Future (lazy), mirroring disconnect_future's loop lookup.
+        my $conn = $self->{_connection};
+        my $loop = $conn && $conn->{server} ? $conn->{server}->loop : undef;
+
+        if ($loop) {
+            $self->{_end_future} = $loop->new_future;
+        } else {
+            # Fallback if no loop available (shouldn't happen in practice)
+            require Future;
+            $self->{_end_future} = Future->new;
+        }
+
+        # Resolve immediately for BOTH terminal outcomes. Unlike disconnect_future,
+        # a clean completion also resolves this Future — with undef, since _reason
+        # stays undef on the clean path and carries the token on the abnormal one.
+        if (!${$self->{_connected}}) {
+            $self->{_end_future}->done(${$self->{_reason}});
+        }
+    }
+
+    # Cancellation-isolated observer per call (spec, Connection State): the
+    # cached master stays private; it alone is resolved at transition step 3.
+    return $self->{_end_future}->without_cancel;
+}
+
 =head2 on_disconnect
 
     $conn->on_disconnect(sub {
@@ -444,6 +516,55 @@ sub on_complete {
     $self->_log(error => "on_complete callback error: $@") if $@;
 }
 
+=head2 on_end
+
+    $conn->on_end(sub {
+        my ($reason, $detail) = @_;
+        release_subscription();   # runs on whichever ending occurred
+    });
+
+Registers a callback invoked once when the scope reaches its terminal outcome,
+B<clean or abnormal>. Exactly one terminal outcome occurs for a scope, and
+C<on_end> observes whichever it was, so a consumer that must act on either
+ending -- subscription cleanup, a framework's close hook -- registers it instead
+of both L</on_disconnect> and L</on_complete>.
+
+=over 4
+
+=item * May be called multiple times to register multiple callbacks
+
+=item * Callbacks are invoked in registration order
+
+=item * Callbacks receive C<($reason, $detail)>: on an abnormal end C<$reason>
+is the L</disconnect_reason> token and C<$detail> is the L</disconnect_detail>;
+on a clean end both are C<undef>. The full terminal record (including a
+WebSocket's L</close_code>/L</close_reason>) is read from the object.
+
+=item * If registered after the scope already ended, the callback is invoked
+immediately with the recorded reason and detail
+
+=item * One callback's failure does not prevent other callbacks from being
+invoked
+
+=back
+
+=cut
+
+sub on_end {
+    my ($self, $cb) = @_;
+
+    # Still in flight: register for later.
+    if (${$self->{_connected}}) {
+        push @{$self->{_end_callbacks}}, $cb;
+        return;
+    }
+
+    # Terminal: fire for either outcome. _reason/_detail carry the abnormal
+    # token/detail and are both undef on a clean end, so one path serves both.
+    eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+    $self->_log(error => "on_end callback error: $@") if $@;
+}
+
 =head2 _mark_disconnected
 
     $conn->_mark_disconnected($reason, $detail);
@@ -461,9 +582,11 @@ State transitions occur in this order:
 
 =item 2. C<disconnect_reason()> returns the reason string
 
-=item 3. C<disconnect_future()> resolves with the reason (if it was created)
+=item 3. C<disconnect_future()> and C<end_future()> resolve with the reason
+(each if it was created)
 
-=item 4. C<on_disconnect> callbacks are invoked in registration order
+=item 4. C<on_disconnect> and C<on_end> callbacks are invoked in registration
+order
 
 =back
 
@@ -480,9 +603,13 @@ sub _mark_disconnected {
     ${$self->{_reason}} = $reason // 'unknown';
     $self->{_detail} = $detail;
 
-    # 2. Resolve future if it exists (lazy - may not have been created)
+    # 2. Resolve futures if they exist (lazy - may not have been created).
+    # end_future is the all-outcome sibling; on this path it carries the reason.
     if ($self->{_future} && !$self->{_future}->is_ready) {
         $self->{_future}->done(${$self->{_reason}});
+    }
+    if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
+        $self->{_end_future}->done(${$self->{_reason}});
     }
 
     # 3. Invoke callbacks with (reason, detail)
@@ -491,9 +618,16 @@ sub _mark_disconnected {
         $self->_log(error => "on_disconnect callback error: $@") if $@;
     }
 
-    # 4. Release both families
+    # 4. Invoke on_end callbacks (the all-outcome observer) with (reason, detail)
+    for my $cb (@{$self->{_end_callbacks}}) {
+        eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+        $self->_log(error => "on_end callback error: $@") if $@;
+    }
+
+    # 5. Release all families
     $self->{_callbacks}          = [];
     $self->{_complete_callbacks} = [];
+    $self->{_end_callbacks}      = [];
     $self->{_on_abort}           = undef;
 }
 
@@ -506,9 +640,12 @@ successfully (the response was fully delivered). Applications should not call
 this method directly.
 
 Transitions to the C<completed> terminal state and invokes C<on_complete>
-callbacks in registration order. Unlike L</_mark_disconnected>, it leaves
-C<disconnect_reason()> as C<undef> and does B<not> resolve C<disconnect_future()>
-or fire C<on_disconnect> callbacks -- a clean completion is not a disconnect.
+callbacks in registration order. It also fires C<on_end> and resolves
+C<end_future()> -- the all-outcome terminal observer -- with C<(undef, undef)>
+and C<undef> respectively, since a clean end carries no reason. Unlike
+L</_mark_disconnected>, it leaves C<disconnect_reason()> as C<undef> and does
+B<not> resolve C<disconnect_future()> or fire C<on_disconnect> callbacks -- a
+clean completion is not a disconnect.
 
 Idempotent, and a no-op once the connection has already reached a terminal
 state (so a stray completion after an abnormal disconnect is ignored).
@@ -526,15 +663,28 @@ sub _mark_complete {
     ${$self->{_connected}} = 0;
     $self->{_completed}    = 1;
 
+    # Resolve end_future if it exists. _reason stays undef on the clean path,
+    # so the all-outcome sibling resolves with undef here.
+    if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
+        $self->{_end_future}->done(${$self->{_reason}});
+    }
+
     # Invoke completion callbacks (no reason argument).
     for my $cb (@{$self->{_complete_callbacks}}) {
         eval { $cb->() };
         $self->_log(error => "on_complete callback error: $@") if $@;
     }
 
-    # Clear both lists to release references.
+    # Invoke on_end callbacks with (undef, undef) -- a clean end carries neither.
+    for my $cb (@{$self->{_end_callbacks}}) {
+        eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+        $self->_log(error => "on_end callback error: $@") if $@;
+    }
+
+    # Clear all lists to release references.
     $self->{_complete_callbacks} = [];
     $self->{_callbacks}          = [];
+    $self->{_end_callbacks}      = [];
     $self->{_on_abort}           = undef;
 }
 

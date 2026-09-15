@@ -588,4 +588,142 @@ subtest 'abort does not clobber an already-recorded peer Close' => sub {
     is($cs->close_reason, 'going', 'close_reason kept the peer text across abort');
 };
 
+# =============================================================================
+# Test: on_end / end_future -- the all-outcome terminal observer (PAGI 0.6)
+#
+# on_end fires once for WHICHEVER terminal outcome occurred; end_future
+# resolves (never fails) for either, with the reason token on an abnormal end
+# and undef on a clean one. Both mirror on_disconnect/disconnect_future.
+# =============================================================================
+
+subtest 'on_end fires on a CLEAN end with (undef, undef); end_future resolves undef' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my @end;
+    my $completed  = 0;
+    my $disconnected = 0;
+    $cs->on_end(sub { push @end, [@_] });
+    $cs->on_complete(sub { $completed = 1 });
+    $cs->on_disconnect(sub { $disconnected = 1 });
+    my $ef = $cs->end_future;
+
+    $cs->_mark_complete;
+
+    is(\@end, [[undef, undef]], 'on_end fired once with (undef, undef) on a clean end');
+    ok($completed,     'on_complete also fired on a clean end');
+    ok(!$disconnected, 'on_disconnect did NOT fire on a clean end');
+    ok($ef->is_ready,  'end_future resolved on a clean end');
+    is($ef->get, undef, 'end_future resolved with undef on a clean end');
+};
+
+subtest 'on_end fires on an ABNORMAL end with (token, detail); end_future resolves token' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my @end;
+    my $completed  = 0;
+    my $disconnected = 0;
+    $cs->on_end(sub { push @end, [@_] });
+    $cs->on_complete(sub { $completed = 1 });
+    $cs->on_disconnect(sub { $disconnected = 1 });
+    my $ef = $cs->end_future;
+
+    $cs->_mark_disconnected('protocol_error', 'RSV1 set on data frame');
+
+    is(\@end, [['protocol_error', 'RSV1 set on data frame']],
+        'on_end fired with (disconnect_reason, disconnect_detail)');
+    is($cs->disconnect_reason, 'protocol_error', 'reason matches the on_end token');
+    is($cs->disconnect_detail, 'RSV1 set on data frame', 'detail matches the on_end detail');
+    ok($disconnected,  'on_disconnect also fired on an abnormal end');
+    ok(!$completed,    'on_complete did NOT fire on an abnormal end');
+    ok($ef->is_ready,  'end_future resolved on an abnormal end');
+    is($ef->get, 'protocol_error', 'end_future resolved with the reason token');
+};
+
+subtest 'exactly one on_end per scope; registration-after-terminal fires immediately' => sub {
+    # Clean terminal, then a stray disconnect: on_end fires exactly once.
+    my $c1 = PAGI::Server::ConnectionState->new;
+    my $count = 0;
+    $c1->on_end(sub { $count++ });
+    $c1->_mark_complete;
+    $c1->_mark_disconnected('client_closed');   # no-op, must not re-fire
+    is($count, 1, 'on_end fired exactly once across a terminal + stray transition');
+
+    # Late registration on a clean scope fires immediately with (undef, undef).
+    my @late_clean;
+    $c1->on_end(sub { push @late_clean, [@_] });
+    is(\@late_clean, [[undef, undef]], 'late on_end on a clean scope fires immediately with recorded values');
+
+    # Late registration on an abnormal scope fires immediately with the record.
+    my $c2 = PAGI::Server::ConnectionState->new;
+    $c2->_mark_disconnected('write_error', 'EPIPE');
+    my @late_abn;
+    $c2->on_end(sub { push @late_abn, [@_] });
+    is(\@late_abn, [['write_error', 'EPIPE']], 'late on_end on an abnormal scope fires immediately with the record');
+};
+
+subtest 'end_future resolves (never fails) on the abnormal path' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my $ef = $cs->end_future;
+    $cs->_mark_disconnected('client_closed');
+    ok($ef->is_ready,    'end_future is ready after an abnormal end');
+    ok(!$ef->is_failed,  'end_future resolved, did not fail');
+    my $token = $ef->get;   # must return, not throw
+    is($token, 'client_closed', 'awaiting the abnormal end_future returns the token');
+
+    # A caller requesting end_future after the abnormal end also resolves.
+    my $late = $cs->end_future;
+    ok($late->is_ready, 'late end_future after abnormal end already resolved');
+    is($late->get, 'client_closed', 'late end_future carries the token');
+};
+
+subtest 'end_future is cancellation-isolated' => sub {
+    my $cs      = PAGI::Server::ConnectionState->new;
+    my $sibling = $cs->end_future;               # obtained before any race
+    my $victim  = $cs->end_future;
+    my $work    = Future->new;
+    my $race    = Future->wait_any($work, $victim);
+    $work->done('won');                          # victim cancelled as loser
+
+    ok($victim->is_cancelled, 'losing end_future observer was cancelled (alone)');
+    ok(!$sibling->is_ready,   'sibling end_future observer unaffected by the race');
+
+    # And the terminal signal, and other callbacks, survive intact.
+    my @end;
+    $cs->on_end(sub { push @end, [@_] });
+    $cs->_mark_disconnected('client_closed');
+
+    is($sibling->get, 'client_closed', 'sibling end_future still receives the reason');
+    is(\@end, [['client_closed', undef]], 'on_end callback still fired after a losing race');
+    is($cs->end_future->get, 'client_closed', 'a late end_future caller receives the reason');
+
+    ok(lives { $cs->end_future->cancel }, 'direct cancel of an end_future observer is harmless');
+    is($cs->end_future->get, 'client_closed', 'and the signal survives it');
+};
+
+subtest 'on_end callbacks are released after terminal delivery' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    $cs->on_end(sub { 1 });
+    $cs->_mark_complete;
+    is(scalar @{$cs->{_end_callbacks}}, 0, 'on_end list emptied after clean terminal');
+
+    my $cs2 = PAGI::Server::ConnectionState->new;
+    $cs2->on_end(sub { 1 });
+    $cs2->_mark_disconnected('client_closed');
+    is(scalar @{$cs2->{_end_callbacks}}, 0, 'on_end list emptied after abnormal terminal');
+};
+
+subtest 'one on_end callback failure does not stop the others' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    my @order;
+    $cs->on_end(sub { push @order, 'first' });
+    $cs->on_end(sub { die "boom\n" });
+    $cs->on_end(sub { push @order, 'third' });
+
+    # The failing callback logs via warn (no server); silence it for pristine output.
+    my $warned = '';
+    local $SIG{__WARN__} = sub { $warned .= $_[0] };
+    $cs->_mark_complete;
+
+    is(\@order, ['first', 'third'], 'callbacks after a failing one still ran');
+    like($warned, qr/on_end callback error: boom/, 'the failure was logged');
+};
+
 done_testing;
