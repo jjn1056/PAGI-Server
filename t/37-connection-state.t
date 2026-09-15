@@ -531,4 +531,61 @@ subtest 'abort without a hook still marks the state' => sub {
     is($cs->disconnect_detail, undef, 'no detail');
 };
 
+# =============================================================================
+# Test: close_code / close_reason accessors and their setter
+#
+# Www.pod "Connection State": close_code/close_reason return the peer's
+# WebSocket Close code and reason text, undef before any Close has been
+# observed and on non-websocket scopes (which never call _set_ws_close). The
+# server derives the code at the terminal site; the setter just stores it, and
+# only while still connected -- once terminal the record is final, so a stale
+# fallback or an abort cannot clobber a peer Close already recorded.
+# =============================================================================
+
+subtest 'close_code/close_reason are undef until a Close is recorded' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    is($cs->close_code,   undef, 'close_code undef on an open scope');
+    is($cs->close_reason, undef, 'close_reason undef on an open scope');
+
+    # A scope that never sees a peer Close (http/sse, or a clean end with no
+    # Close) is never handed one, so both stay undef through completion.
+    $cs->_mark_complete;
+    is($cs->close_code,   undef, 'close_code still undef after a Close-less clean end');
+    is($cs->close_reason, undef, 'close_reason still undef after a Close-less clean end');
+};
+
+subtest '_set_ws_close records the peer code and reason before the terminal mark' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    $cs->_set_ws_close(1000, 'bye');
+    is($cs->close_code,   1000,  'close_code is the recorded peer code');
+    is($cs->close_reason, 'bye', 'close_reason is the recorded peer text');
+
+    # A codeless / reasonless Close is recorded as the derived code with undef.
+    my $cs2 = PAGI::Server::ConnectionState->new;
+    $cs2->_set_ws_close(1005, undef);
+    is($cs2->close_code,   1005,  'close_code 1005 for a codeless peer Close');
+    is($cs2->close_reason, undef, 'close_reason undef for a codeless peer Close');
+};
+
+subtest '_set_ws_close is a no-op once the scope is terminal (no clobber)' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    $cs->_set_ws_close(1000, 'bye');
+    $cs->_mark_complete;
+
+    # A later abnormal-end fallback (or an abort) must not overwrite the peer
+    # Close already recorded before the mark.
+    $cs->_set_ws_close(1006, undef);
+    is($cs->close_code,   1000,  'close_code kept the peer code after terminal');
+    is($cs->close_reason, 'bye', 'close_reason kept the peer text after terminal');
+};
+
+subtest 'abort does not clobber an already-recorded peer Close' => sub {
+    my $cs = PAGI::Server::ConnectionState->new;
+    $cs->_set_ws_close(1001, 'going');
+    $cs->abort('teardown');
+    is($cs->disconnect_reason, 'app_abort', 'abort marked app_abort');
+    is($cs->close_code,   1001,    'close_code kept the peer code across abort');
+    is($cs->close_reason, 'going', 'close_reason kept the peer text across abort');
+};
+
 done_testing;

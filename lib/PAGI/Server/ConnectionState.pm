@@ -220,6 +220,59 @@ sub disconnect_detail {
     return $self->{_detail};
 }
 
+=head2 close_code
+
+    my $code = $conn->close_code;   # e.g. 1000, 1005, 1006, or undef
+
+On a C<websocket> scope, the B<peer's> WebSocket Close-frame code as an
+integer, or C<undef> before a Close has been observed. It reports what the
+peer sent, never the code the server itself sent: a server-initiated protocol
+close (for example C<1011> for an abandoned socket, or C<1002> for a protocol
+error) where the peer never replies leaves this at C<1006>, not the server's
+code. Per RFC 6455 section 7.1.5 it is C<1005> when the handshake completed but
+the peer's Close carried no code, and C<1006> when the transport ended with no
+Close frame at all. On C<http> and C<sse> scopes it is always C<undef>.
+
+Like every terminal fact it is populated before C<on_complete>/C<on_disconnect>
+and C<on_end> fire, so the first callback sees the final value. The same code
+is also delivered in the C<websocket.disconnect> receive event; this accessor
+lets a component that does not own the receive queue read it without consuming
+it. See L<PAGI::Spec::Www/"Connection State">.
+
+=cut
+
+sub close_code { return $_[0]->{_close_code} }
+
+=head2 close_reason
+
+    my $reason = $conn->close_reason;   # peer's reason text, or undef
+
+On a C<websocket> scope, the B<peer's> WebSocket Close-frame reason text, or
+C<undef> when the peer sent no reason, sent no code (C<close_code> C<1005>), or
+sent no Close at all (C<close_code> C<1006>). Like L</close_code> it reflects
+the peer's Close only and is C<undef> on C<http> and C<sse> scopes. Populated
+before the terminal callbacks fire. See L<PAGI::Spec::Www/"Connection State">.
+
+=cut
+
+sub close_reason { return $_[0]->{_close_reason} }
+
+# Server-internal: record the peer's WebSocket Close code and reason text for
+# close_code()/close_reason(). Called at a websocket terminal site BEFORE the
+# _mark_* transition, so the first callback sees the final value (Www.pod
+# "State Transition Order"). The caller derives the code (the peer's code, 1005
+# for a codeless Close, or 1006 for no Close) and passes undef for a reason it
+# did not carry. Set only while still connected: once the scope is terminal the
+# record is final and a later call (a stale abnormal-end fallback, an abort) is
+# a no-op, so a peer Close already recorded is never clobbered.
+sub _set_ws_close {
+    my ($self, $code, $reason) = @_;
+    return unless ${$self->{_connected}};
+    $self->{_close_code}   = $code;
+    $self->{_close_reason} = $reason;
+    return;
+}
+
 =head2 disconnect_future
 
     my $future = $conn->disconnect_future;  # always a Future
