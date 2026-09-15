@@ -7977,6 +7977,22 @@ sub _process_websocket_frames {
             # nobody asked for and nobody drains (h2's equivalent guard is
             # ws_disconnect_delivered / _h2_ws_enqueue_disconnect).
             $self->{_disconnect_handled} = 1;
+
+            # Mark the scope's connection state complete now, at the moment the
+            # closing handshake finishes, rather than waiting for the app to
+            # return. Www.pod ("Observing the end of a scope") requires the
+            # terminal notification to reach the scope on every ending, without
+            # the app draining the queue -- an accepted app that parks on
+            # unrelated work and never calls receive() again must still see its
+            # on_complete fire. This mirrors the app-return tail's own
+            # ws_peer_closed-driven _mark_complete; _mark_complete is
+            # idempotent, so that tail stays a correct backstop and nothing
+            # double-fires. h2 marks its ConnectionState independently in the
+            # same way (_h2_on_close). A pre-accept Close ends no accepted scope,
+            # so the mark is gated on the handshake having been accepted.
+            $self->{current_connection_state}->_mark_complete
+                if $self->{current_connection_state}
+                && _ws_handshake_accepted($self->{h1_seq});
         }
         elsif ($opcode == 9) {
             # Ping - respond with pong (transparent to app)
