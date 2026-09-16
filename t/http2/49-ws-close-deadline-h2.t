@@ -8,6 +8,7 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 use Socket qw(AF_UNIX SOCK_STREAM);
+use Scalar::Util qw(refaddr);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -261,6 +262,8 @@ sub app_initiated_close {
             $obs->{$path}{code}   = $c->close_code;
             $obs->{$path}{reason} = $c->close_reason;
         });
+        $c->on_end(sub { $obs->{$path}{end}++ });
+        $c->end_future->on_ready(sub { $obs->{$path}{end_future}++ });
 
         await $send->({ type => 'websocket.close', code => $code, reason => $reason });
         $obs->{$path}{closed_sent} = 1;
@@ -717,6 +720,102 @@ subtest 'stream isolation: expiring one stream leaves the sibling untouched' => 
     ok(pump_until($client, $client_sock, sub { $obs{'/keep'}{complete} }),
         '/keep completes cleanly on its own peer Close, independent of /close');
     is($obs{'/keep'}{code}, 1000, '/keep close_code is its own peer code');
+
+    $park->done unless $park->is_ready;
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+# ============================================================
+# 13. SHUTDOWN PREEMPTS the in-flight per-stream close-wait. A stream parked in
+#     the app-initiated closing phase when the server begins its graceful drain
+#     resolves with server_shutdown, disposes the per-stream close deadline, and
+#     does NOT wait the full ws_close_timeout. ws_close_timeout is 30s (far
+#     beyond any drain), so a resolution naming close_timeout, or one that
+#     blocked on the deadline, would be the bug. Terminal shape: on_disconnect +
+#     on_end (once) + end_future, NOT on_complete. The h2 twin of h1 subtest 10.
+# ============================================================
+subtest 'server shutdown preempts the in-flight per-stream close-wait -> server_shutdown' => sub {
+    my %obs;
+    my $park = $loop->new_future;
+    my $app  = app_initiated_close(\%obs, $park, park => 1);
+    my ($conn, $stream_io, $client_sock, $server) =
+        create_h2_connection(app => $app, ws_close_timeout => 30);
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{closed_sent} }),
+        'app sent its close and parked (peer silent)');
+
+    # The manual harness builds the connection directly, so register it the way
+    # the real accept path does (by refaddr) -- the drain iterates that registry.
+    $server->{connections}{refaddr($conn)} = $conn;
+    $server->{shutting_down} = 1;
+
+    # Reach the pending stream and its armed per-stream deadline pre-drain.
+    my $ss = $conn->{h2_streams}{$sid};
+    ok($ss, 'the closing-phase stream is live pre-shutdown');
+    my $deadline = $ss->{ws_close_deadline};
+    ok($deadline && $deadline->is_running, 'the per-stream close deadline is armed and live');
+    ok(!$obs{'/ws'}{disconnect}, 'still PENDING before the drain (no terminal yet)');
+
+    # Begin the graceful drain. A ws-only connection has no requests in flight,
+    # so the drain closes it at once with server_shutdown (sync terminal).
+    $park->done unless $park->is_ready;
+    eval { $server->_drain_connections->get };
+
+    ok($obs{'/ws'}{disconnect}, 'the pending stream was resolved by the drain');
+    is($obs{'/ws'}{disconnect}, 1, 'on_disconnect fired exactly once');
+    is($obs{'/ws'}{disconnect_reason}, 'server_shutdown',
+        'reason is server_shutdown -- the drain preempted the close-wait, NOT close_timeout');
+    isnt($obs{'/ws'}{disconnect_reason}, 'close_timeout', 'specifically not close_timeout');
+    is($obs{'/ws'}{code}, 1006, 'close_code 1006 (no peer Close)');
+    is($obs{'/ws'}{end}, 1, 'on_end fired exactly once');
+    ok($obs{'/ws'}{end_future}, 'end_future resolved');
+    ok(!$obs{'/ws'}{complete}, 'on_complete did NOT fire');
+
+    # The per-stream deadline was disposed on the terminal path: dequeued from
+    # the stream (only _dispose_ws_close_deadline deletes it) and stopped.
+    ok(!$ss->{ws_close_deadline}, 'the per-stream deadline was disposed (dequeued)');
+    ok(!$deadline->is_running, 'the per-stream deadline timer was stopped (no late fire)');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+# ============================================================
+# 14. Observability: the h2 close_timeout resolution emits one structured warn
+#     line (per stream) so an operator can watch the new abnormal-close
+#     population. warn keeps a server at the default/quiet (error) threshold
+#     silent; a server dropped to info routes it to its logger. The h2 twin of
+#     h1 subtest 11.
+# ============================================================
+subtest 'h2 close_timeout resolution emits a structured observability log line' => sub {
+    my %obs;
+    my @logs;
+    my $park = $loop->new_future;
+    my $app  = app_initiated_close(\%obs, $park, park => 1);
+    my $server = create_test_server(app => $app,
+        log_level => 'info',
+        logger    => sub { push @logs, $_[0]->{message} // '' });
+    my ($conn, $stream_io, $client_sock) =
+        create_h2_connection(app => $app, server => $server, ws_close_timeout => 0.3);
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{closed_sent} }),
+        'app sent its close and parked');
+
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{disconnect} }, 80),
+        'the deadline resolved close_timeout');
+    is($obs{'/ws'}{disconnect_reason}, 'close_timeout', 'reason is close_timeout');
+
+    my @hits = grep { /close_timeout/ && /close deadline/i } @logs;
+    is(scalar(@hits), 1, 'exactly one structured close_timeout log line was emitted');
+    like($hits[0], qr/1006/, 'the line records the abnormal close_code 1006');
+    like($hits[0], qr/0\.3/, 'the line records the ws_close_timeout bound that elapsed');
 
     $park->done unless $park->is_ready;
     eval { $stream_io->close_now };

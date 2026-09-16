@@ -4933,6 +4933,14 @@ sub _enter_ws_h1_closing_phase {
                 # The bound elapsed with no completed transport closure: end the
                 # scope abnormally with close_timeout / 1006 (Www.pod L866-869).
                 # A peer Close already observed keeps its own code/reason.
+                # One structured warn line marks the new abnormal-close
+                # population an SRE dashboard re-baselines (matches the sibling
+                # idle/keepalive timeout logs); warn keeps a server at the
+                # default/quiet (error) threshold silent.
+                $conn->_log(warn => "WebSocket close deadline expired "
+                    . "(close_timeout, $conn->{ws_close_timeout}s) - ending scope "
+                    . "abnormally with close_code 1006")
+                    if $conn->{server} && $conn->{server}->can('_log');
                 $conn->_resolve_h1_ws_closing('close_timeout',
                     detail => 'closing handshake did not complete within ws_close_timeout');
             },
@@ -5019,6 +5027,13 @@ sub _enter_ws_h2_closing_phase {
                 # The bound elapsed with no completed handshake: end THIS stream
                 # abnormally with close_timeout / 1006 (Www.pod L866-869). A peer
                 # Close already observed keeps its own code/reason (category 4).
+                # One structured warn line (per stream) marks the new
+                # abnormal-close population for an SRE dashboard, mirroring the
+                # h1 twin; warn stays silent at the default/quiet threshold.
+                $conn->_log(warn => "HTTP/2 WebSocket stream $stream_id close "
+                    . "deadline expired (close_timeout, $conn->{ws_close_timeout}s) "
+                    . "- ending scope abnormally with close_code 1006")
+                    if $conn->{server} && $conn->{server}->can('_log');
                 $conn->_resolve_h2_ws_closing($stream_id, $scope, 'close_timeout',
                     detail => 'closing handshake did not complete within ws_close_timeout');
             },

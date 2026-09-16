@@ -219,6 +219,83 @@ and C<t/http2/29-fullflush-cancel.t>.
 C<websocket.accept> or C<sse.start> produces no HTTP status, and the access
 log records the status field as C<->. Observed in C<t/72-abort.t> row 1.
 
+=item * B<The application-initiated WebSocket closing handshake is a bounded
+wait, not an eager clean end.> L<PAGI::Spec::Www/"Meaning per scope"> (L857-869)
+says receiving a peer Close frame advances the closing handshake but does not
+alone establish a clean end, that sending C<websocket.close> likewise initiates
+the handshake without completing it, and that the server MUST bound the wait for
+a peer that never answers. When the application sends C<websocket.close> on an
+accepted socket whose peer has not yet closed, PAGI::Server holds the scope
+B<pending> under a single finite close deadline (C<ws_close_timeout>) and marks
+it clean only when the peer's Close B<and> the transport or stream closing both
+arrive -- the completed handshake plus closure that RFC 6455 section 5.5.1
+("both sending and receiving a Close message") and sections 7.1.1-7.1.4 (the
+Close handshake is distinct from closing the connection) require. A
+B<peer-initiated> close is different and is unchanged: the peer's Close plus the
+server's reciprocal Close is already the completed handshake of section 5.5.1,
+so it is clean at the reciprocal-Close point (the accepted pre-existing
+behaviour, before transport closure). The deadline is one per scope -- per
+stream on HTTP/2, so a sibling WebSocket stream is untouched. Pinned by
+C<t/ws-close-deadline-h1.t> and C<t/http2/49-ws-close-deadline-h2.t> for the
+app-initiated wait, and by C<t/82-ws-parked-terminal-notification.t>,
+C<t/83-ws-close-code.t>, C<t/http2/47-ws-parked-terminal-notification.t> and
+C<t/http2/48-ws-close-code.t> for the preserved peer-initiated close.
+
+=item * B<C<close_timeout> (the deadline expired) and transport loss (the stream
+died first) are distinct abnormal ends, and C<1006> is reported only when no
+valid peer Close was observed.> When the bounded wait above does not complete,
+two abnormal outcomes are kept apart: the close B<deadline> expiring yields
+C<disconnect_reason> C<close_timeout>, while the transport or stream terminating
+first (a TCP FIN or, on HTTP/2, C<END_STREAM> or C<RST_STREAM> with no Close
+frame) yields the transport-loss token (C<client_closed>, or the read/write
+error that was seen). C<close_timeout> is inferred B<only> from an actual
+deadline expiry, never from missing Close metadata. In both cases C<close_code>
+is RFC 6455 section 7.1.5's C<1006> -- the code for a connection closed with no
+Close frame from the peer -- and never the code the server itself sent. The one
+exception is a valid peer Close observed before the abnormal outcome: its own
+C<close_code>/C<close_reason> are preserved and are B<not> overwritten with
+C<1006>. Pinned by C<t/ws-close-deadline-h1.t> (deadline vs transport drop vs
+preserved peer code), C<t/http2/49-ws-close-deadline-h2.t> (the same on HTTP/2,
+including C<END_STREAM>/bare C<RST_STREAM>), and C<t/ws-close-parity.t> (the two
+transports agree category, reason and code).
+
+=item * B<C<ws_close_timeout> is a finite, positive, server-owned bound that
+supersedes the scope's activity timers for the closing phase.> The spec
+(L627-632, L866-869) leaves the bound and its default to the server. PAGI::Server
+defaults it to 10 seconds -- chosen from the surveyed closing-handshake waits
+(Python C<websockets> 10s, Node C<ws> 30s, Autobahn 1s) -- and, unlike the idle
+timers, rejects zero, negative and non-finite values at construction: there is no
+"zero disables" spelling, because an unbounded closing wait is the very thing the
+spec's MUST forbids. Entering the closing phase arms the one deadline B<before>
+cancelling the scope's WebSocket keepalive/pong and idle timers, so the deadline
+is the sole bound governing the phase and a shorter activity timer cannot
+short-circuit the wait with the wrong reason. Two conditions still preempt the
+wait with their own reason and dispose the deadline: transport or stream loss
+(the transport-loss token above), and the graceful-shutdown drain, which closes a
+pending closing-phase scope at once with C<server_shutdown> rather than letting it
+wait out the deadline (the drain's own force-close still caps it). Pinned by
+C<t/ws-close-config.t> (default, finite-positive validation, propagation),
+C<t/ws-close-phase-entry.t> (arm-before-cancel, the deadline supersedes the
+activity timers) and the shutdown-preemption cases of
+C<t/ws-close-deadline-h1.t> and C<t/http2/49-ws-close-deadline-h2.t>.
+
+=item * B<SRE rollout: this is a metric-definition change, not a regression.>
+Making the closing handshake truthful moves a population of closes that the
+server previously recorded as clean (C<on_complete>, C<response_complete> true)
+into the abnormal bucket: an application close whose peer never answered now
+reads C<close_timeout>/C<1006> or transport-loss/C<1006> instead of clean. An
+operator upgrading past this change should expect the clean-close rate to fall
+and the abnormal/C<1006> rate to rise by the size of that always-mis-recorded
+population, re-baseline any clean-rate and abnormal-close dashboards against it,
+and run any C<1006>- or close-rate alert in observe-only mode until the new
+baseline is established before enforcing it. The new population is observable
+without a metrics subsystem: each C<close_timeout> resolution emits one
+structured C<warn> log line naming C<close_timeout>, the elapsed bound and
+C<close_code 1006> (per stream on HTTP/2), which a server at the default C<error>
+threshold suppresses and a server at C<warn> or C<info> routes to its logger.
+Pinned by the observability cases of C<t/ws-close-deadline-h1.t> and
+C<t/http2/49-ws-close-deadline-h2.t>.
+
 =back
 
 Behaviours the spec fixes are not listed here; the relevant sections below

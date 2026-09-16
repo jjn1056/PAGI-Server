@@ -65,6 +65,10 @@ sub start_server {
         shutdown_timeout => 1,
         (exists $opt{ws_close_timeout} ? (ws_close_timeout => $opt{ws_close_timeout}) : ()),
         ($opt{logger} ? (logger => $opt{logger}) : ()),
+        # An explicit log_level wins over quiet (PAGI::Server config), so a case
+        # that wants to observe the close_timeout warn line can lower the
+        # threshold below error while still routing lines to its own logger.
+        (exists $opt{log_level} ? (log_level => $opt{log_level}) : ()),
     );
     $loop->add($server);
     $server->listen->get;
@@ -418,6 +422,85 @@ subtest 'resolution before app-return logs the access record exactly once' => su
 
     my @records = ($access =~ /"GET /g);
     is(scalar(@records), 1, 'exactly ONE access-log record for the connection (no duplicate)');
+    close($sock);
+    shutdown_server($server);
+};
+
+# =============================================================================
+# 10. SHUTDOWN PREEMPTS the in-flight close-wait. A scope parked in the
+#     app-initiated closing phase when the server begins its graceful drain must
+#     resolve with `server_shutdown` (the drain's ending), dispose the close
+#     deadline, and NOT wait the full ws_close_timeout. Here ws_close_timeout is
+#     far longer than shutdown_timeout, so a resolution that named close_timeout
+#     or blocked on the deadline would be the bug. Terminal shape asserted:
+#     on_disconnect + on_end (once) + end_future, NOT on_complete.
+# =============================================================================
+subtest 'server shutdown preempts the in-flight close-wait -> server_shutdown' => sub {
+    my ($app, $obs, $park) = build_app(park => 1);
+    # ws_close_timeout 30s: far beyond the 1s shutdown_timeout, so only a real
+    # preemption (not the deadline, not the force-close) can end this quickly.
+    my $server = start_server($app, ws_close_timeout => 30);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked (peer silent)');
+
+    # Reach the live connection and its armed deadline BEFORE the drain runs.
+    my ($conn) = values %{$server->{connections}};
+    ok($conn, 'the closing-phase connection is registered with the server');
+    my $deadline = $conn->{ws_close_deadline};
+    ok($deadline && $deadline->is_running, 'the close deadline is armed and live pre-shutdown');
+    ok(!$obs->{disconnect}, 'still PENDING before the drain (no terminal yet)');
+
+    # Begin the graceful drain: shutdown_server calls $server->shutdown->get,
+    # which runs _drain_connections. A closing-phase WebSocket is long-lived, so
+    # the drain closes it at once with server_shutdown.
+    $park->done unless $park->is_ready;
+    shutdown_server($server);
+
+    ok($obs->{disconnect}, 'the pending scope was resolved by the drain');
+    is($obs->{disconnect}, 1, 'on_disconnect fired exactly once');
+    is($obs->{disconnect_reason}, 'server_shutdown',
+        'reason is server_shutdown -- the drain preempted the close-wait, NOT close_timeout');
+    isnt($obs->{disconnect_reason}, 'close_timeout', 'specifically not close_timeout');
+    is($obs->{disconnect_code}, 1006, 'close_code 1006 (no peer Close)');
+    is($obs->{end}, 1, 'on_end fired exactly once');
+    ok($obs->{end_future}, 'end_future resolved');
+    ok(!$obs->{complete}, 'on_complete did NOT fire');
+
+    # Deadline disposed by the terminal path: the one-shot timer is dequeued
+    # from the scope (only _dispose_ws_close_deadline deletes it) and stopped,
+    # so it can neither fire late nor leak past the drain.
+    ok(!$conn->{ws_close_deadline}, 'the close deadline was disposed (dequeued from the scope)');
+    ok(!$deadline->is_running, 'the close deadline timer was stopped (no late fire)');
+    close($sock);
+};
+
+# =============================================================================
+# 11. Observability: the close_timeout resolution emits one structured warn
+#     line so an operator can watch the new abnormal-close population. The line
+#     is warn level, so a server at the default/quiet (error) threshold stays
+#     silent; a server dropped to info routes it to its logger. Asserts the line
+#     names close_timeout and the bound.
+# =============================================================================
+subtest 'close_timeout resolution emits a structured observability log line' => sub {
+    my @logs;
+    my ($app, $obs, $park) = build_app(park => 1);
+    my $server = start_server($app,
+        ws_close_timeout => 0.3,
+        log_level        => 'info',
+        logger           => sub { push @logs, $_[0]->{message} // '' });
+    my $sock = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked');
+
+    ok(pump_until(sub { $obs->{disconnect} }, 5), 'the deadline resolved close_timeout');
+    is($obs->{disconnect_reason}, 'close_timeout', 'reason is close_timeout');
+
+    my @hits = grep { /close_timeout/ && /close deadline/i } @logs;
+    is(scalar(@hits), 1, 'exactly one structured close_timeout log line was emitted');
+    like($hits[0], qr/1006/, 'the line records the abnormal close_code 1006');
+    like($hits[0], qr/0\.3/, 'the line records the ws_close_timeout bound that elapsed');
+    $park->done unless $park->is_ready;
     close($sock);
     shutdown_server($server);
 };
