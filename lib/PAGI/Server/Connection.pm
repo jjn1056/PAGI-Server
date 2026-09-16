@@ -818,6 +818,7 @@ sub _h2_on_request {
         ws_frame     => undef,   # Protocol::WebSocket::Frame for parsing
         ws_connect_sent => 0,
         ws_disconnect_delivered => 0,   # True once the scope's single websocket.disconnect has been queued
+        ws_closing              => 0,   # True once this stream is waiting for the peer to complete an app-initiated closing handshake
     };
 
     # Check Content-Length against max_body_size limit before dispatching
@@ -868,14 +869,17 @@ sub _h2_on_body {
 
         if ($eof) {
             # A completed closing handshake is a clean end (Www.pod "Meaning
-            # per scope"); the peer's Close set ws_peer_closed here and queued
-            # the server's reciprocal Close + END_STREAM, so _h2_on_close runs
-            # on this now-closing stream and marks it complete. Leave it for
-            # that mark -- routing it through _h2_end_ws_stream's abnormal
+            # per scope"): the peer's Close set ws_peer_closed and queued the
+            # server's reciprocal Close + END_STREAM, so _h2_on_close runs on
+            # this now-closing stream and marks it complete. Leave it for that
+            # mark -- routing it through _h2_end_ws_stream's abnormal
             # _mark_disconnected here would land first and make _h2_on_close's
-            # clean _mark_complete a no-op. Only a bare END_STREAM with no
-            # completed handshake is the abnormal client_closed the ending
-            # record's defaults (1006 / client_closed) describe.
+            # clean _mark_complete a no-op. An END_STREAM arriving with NO peer
+            # Close -- whether the app initiated the close (ws_closing) or not
+            # -- is a PREMATURE STREAM TERMINATION, not a completed handshake:
+            # it is the abnormal transport-loss end the ending record's
+            # defaults (1006 / client_closed) describe, NOT close_timeout (the
+            # deadline did not fire) and NOT the app-walked-away 1011 path.
             $self->_h2_end_ws_stream($stream) unless _h2_ws_clean_end($stream);
         }
         return;
@@ -1030,6 +1034,11 @@ sub _h2_wake_pending {
 # HTTP/2 goes through here.
 sub _h2_end_ws_stream {
     my ($self, $stream, %end) = @_;
+    # Dispose this stream's one-shot close deadline on every ws terminal path
+    # (the funnel every server-decided h2 ws end passes through), so it can
+    # neither fire late nor leak. A no-op when none was armed (peer-initiated
+    # close, a stream never in the app-initiated closing phase).
+    $self->_dispose_ws_close_deadline($stream) if $stream->{ws_close_deadline};
     $self->_record_end($stream, %end);
     if ($stream->{connection_state}) {
         # Populate the peer's Close before the mark, so a callback reading
@@ -1135,15 +1144,18 @@ sub has_requests_in_flight {
     return $self->{handling_request} ? 1 : 0;
 }
 
-# Did this h2 WebSocket scope reach a clean end? Two ways, and Www.pod
-# "Meaning per scope" names both: the accepted socket completed a closing
-# handshake -- the application sent websocket.close (send state 'closed') or
-# the peer's Close frame validated (ws_peer_closed) -- or the server finished
-# its output of a refusal (send state 'refusal_complete').
-#
-# The accept conjunct binds only the handshake half; the refusal half is
-# deliberately outside it, because a refusal never accepts. This is term for
-# term the h1 twin at _handle_websocket_request's tail.
+# Did this h2 WebSocket scope reach a clean end? Www.pod "Meaning per scope"
+# (L857-869): a completed closing handshake requires the PEER's Close
+# (ws_peer_closed) as well as the accepted handshake -- the application's own
+# websocket.close (send state 'closed') initiates the handshake but does not
+# complete it. So the app-initiated closing phase is NOT clean on the send
+# state alone: it is held PENDING under the close deadline until the peer's
+# Close arrives and the stream closes, and resolves abnormally
+# (close_timeout, or a transport-loss token) if the peer never completes it.
+# A refusal the server carried to completion (send state 'refusal_complete')
+# is the other clean end -- deliberately outside the accept conjunct, because
+# a refusal never accepts. This is term for term the h1 twin at
+# _handle_websocket_request's tail.
 #
 # A close this server initiated -- a protocol violation, a queue overflow --
 # is NOT here: the spec calls it abnormal, and it records its own reason
@@ -1151,7 +1163,7 @@ sub has_requests_in_flight {
 sub _h2_ws_clean_end {
     my ($stream) = @_;
     my $seq = $stream->{seq_state} // '';
-    return 1 if _ws_handshake_accepted($seq) && ($seq eq 'closed' || $stream->{ws_peer_closed});
+    return 1 if _ws_handshake_accepted($seq) && $stream->{ws_peer_closed};
     return 1 if $seq eq 'refusal_complete';
     return 0;
 }
@@ -1352,6 +1364,22 @@ sub _h2_on_close {
                         ($stream->{is_sse} ? 'sse' : 'http'), $stream->{seq_state});
         if ($clean && !$error_code) {
             $cs->_mark_complete;
+        } elsif ($stream->{is_websocket} && $stream->{ws_closing}) {
+            # An app-initiated closing phase that did NOT complete the
+            # handshake cleanly (no peer Close, or a peer Close without the
+            # stream closing on it): the stream terminated under the deadline.
+            # This is a TRANSPORT LOSS -- the peer's doing -- with close_code
+            # 1006 (category 3), NOT the server_error the app-walked-away path
+            # reports and NOT close_timeout (the deadline did not fire; when it
+            # did, it recorded close_timeout first and first-wins keeps it).
+            # A peer Close already observed keeps its own code/reason
+            # (_set_ws_close above; category 4). Covers both a bare
+            # END_STREAM's stream close and a bare RST_STREAM (any error code,
+            # NO_ERROR included) with no prior peer Close.
+            $self->_record_end($stream, reason => 'client_closed',
+                detail => 'WebSocket stream terminated before the closing handshake completed');
+            $cs->_mark_disconnected($self->_end_reason($stream),
+                $self->_end_detail($stream));
         } elsif (!$error_code) {
             # Record the token on the stream before marking, so the events
             # queued below carry the same reason as the object (spec:
@@ -1586,27 +1614,46 @@ sub _h2_dispatch_stream {
                         # refusal case first).
                         my $seq_now = $stream_state->{seq_state};
                         my $kind    = $stream_state->{is_websocket} ? 'websocket' : 'sse';
-                        my $started = PAGI::Server::EventValidator::scope_started($kind, $seq_now);
-                        my $clean   = $stream_state->{is_websocket}
-                                    ? _h2_ws_clean_end($stream_state)
-                                    : PAGI::Server::EventValidator::scope_send_clean('sse', $seq_now);
-                        if ($started && !$clean) {
-                            $weak_self->_h2_incomplete_scope_end($stream_id, $stream_state, $error);
-                        }
-                        elsif ($clean) {
-                            # Clean end -- a completed closing handshake, sse.close,
-                            # or a completed refusal on either scope. _h2_on_close
-                            # ordinarily marks this already; mark here too in case
-                            # this coroutine resumed first -- idempotent.
-                            $cs->_mark_complete if $cs;
+                        if ($stream_state->{is_websocket} && $stream_state->{ws_closing}) {
+                            # The app sent websocket.close and this scope is now in
+                            # the app-initiated closing phase: it is legitimately
+                            # PENDING under the close deadline, waiting for the peer
+                            # to complete the handshake. It did NOT walk away, so it
+                            # must not be routed to the incomplete-scope
+                            # (1011/server_error) path, and its terminal outcome is
+                            # decided by the resolution paths (the peer's Close, the
+                            # deadline, or a transport loss) -- not here. The h2 twin
+                            # of the h1 tail's `return if ws_closing`. An exception
+                            # thrown after the close is still surfaced, never
+                            # swallowed, exactly as the clean branch below does.
                             $self->_log(error => 'PAGI application error after '
                                 . _h2_scope_verb($kind, $seq_now)
-                                . " ended cleanly (HTTP/2 stream $stream_id): $error")
+                                . " (HTTP/2 stream $stream_id) while its closing handshake was pending: $error")
                                 if $error;
                         }
-                        # else ($started false, $clean false): the application never
-                        # accepted, never started a stream, and never refused. The
-                        # !response_started arm above has already answered that case.
+                        else {
+                            my $started = PAGI::Server::EventValidator::scope_started($kind, $seq_now);
+                            my $clean   = $stream_state->{is_websocket}
+                                        ? _h2_ws_clean_end($stream_state)
+                                        : PAGI::Server::EventValidator::scope_send_clean('sse', $seq_now);
+                            if ($started && !$clean) {
+                                $weak_self->_h2_incomplete_scope_end($stream_id, $stream_state, $error);
+                            }
+                            elsif ($clean) {
+                                # Clean end -- a completed closing handshake, sse.close,
+                                # or a completed refusal on either scope. _h2_on_close
+                                # ordinarily marks this already; mark here too in case
+                                # this coroutine resumed first -- idempotent.
+                                $cs->_mark_complete if $cs;
+                                $self->_log(error => 'PAGI application error after '
+                                    . _h2_scope_verb($kind, $seq_now)
+                                    . " ended cleanly (HTTP/2 stream $stream_id): $error")
+                                    if $error;
+                            }
+                            # else ($started false, $clean false): the application never
+                            # accepted, never started a stream, and never refused. The
+                            # !response_started arm above has already answered that case.
+                        }
                     }
                     elsif ($cs && (($stream_state->{seq_state} // 'complete') ne 'complete')) {
                         # Response started but never finished: the app either
@@ -3180,6 +3227,16 @@ sub _h2_create_websocket_send {
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket,
             # so the handshake is known complete here.
+
+            # Enter the app-initiated closing phase: arm the one finite
+            # per-stream close deadline and cancel this stream's keepalive, then
+            # hold the scope PENDING until the peer completes the handshake --
+            # UNLESS the peer already closed, in which case this reciprocal
+            # Close completes the handshake and the ordinary teardown stands
+            # (no deadline needed). Armed at the SEND, so a parked handler is
+            # still bounded.
+            $weak_self->_enter_ws_h2_closing_phase($stream_id, $ss)
+                unless $ss->{ws_peer_closed};
 
             # Close frame + END_STREAM, and release this stream's keepalive
             # (_h2_ws_close does both). Runs outside feed(), so flush here.
@@ -4931,6 +4988,72 @@ sub _dispose_ws_close_deadline {
     return;
 }
 
+# Enter the app-initiated WebSocket closing phase on ONE HTTP/2 stream: consume
+# Task 2's _enter_ws_closing_phase seam with the STREAM ($ss) as the scope, so
+# the one finite close deadline and the ws_closing flag are per-stream and a
+# sibling ws stream on the same connection is untouched. Arms the deadline and
+# cancels this stream's keepalive/pong, then waits for the peer to complete the
+# handshake. The h2 twin of _enter_ws_h1_closing_phase.
+#
+# The seam's guard (die + error log) is a can't-happen backstop: arm-before-
+# cancel guarantees a live deadline on the normal path, so it never fires here.
+# If it ever did, it is a fatal fault for this connection -- it reaches the
+# connection error boundary and fails the app's send Future, never swallowed and
+# never leaving the stream pending with no bound.
+sub _enter_ws_h2_closing_phase {
+    my ($self, $stream_id, $ss) = @_;
+    weaken(my $weak_self = $self);
+
+    my $ok = eval {
+        $self->_enter_ws_closing_phase($ss,
+            cancel_timers => sub {
+                return unless $weak_self;
+                # The close deadline governs the phase alone: release this
+                # stream's keepalive (and its pong timeout) so a shorter
+                # activity timer cannot short-circuit the close-wait with the
+                # wrong reason. (_h2_ws_close releases it too; idempotent.)
+                $weak_self->_h2_stop_ws_keepalive($ss);
+            },
+            on_deadline => sub {
+                my ($conn, $scope) = @_;
+                # The bound elapsed with no completed handshake: end THIS stream
+                # abnormally with close_timeout / 1006 (Www.pod L866-869). A peer
+                # Close already observed keeps its own code/reason (category 4).
+                $conn->_resolve_h2_ws_closing($stream_id, $scope, 'close_timeout',
+                    detail => 'closing handshake did not complete within ws_close_timeout');
+            },
+        );
+        1;
+    };
+    return if $ok;
+
+    # Guard tripped (or arming threw). Route to the connection error boundary
+    # and fail the app's send Future.
+    my $err = $@;
+    $self->_handle_disconnect_and_close('server_error',
+        detail => "failed to enter WebSocket closing phase: $err");
+    die $err;
+}
+
+# Terminally resolve an h2 WebSocket stream waiting in the app-initiated closing
+# phase when its close deadline expires. Ends the scope abnormally (close_timeout
+# / 1006, or the peer's preserved code when a valid Close was seen -- category 4)
+# through _h2_end_ws_stream, which disposes the deadline and delivers the scope's
+# one disconnect event, then resets the still-half-open stream so nghttp2 releases
+# it. First-wins: if another outcome already ended the stream, _h2_end_ws_stream's
+# record/mark/enqueue are no-ops and the reset is skipped for a dead stream.
+sub _resolve_h2_ws_closing {
+    my ($self, $stream_id, $stream, $reason, %opt) = @_;
+    $self->_h2_end_ws_stream($stream, reason => $reason, code => 1006,
+        (defined $opt{detail} ? (detail => $opt{detail}) : ()));
+    # The peer never completed its half, so the stream is still open (half-closed
+    # local): cancel it so nghttp2 releases it and runs the deferred cleanup.
+    # _h2_on_close then re-enters _h2_end_ws_stream, whose marks/enqueue are
+    # first-wins no-ops and whose reason (close_timeout, recorded above) stands.
+    $self->_h2_reset_stream($stream_id, _h2_rst_cancel_code());
+    return;
+}
+
 # SSE keepalive - sends comment lines to prevent proxy timeouts
 sub _start_sse_keepalive {
     my ($self, $interval, $comment) = @_;
@@ -6338,6 +6461,12 @@ sub _handle_disconnect {
         # $stream->{connection_state} is defensive only.
         if ($self->{is_h2} && $self->{h2_streams}) {
             for my $stream (values %{$self->{h2_streams}}) {
+                # Dispose a closing-phase ws stream's one-shot close deadline on
+                # the connection-level terminal path too (the h2 twin of the h1
+                # scope disposal above), so it can neither fire late nor leak
+                # when the whole connection ends under a pending stream. A no-op
+                # when none was armed.
+                $self->_dispose_ws_close_deadline($stream) if $stream->{ws_close_deadline};
                 $self->_record_end($stream, reason => $reason, detail => $detail);
                 if ($stream->{connection_state}) {
                     # Populate the peer's Close before the mark. A websocket

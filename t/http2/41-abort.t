@@ -38,6 +38,7 @@ use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
+use Protocol::WebSocket::Frame;
 
 my $loop     = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -267,17 +268,24 @@ subtest 'websocket stream: abort resets with CANCEL and sends no Close frame' =>
 
     $sib_gate->done;
     exchange_frames($client, $client_sock, 20);
-    ok($r{sib_done}, 'the sibling ran to completion after the reset');
+    ok($r{sib_done}, 'the sibling app sent its Close and returned after the reset');
     like($data{$ssid}, qr/\x88/, 'the sibling did send a Close frame');
-    # nghttp2 reports on_stream_close only once both sides have ended, and this
-    # client deliberately keeps its CONNECT request body open -- that is what
-    # makes the stream a tunnel -- so a clean server-side END_STREAM leaves the
-    # code undefined here rather than 0. (Same limitation as t/71 case (h)'s h2
-    # half.) The contrast that matters survives: the aborted stream carries a
-    # nonzero error code, this one carries none at all, and the scope's own
-    # clean end is asserted directly on the next line.
-    is($closed{$ssid}, undef, 'and its stream was never reset');
-    is($r{sib_conn}->response_complete, 1, 'the sibling scope ended cleanly');
+
+    # The sibling's own websocket.close only INITIATES the closing handshake;
+    # under Www.pod L857-869 / WS-CLOSE-TRUTH-1 the scope is clean only once the
+    # PEER completes it. So the client answers the server's Close with its own
+    # Close + END_STREAM. That both completes the handshake (a clean end) and,
+    # by ending the client's tunnel half, lets nghttp2 report on_stream_close --
+    # with code 0 (a clean END_STREAM), never the CANCEL 8 an abort would give.
+    my $sib_close = Protocol::WebSocket::Frame->new(
+        type => 'close', buffer => pack('n', 1000), masked => 1)->to_bytes;
+    $client->submit_data($ssid, $sib_close, 1);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    is($closed{$ssid}, 0, 'the sibling ended with a clean END_STREAM (code 0), not a reset (CANCEL 8)');
+    is($r{sib_conn}->response_complete, 1,
+        'the sibling scope ended cleanly once the peer completed the handshake');
     is(errors_in(\@log), [], 'no error line was logged for either stream');
 
     $stream_io->close_now;
