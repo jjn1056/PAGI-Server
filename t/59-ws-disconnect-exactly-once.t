@@ -181,12 +181,18 @@ subtest 'clean peer close delivers exactly one websocket.disconnect' => sub {
         }
 
         # Direct check on the root cause: processing the peer's Close frame
-        # must have already marked the connection's disconnect-handled guard,
-        # so the later TCP-close path below delivers nothing further.
-        ok($conn->{_disconnect_handled}, 'disconnect-handled guard set by the Close frame path');
+        # must have marked the scope's single disconnect delivered, so the
+        # later transport-close teardown does not re-queue a ghost copy. Under
+        # server-owned closure (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3) the CLEAN end
+        # is marked at the server-driven transport closure, not here, and the
+        # coarse _disconnect_handled guard is deliberately NOT set by this path;
+        # ws_disconnect_delivered is the marker that guards against the ghost.
+        ok($conn->{ws_disconnect_delivered},
+            'the scope marked its single disconnect delivered (guards the ghost re-queue)');
 
-        # Step 2: TCP closes ~50ms later (a separate event on the wire, not
-        # coalesced with the Close frame above).
+        # Step 2: the client also closes its end ~50ms later (a separate event
+        # on the wire). The server already owns the transport close, so this is
+        # belt-and-suspenders; the teardown must still deliver nothing further.
         $loop->loop_once(0.05);
         close $sock;
 

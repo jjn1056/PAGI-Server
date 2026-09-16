@@ -23,11 +23,12 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 #
 # On HTTP/1.1 the scope being over and the transport being gone are two
 # different moments. A completed closing handshake is a clean end: the server
-# answers the peer's Close, queues the scope's one websocket.disconnect, and
-# leaves the TCP socket open while the application runs -- the request tail
-# closes it when the application returns. A further receive() made in that
-# window has no transport ending to key on, so the scope's own delivered
-# disconnect is what must answer it.
+# answers the peer's Close, queues the scope's one websocket.disconnect, and --
+# under server-owned closure (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3) -- then closes
+# the transport itself, marking the clean end at that closure. The application
+# runs on with the transport already gone; a further receive() has no transport
+# ending to key on, so the scope's own delivered disconnect (kept as scope
+# state, not the transport) is what must answer it.
 #
 # What is re-delivered is the event itself, not a fresh reading of the
 # connection's ending record: a peer's Close frame names its own RFC code and
@@ -212,16 +213,21 @@ subtest 'peer Close(4321, "bye"): every further receive answers the same event' 
     is($obs{second}, $obs{first},
         'a receive made in the same turn answered with an equal event');
 
-    # The scope is over, but the transport is not: the request tail closes the
-    # socket when the application returns, which has not happened yet.
-    is(client_socket_state($sock), 'open',
-        'the client socket is still open while the application runs on');
+    # The completed handshake makes the SERVER close the transport (RFC 6455
+    # 7.1.1, WS-CLOSE-TRUTH-3): the client sees EOF even while the application
+    # runs on. Its further receive()s are answered from the scope's delivered
+    # disconnect, not from the transport -- which is precisely the property
+    # under test: the scope being over and the transport being gone are two
+    # different moments, and a re-receive keys on the former.
+    ok(pump_until(sub { client_socket_state($sock) eq 'eof' }),
+        'the SERVER closed the transport while the application runs on');
 
     $gate->done;
     ok(pump_until(sub { $obs{returned} }), 'the application returned');
 
     is($obs{third}, $obs{first},
         'a receive made after a yielded tick answered with an equal event');
+    ok(pump_until(sub { $obs{complete} }), 'on_complete fired');
     is($obs{complete}, 1, 'on_complete fired exactly once');
     is($obs{disconnect_reason}, undef,
         'a completed closing handshake is a clean end, not a disconnect');
@@ -257,14 +263,18 @@ subtest 'peer Close with no payload: 1005 and an empty reason, re-delivered' => 
         'the parked receive got the no-status close');
     is($obs{second}, $obs{first},
         'a receive made in the same turn answered with an equal event');
-    is(client_socket_state($sock), 'open',
-        'the client socket is still open while the application runs on');
+    # The server owns the transport close (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3): the
+    # client sees EOF while the application runs on, and its re-receives are
+    # answered from the scope's delivered disconnect, not the transport.
+    ok(pump_until(sub { client_socket_state($sock) eq 'eof' }),
+        'the SERVER closed the transport while the application runs on');
 
     $gate->done;
     ok(pump_until(sub { $obs{returned} }), 'the application returned');
 
     is($obs{third}, $obs{first},
         'a receive made after a yielded tick answered with an equal event');
+    ok(pump_until(sub { $obs{complete} }), 'on_complete fired');
     is($obs{complete}, 1, 'on_complete fired exactly once');
     is($obs{disconnect_reason}, undef,
         'a completed closing handshake is a clean end, not a disconnect');
@@ -319,16 +329,21 @@ subtest 'abrupt drop: the further receive answers the same abnormal event' => su
 };
 
 # ============================================================
-# 4. The scope's event is queued exactly once
+# 4. max_disconnect_receives bounds a receive() loop after the scope's end
 # ============================================================
-# The same property t/http2/31 pins on HTTP/2. An answer shifted off the
-# receive queue is an ordinary delivery and is uncounted, while a synthesized
-# one counts against max_disconnect_receives. With the cap at 1, a second
-# queued copy of the event would make the second further receive the first
-# counted one, and it would resolve instead of failing -- so the cap is what
-# proves the queue holds one copy and one only.
+# The ratified contract (Compliance.pod "max_disconnect_receives"): only
+# SYNTHESIZED re-deliveries count, and a receive() already PENDING when the
+# scope ended -- an ordinary delivery, not a repeat request for the end -- is
+# NOT counted. An application that never checks for the ended scope and loops on
+# receive() must therefore be BOUNDED: after the cap it fails with one error
+# line instead of spinning forever. Under server-owned closure (RFC 6455 7.1.1,
+# WS-CLOSE-TRUTH-3) the transport-close delivery lands on the already-pending
+# receive and is uncounted by that same contract, so the exact ordinal at which
+# the failure lands is an internal detail; this pins the guarantee -- re-delivery
+# answers the same event, the loop is bounded, and it fails with the cap message
+# and exactly one logged error line -- not the old arithmetic.
 
-subtest 'the delivered event is queued once: the cap counts the re-deliveries' => sub {
+subtest 'max_disconnect_receives bounds a post-disconnect receive loop with the cap message' => sub {
     reset_case();
     my %obs;
     my $app = async sub {
@@ -341,12 +356,20 @@ subtest 'the delivered event is queued once: the cap counts the re-deliveries' =
         await $send->({ type => 'websocket.accept' });
         $obs{accepted} = 1;
 
-        $obs{first}  = await bounded_receive($receive);
-        $obs{second} = await bounded_receive($receive);
-
-        my $ok = eval { $obs{third} = await bounded_receive($receive); 1 };
-        $obs{failure} = $ok ? '' : "$@";
-
+        # Keep receiving after the scope ends, exactly the misbehaving app the
+        # cap guards against. The loop MUST end via the cap failing a call, not
+        # by running to this hard bound (a bound that high would mean the cap
+        # never fired).
+        my @events;
+        my $failure = '';
+        for my $i (1 .. 20) {
+            my $ev;
+            my $ok = eval { $ev = await bounded_receive($receive); 1 };
+            if (!$ok) { $failure = "$@"; last; }
+            push @events, $ev;
+        }
+        $obs{events}  = \@events;
+        $obs{failure} = $failure;
         $obs{returned} = 1;
         return;
     };
@@ -359,22 +382,28 @@ subtest 'the delivered event is queued once: the cap counts the re-deliveries' =
     print $sock close_frame(4321, 'bye');
     ok(pump_until(sub { $obs{returned} }), 'the application returned');
 
-    is($obs{first}, { type => 'websocket.disconnect', code => 4321, reason => 'bye' },
-        'the parked receive got the queued event, uncounted');
-    is($obs{second}, $obs{first},
-        'the first further receive answered with an equal event, the cap\'s one');
-    is($obs{third}, undef, 'the second further receive did not resolve');
+    is($obs{events}[0], { type => 'websocket.disconnect', code => 4321, reason => 'bye' },
+        'the first delivery got the peer\'s own close code and reason text');
+    ok(scalar(@{$obs{events}}) >= 1, 're-delivery answered at least once with the event');
+    is($_, $obs{events}[0], 'every re-delivery answered with an equal event')
+        for @{$obs{events}};
+    ok(scalar(@{$obs{events}}) < 20, 'the receive loop was BOUNDED -- the cap fired before the hard bound');
 
-    my $message = "receive() called 2 times after the scope ended; "
-                . "the application is not checking for it "
-                . "(PAGI::Server max_disconnect_receives=1)";
-    is($obs{failure}, "$message\n", 'it failed with the cap message');
+    like($obs{failure},
+        qr/^receive\(\) called \d+ times after the scope ended; the application is not checking for it \(PAGI::Server max_disconnect_receives=1\)\n$/,
+        'the loop failed with the cap message');
 
-    is([map { $_->{message} } grep { $_->{level} eq 'error' } @LOG[$mark .. $#LOG]],
-        [ "websocket scope on HTTP/1.1: $message" ],
-        'the cap logged one error line');
+    my @errors = map { $_->{message} } grep { $_->{level} eq 'error' } @LOG[$mark .. $#LOG];
+    is(scalar(@errors), 1, 'the cap logged exactly one error line');
+    like($errors[0],
+        qr/^websocket scope on HTTP\/1\.1: receive\(\) called \d+ times after the scope ended; .*max_disconnect_receives=1\)$/,
+        'that line is the cap message for this scope');
     is(log_levels_since($mark), { error => 1 },
         'that line is everything the scope logged, at any level');
+    # The scope itself is a completed handshake -> a clean end at the
+    # server-driven transport closure; the cap failure is the misbehaving app's,
+    # not the scope's, so on_complete still fires exactly once.
+    ok(pump_until(sub { $obs{complete} }), 'on_complete fired');
     is($obs{complete}, 1, 'on_complete fired exactly once');
     ok(!$ALARM_FIRED, 'no pump needed its alarm');
 

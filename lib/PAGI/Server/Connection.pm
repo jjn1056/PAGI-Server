@@ -312,6 +312,7 @@ sub new {
         ws_closing          => 0,      # True once the scope is waiting for the peer to complete the closing handshake
         ws_close_deadline   => undef,  # The single finite deadline governing that wait
         ws_disconnect_delivered => 0,  # True once the closing phase has delivered the scope's single websocket.disconnect (suppresses a re-queue at transport close)
+        _ws_close_transport_pending => 0,  # Set in the Close parser when a completed handshake needs the server-owned transport close; acted on after the disconnect is delivered to a parked receive()
         _ws_closing_finished => 0,     # True once the closing-phase resolution has run the deferred access log + request accounting (runs them exactly once)
         # HTTP/2 state
         alpn_protocol     => $args{alpn_protocol},    # ALPN-negotiated protocol (e.g. 'h2', 'http/1.1')
@@ -4974,13 +4975,34 @@ sub _resolve_h1_ws_closing {
 }
 
 # The transport-close entry (EOF, on_closed, a socket error) for an h1 scope.
-# A WebSocket scope waiting in the closing phase resolves through
-# _resolve_h1_ws_closing (clean iff the peer completed the handshake, else the
-# transport-loss token); every other scope tears down as before.
+# A WebSocket scope the server drove toward closure resolves through the one
+# closing-resolution owner -- the app-initiated closing phase (ws_closing) OR a
+# completed peer-initiated handshake (ws_peer_closed, which arms no deadline).
+# That owner decides clean (completed handshake AND graceful closure) versus
+# abnormal (the transport-loss token) and runs the deferred access log/
+# accounting exactly once; every other scope tears down as before.
 sub _h1_transport_closed {
     my ($self, $reason, %opt) = @_;
-    return $self->_resolve_h1_ws_closing($reason, %opt) if $self->{ws_closing};
+    return $self->_resolve_h1_ws_closing($reason, %opt)
+        if $self->{ws_closing} || $self->{ws_peer_closed};
     return $self->_handle_disconnect_and_close($reason, %opt);
+}
+
+# The server owns the WebSocket transport close once the closing handshake is
+# complete (RFC 6455 7.1.1), for both initiators: flush the reciprocal/queued
+# Close, then close the socket. on_closed then drives _h1_transport_closed,
+# which settles the clean end AT transport closure -- a completed handshake
+# before transport closure is not a clean end (Www.pod L831-834).
+# close_when_empty (not close_now) lets a queued Close reach the peer before the
+# FIN; a scope already torn down or closing is a no-op. Its callers invoke it
+# only after the closing-handshake pass has delivered the disconnect event to
+# any parked receive() (see _process_websocket_frames), so the synchronous
+# on_closed an empty buffer triggers cannot abandon a still-parked coroutine.
+sub _initiate_ws_h1_transport_close {
+    my ($self) = @_;
+    return if $self->{closed} || $self->{_cleanup_done};
+    $self->{stream}->close_when_empty if $self->{stream};
+    return;
 }
 
 # Dispose a closing scope's one-shot close deadline: stop it and de-register it
@@ -6438,16 +6460,17 @@ sub _handle_disconnect {
         if (my $cs = $self->{current_connection_state}) {
             if (!$self->{is_h2}
                 && ($self->{scope_kind} // '') eq 'websocket'
-                && $self->{ws_closing}
                 && $self->{ws_peer_closed}
                 && $reason eq 'client_closed') {
-                # h1 app-initiated closing phase, the peer completed the
-                # handshake, and the transport has now closed gracefully: the
-                # completed handshake PLUS transport closure the spec requires
-                # -> a CLEAN end (Www.pod L857-863). The peer's own
-                # close_code/reason, recorded when the Close validated, stand;
-                # _mark_complete leaves them untouched. disconnect_reason stays
-                # undef -- a completion is not a disconnect.
+                # h1, the peer completed a valid Close, and the server-owned
+                # transport close has now closed the transport gracefully: the
+                # completed handshake (peer Close + this server's Close, RFC 6455
+                # 5.5.1) PLUS transport closure the spec requires -> a CLEAN end
+                # for BOTH initiators (Www.pod L831-834, L857-863;
+                # WS-CLOSE-TRUTH-3). The peer's own close_code/reason, recorded
+                # when the Close validated, stand; _mark_complete leaves them
+                # untouched. disconnect_reason stays undef -- a completion is not
+                # a disconnect.
                 $cs->_mark_complete;
             }
             else {
@@ -7729,21 +7752,26 @@ async sub _handle_websocket_request {
             return;
         }
 
-        # App-initiated WebSocket closing phase (Www.pod L857-869): the app sent
-        # its Close and the scope is now waiting, under the close deadline, for
-        # the peer to complete the handshake and the transport to close. The
-        # terminal outcome (clean on peer Close + transport closure,
-        # close_timeout on the deadline, transport-loss on a drop) is decided in
-        # _resolve_h1_ws_closing, NOT here at app-return. Leave the transport
-        # open and let that resolution -- and the access log it writes -- run.
-        # Return for ANY ws_closing scope: arm-before-cancel guarantees a live
-        # deadline whenever ws_closing is set, so the resolution path always runs
-        # independently. Were this gated on !closed, a resolution that already
-        # completed (deadline / peer Close + transport closure / transport drop)
-        # while the handler was still parked would let the tail run the access
-        # log and request accounting a SECOND time when the handler finally
-        # returns (duplicate access-log line, max_requests over-count).
-        return if $self->{ws_closing};
+        # WebSocket closing handshake in progress (Www.pod L831-834, L857-869):
+        # the terminal outcome is decided by _resolve_h1_ws_closing at the
+        # server-owned transport closure, NOT here at app-return, for BOTH
+        # initiators. Return, leaving that resolution -- and the access log it
+        # writes -- to run:
+        #   ws_closing    (app-initiated) the app sent its Close and the scope is
+        #                 waiting for the peer + transport, under the close
+        #                 deadline (arm-before-cancel guarantees a live deadline
+        #                 whenever ws_closing is set);
+        #   ws_peer_closed (peer-initiated) the peer completed a valid Close, the
+        #                 server sent its reciprocal Close and initiated the
+        #                 transport close (no deadline was armed).
+        # Either way the transport close was initiated in the Close parser, so
+        # on_closed drives the resolution independently of this return. Were this
+        # gated on !closed, a resolution that already completed (deadline / peer
+        # Close + transport closure / transport drop) while the handler was still
+        # parked would let the tail run the access log and request accounting a
+        # SECOND time when the handler finally returns (duplicate access-log line,
+        # max_requests over-count).
+        return if $self->{ws_closing} || $self->{ws_peer_closed};
 
         # Write access log entry (logs at connection close with total duration)
         $self->_write_access_log;
@@ -7769,18 +7797,12 @@ async sub _handle_websocket_request {
                     detail => 'accepted socket left without a closing handshake');
                 return;
             }
-            # A clean end at app-return requires the peer's validated Close, or a
-            # completed refusal. An app-initiated close (h1_seq 'closed') is NOT
-            # clean on its own here: it is handled by the closing-phase deferral
-            # above, which waits for the peer Close and the transport closure
-            # (Www.pod L857-863). Only the peer-initiated close -- the peer's
-            # Close plus this server's reciprocal Close, a completed handshake
-            # (RFC 6455 5.5.1) -- reaches this mark, together with refusal
-            # completion. A server-initiated protocol close never sets
-            # ws_peer_closed, so it cannot satisfy this guard.
+            # A clean end reaching THIS mark is a completed refusal: a WebSocket
+            # closing handshake (either initiator) returned above once its peer
+            # Close validated, so its clean end is owned by _resolve_h1_ws_closing
+            # at the server-driven transport closure, not by this tail.
             $cs->_mark_complete
-                if (_ws_handshake_accepted($self->{h1_seq}) && $self->{ws_peer_closed})
-                || (($self->{h1_seq} // '') eq 'refusal_complete');
+                if (($self->{h1_seq} // '') eq 'refusal_complete');
         }
 
         # Close connection after WebSocket session ends
@@ -8221,8 +8243,10 @@ sub _create_websocket_send {
             # close deadline, and the terminal outcome is decided there.
             if ($weak_self->{close_received}) {
                 # The peer had already sent its Close, so this reciprocal Close
-                # completes the handshake (RFC 6455 5.5.1) and the peer path has
-                # already marked the scope; nothing is left to wait for.
+                # completes the handshake (RFC 6455 5.5.1); the peer path has
+                # already initiated the server-owned transport close. Nothing is
+                # left to wait for -- close now, and the completed-handshake clean
+                # end (ws_peer_closed + client_closed) is marked by the teardown.
                 $weak_self->_handle_disconnect_and_close('client_closed');
             }
             else {
@@ -8422,37 +8446,44 @@ sub _process_websocket_frames {
                     $code, (length($reason) ? $reason : undef));
             }
 
-            if ($self->{ws_closing}) {
-                # App-initiated closing phase: the app sent its Close first, and
-                # this peer Close completes the RECEIVE half of the handshake.
-                # Its code/reason are recorded above, but the CLEAN end is NOT
-                # decided here -- receiving the peer Close alone is not a clean
-                # end (Www.pod L857-863). The scope stays PENDING until the
-                # transport then closes (_resolve_h1_ws_closing -> _mark_complete),
-                # bounded by the close deadline. Mark the scope's single
-                # disconnect event delivered (it was queued above) so the
-                # transport-close teardown does not re-queue a ghost copy; the
-                # coarse _disconnect_handled guard is deliberately NOT set, so
-                # that teardown can still run the terminal mark.
-                $self->{ws_disconnect_delivered} = 1;
-            }
-            else {
-                # Peer-initiated close (no app websocket.close): the peer's Close
-                # plus this server's reciprocal Close is a completed handshake
-                # (RFC 6455 5.5.1), a clean end delivered now -- at the moment the
-                # handshake finishes -- rather than waiting for the app to return,
-                # so a parked app that never drains receive() still sees its
-                # on_complete fire (Www.pod "Observing the end of a scope"). Set
-                # the disconnect-handled guard so a later TCP close or the app's
-                # own teardown delivers nothing further, and mark complete.
-                # _mark_complete is idempotent, so the app-return tail stays a
-                # correct backstop.
-                $self->{_disconnect_handled} = 1;
-                if ($self->{current_connection_state}
-                    && _ws_handshake_accepted($self->{h1_seq})) {
-                    $self->{current_connection_state}->_mark_complete;
-                }
-            }
+            # A completed closing handshake (this valid peer Close plus this
+            # server's Close, RFC 6455 5.5.1) makes the SERVER the owner of the
+            # transport close (RFC 6455 7.1.1), for BOTH initiators: the server
+            # closes the transport rather than waiting for the client to close
+            # TCP -- a conforming client waits for the server, so waiting for it
+            # deadlocked an app-initiated close into a false close_timeout
+            # (WS-CLOSE-TRUTH-3). The CLEAN end is marked when the transport
+            # actually closes (on_closed -> _h1_transport_closed ->
+            # _resolve_h1_ws_closing), NOT here -- a completed handshake before
+            # transport closure is not a clean end (Www.pod L831-834, L857-863).
+            #
+            # Mark the scope's single disconnect event delivered (it was queued
+            # above) so the transport-close teardown does not re-queue a ghost
+            # copy; the coarse _disconnect_handled guard is deliberately NOT set
+            # for either initiator, so that teardown still runs the terminal
+            # mark, and the app-return tail stays a consistent backstop.
+            $self->{ws_disconnect_delivered} = 1;
+
+            # App-initiated only: a close deadline was armed waiting for exactly
+            # this peer Close. Dispose it the instant the peer answers so a slow
+            # flush cannot let it misfire after the peer replied (the deadline is
+            # reachable only for a genuinely silent peer). Peer-initiated close
+            # armed no deadline -- there was nothing to wait for.
+            $self->_dispose_ws_close_deadline($self)
+                if $self->{ws_closing} && $self->{ws_close_deadline};
+
+            # Close the transport AFTER this parser pass finishes delivering the
+            # queued disconnect to any parked receive() (the "Notify any waiting
+            # receive" tail below), not here: an empty write buffer makes
+            # close_when_empty fire on_closed synchronously, and that teardown
+            # would run _close -- force-completing (abandoning) a receive()
+            # coroutine still parked on the disconnect event -- before it is
+            # delivered gracefully. Deferring to the tail keeps the close in the
+            # same parser pass (so a following server shutdown cannot preempt the
+            # clean end) while letting the graceful receive delivery run first;
+            # once the scope is ending a further receive() answers immediately
+            # and never re-parks, so nothing is left to abandon.
+            $self->{_ws_close_transport_pending} = 1;
         }
         elsif ($opcode == 9) {
             # Ping - respond with pong (transparent to app)
@@ -8473,6 +8504,14 @@ sub _process_websocket_frames {
         my $f = $self->{receive_pending};
         $self->{receive_pending} = undef;
         $f->done;
+    }
+
+    # Server-owned WebSocket transport close (RFC 6455 7.1.1): a completed
+    # closing handshake this pass flagged now closes the transport, AFTER the
+    # disconnect event has been delivered to any parked receive() above. The
+    # clean end is marked at that closure (on_closed -> _h1_transport_closed).
+    if (delete $self->{_ws_close_transport_pending} && !$self->{closed}) {
+        $self->_initiate_ws_h1_transport_close;
     }
 }
 

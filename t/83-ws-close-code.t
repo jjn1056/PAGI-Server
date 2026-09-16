@@ -10,9 +10,14 @@
 # populated before the callback runs. A naive populate-after-mark ordering
 # would make the callback see undef (see the F4 mutation in the task report).
 #
+# The peer-initiated cases (1, 2) reach their clean end at the SERVER-driven
+# transport closure (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3): the peer's Close plus the
+# server's reciprocal Close is a completed handshake, and the server then closes
+# the transport. The peer's recorded code/reason survive to on_complete.
+#
 # Cases:
 #   1. Peer Close with code+reason -> close_code == code, close_reason == text,
-#      read in on_complete (a completed handshake is a clean end).
+#      read in on_complete (a completed handshake, clean at server-driven close).
 #   2. Peer Close with no code (empty payload) -> close_code 1005, reason undef.
 #   3. Abrupt transport drop, no Close -> close_code 1006, reason undef, read in
 #      on_disconnect (abnormal end).

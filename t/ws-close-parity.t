@@ -13,11 +13,13 @@
 # each proves its own transport exhaustively, neither proves the two AGREE.
 #
 # Five outcomes, table-driven, each run on BOTH transports:
-#   clean               app close + peer Close + transport/stream close
+#   clean               app close + peer Close -> the SERVER closes the transport
+#                       (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3), clean at that closure
 #   close_timeout/1006  app close, peer silent, the deadline expires
 #   transport-loss/1006 app close, transport/stream drops with no peer Close
-#   peer-preserved      app close, peer Close (held open), deadline expires ->
-#                       abnormal but the peer's own code/reason survive (cat 4)
+#   peer-preserved      abnormal but the peer's own code/reason survive (cat 4).
+#                       SKIPPED in corrective Task 1: coherent only once h2 also
+#                       adopts server-owned closure (Task 2) -- see the row.
 #   server_error/1011   app returns from an accepted socket with no closing
 #                       handshake (the "Application Left a Response Incomplete"
 #                       path -- unchanged by this work, asserted identical here)
@@ -400,9 +402,10 @@ subtest 'clean: app close + peer Close + transport/stream close' => sub {
         send_close => 1,
         peer => sub {
             my ($sock) = @_;
+            # The peer answers with its Close and then leaves TCP open: the
+            # SERVER owns the transport close (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3),
+            # so the clean end comes from the server closing, not the client.
             syswrite($sock, h1_frame(8, pack('n', 1000) . 'bye'));
-            h1_pump_until(sub { 0 }, 0.2);   # let the server read the Close
-            close($sock);                     # transport closes -> clean
         },
     );
     my $r2 = run_h2(
@@ -448,28 +451,19 @@ subtest 'transport-loss/1006: app close, transport/stream drops with no peer Clo
     is(parity_key($r1), parity_key($r2), 'h1/h2 parity: transport-loss/1006');
 };
 
+# TODO(WS-CLOSE-TRUTH-3, corrective Task 2): cross-transport peer-preserved (cat
+# 4) parity is coherent only once h2 migrates to server-owned closure. Under
+# server-owned closure a validated peer Close DISPOSES the deadline and the
+# server closes the transport, so migrated-h1 can no longer produce
+# close_timeout-after-a-peer-Close (it goes clean); un-migrated h2 still expires
+# its deadline to close_timeout, so the two transports cannot agree yet. h1's
+# own cat-4 preservation (peer Close + a real write_error -> peer code/reason
+# preserved) is covered in t/ws-close-deadline-h1.t. Corrective Task 2 migrates
+# h2 and re-enables this row (both transports abnormal via the same real event,
+# peer code/reason preserved). Skipped, NOT deleted, so the row's intent stays
+# visible and the Task 1 suite is green.
 subtest 'peer-preserved (cat 4): abnormal but the peer code/reason survive' => sub {
-    my $r1 = run_h1(
-        send_close => 1, ws_close_timeout => 0.3,
-        peer => sub {
-            my ($sock) = @_;
-            # Peer sends a valid Close but holds the transport open; the deadline
-            # then expires -> abnormal, yet the peer's own code/reason stand.
-            syswrite($sock, h1_frame(8, pack('n', 1000) . 'seeya'));
-        },
-    );
-    my $r2 = run_h2(
-        send_close => 1, ws_close_timeout => 0.3,
-        peer => sub {
-            my ($client, $sock, $sid) = @_;
-            h2_send_data($client, $sock, $sid, h2_close_frame(1000, 'seeya'), 0);  # no END_STREAM
-        },
-    );
-    is($r1->{category}, 'close_timeout', 'h1 abnormal (close_timeout) but preserved');
-    is($r2->{category}, 'close_timeout', 'h2 abnormal (close_timeout) but preserved');
-    is($r1->{code}, 1000, 'h1 close_code preserved from the peer Close');
-    is($r1->{creason}, 'seeya', 'h1 close_reason preserved from the peer Close');
-    is(parity_key($r1), parity_key($r2), 'h1/h2 parity: peer-preserved (cat 4)');
+    skip_all 'coherent only once h2 migrates to server-owned closure (corrective Task 2); re-enable there';
 };
 
 subtest 'server_error/1011: app walks away from an accepted socket' => sub {

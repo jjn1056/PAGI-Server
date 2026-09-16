@@ -169,7 +169,13 @@ sub run_h1 {
     $r{wire_before_drop} = length $wire;
     if    ($case eq 'peer') { print $sock peer_close_frame() }  # closing handshake
     elsif ($case ne 'post') { close $sock }                     # abnormal drop
-    pump_until(sub { $r{app_done} }, sub { $loop->loop_once(0.05) }, 120);
+    # Pump until the terminal callback fires, not merely until the app returned:
+    # a peer-initiated close is CLEAN at the SERVER-driven transport closure
+    # (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3), which lands a tick after the app drains
+    # the disconnect and returns. Shutting down at app_done alone would preempt
+    # that closure and record server_shutdown instead of the clean end.
+    pump_until(sub { $r{app_done} && ($r{on_complete} || $r{on_disconnect}) },
+               sub { $loop->loop_once(0.05) }, 120);
     $server->shutdown->get;
     $loop->remove($server);
     return \%r;

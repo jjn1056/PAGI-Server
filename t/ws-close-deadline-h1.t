@@ -1,21 +1,27 @@
 #!/usr/bin/env perl
 
 # =============================================================================
-# Test: h1 app-initiated WebSocket close waits for the peer, under a finite
-# close deadline, instead of deciding a clean end eagerly at the app's send.
+# Test: h1 app-initiated WebSocket close waits for the peer under a finite close
+# deadline, then the SERVER closes the transport (RFC 6455 7.1.1) instead of
+# waiting for the client to close TCP; the clean end is marked at that
+# server-driven transport closure.
 #
-# Www.pod L857-869 / design spec "WebSocket Close Truthfulness": when the
-# application sends websocket.close on an accepted socket, the scope enters a
-# PENDING closing phase. A completed handshake -- the peer's Close AND the
-# stream/transport then closing -- is the ONLY clean end. The wait is bounded
-# by a finite close deadline (ws_close_timeout); its expiry with no peer Close
-# is abnormal `close_timeout` / close_code 1006, and a transport drop with no
-# peer Close is the transport-loss token / 1006 (NOT close_timeout). A peer
-# Close observed before an abnormal outcome keeps its own code/reason.
+# Www.pod L831-834, L857-869 / WS-CLOSE-TRUTH-3: when the application sends
+# websocket.close on an accepted socket, the scope enters a PENDING closing
+# phase. On the peer's validated Close the server DISPOSES the close deadline
+# and closes the transport itself; the completed handshake AND that transport
+# closure are the ONLY clean end. A conforming client waits for the server
+# (RFC 6455 7.1.1), so waiting for the client deadlocked into a false
+# close_timeout -- finding 1, fixed here. The wait is bounded by a finite close
+# deadline (ws_close_timeout) reachable ONLY for a genuinely silent peer: its
+# expiry with no peer Close is abnormal `close_timeout` / close_code 1006, and a
+# transport drop with no peer Close is the transport-loss token / 1006 (NOT
+# close_timeout). A peer Close observed before an abnormal outcome keeps its own
+# code/reason.
 #
 # These cases are all APP-INITIATED (the handler sends websocket.close). The
-# peer-initiated close (peer sends Close first) is a completed handshake at the
-# reciprocal-Close point and stays clean -- covered by t/82 and t/83, not here.
+# peer-initiated close (peer sends Close first) also reaches its clean end at
+# the server-driven transport closure -- covered by t/82 and t/83.
 # =============================================================================
 
 use strict;
@@ -105,6 +111,17 @@ sub pump_turns {
     $loop->loop_once(0.005) for 1 .. $n;
 }
 
+# Drain any server bytes on $sock and report whether the SERVER has closed its
+# end of the transport (a defined sysread of 0 bytes is EOF). Used to prove the
+# server -- not the client -- owns the transport close (RFC 6455 7.1.1): the
+# client NEVER calls close($sock); it only reads and waits for the server's EOF.
+sub server_closed_transport {
+    my ($sock) = @_;
+    my $buf;
+    my $n = sysread($sock, $buf, 4096);
+    return (defined $n && $n == 0) ? 1 : 0;
+}
+
 sub shutdown_server {
     my ($server) = @_;
     eval { $server->shutdown->get };
@@ -192,36 +209,76 @@ sub build_app {
 }
 
 # =============================================================================
-# 1. handler RETURNS after Close; peer answers; transport closes -> CLEAN.
-#    Split assertion: after the peer Close but before the transport closes the
-#    scope is NOT yet clean; after the transport closes it is, close_code = peer.
+# 1. handler RETURNS after Close; peer answers then WAITS for the server to
+#    close the transport (never closes TCP) -> CLEAN, close_code = peer. THE
+#    FINDING-1 REGRESSION: a conforming client waits for the server (RFC 6455
+#    7.1.1); on base the server waited for the client, so this deadlocked into a
+#    false close_timeout. Now the SERVER closes the transport and the client
+#    observes the EOF.
 # =============================================================================
-subtest 'app close, peer Close, then transport close -> clean (two-step)' => sub {
+subtest 'app close, peer answers, client waits for server EOF -> clean (server-owned close)' => sub {
     my ($app, $obs, $park) = build_app(recv_after => 1);
-    my $server = start_server($app);
+    # A finite deadline shorter than the pump window: were the server still
+    # waiting for the client to close TCP, this would misfire close_timeout.
+    my $server = start_server($app, ws_close_timeout => 0.5);
     my $sock   = connect_client($server->port);
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
     ok(pump_until(sub { $obs->{sent_close} }, 5), 'app sent websocket.close');
 
-    # Peer answers with its Close (code 1000, reason "bye"), TCP still open.
+    # Peer answers with its Close (code 1000, reason "peerbye"), then leaves TCP
+    # open and only reads -- the RFC 6455 7.1.1 conforming client.
     syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'peerbye'));
-    ok(pump_until(sub { $obs->{recv_type} }, 5), 'peer Close observed by the app');
-    is($obs->{recv_type}, 'websocket.disconnect', 'the observed event is the peer disconnect');
-    is($obs->{recv_connected}, 1, 'still connected when the peer Close arrived -- NOT yet clean');
-    is($obs->{recv_complete}, 0,  'on_complete had NOT fired on the peer Close alone');
-    pump_turns(20);
-    ok(!$obs->{complete}, 'still not clean while the transport is open');
+    ok(pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5), 'a terminal fired');
 
-    # Transport then closes: the completed handshake is now a clean end.
-    close($sock);
-    ok(pump_until(sub { $obs->{complete} }, 5), 'on_complete fired once the transport closed');
+    ok($obs->{complete}, 'on_complete fired -- the server closed the transport and marked clean');
     is($obs->{complete}, 1, 'on_complete fired exactly once');
     is($obs->{complete_connected}, 0, 'is_connected() false at the clean end');
     is($obs->{complete_reason}, undef, 'disconnect_reason() undef -- a clean end');
     is($obs->{complete_code}, 1000, 'close_code is the peer code');
     is($obs->{complete_creason}, 'peerbye', 'close_reason is the peer text');
-    ok(!$obs->{disconnect}, 'on_disconnect did NOT fire');
+    ok(!$obs->{disconnect}, 'on_disconnect did NOT fire (no false close_timeout)');
+    ok(pump_until(sub { server_closed_transport($sock) }, 3),
+        'the SERVER closed the transport -- the client saw EOF without ever closing TCP');
     $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+# =============================================================================
+# 1b. DISARM ON PEER CLOSE: the instant a validated peer Close arrives the close
+#     deadline is disposed, so even a transport completion deferred PAST the
+#     (short) deadline can NEVER produce close_timeout. White-box: the deadline
+#     timer is dequeued and stopped at the peer Close; pumping well past its
+#     expiry yields a clean end, never close_timeout.
+# =============================================================================
+subtest 'peer Close disposes the deadline -> deferred completion cannot become close_timeout' => sub {
+    my ($app, $obs, $park) = build_app(park => 1);
+    my $server = start_server($app, ws_close_timeout => 0.3);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked (peer silent so far)');
+
+    my ($conn) = values %{$server->{connections}};
+    ok($conn, 'the closing-phase connection is registered');
+    my $deadline = $conn->{ws_close_deadline};
+    ok($deadline && $deadline->is_running, 'the close deadline is armed and live before the peer answers');
+
+    # Peer answers: the deadline must be disposed at once (before any flush).
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'seeya'));
+    ok(pump_until(sub { !$conn->{ws_close_deadline} }, 5),
+        'the close deadline was disposed the instant the peer Close validated');
+    ok(!$deadline->is_running, 'the disposed deadline timer was stopped (no late fire)');
+
+    # Pump WELL past the 0.3s bound: a disposed deadline can never fire, so the
+    # only terminal reachable is the clean end from the server-owned close.
+    pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5);
+    ok($obs->{complete}, 'reached a clean end after the deadline bound elapsed');
+    ok(!$obs->{disconnect}, 'on_disconnect never fired');
+    isnt($obs->{disconnect_reason} // '', 'close_timeout',
+        'the peer Close made close_timeout unreachable');
+    is($obs->{complete_code}, 1000, 'close_code is the peer code');
+    $park->done unless $park->is_ready;
+    close($sock);
     shutdown_server($server);
 };
 
@@ -272,25 +329,31 @@ subtest 'app close then PARK, peer silent, deadline expires -> close_timeout/100
 };
 
 # =============================================================================
-# 4. handler PARKS after Close; peer answers; transport closes -> CLEAN.
+# 4. handler PARKS after Close (never returns, never drains); peer answers then
+#    waits for server EOF -> CLEAN at the server-driven transport closure. The
+#    parked handler is notified without returning and without the client closing
+#    TCP.
 # =============================================================================
-subtest 'app close then PARK, peer Close, transport close -> clean' => sub {
+subtest 'app close then PARK, peer answers, server closes transport -> clean' => sub {
     my ($app, $obs, $park) = build_app(park => 1);
-    my $server = start_server($app);
+    my $server = start_server($app, ws_close_timeout => 0.5);
     my $sock   = connect_client($server->port);
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
     ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked');
 
+    # Peer answers, then only reads and waits for the server to close.
     syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'peerbye'));
-    pump_turns(30);   # let the server read + process the peer Close
-    ok(!$obs->{complete}, 'not clean on the peer Close alone (transport still open)');
+    ok(pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5), 'a terminal fired');
 
-    close($sock);
-    ok(pump_until(sub { $obs->{complete} }, 5), 'on_complete fired once the transport closed');
+    ok($obs->{complete}, 'on_complete fired for the parked handler at the server-driven closure');
     is($obs->{complete_code}, 1000, 'close_code is the peer code');
     is($obs->{complete_reason}, undef, 'disconnect_reason undef -- clean');
     ok(!$obs->{disconnect}, 'on_disconnect did NOT fire');
+    ok(!$obs->{app_returned}, 'the handler never returned -- notified without draining receive()');
+    ok(pump_until(sub { server_closed_transport($sock) }, 3),
+        'the SERVER closed the transport (client saw EOF, never closed TCP)');
     $park->done unless $park->is_ready;
+    close($sock);
     shutdown_server($server);
 };
 
@@ -339,26 +402,52 @@ subtest 'app returns without a Close -> server_error (unchanged)' => sub {
 };
 
 # =============================================================================
-# 7. valid peer Close observed, then abnormal for another reason -> peer
-#    code/reason PRESERVED (category 4). Here: peer Close, then the deadline
-#    expires with the transport still open.
+# 7. valid peer Close observed, then a REAL abnormal event (a write_error while
+#    the server closes the transport) -> peer code/reason PRESERVED (category 4),
+#    never 1006. Re-homed off "close_timeout after a peer Close": under
+#    WS-CLOSE-TRUTH-3 a validated peer Close disposes the deadline, so
+#    close_timeout-after-reply can no longer happen; the real abnormal that can
+#    still co-occur with a recorded peer Close is the server's own close-write
+#    failing.
+#
+#    Genuine fault injection (the pattern t/23-connection-cleanup.t uses): a real
+#    server, a real accepted socket, a REAL peer Close recorded by the real
+#    parser (ws_peer_closed + the peer's 1000/"seeya"), then the REAL
+#    on_write_error handler start() registered is fired with an EPIPE-like errno.
+#    _initiate_ws_h1_transport_close is stubbed to a no-op for this case so the
+#    server's clean close does not win the race first -- modelling exactly the
+#    close whose write fails. Nothing here is a mock asserting itself: the
+#    preservation logic (_ws_peer_close_pair -> _set_ws_close) runs for real and
+#    is what the assertions read.
 # =============================================================================
-subtest 'peer Close then deadline expiry -> abnormal but peer code/reason preserved' => sub {
+subtest 'peer Close then a write_error during close -> abnormal but peer code/reason preserved' => sub {
+    no warnings 'redefine';
+    # Hold the transport open on the peer Close so the injected write_error is
+    # the first terminal (models the server's close-write failing).
+    local *PAGI::Server::Connection::_initiate_ws_h1_transport_close = sub { };
+
     my ($app, $obs, $park) = build_app(park => 1);
-    my $server = start_server($app, ws_close_timeout => 0.4);
+    my $server = start_server($app, ws_close_timeout => 30);
     my $sock   = connect_client($server->port);
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
     ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked');
 
-    # Peer sends a valid Close (1000/"seeya") but holds the transport open.
+    # Peer sends a valid Close (1000/"seeya"): the real parser records it.
     syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'seeya'));
-    pump_turns(20);   # process the peer Close; transport stays open
-    ok(!$obs->{complete}, 'not clean -- transport never closed');
+    my ($conn) = values %{$server->{connections}};
+    ok($conn, 'the connection is registered');
+    ok(pump_until(sub { $conn->{ws_peer_closed} }, 5),
+        'the real parser recorded the peer Close (ws_peer_closed)');
+    ok(!$obs->{complete}, 'not clean -- the server-owned close is held open for this fault');
+    ok($conn->{stream}->can_event('on_write_error'),
+        'start() registered the real on_write_error handler');
 
-    # The deadline then expires: abnormal, but the peer values stand.
-    ok(pump_until(sub { $obs->{disconnect} }, 5), 'on_disconnect fired at the deadline');
-    is($obs->{disconnect_reason}, 'close_timeout', 'reason is close_timeout (abnormal)');
-    is($obs->{disconnect_code}, 1000, 'close_code preserved from the peer Close');
+    # Fire the REAL registered write-error handler with an EPIPE-like errno.
+    $conn->{stream}->invoke_event('on_write_error', 32);
+
+    ok(pump_until(sub { $obs->{disconnect} }, 5), 'on_disconnect fired on the write_error');
+    is($obs->{disconnect_reason}, 'write_error', 'reason is write_error (a REAL abnormal end)');
+    is($obs->{disconnect_code}, 1000, 'close_code preserved from the peer Close (not 1006)');
     is($obs->{disconnect_creason}, 'seeya', 'close_reason preserved from the peer Close');
     ok(!$obs->{complete}, 'on_complete did NOT fire');
     $park->done unless $park->is_ready;
