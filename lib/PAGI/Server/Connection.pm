@@ -312,6 +312,7 @@ sub new {
         ws_closing          => 0,      # True once the scope is waiting for the peer to complete the closing handshake
         ws_close_deadline   => undef,  # The single finite deadline governing that wait
         ws_disconnect_delivered => 0,  # True once the closing phase has delivered the scope's single websocket.disconnect (suppresses a re-queue at transport close)
+        _ws_closing_finished => 0,     # True once the closing-phase resolution has run the deferred access log + request accounting (runs them exactly once)
         # HTTP/2 state
         alpn_protocol     => $args{alpn_protocol},    # ALPN-negotiated protocol (e.g. 'h2', 'http/1.1')
         h2_protocol       => $args{h2_protocol},      # PAGI::Server::Protocol::HTTP2 instance
@@ -7591,7 +7592,14 @@ async sub _handle_websocket_request {
         # close_timeout on the deadline, transport-loss on a drop) is decided in
         # _resolve_h1_ws_closing, NOT here at app-return. Leave the transport
         # open and let that resolution -- and the access log it writes -- run.
-        return if $self->{ws_closing} && !$self->{closed};
+        # Return for ANY ws_closing scope: arm-before-cancel guarantees a live
+        # deadline whenever ws_closing is set, so the resolution path always runs
+        # independently. Were this gated on !closed, a resolution that already
+        # completed (deadline / peer Close + transport closure / transport drop)
+        # while the handler was still parked would let the tail run the access
+        # log and request accounting a SECOND time when the handler finally
+        # returns (duplicate access-log line, max_requests over-count).
+        return if $self->{ws_closing};
 
         # Write access log entry (logs at connection close with total duration)
         $self->_write_access_log;

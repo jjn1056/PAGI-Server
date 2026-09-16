@@ -61,7 +61,7 @@ sub start_server {
         host             => '127.0.0.1',
         port             => 0,
         quiet            => 1,
-        access_log       => undef,
+        access_log       => (exists $opt{access_log} ? $opt{access_log} : undef),
         shutdown_timeout => 1,
         (exists $opt{ws_close_timeout} ? (ws_close_timeout => $opt{ws_close_timeout}) : ()),
         ($opt{logger} ? (logger => $opt{logger}) : ()),
@@ -385,6 +385,40 @@ subtest 'normal close path never trips the closing-phase guard' => sub {
     ok(!scalar(grep { /bounded-wait invariant|without a live close deadline/ } @logs),
         'no pending-without-deadline guard was tripped on the normal path');
     $park->done unless $park->is_ready;
+    shutdown_server($server);
+};
+
+# =============================================================================
+# 9. Resolution BEFORE app-return: the closing resolution (here the deadline)
+#    runs the access log + request accounting and closes the transport while the
+#    handler is still parked; when the handler THEN returns, the app-return tail
+#    must NOT run them a second time. Asserts exactly ONE access-log record.
+#    Regression for the `ws_closing && !closed` tail guard double-executing.
+# =============================================================================
+subtest 'resolution before app-return logs the access record exactly once' => sub {
+    my $access = '';
+    open(my $afh, '>', \$access) or die "cannot open in-memory access log: $!";
+    my ($app, $obs, $park) = build_app(park => 1);
+    my $server = start_server($app, ws_close_timeout => 0.3, access_log => $afh);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{parked} }, 5), 'app sent close and parked');
+
+    # The deadline resolves FIRST -- while the handler is still parked. The
+    # resolution writes the access log and closes the transport (closed=1),
+    # with ws_closing still set.
+    ok(pump_until(sub { $obs->{disconnect} }, 5), 'resolved at the deadline before the app returned');
+    ok(!$obs->{app_returned}, 'the handler had not returned yet');
+
+    # NOW let the handler return: the tail runs with ws_closing=1 AND closed=1,
+    # exactly the state the buggy `ws_closing && !closed` guard let through.
+    $park->done unless $park->is_ready;
+    ok(pump_until(sub { $obs->{app_returned} }, 5), 'handler returned after resolution');
+    pump_turns(10);
+
+    my @records = ($access =~ /"GET /g);
+    is(scalar(@records), 1, 'exactly ONE access-log record for the connection (no duplicate)');
+    close($sock);
     shutdown_server($server);
 };
 
