@@ -48,7 +48,9 @@ BEGIN {
 #                      call reports that end with no reason (Www.pod
 #                      "Receiving after the scope's end")
 #               acc  - app accepted the WebSocket, parked, client drops
-#               peer - app accepted the WebSocket, peer sent a Close frame
+#               peer - app accepted the WebSocket, peer completed the closing
+#                      handshake (its Close frame WITH END_STREAM: on h2 a clean
+#                      end needs full stream closure, RFC 8441 §5)
 #               rsv1 - app accepted the WebSocket, peer sent a frame with
 #                      RSV1 set (a server-detected protocol violation)
 #   drops:      close (socket EOF)   rst (h2 only: RST_STREAM CANCEL)
@@ -234,7 +236,13 @@ sub run_h2 {
     $r{wire_before_drop} = (join(';', map { "$_=$headers{$_}" } sort keys %headers) || 'none') . " data='$data'";
     if    ($drop eq 'rst')  { $client->submit_rst_stream($sid, 8); $sock_b->syswrite($client->mem_send) }
     elsif ($drop eq 'close'){ close $sock_b }
-    elsif ($drop eq 'peer') { $client->submit_data($sid, peer_close_frame(), 0); $sock_b->syswrite($client->mem_send) }
+    # The peer's Close carries END_STREAM: an h2 clean end is a COMPLETED closing
+    # handshake AND full stream closure -- the client's END_STREAM too (RFC 8441
+    # §5, WS-CLOSE-TRUTH-3), which _h2_on_close settles. The Close frame alone (no
+    # END_STREAM) leaves the stream half-open, an unresolved close, NOT clean; the
+    # h1 twin reaches clean differently (the server drives the TCP close), the same
+    # per-transport asymmetry the parity clean row encodes.
+    elsif ($drop eq 'peer') { $client->submit_data($sid, peer_close_frame(), 1); $sock_b->syswrite($client->mem_send) }
     elsif ($drop eq 'rsv1') { $client->submit_data($sid, rsv1_frame(), 0); $sock_b->syswrite($client->mem_send) }
     # 'none': the client stays put; the app is the only thing that ends the scope.
     pump_until(sub { $r{app_done} }, sub { $loop->loop_once(0.05) }, 120);

@@ -451,19 +451,87 @@ subtest 'transport-loss/1006: app close, transport/stream drops with no peer Clo
     is(parity_key($r1), parity_key($r2), 'h1/h2 parity: transport-loss/1006');
 };
 
-# TODO(WS-CLOSE-TRUTH-3, corrective Task 2): cross-transport peer-preserved (cat
-# 4) parity is coherent only once h2 migrates to server-owned closure. Under
-# server-owned closure a validated peer Close DISPOSES the deadline and the
-# server closes the transport, so migrated-h1 can no longer produce
-# close_timeout-after-a-peer-Close (it goes clean); un-migrated h2 still expires
-# its deadline to close_timeout, so the two transports cannot agree yet. h1's
-# own cat-4 preservation (peer Close + a real write_error -> peer code/reason
-# preserved) is covered in t/ws-close-deadline-h1.t. Corrective Task 2 migrates
-# h2 and re-enables this row (both transports abnormal via the same real event,
-# peer code/reason preserved). Skipped, NOT deleted, so the row's intent stays
-# visible and the Task 1 suite is green.
+# peer-preserved (cat 4): a VALIDATED peer Close is observed, THEN a real
+# abnormal event ends the scope -- and the peer's own code/reason survive, never
+# overwritten by the abnormal-closure 1006. Under server-owned closure
+# (WS-CLOSE-TRUTH-3) a validated peer Close DISPOSES the close deadline on both
+# transports, so the abnormal end here comes from a genuine fault after the
+# Close, not from close_timeout:
+#   h1: the peer Close lands, then a REAL write_error faults the server's
+#       transport close (the server-owned close is held open so the injected
+#       fault is the first terminal) -> write_error, peer code/reason preserved
+#       (the mechanism t/ws-close-deadline-h1.t case 7 drives directly).
+#   h2: the peer's valid Close lands WITHOUT its END_STREAM (which disposes the
+#       deadline), then a REAL RST_STREAM(INTERNAL_ERROR) resets the still-open
+#       stream -> client_closed, peer code/reason preserved.
+# Both are the transport_loss category (the token is transport-specific, so
+# parity is at the category level), with the peer's own close_code/close_reason
+# identical across transports. (Re-enabled in corrective Task 2, which migrated
+# h2 to server-owned closure so this cross-transport row is finally coherent.)
 subtest 'peer-preserved (cat 4): abnormal but the peer code/reason survive' => sub {
-    skip_all 'coherent only once h2 migrates to server-owned closure (corrective Task 2); re-enable there';
+    no warnings 'redefine';
+    # Hold the h1 server-owned transport close open so the injected write_error
+    # is the first terminal (models the server's close-write failing). Harmless
+    # to the h2 half, which never calls this h1-only sub.
+    local *PAGI::Server::Connection::_initiate_ws_h1_transport_close = sub { };
+
+    # --- h1: peer Close(1001,'later'), then a real write_error during close ---
+    my $h1 = do {
+        my %obs;
+        my $park = $loop->new_future;
+        my $app  = build_app(\%obs, $park, send_close => 1, park => 1);
+        my $server = h1_start($app, ws_close_timeout => 30);
+        my $sock = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1', PeerPort => $server->port,
+            Proto => 'tcp', Timeout => 2,
+        ) or die "connect: $!";
+        $sock->blocking(0);
+        h1_upgrade($sock);
+        h1_pump_until(sub { $obs{sent} }, 5);
+        syswrite($sock, h1_frame(8, pack('n', 1001) . 'later'));
+        my ($conn) = values %{$server->{connections}};
+        h1_pump_until(sub { $conn && $conn->{ws_peer_closed} }, 5);
+        $conn->{stream}->invoke_event('on_write_error', 32) if $conn;   # EPIPE-like
+        h1_pump_until(sub { $obs{complete} || $obs{disconnect} }, 6);
+        my $r = normalize(\%obs);
+        $park->done unless $park->is_ready;
+        close($sock);
+        eval { $server->shutdown->get };
+        eval { $loop->remove($server) };
+        $r;
+    };
+
+    # --- h2: peer Close(1001,'later') no END_STREAM, then RST_STREAM(INTERNAL) ---
+    my $h2 = do {
+        my %obs;
+        my $park = $loop->new_future;
+        my $app  = build_app(\%obs, $park, send_close => 1, park => 1);
+        my ($conn, $stream_io, $sock, $server) =
+            h2_connection(app => $app, ws_close_timeout => 30);
+        my $client = h2_client();
+        h2_handshake($client, $sock);
+        my $sid = h2_open_ws($client, $sock);
+        h2_pump_until($client, $sock, sub { $obs{sent} });
+        h2_send_data($client, $sock, $sid, h2_close_frame(1001, 'later'), 0);
+        my $ss = $conn->{h2_streams}{$sid};
+        h2_pump_until($client, $sock, sub { $ss && $ss->{ws_peer_closed} });
+        $client->submit_rst_stream($sid, 2);   # INTERNAL_ERROR: a real abnormal reset
+        { my $out = $client->mem_send; $sock->syswrite($out) if length $out; }
+        h2_pump_until($client, $sock, sub { $obs{complete} || $obs{disconnect} });
+        my $r = normalize(\%obs);
+        $park->done unless $park->is_ready;
+        eval { $stream_io->close_now };
+        eval { $loop->remove($server) };
+        $r;
+    };
+
+    is($h1->{category}, 'transport_loss', 'h1 cat-4 is abnormal (transport_loss category)');
+    is($h2->{category}, 'transport_loss', 'h2 cat-4 is abnormal (transport_loss category)');
+    is($h1->{code},    1001,    'h1 preserves the peer close_code (never 1006)');
+    is($h1->{creason}, 'later', 'h1 preserves the peer close_reason');
+    is($h2->{code},    1001,    'h2 preserves the peer close_code (never 1006)');
+    is($h2->{creason}, 'later', 'h2 preserves the peer close_reason');
+    is(parity_key($h1), parity_key($h2), 'h1/h2 parity: peer-preserved (cat 4)');
 };
 
 subtest 'server_error/1011: app walks away from an accepted socket' => sub {

@@ -486,19 +486,29 @@ subtest 'app returns without a Close -> server_error (unchanged)' => sub {
 };
 
 # ============================================================
-# 7. valid peer Close observed, then the deadline expires (peer never sent its
-#    END_STREAM) -> abnormal close_timeout, but the peer code/reason PRESERVED
-#    (category 4).
+# 7. STAGED (app-initiated): the peer answers with a valid Close but WITHHOLDS
+#    its END_STREAM. Per WS-CLOSE-TRUTH-3 a validated peer Close DISARMS the
+#    close deadline (close_timeout is reachable only for a genuinely SILENT
+#    peer -- a peer that sent a Close is not silent), and the CLEAN end is marked
+#    only at FULL stream closure: the client's END_STREAM too (RFC 8441 5,
+#    orderly closure = END_STREAM each direction). So, in observable stages:
+#      (a) after the Close WITHOUT END_STREAM the deadline is DISPOSED and NO
+#          terminal has fired -- the scope is PENDING, not close_timeout;
+#      (b) the client's END_STREAM then completes it CLEAN exactly once, the
+#          peer's own code/reason preserved.
+#    Do NOT send Close+END_STREAM together -- that cannot prove the ordering.
+#    (Was: "peer Close then deadline -> close_timeout / peer code preserved",
+#    retired by WS-CLOSE-TRUTH-3; a peer that answered is not silent, so its
+#    withheld END_STREAM is an UNRESOLVED half-closed case, never close_timeout.)
 # ============================================================
-subtest 'peer Close then deadline -> close_timeout, peer code/reason preserved' => sub {
+subtest 'app close, peer Close WITHOUT END_STREAM -> deadline disarmed, clean only at END_STREAM' => sub {
     my %obs;
     my $park = $loop->new_future;
-    my $app  = app_initiated_close(\%obs, $park, park => 1);
-    # A deadline long enough to survive the stream setup, so the peer's Close
-    # lands (ws_peer_closed) BEFORE the deadline; the deadline then governs the
-    # still-open stream (the peer never sent its END_STREAM).
+    my $app  = app_initiated_close(\%obs, $park, code => 1000, reason => 'bye', park => 1);
+    # A short deadline: were it NOT disarmed on the peer Close, it would misfire
+    # close_timeout within the pump window below -- exactly the bug this pins.
     my ($conn, $stream_io, $client_sock, $server) =
-        create_h2_connection(app => $app, ws_close_timeout => 1);
+        create_h2_connection(app => $app, ws_close_timeout => 0.3);
     my $client = create_client();
 
     complete_h2_handshake($client, $client_sock);
@@ -506,16 +516,35 @@ subtest 'peer Close then deadline -> close_timeout, peer code/reason preserved' 
     ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{closed_sent} }),
         'app sent its close and parked');
 
-    # Peer sends its Close frame but NOT END_STREAM: the handshake frame is seen
-    # (ws_peer_closed) but the stream never closes, so the deadline governs.
-    send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'peerbye'), 0);
+    my $ss = $conn->{h2_streams}{$sid};
+    ok($ss, 'the closing-phase stream is live');
+    ok($ss->{ws_close_deadline} && $ss->{ws_close_deadline}->is_running,
+        'the per-stream close deadline is armed while the peer is silent');
 
-    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{disconnect} }, 80),
-        'on_disconnect fired on deadline expiry');
-    is($obs{'/ws'}{disconnect_reason}, 'close_timeout', 'reason is close_timeout (abnormal)');
-    is($obs{'/ws'}{code},   1000,      'close_code is the peer code, PRESERVED');
-    is($obs{'/ws'}{reason}, 'peerbye', 'close_reason is the peer text, PRESERVED');
-    ok(!$obs{'/ws'}{complete}, 'on_complete did NOT fire');
+    # STAGE (a): peer sends its valid Close frame but NOT END_STREAM.
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'peerbye'), 0);
+    ok(pump_until($client, $client_sock, sub { $ss->{ws_peer_closed} }),
+        'the server recorded the peer Close (ws_peer_closed)');
+
+    # The deadline is DISPOSED the instant the peer answers (dequeued + stopped),
+    # so pumping well past its 0.3s expiry can never produce close_timeout.
+    ok(!$ss->{ws_close_deadline},
+        'the close deadline was disposed on the peer Close (dequeued)');
+    pump_rounds($client, $client_sock, 12);   # well over 0.3s of loop time
+    ok(!$obs{'/ws'}{complete},
+        'NOT clean yet -- the client has not sent its END_STREAM (RFC 8441 5)');
+    ok(!$obs{'/ws'}{disconnect},
+        'NOT close_timeout / abnormal -- the peer answered, the scope is PENDING');
+
+    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN.
+    send_stream_data($client, $client_sock, $sid, '', 1);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{complete} }),
+        'on_complete fired once the client completed the stream closure');
+    is($obs{'/ws'}{complete}, 1, 'on_complete fired exactly once');
+    is($obs{'/ws'}{code},   1000,      'close_code is the peer code, preserved');
+    is($obs{'/ws'}{reason}, 'peerbye', 'close_reason is the peer text, preserved');
+    is($obs{'/ws'}{complete_reason}, undef, 'disconnect_reason undef -- a clean end');
+    ok(!$obs{'/ws'}{disconnect}, 'on_disconnect did NOT fire (clean end)');
 
     $park->done unless $park->is_ready;
     eval { $stream_io->close_now };

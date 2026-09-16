@@ -1359,6 +1359,16 @@ sub _h2_on_close {
         # peer Close, or a reset), never the server's own code.
         $cs->_set_ws_close($self->_ws_peer_close_pair($stream))
             if $stream->{is_websocket};
+        # _h2_on_close runs only at FULL stream closure -- nghttp2 has seen
+        # END_STREAM from BOTH directions (the server's, queued with its Close,
+        # and the client's), or a reset. So the clean WebSocket end is settled
+        # HERE and only here: _h2_ws_clean_end's ws_peer_closed conjunct means a
+        # validated peer Close, and the zero error code means the client closed
+        # its half with END_STREAM rather than a reset -- together the completed
+        # handshake AND the full stream closure RFC 8441 5 requires. The dispatch
+        # tail defers to this owner for both initiators (see its ws_closing ||
+        # ws_peer_closed guard) so a completed handshake is never marked clean at
+        # the peer's Close frame, before the client's END_STREAM.
         my $clean = $stream->{is_websocket}
                   ? _h2_ws_clean_end($stream)
                   : PAGI::Server::EventValidator::scope_send_clean(
@@ -1615,16 +1625,24 @@ sub _h2_dispatch_stream {
                         # refusal case first).
                         my $seq_now = $stream_state->{seq_state};
                         my $kind    = $stream_state->{is_websocket} ? 'websocket' : 'sse';
-                        if ($stream_state->{is_websocket} && $stream_state->{ws_closing}) {
-                            # The app sent websocket.close and this scope is now in
-                            # the app-initiated closing phase: it is legitimately
-                            # PENDING under the close deadline, waiting for the peer
-                            # to complete the handshake. It did NOT walk away, so it
-                            # must not be routed to the incomplete-scope
-                            # (1011/server_error) path, and its terminal outcome is
-                            # decided by the resolution paths (the peer's Close, the
-                            # deadline, or a transport loss) -- not here. The h2 twin
-                            # of the h1 tail's `return if ws_closing`. An exception
+                        if ($stream_state->{is_websocket}
+                                && ($stream_state->{ws_closing} || $stream_state->{ws_peer_closed})) {
+                            # This scope is in a WebSocket closing handshake -- the
+                            # app sent websocket.close (ws_closing, app-initiated) OR
+                            # the peer sent its Close and the server queued the
+                            # reciprocal one (ws_peer_closed, peer-initiated). Either
+                            # way the CLEAN end is marked only at FULL stream closure
+                            # (the client's END_STREAM too, RFC 8441 5; the server's
+                            # own END_STREAM ends only the server's direction), which
+                            # _h2_on_close settles. So this scope is legitimately
+                            # PENDING, not walked-away: it must NOT be routed to the
+                            # incomplete-scope (1011/server_error) path, and it must
+                            # NOT be marked complete HERE -- doing so at the peer's
+                            # Close frame, before the client's END_STREAM, would mark
+                            # clean prematurely. The app-return tail is only a
+                            # backstop; the single settlement owner is _h2_on_close.
+                            # The h2 twin of the h1 tail's
+                            # `return if ws_closing || ws_peer_closed`. An exception
                             # thrown after the close is still surfaced, never
                             # swallowed, exactly as the clean branch below does.
                             $self->_log(error => 'PAGI application error after '
@@ -3973,6 +3991,17 @@ sub _h2_process_ws_frames {
             # _h2_dispatch_stream's post-await check before this line would
             # otherwise have run.
             $stream->{ws_peer_closed} = 1;
+
+            # App-initiated only: a close deadline was armed waiting for exactly
+            # this peer Close. Dispose it the instant the peer answers so a slow
+            # or withheld client END_STREAM cannot let it misfire close_timeout
+            # after the peer already replied (WS-CLOSE-TRUTH-3: close_timeout is
+            # reachable only for a genuinely SILENT peer, and a peer that sent a
+            # Close is not silent). Peer-initiated close armed no deadline -- there
+            # was nothing to wait for. The h1 twin is the parser's ws_closing
+            # branch (_dispose_ws_close_deadline on the validated peer Close).
+            $self->_dispose_ws_close_deadline($stream)
+                if $stream->{ws_closing} && $stream->{ws_close_deadline};
 
             # Peer's Close frame: its own code (1005 default when the frame
             # carried none) and reason text (Www.pod "Disconnect - receive event").
