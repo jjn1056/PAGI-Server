@@ -41,7 +41,7 @@ use Future;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
-use Socket qw(AF_UNIX SOCK_STREAM);
+use Socket qw(AF_UNIX SOCK_STREAM SO_RCVBUF);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -99,6 +99,19 @@ sub build_app {
             $obs->{d_creason} = $c->close_reason;
         });
 
+        if ($o{prime_bytes}) {
+            # Fill the server's write queue past the socket buffers with many
+            # sub-cap frames, so a peer that stops reading leaves the later
+            # server-owned close (close_when_empty) unable to finish -- the
+            # transport-finish stall the close_incomplete row exercises. The
+            # test server raises write_high_watermark so these are not
+            # backpressured.
+            my $chunk = 'x' x 60000;
+            my $n = int($o{prime_bytes} / 60000) + 1;
+            for my $i (1 .. $n) {
+                await $send->({ type => 'websocket.send', bytes => $chunk });
+            }
+        }
         if ($o{send_close}) {
             await $send->({ type => 'websocket.close', code => 1000, reason => 'bye' });
             $obs->{sent} = 1;
@@ -115,8 +128,9 @@ sub category {
     my ($terminal, $reason) = @_;
     return 'clean' if $terminal eq 'complete';
     $reason //= '';
-    return 'close_timeout'  if $reason eq 'close_timeout';
-    return 'server_error'   if $reason eq 'server_error';
+    return 'close_timeout'    if $reason eq 'close_timeout';
+    return 'close_incomplete' if $reason eq 'close_incomplete';
+    return 'server_error'     if $reason eq 'server_error';
     return 'transport_loss' if $reason =~ /^(?:client_closed|read_error|write_error)$/;
     return "other:$reason";
 }
@@ -182,6 +196,7 @@ sub h1_start {
         access_log       => undef,
         logger           => $capture_logger,
         (exists $opt{ws_close_timeout} ? (ws_close_timeout => $opt{ws_close_timeout}) : ()),
+        (exists $opt{write_high_watermark} ? (write_high_watermark => $opt{write_high_watermark}) : ()),
     );
     $loop->add($server);
     $server->listen->get;
@@ -430,6 +445,50 @@ subtest 'close_timeout/1006: app close, peer silent, deadline expires' => sub {
     is($r1->{code}, 1006, 'h1 close_code 1006');
     is($r1->{creason}, undef, 'h1 close_reason undef');
     is(parity_key($r1), parity_key($r2), 'h1/h2 parity: close_timeout/1006');
+};
+
+# close_incomplete/1006: the closing handshake COMPLETES -- the peer answers its
+# Close -- but the peer then stops reading, so the server-owned transport close
+# can never finish draining. The finish bound ends the scope close_incomplete /
+# 1006 (Www.pod "Standard Disconnect Reasons"; RFC 6455 7.1.5; WS-CLOSE-TRUTH-4).
+# DISTINCT from close_timeout, where a Close was sent and the peer's Close never
+# arrived: here the peer DID answer, but the transport-level close did not
+# finish. h1 only for now -- the h2 per-stream finish bound lands in Task 3, at
+# which point this row runs on BOTH transports and the cross-transport parity
+# assertion is enabled (mirrors the peer-preserved row's staging in corrective
+# Task 1).
+subtest 'close_incomplete/1006: handshake completes, transport never finishes (h1)' => sub {
+    my %obs;
+    my $park = $loop->new_future;
+    my $app  = build_app(\%obs, $park,
+        send_close  => 1, park => 1,
+        prime_bytes => 4 * 1024 * 1024);
+    my $server = h1_start($app,
+        ws_close_timeout     => 0.5,
+        write_high_watermark => 64 * 1024 * 1024);
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp', Timeout => 2,
+    ) or die "connect: $!";
+    $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
+    $sock->blocking(0);
+    h1_upgrade($sock);
+    h1_pump_until(sub { $obs{sent} }, 6);
+
+    # The peer answers with its Close and then only leaves TCP open WITHOUT
+    # reading: the server owns the transport close, but its queued bytes cannot
+    # drain, so the finish bound is the terminal.
+    syswrite($sock, h1_frame(8, pack('n', 1000) . 'bye'));
+    h1_pump_until(sub { $obs{complete} || $obs{disconnect} }, 6);
+
+    my $r = normalize(\%obs);
+    is($r->{category}, 'close_incomplete', 'h1 close_incomplete');
+    is($r->{code},    1006,  'h1 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
+    is($r->{creason}, undef, 'h1 close_reason undef at 1006');
+
+    $park->done unless $park->is_ready;
+    close($sock);
+    eval { $server->shutdown->get };
+    eval { $loop->remove($server) };
 };
 
 subtest 'transport-loss/1006: app close, transport/stream drops with no peer Close' => sub {

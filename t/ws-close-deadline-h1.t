@@ -33,6 +33,7 @@ use Future;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
+use Socket qw(SOL_SOCKET SO_SNDBUF SO_RCVBUF);
 
 use PAGI::Server;
 
@@ -70,6 +71,7 @@ sub start_server {
         access_log       => (exists $opt{access_log} ? $opt{access_log} : undef),
         shutdown_timeout => 1,
         (exists $opt{ws_close_timeout} ? (ws_close_timeout => $opt{ws_close_timeout}) : ()),
+        (exists $opt{write_high_watermark} ? (write_high_watermark => $opt{write_high_watermark}) : ()),
         ($opt{logger} ? (logger => $opt{logger}) : ()),
         # An explicit log_level wins over quiet (PAGI::Server config), so a case
         # that wants to observe the close_timeout warn line can lower the
@@ -153,6 +155,13 @@ sub ws_upgrade {
 #   recv_after  => bool               after the close, do one receive() (drains
 #                                     the peer's websocket.disconnect) then return
 #   park        => bool               after the close, park forever (never return)
+#   prime_bytes => int                before the close, send one binary message
+#                                     of this size, so the server's write buffer
+#                                     is non-empty when the closing handshake
+#                                     completes (a peer that stops reading then
+#                                     leaves close_when_empty pending forever --
+#                                     the transport-finish stall the finish bound
+#                                     governs). Www.pod close_incomplete.
 # Records terminal observations at the instant each notification fires.
 sub build_app {
     my (%o) = @_;
@@ -183,6 +192,19 @@ sub build_app {
         });
         $conn->on_end(sub { $obs{end}++ });
         $conn->end_future->on_ready(sub { $obs{end_future}++ });
+
+        if ($o{prime_bytes}) {
+            # Fill the server's write queue past the socket buffers with many
+            # sub-cap frames (each under Protocol::WebSocket::Frame's payload
+            # cap). The test server raises write_high_watermark so these sends
+            # are not backpressured; a peer that never reads leaves them
+            # undrained, so the later close_when_empty can never finish.
+            my $chunk = 'x' x 60000;
+            my $n = int($o{prime_bytes} / 60000) + 1;
+            for my $i (1 .. $n) {
+                await $send->({ type => 'websocket.send', bytes => $chunk });
+            }
+        }
 
         if ($o{send_close}) {
             await $send->({ type => 'websocket.close', code => 1000, reason => 'bye' });
@@ -589,6 +611,102 @@ subtest 'close_timeout resolution emits a structured observability log line' => 
     is(scalar(@hits), 1, 'exactly one structured close_timeout log line was emitted');
     like($hits[0], qr/1006/, 'the line records the abnormal close_code 1006');
     like($hits[0], qr/0\.3/, 'the line records the ws_close_timeout bound that elapsed');
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+# =============================================================================
+# 12/13. THE FINISH-BOUND REGRESSIONS (close_incomplete). The closing handshake
+#     COMPLETES -- the peer answers (app-initiated) or initiates (peer-initiated)
+#     its Close -- and the server owns the transport close (RFC 6455 7.1.1). But
+#     the peer then refuses to read, so the server-owned close (close_when_empty)
+#     can never finish draining and the scope was left waiting forever (h1
+#     INFO-2). Now a finite finish bound (ws_close_timeout) ends the scope
+#     abnormally with `close_incomplete` / close_code 1006 (Www.pod "Standard
+#     Disconnect Reasons"; RFC 6455 7.1.5) -- DISTINCT from close_timeout (a
+#     silent peer): here the peer DID answer. WS-CLOSE-TRUTH-4. RED on base
+#     (no finish bound -> the scope hangs, no terminal fires).
+# =============================================================================
+
+# Build a WebSocket whose closing handshake COMPLETES but whose transport can
+# never finish closing: the app primes a large message the peer refuses to read,
+# then the handshake completes (app-initiated when send_close, else
+# peer-initiated), leaving close_when_empty pending. Sends the peer's Close and
+# returns the live pieces so the caller can assert the bound and the terminal.
+sub stuck_closing_connection {
+    my (%o) = @_;
+    my @logs;
+    my ($app, $obs, $park) = build_app(
+        prime_bytes => (4 * 1024 * 1024),   # exceeds any default socket buffer
+        send_close  => $o{send_close},
+        park        => 1,
+    );
+    my $server = start_server($app,
+        ws_close_timeout     => $o{ws_close_timeout},
+        write_high_watermark => 64 * 1024 * 1024,   # never backpressure the prime
+        log_level            => 'info',
+        logger               => sub { push @logs, $_[0]->{message} // '' });
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+
+    # The app primed the large message (and, for app-initiated, sent its Close)
+    # and is now parked. The prime is stuck in the server's write queue.
+    ok(pump_until(sub { $obs->{parked} }, 5), 'app primed the buffer and parked');
+    my ($conn) = values %{$server->{connections}};
+    ok($conn, 'the connection is registered with the server');
+    ok($conn->_get_write_buffer_size > 0,
+        'the primed message is stuck in the write queue (the peer is not reading)');
+
+    # The peer answers (app-initiated) or initiates (peer-initiated) its Close,
+    # completing the closing handshake -- but it never reads, so the
+    # server-owned transport close cannot finish draining.
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'peerbye'));
+    return ($obs, $conn, \@logs, $sock, $server, $park);
+}
+
+# The completed handshake is NOT a clean end (the transport has not finished):
+# the scope waits under the finish bound and then resolves close_incomplete/1006.
+sub assert_bounded_close_incomplete {
+    my ($obs, $conn, $logs, $label) = @_;
+
+    ok(pump_until(sub { $conn->{ws_close_deadline} && $conn->{ws_close_deadline}->is_running }, 3),
+        "$label: the finish bound is armed and live after the handshake completed");
+    ok(!$obs->{complete} && !$obs->{disconnect},
+        "$label: no terminal yet -- the completed handshake alone is not a clean end");
+
+    ok(pump_until(sub { $obs->{disconnect} }, 5),
+        "$label: the finish bound resolved the scope");
+    is($obs->{disconnect_reason}, 'close_incomplete',
+        "$label: reason is close_incomplete (the peer answered; the transport never finished)");
+    isnt($obs->{disconnect_reason}, 'close_timeout',
+        "$label: specifically NOT close_timeout");
+    is($obs->{disconnect_code}, 1006, "$label: close_code is 1006 (RFC 6455 7.1.5)");
+    is($obs->{disconnect_creason}, undef, "$label: close_reason is undef at 1006");
+    is($obs->{disconnect}, 1, "$label: on_disconnect fired exactly once");
+    is($obs->{end}, 1, "$label: on_end fired exactly once");
+    ok($obs->{end_future}, "$label: end_future resolved");
+    ok(!$obs->{complete}, "$label: on_complete did NOT fire");
+
+    my @hits = grep { /close_incomplete/ && /finish bound/i } @$logs;
+    is(scalar(@hits), 1, "$label: exactly one structured close_incomplete log line");
+    like($hits[0], qr/1006/, "$label: the line records the abnormal close_code 1006");
+}
+
+subtest 'app close, peer answers, transport never finishes -> close_incomplete/1006' => sub {
+    my ($obs, $conn, $logs, $sock, $server, $park) =
+        stuck_closing_connection(send_close => 1, ws_close_timeout => 0.5);
+    assert_bounded_close_incomplete($obs, $conn, $logs, 'app-initiated');
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'peer close, server reciprocates, transport never finishes -> close_incomplete/1006' => sub {
+    my ($obs, $conn, $logs, $sock, $server, $park) =
+        stuck_closing_connection(send_close => 0, ws_close_timeout => 0.5);
+    assert_bounded_close_incomplete($obs, $conn, $logs, 'peer-initiated');
     $park->done unless $park->is_ready;
     close($sock);
     shutdown_server($server);

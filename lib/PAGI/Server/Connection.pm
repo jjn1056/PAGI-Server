@@ -5030,7 +5030,64 @@ sub _h1_transport_closed {
 sub _initiate_ws_h1_transport_close {
     my ($self) = @_;
     return if $self->{closed} || $self->{_cleanup_done};
+
+    # Bound the FINISH of the close. The closing handshake is complete and the
+    # server now owns the transport close, but the transport itself may never
+    # finish closing -- a peer that answered its Close and then stopped reading
+    # leaves close_when_empty pending forever (h1 INFO-2). Arm one finite finish
+    # bound (ws_close_timeout) BEFORE initiating the close, so a stuck finish
+    # ends the scope abnormally with close_incomplete / 1006 instead of hanging
+    # (WS-CLOSE-TRUTH-4). The cooperative close finishes well within the bound
+    # and disposes it (the terminal path's _dispose_ws_close_deadline). Distinct
+    # from close_timeout (a silent peer, armed at the send): here the peer
+    # answered, so the abnormal reason is close_incomplete, not close_timeout.
+    $self->_arm_ws_h1_finish_bound;
+
     $self->{stream}->close_when_empty if $self->{stream};
+    return;
+}
+
+# Arm the h1 close-FINISH bound: one finite deadline (ws_close_timeout) that
+# governs the wait for the server-owned transport close to actually finish, on
+# BOTH initiators (the peer-Close parser reaches here for each). Reuses the
+# deadline machinery's on_deadline seam; the finish bound lives in the same
+# ws_close_deadline slot the terminal path disposes, so a clean transport
+# closure disarms it automatically. On expiry the transport never finished:
+# force-close and end the scope abnormally with close_incomplete / 1006 (Www.pod
+# "Standard Disconnect Reasons"; RFC 6455 7.1.5) -- NOT close_timeout.
+sub _arm_ws_h1_finish_bound {
+    my ($self) = @_;
+
+    # One bound per scope. The app-initiated close deadline was disposed on the
+    # peer's Close before this runs; guard against a double arm regardless.
+    return if $self->{ws_close_deadline};
+
+    # ARM before cancelling any surviving activity timer (the bounded-wait
+    # invariant): a peer-initiated close never entered the closing phase, so its
+    # idle/keepalive timers may still be live and could otherwise short-circuit
+    # the finish-wait with the wrong reason.
+    $self->{ws_close_deadline} = $self->_arm_ws_close_deadline($self, sub {
+        my ($conn, $scope) = @_;
+        # The bound elapsed with the transport still not closed. One structured
+        # warn line marks the new abnormal-close population for an SRE dashboard,
+        # mirroring the close_timeout sibling; warn stays silent at the
+        # default/quiet threshold.
+        $conn->_log(warn => "WebSocket close-finish bound expired "
+            . "(close_incomplete, $conn->{ws_close_timeout}s) - force-closing the "
+            . "transport, ending scope abnormally with close_code 1006")
+            if $conn->{server} && $conn->{server}->can('_log');
+        $conn->_resolve_h1_ws_closing('close_incomplete',
+            detail    => 'transport did not finish closing within ws_close_timeout',
+            close_now => 1);
+    });
+
+    # The close deadline governs the finish alone: cancel this scope's activity
+    # timers so a shorter keepalive/idle timer cannot short-circuit the wait with
+    # the wrong reason. Idempotent -- the app-initiated path already cancelled
+    # them on entering the closing phase.
+    $self->_stop_idle_timer;
+    $self->_stop_ws_idle_timer;
+    $self->_stop_ws_keepalive;   # cancels the pong timeout too
     return;
 }
 
@@ -6508,9 +6565,18 @@ sub _handle_disconnect {
                 # preserved even when the outcome is abnormal for another
                 # reason), otherwise RFC 6455 1006 -- never the server's own
                 # code. Populated before the mark so a callback sees the final
-                # value.
-                $cs->_set_ws_close($self->_ws_peer_close_pair($self))
-                    if ($self->{scope_kind} // '') eq 'websocket';
+                # value. EXCEPTION: close_incomplete is defined with close_code
+                # 1006 (Www.pod "Standard Disconnect Reasons"; RFC 6455 7.1.5)
+                # even though the peer's Close was seen -- the closing handshake
+                # completed but the transport-level close did not, so the
+                # abnormal transport closure, not the peer's negotiated code, is
+                # what close_code reports.
+                if (($self->{scope_kind} // '') eq 'websocket') {
+                    $cs->_set_ws_close(
+                        $reason eq 'close_incomplete'
+                            ? (1006, undef)
+                            : $self->_ws_peer_close_pair($self));
+                }
                 $cs->_mark_disconnected(
                     $self->_end_reason($self), $self->_end_detail($self), $sync);
             }
