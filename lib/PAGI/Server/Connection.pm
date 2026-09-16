@@ -246,6 +246,7 @@ sub new {
         request_timeout => $args{request_timeout} // 0,  # Request stall timeout in seconds (0 = disabled, default for performance)
         ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
+        ws_close_timeout => $args{ws_close_timeout} // 10,  # Finite bound on the WebSocket closing-handshake wait (validated in PAGI::Server)
         max_body_size     => $args{max_body_size},  # 0 = unlimited
         # What is left of a request body the application never read, which this
         # connection consumes before it parses anything else (RFC 9112 s9.3).
@@ -305,6 +306,11 @@ sub new {
         ws_keepalive_timeout  => 0,    # Current pong timeout (0 = no timeout check)
         sse_keepalive_timer => undef,  # Periodic timer for sending SSE keepalive comments
         sse_keepalive_comment => '',   # Comment text to send
+        # WebSocket closing-handshake phase (h1 scope == the connection; the h2
+        # scope keeps the same two keys on its per-stream hash instead). See
+        # _enter_ws_closing_phase.
+        ws_closing          => 0,      # True once the scope is waiting for the peer to complete the closing handshake
+        ws_close_deadline   => undef,  # The single finite deadline governing that wait
         # HTTP/2 state
         alpn_protocol     => $args{alpn_protocol},    # ALPN-negotiated protocol (e.g. 'h2', 'http/1.1')
         h2_protocol       => $args{h2_protocol},      # PAGI::Server::Protocol::HTTP2 instance
@@ -4740,6 +4746,99 @@ sub _stop_ws_keepalive {
     $self->{ws_keepalive_timer} = undef;
     $self->{ws_keepalive_interval} = 0;
     $self->{ws_keepalive_timeout} = 0;
+}
+
+# =============================================================================
+# WebSocket closing-handshake phase
+# =============================================================================
+# When the application initiates a Close on an accepted socket (websocket.close),
+# the scope does not end eagerly: it enters a PENDING closing phase and waits
+# for the peer to complete the handshake, under a single finite close deadline
+# (ws_close_timeout, default 10s). This is the entry into that phase; the h1/h2
+# call sites that trigger it and the deadline's resolution (clean /
+# close_timeout / transport-loss) live with each transport's close path.
+#
+# $scope is the per-scope hash the phase's state lives on: the connection
+# ($self) for h1, the per-stream hash ($ss) for h2. Both keep ws_closing and
+# ws_close_deadline. Options:
+#   on_deadline   => coderef->($self, $scope) run if the deadline expires. The
+#                    terminal resolution it performs belongs to the call site;
+#                    entry only arms the deadline.
+#   cancel_timers => coderef->() that cancels this scope's activity timers (the
+#                    WebSocket keepalive/pong timeout and the idle timeout),
+#                    supplied by the transport that knows where they live.
+sub _enter_ws_closing_phase {
+    my ($self, $scope, %opts) = @_;
+
+    # One bounded wait per closing scope: the deadline is armed once and is not
+    # reset by later traffic. Re-entry is a no-op.
+    return if $scope->{ws_closing};
+
+    # ARM the single finite close deadline BEFORE cancelling any activity timer.
+    # This ordering is the bounded-wait security invariant: were the activity
+    # timers cancelled first, any throw or early return before the deadline was
+    # armed would leave the scope waiting with no bound at all -- the unbounded
+    # wait (a DoS vector) the deadline exists to prevent. Arming first means a
+    # failure here leaves the activity timers in place, still bounding the scope.
+    $scope->{ws_close_deadline} = $self->_arm_ws_close_deadline($scope, $opts{on_deadline});
+
+    # Guard the invariant at the transition: a scope may not be marked as being
+    # in the pending closing phase unless a live deadline governs it. If arming
+    # did not produce a live deadline, fail loudly now -- still BEFORE any
+    # activity timer is cancelled, so the scope is never left pending without a
+    # bound.
+    unless ($self->_ws_close_deadline_live($scope)) {
+        my $msg = "WebSocket scope entered the closing phase without a live "
+                . "close deadline (bounded-wait invariant violated)";
+        $self->{server}->_log(error => $msg)
+            if $self->{server} && $self->{server}->can('_log');
+        die "$msg\n";
+    }
+
+    $scope->{ws_closing} = 1;
+
+    # The close deadline now governs the phase alone: cancel the scope's
+    # activity timers so a shorter keepalive/idle timer cannot short-circuit the
+    # close-wait with the wrong reason.
+    $opts{cancel_timers}->() if $opts{cancel_timers};
+
+    return;
+}
+
+# Create, register, and start the one finite close deadline for a closing
+# scope, returning the timer. Factored out as the single seam through which the
+# deadline is armed (and the single point _enter_ws_closing_phase's ordering
+# guarantee has to protect). With no server/loop the timer cannot be made live,
+# so a non-live timer is returned and the guard above catches it.
+sub _arm_ws_close_deadline {
+    my ($self, $scope, $on_deadline) = @_;
+
+    weaken(my $weak_self  = $self);
+    weaken(my $weak_scope = $scope);
+
+    my $timer = IO::Async::Timer::Countdown->new(
+        delay     => $self->{ws_close_timeout},
+        on_expire => sub {
+            return unless $weak_self && $weak_scope;
+            return if $weak_self->{closed};
+            $on_deadline->($weak_self, $weak_scope) if $on_deadline;
+        },
+    );
+
+    if ($self->{server}) {
+        $self->{server}->add_child($timer);
+        $timer->start;
+    }
+
+    return $timer;
+}
+
+# The bounded-wait invariant's predicate: a scope is governed by a live close
+# deadline only when its deadline timer exists and is running.
+sub _ws_close_deadline_live {
+    my ($self, $scope) = @_;
+    my $deadline = $scope->{ws_close_deadline};
+    return ($deadline && $deadline->is_running) ? 1 : 0;
 }
 
 # SSE keepalive - sends comment lines to prevent proxy timeouts
