@@ -3973,20 +3973,31 @@ sub _h2_process_ws_frames {
                 }
             }
 
-            # Send close frame back + END_STREAM. Queued (not submit_data)
-            # so the data_callback's own eof_pending merge puts END_STREAM on
-            # this exact chunk, same as the previous submit_data(..., 1) did.
-            # Not an application send — no transport_state->_check_watermarks.
-            my $close_frame = Protocol::WebSocket::Frame->new(
-                type   => 'close',
-                buffer => pack('n', $code) . $reason,
-            );
-            my $close_bytes = $close_frame->to_bytes;
-            push @{$stream->{send_queue} ||= []}, $close_bytes;
-            $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
-            $stream->{ws_eof_pending} = 1;
-            $self->{h2_session}->resume_stream($stream_id);
-            # No flush here — see this sub's note on who writes it
+            # Idempotent with a Close already queued: in the app-first race the
+            # application's own websocket.close set ws_eof_pending and queued its
+            # Close before this peer Close arrived. While that output was still
+            # PENDING (unflushed, e.g. under flow-control backpressure), a second
+            # enqueue here would put a DUPLICATE Close on the wire when the queue
+            # drains (RFC 6455 5.5.1, one Close per direction). Mirrors
+            # _h2_ws_close's own `unless ws_eof_pending`. The lifecycle below
+            # (ws_peer_closed, deadline disposal, disconnect enqueue) runs
+            # regardless -- the peer's Close still completes the handshake.
+            unless ($stream->{ws_eof_pending}) {
+                # Send close frame back + END_STREAM. Queued (not submit_data)
+                # so the data_callback's own eof_pending merge puts END_STREAM on
+                # this exact chunk, same as the previous submit_data(..., 1) did.
+                # Not an application send — no transport_state->_check_watermarks.
+                my $close_frame = Protocol::WebSocket::Frame->new(
+                    type   => 'close',
+                    buffer => pack('n', $code) . $reason,
+                );
+                my $close_bytes = $close_frame->to_bytes;
+                push @{$stream->{send_queue} ||= []}, $close_bytes;
+                $stream->{send_queue_bytes} = ($stream->{send_queue_bytes} // 0) + length $close_bytes;
+                $stream->{ws_eof_pending} = 1;
+                $self->{h2_session}->resume_stream($stream_id);
+                # No flush here — see this sub's note on who writes it
+            }
 
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"). Receive-side,
@@ -8409,13 +8420,22 @@ sub _create_websocket_send {
             my $code = $event->{code} // 1000;
             my $reason = $event->{reason} // '';
 
-            my $frame = Protocol::WebSocket::Frame->new(
-                type   => 'close',
-                buffer => pack('n', $code) . $reason,
-            );
+            # Idempotent with a reciprocal Close already on the wire: in the
+            # peer-first race the parser sent the server's one Close (close_sent)
+            # before delivering the disconnect that resumed this handler, so this
+            # app-initiated Close must add no second frame (RFC 6455 5.5.1, one
+            # Close per direction; §5.5.1). Mirrors the parser reciprocal's
+            # `if (!close_sent)` and _send_close_frame's `return if close_sent`.
+            # The close-lifecycle branch below runs regardless.
+            unless ($weak_self->{close_sent}) {
+                my $frame = Protocol::WebSocket::Frame->new(
+                    type   => 'close',
+                    buffer => pack('n', $code) . $reason,
+                );
 
-            $weak_self->{stream}->write($frame->to_bytes);
-            $weak_self->{close_sent} = 1;
+                $weak_self->{stream}->write($frame->to_bytes);
+                $weak_self->{close_sent} = 1;
+            }
 
             # App-initiated close does NOT end the scope eagerly (Www.pod
             # L857-869): sending the Close initiates the handshake without
