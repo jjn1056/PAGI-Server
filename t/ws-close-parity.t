@@ -448,47 +448,62 @@ subtest 'close_timeout/1006: app close, peer silent, deadline expires' => sub {
 };
 
 # close_incomplete/1006: the closing handshake COMPLETES -- the peer answers its
-# Close -- but the peer then stops reading, so the server-owned transport close
-# can never finish draining. The finish bound ends the scope close_incomplete /
-# 1006 (Www.pod "Standard Disconnect Reasons"; RFC 6455 7.1.5; WS-CLOSE-TRUTH-4).
-# DISTINCT from close_timeout, where a Close was sent and the peer's Close never
-# arrived: here the peer DID answer, but the transport-level close did not
-# finish. h1 only for now -- the h2 per-stream finish bound lands in Task 3, at
-# which point this row runs on BOTH transports and the cross-transport parity
-# assertion is enabled (mirrors the peer-preserved row's staging in corrective
-# Task 1).
-subtest 'close_incomplete/1006: handshake completes, transport never finishes (h1)' => sub {
-    my %obs;
-    my $park = $loop->new_future;
-    my $app  = build_app(\%obs, $park,
-        send_close  => 1, park => 1,
-        prime_bytes => 4 * 1024 * 1024);
-    my $server = h1_start($app,
-        ws_close_timeout     => 0.5,
-        write_high_watermark => 64 * 1024 * 1024);
-    my $sock = IO::Socket::INET->new(
-        PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp', Timeout => 2,
-    ) or die "connect: $!";
-    $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
-    $sock->blocking(0);
-    h1_upgrade($sock);
-    h1_pump_until(sub { $obs{sent} }, 6);
+# Close -- but the transport/stream then never finishes closing. The finish
+# bound ends the scope close_incomplete / 1006 (Www.pod "Standard Disconnect
+# Reasons"; RFC 6455 7.1.5; WS-CLOSE-TRUTH-4). DISTINCT from close_timeout, where
+# a Close was sent and the peer's Close never arrived: here the peer DID answer,
+# but the transport-level close did not finish. The stall is transport-specific
+# -- h1: the peer answers then stops reading, so the server-owned close_when_empty
+# can never drain; h2: the peer answers its Close WITHOUT its END_STREAM and never
+# sends it, so the half-closed stream can never reach full closure -- but the
+# terminal CATEGORY (close_incomplete), close_code (1006) and close_reason (undef)
+# are identical, so cross-transport parity is asserted at that spec-defined level.
+subtest 'close_incomplete/1006: handshake completes, transport never finishes' => sub {
+    # --- h1: the peer answers its Close, then stops reading; the server-owned
+    #     close_when_empty can never drain -> the finish bound is the terminal. ---
+    my $r1 = do {
+        my %obs;
+        my $park = $loop->new_future;
+        my $app  = build_app(\%obs, $park,
+            send_close  => 1, park => 1,
+            prime_bytes => 4 * 1024 * 1024);
+        my $server = h1_start($app,
+            ws_close_timeout     => 0.5,
+            write_high_watermark => 64 * 1024 * 1024);
+        my $sock = IO::Socket::INET->new(
+            PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp', Timeout => 2,
+        ) or die "connect: $!";
+        $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
+        $sock->blocking(0);
+        h1_upgrade($sock);
+        h1_pump_until(sub { $obs{sent} }, 6);
+        syswrite($sock, h1_frame(8, pack('n', 1000) . 'bye'));
+        h1_pump_until(sub { $obs{complete} || $obs{disconnect} }, 6);
+        my $r = normalize(\%obs);
+        $park->done unless $park->is_ready;
+        close($sock);
+        eval { $server->shutdown->get };
+        eval { $loop->remove($server) };
+        $r;
+    };
 
-    # The peer answers with its Close and then only leaves TCP open WITHOUT
-    # reading: the server owns the transport close, but its queued bytes cannot
-    # drain, so the finish bound is the terminal.
-    syswrite($sock, h1_frame(8, pack('n', 1000) . 'bye'));
-    h1_pump_until(sub { $obs{complete} || $obs{disconnect} }, 6);
+    # --- h2: the peer answers its Close WITHOUT END_STREAM and never sends it;
+    #     the per-stream finish bound RSTs the half-closed stream (WS-CLOSE-TRUTH-4). ---
+    my $r2 = run_h2(
+        send_close => 1, ws_close_timeout => 0.5,
+        peer => sub {
+            my ($client, $sock, $sid) = @_;
+            h2_send_data($client, $sock, $sid, h2_close_frame(1000, 'bye'), 0);   # no END_STREAM
+        },
+    );
 
-    my $r = normalize(\%obs);
-    is($r->{category}, 'close_incomplete', 'h1 close_incomplete');
-    is($r->{code},    1006,  'h1 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
-    is($r->{creason}, undef, 'h1 close_reason undef at 1006');
-
-    $park->done unless $park->is_ready;
-    close($sock);
-    eval { $server->shutdown->get };
-    eval { $loop->remove($server) };
+    is($r1->{category}, 'close_incomplete', 'h1 close_incomplete');
+    is($r2->{category}, 'close_incomplete', 'h2 close_incomplete');
+    is($r1->{code}, 1006, 'h1 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
+    is($r2->{code}, 1006, 'h2 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
+    is($r1->{creason}, undef, 'h1 close_reason undef at 1006');
+    is($r2->{creason}, undef, 'h2 close_reason undef at 1006');
+    is(parity_key($r1), parity_key($r2), 'h1/h2 parity: close_incomplete/1006');
 };
 
 subtest 'transport-loss/1006: app close, transport/stream drops with no peer Close' => sub {

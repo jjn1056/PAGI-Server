@@ -1045,8 +1045,16 @@ sub _h2_end_ws_stream {
         # Populate the peer's Close before the mark, so a callback reading
         # close_code/close_reason sees the final value (Www.pod "State
         # Transition Order"). _set_ws_close no-ops once terminal, so a stream
-        # _h2_on_close already ended keeps its recorded peer Close.
-        $stream->{connection_state}->_set_ws_close($self->_ws_peer_close_pair($stream));
+        # _h2_on_close already ended keeps its recorded peer Close. EXCEPTION:
+        # close_incomplete is defined with close_code 1006 (Www.pod "Standard
+        # Disconnect Reasons"; RFC 6455 7.1.5) even though the peer's Close was
+        # seen -- the closing handshake completed but the stream-level close did
+        # not, so the abnormal closure, not the peer's negotiated code, is what
+        # close_code reports (the h2 twin of h1's _handle_disconnect exception).
+        $stream->{connection_state}->_set_ws_close(
+            $self->_end_reason($stream) eq 'close_incomplete'
+                ? (1006, undef)
+                : $self->_ws_peer_close_pair($stream));
         $stream->{connection_state}->_mark_disconnected($self->_end_reason($stream), $self->_end_detail($stream));
     }
     $self->_h2_ws_enqueue_disconnect($stream, $self->_end_code($stream), $self->_end_reason($stream));
@@ -4006,6 +4014,19 @@ sub _h2_process_ws_frames {
             # Peer's Close frame: its own code (1005 default when the frame
             # carried none) and reason text (Www.pod "Disconnect - receive event").
             $self->_h2_ws_enqueue_disconnect($stream, $code, $reason);
+
+            # The closing handshake is now complete on this stream -- the peer's
+            # Close is in, the server's reciprocal Close + END_STREAM is queued --
+            # for BOTH initiators (an app-initiated close reaches here when the
+            # peer answers; a peer-initiated one is the peer's Close itself). Bound
+            # the FINISH: a client that sends its Close but WITHHOLDS its END_STREAM
+            # leaves the stream half-closed forever, so _h2_on_close never runs and
+            # the scope hangs. Arm one finite per-stream finish bound (ws_close_timeout,
+            # reusing the disposed slot) so a stuck finish ends the scope abnormally
+            # with close_incomplete / 1006 instead of hanging (WS-CLOSE-TRUTH-4).
+            # Full stream closure disposes it (_h2_end_ws_stream). The h2 twin of
+            # h1's _initiate_ws_h1_transport_close.
+            $self->_arm_ws_h2_finish_bound($stream_id, $stream);
         }
         elsif ($opcode == 9) {
             # Ping — respond with pong. Queued, not an application send.
@@ -5081,6 +5102,20 @@ sub _arm_ws_h1_finish_bound {
             close_now => 1);
     });
 
+    # Guard the bounded-wait invariant at the transition, exactly as
+    # _enter_ws_closing_phase does: the finish bound may not be considered in
+    # place unless a live deadline governs it. If arming did not produce a live
+    # deadline, fail loudly now -- still BEFORE the activity timers below are
+    # cancelled, so the scope is never left waiting with no bound at all (the
+    # unbounded-wait DoS vector).
+    unless ($self->_ws_close_deadline_live($self)) {
+        my $msg = "WebSocket close-finish bound armed without a live close "
+                . "deadline (bounded-wait invariant violated)";
+        $self->{server}->_log(error => $msg)
+            if $self->{server} && $self->{server}->can('_log');
+        die "$msg\n";
+    }
+
     # The close deadline governs the finish alone: cancel this scope's activity
     # timers so a shorter keepalive/idle timer cannot short-circuit the wait with
     # the wrong reason. Idempotent -- the app-initiated path already cancelled
@@ -5156,6 +5191,48 @@ sub _enter_ws_h2_closing_phase {
     $self->_handle_disconnect_and_close('server_error',
         detail => "failed to enter WebSocket closing phase: $err");
     die $err;
+}
+
+# Arm the h2 per-stream close-FINISH bound: one finite deadline (ws_close_timeout)
+# governing the wait for THIS stream to actually finish closing after the closing
+# handshake completes, on BOTH initiators (the peer-Close branch reaches here for
+# each). Reuses the deadline machinery's on_deadline seam and the same per-stream
+# ws_close_deadline slot the terminal path (_h2_end_ws_stream) disposes, so a
+# clean full stream closure disarms it automatically. On expiry the stream never
+# finished (a client that answered its Close but withheld its END_STREAM): RST it
+# and end the scope abnormally with close_incomplete / 1006 (Www.pod "Standard
+# Disconnect Reasons"; RFC 6455 7.1.5) -- NOT close_timeout (the peer answered).
+# Per-stream: a sibling ws stream on the same connection is untouched. The h2 twin
+# of _arm_ws_h1_finish_bound.
+sub _arm_ws_h2_finish_bound {
+    my ($self, $stream_id, $ss) = @_;
+
+    # Nothing to bound once the stream has already fully closed (the clean path's
+    # _h2_on_close disposes anything armed anyway); and one bound per stream --
+    # the app-initiated close deadline was disposed on the peer's Close before
+    # this runs, guard against a double arm regardless.
+    return if $ss->{h2_closed} || $ss->{ws_close_deadline};
+
+    $ss->{ws_close_deadline} = $self->_arm_ws_close_deadline($ss, sub {
+        my ($conn, $scope) = @_;
+        # The bound elapsed with the stream still not closed. One structured warn
+        # line (per stream) marks the new abnormal-close population for an SRE
+        # dashboard, mirroring the close_timeout sibling; warn stays silent at the
+        # default/quiet threshold.
+        $conn->_log(warn => "HTTP/2 WebSocket stream $stream_id close-finish bound "
+            . "expired (close_incomplete, $conn->{ws_close_timeout}s) - resetting the "
+            . "stream, ending scope abnormally with close_code 1006")
+            if $conn->{server} && $conn->{server}->can('_log');
+        $conn->_resolve_h2_ws_closing($stream_id, $scope, 'close_incomplete',
+            detail => 'stream did not finish closing within ws_close_timeout');
+    });
+
+    # The bound now governs the finish alone: release this stream's keepalive
+    # (and its pong timeout) so a shorter timer cannot short-circuit the wait
+    # with the wrong reason. Idempotent -- the peer-Close branch stopped it, and
+    # an app-initiated closing phase cancelled it on entry.
+    $self->_h2_stop_ws_keepalive($ss);
+    return;
 }
 
 # Terminally resolve an h2 WebSocket stream waiting in the app-initiated closing
