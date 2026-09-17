@@ -5057,8 +5057,9 @@ sub _initiate_ws_h1_transport_close {
     # leaves close_when_empty pending forever (h1 INFO-2). Arm one finite finish
     # bound (ws_close_timeout) BEFORE initiating the close, so a stuck finish
     # ends the scope abnormally with close_incomplete instead of hanging
-    # (WS-CLOSE-TRUTH-5; close_incomplete preserves the peer's close code). The cooperative close finishes well within the bound
-    # and disposes it (the terminal path's _dispose_ws_close_deadline). Distinct
+    # (WS-CLOSE-TRUTH-5; close_incomplete preserves the peer's close code). The
+    # cooperative close finishes well within the bound and disposes it (the
+    # terminal path's _dispose_ws_close_deadline). Distinct
     # from close_timeout (a silent peer, armed at the send): here the peer
     # answered, so the abnormal reason is close_incomplete, not close_timeout.
     $self->_arm_ws_h1_finish_bound;

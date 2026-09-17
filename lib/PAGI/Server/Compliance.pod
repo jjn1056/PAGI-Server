@@ -275,16 +275,20 @@ withholds its C<END_STREAM>) would otherwise leave the scope pending forever. So
 handshake completion PAGI::Server arms a second, finite B<finish> bound, reusing
 C<ws_close_timeout>; when it expires the server force-closes (C<close_now> on
 HTTP/1.1, C<RST_STREAM> on HTTP/2) and ends the scope abnormally with
-C<disconnect_reason> C<close_incomplete> and C<close_code> C<1006>. This is B<distinct>
-from C<close_timeout>: C<close_timeout> is a Close the peer never answered, whereas
-C<close_incomplete> is a handshake the peer B<did> answer whose transport-level close
-did not finish in time (L<PAGI::Spec::Www/"Standard Disconnect Reasons">). The
-practice matches lifecycle-owning WebSocket servers, which bound the whole close
-(Python C<websockets> 10s, Node C<ws> 30s, Tomcat C<SESSION_CLOSE_TIMEOUT> 30s)
-rather than leaning on a general idle timeout. The bound is one per scope, per stream
-on HTTP/2. Pinned by C<t/ws-close-deadline-h1.t>, C<t/http2/49-ws-close-deadline-h2.t>,
-and C<t/ws-close-parity.t> (the two transports agree the C<close_incomplete>/C<1006>
-category).
+C<disconnect_reason> C<close_incomplete>. Because the peer sent a valid Close,
+C<close_code>/C<close_reason> report B<the peer's> values (the peer's code, or C<1005>
+when its Close carried none) -- B<not> C<1006>; the outcome lives in
+C<disconnect_reason> alone, keeping protocol data separate from the lifetime reason.
+This is B<distinct> from C<close_timeout>: C<close_timeout> is a Close the peer never
+answered (so C<close_code> is C<1006>), whereas C<close_incomplete> is a handshake the
+peer B<did> answer whose transport-level close did not finish in time
+(L<PAGI::Spec::Www/"Standard Disconnect Reasons">). The practice matches
+lifecycle-owning WebSocket servers, which bound the whole close (Python C<websockets>
+10s, Node C<ws> 30s, Tomcat C<SESSION_CLOSE_TIMEOUT> 30s) rather than leaning on a
+general idle timeout. The bound is one per scope, per stream on HTTP/2. Pinned by
+C<t/ws-close-deadline-h1.t>, C<t/http2/49-ws-close-deadline-h2.t>, and
+C<t/ws-close-parity.t> (the two transports agree the C<close_incomplete> category and
+the preserved peer code).
 
 =item * B<C<ws_close_timeout> is a finite, positive, server-owned bound that
 supersedes the scope's activity timers for the closing phase.> The spec
@@ -311,8 +315,8 @@ Making the closing handshake truthful moves a population of closes that the
 server previously recorded as clean (C<on_complete>, C<response_complete> true)
 into the abnormal bucket: an application close whose peer never answered now
 reads C<close_timeout>/C<1006>, a close whose peer answered but whose transport
-never finished reads C<close_incomplete>/C<1006>, and a transport that died first
-reads transport-loss/C<1006>, all instead of clean. An
+never finished reads C<close_incomplete> (with the peer's preserved close code), and
+a transport that died first reads transport-loss/C<1006>, all instead of clean. An
 operator upgrading past this change should expect the clean-close rate to fall
 and the abnormal/C<1006> rate to rise by the size of that always-mis-recorded
 population, re-baseline any clean-rate and abnormal-close dashboards against it,
