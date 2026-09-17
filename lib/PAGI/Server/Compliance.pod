@@ -240,9 +240,9 @@ For a valid closing handshake this reciprocal-Close send is idempotent on the
 wire: PAGI::Server writes exactly one Close frame per direction (section
 5.5.1), and whichever reply path -- the application's own C<websocket.close>
 or the server's peer-inbound reciprocal -- arrives second is suppressed and
-adds no second frame; an abnormal or aborted end still writes none at all
-(RFC 6455 section 7.4.1 forbids C<1006> on the wire, so no Close frame is
-written), so the guarantee is B<no second frame>, not always one. Pinned by
+adds no second frame. An end without a closing handshake may send no Close
+frame at all; the guarantee is B<no second frame>, not that one is always
+sent. Pinned by
 C<t/ws-close-no-duplicate-frame.t> (HTTP/1.1) and
 C<t/http2/ws-close-no-duplicate-frame-h2.t> (HTTP/2).
 The scope is clean only once that server-owned closure completes, so B<both
