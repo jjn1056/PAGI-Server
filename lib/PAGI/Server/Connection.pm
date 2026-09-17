@@ -5227,6 +5227,19 @@ sub _arm_ws_h2_finish_bound {
             detail => 'stream did not finish closing within ws_close_timeout');
     });
 
+    # Guard the bounded-wait invariant at the transition, exactly as the h1 twin
+    # and _enter_ws_closing_phase do: the finish bound may not be considered in
+    # place unless a live deadline governs it. Fail loudly now -- still BEFORE the
+    # keepalive below is cancelled -- so the stream is never left waiting with no
+    # bound at all (the unbounded-wait DoS vector).
+    unless ($self->_ws_close_deadline_live($ss)) {
+        my $msg = "HTTP/2 WebSocket stream $stream_id close-finish bound armed "
+                . "without a live close deadline (bounded-wait invariant violated)";
+        $self->{server}->_log(error => $msg)
+            if $self->{server} && $self->{server}->can('_log');
+        die "$msg\n";
+    }
+
     # The bound now governs the finish alone: release this stream's keepalive
     # (and its pong timeout) so a shorter timer cannot short-circuit the wait
     # with the wrong reason. Idempotent -- the peer-Close branch stopped it, and
