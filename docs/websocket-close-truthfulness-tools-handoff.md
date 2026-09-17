@@ -106,3 +106,10 @@ server contract is implemented-and-reviewed but NOT proven end-to-end.
   `close_timeout`/`close_incomplete` instead). The strict transport-closure semantics
   for peer-initiated close, and a bound on the withheld-close finish, are now BUILT
   (server-owned closure + `close_incomplete`), not a follow-up.
+- The close race between the application's own `websocket.close` and the server's
+  peer-inbound reciprocal Close is resolved SUCCEED-as-no-op on both transports and
+  both orderings: whichever side arrives second writes no second Close frame, the
+  peer's code is preserved, and exactly one Close frame per direction reaches the
+  wire for a valid handshake. The double-Close-frame item is CLOSED, not a
+  follow-up. Portable contract for the Tools doubles: a first application close in
+  this race succeeds and the accessors report the peer's outcome.

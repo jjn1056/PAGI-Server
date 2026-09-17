@@ -236,6 +236,14 @@ reciprocal-Close point: the peer's Close plus the server's reciprocal Close
 completes the handshake (section 5.5.1), and the server then B<owns> closing the
 transport -- RFC 6455 section 7.1.1 has the server close the connection after the
 exchange, and RFC 8441 section 5 maps orderly HTTP/2 closure to C<END_STREAM>.
+For a valid closing handshake this reciprocal-Close send is idempotent on the
+wire: PAGI::Server writes exactly one Close frame per direction (section
+5.5.1), and whichever reply path -- the application's own C<websocket.close>
+or the server's peer-inbound reciprocal -- arrives second is suppressed and
+adds no second frame; an abnormal or aborted end still writes none at all
+(this list's HTTP/2 keepalive item, section 7.4.1), so the guarantee is B<no
+second frame>, not always one. Pinned by C<t/ws-close-no-duplicate-frame.t>
+(HTTP/1.1) and C<t/http2/ws-close-no-duplicate-frame-h2.t> (HTTP/2).
 The scope is clean only once that server-owned closure completes, so B<both
 initiators> reach a clean end at transport or stream closure. (This retired the
 earlier peer-initiated early-clean; the server drives the closure, so an
