@@ -231,11 +231,17 @@ it clean only when the peer's Close B<and> the transport or stream closing both
 arrive -- the completed handshake plus closure that RFC 6455 section 5.5.1
 ("both sending and receiving a Close message") and sections 7.1.1-7.1.4 (the
 Close handshake is distinct from closing the connection) require. A
-B<peer-initiated> close is different and is unchanged: the peer's Close plus the
-server's reciprocal Close is already the completed handshake of section 5.5.1,
-so it is clean at the reciprocal-Close point (the accepted pre-existing
-behaviour, before transport closure). The deadline is one per scope -- per
-stream on HTTP/2, so a sibling WebSocket stream is untouched. Pinned by
+B<peer-initiated> close is handled the same way and is B<no longer> clean at the
+reciprocal-Close point: the peer's Close plus the server's reciprocal Close
+completes the handshake (section 5.5.1), and the server then B<owns> closing the
+transport -- RFC 6455 section 7.1.1 has the server close the connection after the
+exchange, and RFC 8441 section 5 maps orderly HTTP/2 closure to C<END_STREAM>.
+The scope is clean only once that server-owned closure completes, so B<both
+initiators> reach a clean end at transport or stream closure. (This retired the
+earlier peer-initiated early-clean; the server drives the closure, so an
+application parked on unrelated work is still notified when it completes.) The
+deadline is one per scope -- per stream on HTTP/2, so a sibling WebSocket stream
+is untouched. Pinned by
 C<t/ws-close-deadline-h1.t> and C<t/http2/49-ws-close-deadline-h2.t> for the
 app-initiated wait, and by C<t/82-ws-parked-terminal-notification.t>,
 C<t/83-ws-close-code.t>, C<t/http2/47-ws-parked-terminal-notification.t> and
@@ -258,6 +264,27 @@ C<1006>. Pinned by C<t/ws-close-deadline-h1.t> (deadline vs transport drop vs
 preserved peer code), C<t/http2/49-ws-close-deadline-h2.t> (the same on HTTP/2,
 including C<END_STREAM>/bare C<RST_STREAM>), and C<t/ws-close-parity.t> (the two
 transports agree category, reason and code).
+
+=item * B<The server-owned transport close is itself bounded; a finish that never
+completes ends the scope with C<close_incomplete>, not C<close_timeout>.> Once the
+closing handshake completes -- the peer's Close has arrived, on either initiator --
+the server owns closing the transport (a TCP close on HTTP/1.1, C<END_STREAM> on
+HTTP/2). A peer that answered but then never lets the transport finish (blocks the
+socket so the reciprocal Close cannot flush, or on HTTP/2 sends its Close but
+withholds its C<END_STREAM>) would otherwise leave the scope pending forever. So at
+handshake completion PAGI::Server arms a second, finite B<finish> bound, reusing
+C<ws_close_timeout>; when it expires the server force-closes (C<close_now> on
+HTTP/1.1, C<RST_STREAM> on HTTP/2) and ends the scope abnormally with
+C<disconnect_reason> C<close_incomplete> and C<close_code> C<1006>. This is B<distinct>
+from C<close_timeout>: C<close_timeout> is a Close the peer never answered, whereas
+C<close_incomplete> is a handshake the peer B<did> answer whose transport-level close
+did not finish in time (L<PAGI::Spec::Www/"Standard Disconnect Reasons">). The
+practice matches lifecycle-owning WebSocket servers, which bound the whole close
+(Python C<websockets> 10s, Node C<ws> 30s, Tomcat C<SESSION_CLOSE_TIMEOUT> 30s)
+rather than leaning on a general idle timeout. The bound is one per scope, per stream
+on HTTP/2. Pinned by C<t/ws-close-deadline-h1.t>, C<t/http2/49-ws-close-deadline-h2.t>,
+and C<t/ws-close-parity.t> (the two transports agree the C<close_incomplete>/C<1006>
+category).
 
 =item * B<C<ws_close_timeout> is a finite, positive, server-owned bound that
 supersedes the scope's activity timers for the closing phase.> The spec

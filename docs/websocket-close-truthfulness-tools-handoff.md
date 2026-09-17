@@ -27,15 +27,21 @@ APP-INITIATED close (the app/helper sends `websocket.close` on an accepted socke
     `disconnect_reason` = `close_timeout`, `close_code` 1006, `close_reason` undef.
   - the transport/stream is lost with no peer Close -> ABNORMAL, the transport-loss
     reason token, `close_code` 1006.
+  - the peer ANSWERED (handshake completed) but the transport/stream does not FINISH
+    closing within the bound -> ABNORMAL, `disconnect_reason` = `close_incomplete`,
+    `close_code` 1006. Distinct from `close_timeout` (peer never answered).
 - If a valid peer Close WAS observed, its code/reason are PRESERVED even when the
   outcome is abnormal for another reason.
 - `on_complete` does NOT fire on the application's own close until the handshake
   completes. A cooperative peer completes it promptly; a silent peer yields
   `close_timeout`.
 
-PEER-INITIATED close (peer sends Close; the app never did): UNCHANGED — clean at the
-reciprocal-Close point (RFC 6455 section 5.5.1). Do not change your peer-initiated
-handling.
+PEER-INITIATED close (peer sends Close; the app never did): the server now OWNS the
+transport close and the scope is clean only at transport/stream closure, the same as
+app-initiated — NOT at the reciprocal-Close point. (This changed: the earlier
+early-clean was retired. The server drives the closure, so a parked app is still
+notified.) The finish is bounded the same way: a peer that answered but never lets
+the transport finish yields `close_incomplete`/1006.
 
 `close_code`/`close_reason` are PEER-only: 1006 when the scope ended with no peer
 Close; the deadline case and the transport-loss case both carry 1006 and are
@@ -84,7 +90,13 @@ server contract is implemented-and-reviewed but NOT proven end-to-end.
 ## Notes
 - The server treats a metric shift as expected: some closes that read clean now read
   `close_timeout`/abnormal. That is the point (truthful outcomes), not a regression.
-- Ledgered, not built (do not depend on): a numeric `close_timeout` counter (server
-  has no stats facility; a structured warn line marks each close_timeout instead),
-  and strict transport-closure semantics for PEER-initiated close (an Option-B
-  follow-up needing John's sign-off).
+- Model FOUR abnormal close reasons as portable spec tokens: `close_timeout` (peer
+  never answered), `close_incomplete` (peer answered but the transport never finished
+  closing within the bound), the transport-loss token (transport died first), and the
+  app-walked-away `server_error`/1011. All abnormal closes are `close_code` 1006 except
+  a preserved peer Close and the 1011 walk-away.
+- Ledgered, not built (do not depend on): a numeric counter for the abnormal-close
+  population (server has no stats facility; a structured warn line marks each
+  `close_timeout`/`close_incomplete` instead). The strict transport-closure semantics
+  for peer-initiated close, and a bound on the withheld-close finish, are now BUILT
+  (server-owned closure + `close_incomplete`), not a follow-up.
