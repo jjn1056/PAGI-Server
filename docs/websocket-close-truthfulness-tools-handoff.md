@@ -29,7 +29,9 @@ APP-INITIATED close (the app/helper sends `websocket.close` on an accepted socke
     reason token, `close_code` 1006.
   - the peer ANSWERED (handshake completed) but the transport/stream does not FINISH
     closing within the bound -> ABNORMAL, `disconnect_reason` = `close_incomplete`,
-    `close_code` 1006. Distinct from `close_timeout` (peer never answered).
+    with the PEER's `close_code`/`close_reason` PRESERVED (the peer sent a valid Close;
+    1005/undef if that Close carried no code) -- NOT 1006. Distinct from `close_timeout`
+    (peer never answered, so 1006).
 - If a valid peer Close WAS observed, its code/reason are PRESERVED even when the
   outcome is abnormal for another reason.
 - `on_complete` does NOT fire on the application's own close until the handshake
