@@ -93,8 +93,10 @@ server contract is implemented-and-reviewed but NOT proven end-to-end.
 - Model FOUR abnormal close reasons as portable spec tokens: `close_timeout` (peer
   never answered), `close_incomplete` (peer answered but the transport never finished
   closing within the bound), the transport-loss token (transport died first), and the
-  app-walked-away `server_error`/1011. All abnormal closes are `close_code` 1006 except
-  a preserved peer Close and the 1011 walk-away.
+  app-walked-away `server_error`/1011. All abnormal closes report `close_code` 1006
+  except the 1011 walk-away and a peer Close preserved on a later abnormal outcome
+  (e.g. transport-loss). Note `close_incomplete` is 1006 even though the peer DID send
+  its Close: the transport finish failed, so the peer's code is deliberately not used.
 - Ledgered, not built (do not depend on): a numeric counter for the abnormal-close
   population (server has no stats facility; a structured warn line marks each
   `close_timeout`/`close_incomplete` instead). The strict transport-closure semantics

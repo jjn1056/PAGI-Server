@@ -310,15 +310,17 @@ C<t/ws-close-deadline-h1.t> and C<t/http2/49-ws-close-deadline-h2.t>.
 Making the closing handshake truthful moves a population of closes that the
 server previously recorded as clean (C<on_complete>, C<response_complete> true)
 into the abnormal bucket: an application close whose peer never answered now
-reads C<close_timeout>/C<1006> or transport-loss/C<1006> instead of clean. An
+reads C<close_timeout>/C<1006>, a close whose peer answered but whose transport
+never finished reads C<close_incomplete>/C<1006>, and a transport that died first
+reads transport-loss/C<1006>, all instead of clean. An
 operator upgrading past this change should expect the clean-close rate to fall
 and the abnormal/C<1006> rate to rise by the size of that always-mis-recorded
 population, re-baseline any clean-rate and abnormal-close dashboards against it,
 and run any C<1006>- or close-rate alert in observe-only mode until the new
 baseline is established before enforcing it. The new population is observable
-without a metrics subsystem: each C<close_timeout> resolution emits one
-structured C<warn> log line naming C<close_timeout>, the elapsed bound and
-C<close_code 1006> (per stream on HTTP/2), which a server at the default C<error>
+without a metrics subsystem: each C<close_timeout> and C<close_incomplete>
+resolution emits one structured C<warn> log line naming the reason, the elapsed
+bound and C<close_code 1006> (per stream on HTTP/2), which a server at the default C<error>
 threshold suppresses and a server at C<warn> or C<info> routes to its logger.
 Pinned by the observability cases of C<t/ws-close-deadline-h1.t> and
 C<t/http2/49-ws-close-deadline-h2.t>.
