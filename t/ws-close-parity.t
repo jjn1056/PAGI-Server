@@ -447,18 +447,21 @@ subtest 'close_timeout/1006: app close, peer silent, deadline expires' => sub {
     is(parity_key($r1), parity_key($r2), 'h1/h2 parity: close_timeout/1006');
 };
 
-# close_incomplete/1006: the closing handshake COMPLETES -- the peer answers its
+# close_incomplete: the closing handshake COMPLETES -- the peer answers its
 # Close -- but the transport/stream then never finishes closing. The finish
-# bound ends the scope close_incomplete / 1006 (Www.pod "Standard Disconnect
-# Reasons"; RFC 6455 7.1.5; WS-CLOSE-TRUTH-4). DISTINCT from close_timeout, where
-# a Close was sent and the peer's Close never arrived: here the peer DID answer,
-# but the transport-level close did not finish. The stall is transport-specific
-# -- h1: the peer answers then stops reading, so the server-owned close_when_empty
-# can never drain; h2: the peer answers its Close WITHOUT its END_STREAM and never
+# bound ends the scope close_incomplete, PRESERVING the peer's close_code/
+# close_reason (the peer sent a valid Close; category 4, WS-CLOSE-TRUTH-5); only
+# disconnect_reason names the outcome. DISTINCT from close_timeout, where a Close
+# was sent and the peer's Close never arrived: here the peer DID answer, but the
+# transport-level close did not finish. The stall is transport-specific -- h1:
+# the peer answers then stops reading, so the server-owned close_when_empty can
+# never drain; h2: the peer answers its Close WITHOUT its END_STREAM and never
 # sends it, so the half-closed stream can never reach full closure -- but the
-# terminal CATEGORY (close_incomplete), close_code (1006) and close_reason (undef)
-# are identical, so cross-transport parity is asserted at that spec-defined level.
-subtest 'close_incomplete/1006: handshake completes, transport never finishes' => sub {
+# terminal CATEGORY (close_incomplete) and the preserved peer close_code (1001)
+# and close_reason ('peerbye') are identical, so cross-transport parity is
+# asserted at that spec-defined level. The peer's code (1001) is DISTINCT from
+# the app's own (1000), so a fix substituting app intent cannot pass.
+subtest 'close_incomplete: handshake completes, transport never finishes (peer code preserved)' => sub {
     # --- h1: the peer answers its Close, then stops reading; the server-owned
     #     close_when_empty can never drain -> the finish bound is the terminal. ---
     my $r1 = do {
@@ -477,7 +480,7 @@ subtest 'close_incomplete/1006: handshake completes, transport never finishes' =
         $sock->blocking(0);
         h1_upgrade($sock);
         h1_pump_until(sub { $obs{sent} }, 6);
-        syswrite($sock, h1_frame(8, pack('n', 1000) . 'bye'));
+        syswrite($sock, h1_frame(8, pack('n', 1001) . 'peerbye'));
         h1_pump_until(sub { $obs{complete} || $obs{disconnect} }, 6);
         my $r = normalize(\%obs);
         $park->done unless $park->is_ready;
@@ -493,17 +496,17 @@ subtest 'close_incomplete/1006: handshake completes, transport never finishes' =
         send_close => 1, ws_close_timeout => 0.5,
         peer => sub {
             my ($client, $sock, $sid) = @_;
-            h2_send_data($client, $sock, $sid, h2_close_frame(1000, 'bye'), 0);   # no END_STREAM
+            h2_send_data($client, $sock, $sid, h2_close_frame(1001, 'peerbye'), 0);   # no END_STREAM
         },
     );
 
     is($r1->{category}, 'close_incomplete', 'h1 close_incomplete');
     is($r2->{category}, 'close_incomplete', 'h2 close_incomplete');
-    is($r1->{code}, 1006, 'h1 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
-    is($r2->{code}, 1006, 'h2 close_code is 1006 (RFC 6455 7.1.5), not the peer code');
-    is($r1->{creason}, undef, 'h1 close_reason undef at 1006');
-    is($r2->{creason}, undef, 'h2 close_reason undef at 1006');
-    is(parity_key($r1), parity_key($r2), 'h1/h2 parity: close_incomplete/1006');
+    is($r1->{code}, 1001, 'h1 close_code is the peer code, preserved (WS-CLOSE-TRUTH-5)');
+    is($r2->{code}, 1001, 'h2 close_code is the peer code, preserved (WS-CLOSE-TRUTH-5)');
+    is($r1->{creason}, 'peerbye', 'h1 close_reason is the peer text, preserved');
+    is($r2->{creason}, 'peerbye', 'h2 close_reason is the peer text, preserved');
+    is(parity_key($r1), parity_key($r2), 'h1/h2 parity: close_incomplete (peer code preserved)');
 };
 
 subtest 'transport-loss/1006: app close, transport/stream drops with no peer Close' => sub {

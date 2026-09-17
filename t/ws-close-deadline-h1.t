@@ -230,6 +230,157 @@ sub build_app {
     return ($app, \%obs, $park);
 }
 
+# The Fix-1 (reciprocal-Close-after-peer) app: it does NOT send its own Close
+# until AFTER it has received the peer's disconnect, so `close_received` is
+# already true when websocket.close is sent -- the 8429 send-handler branch under
+# test. Its own Close code (1000/'srvbye') is DISTINCT from the peer's
+# (1001/'peerbye'), so any assertion that the peer's code is preserved cannot
+# pass on the app's own intent. Options: prime_bytes (an undrainable message, to
+# stall the finish); park (never return, so the send path -- not app-return --
+# is what governs the close).
+sub peer_first_app {
+    my (%o) = @_;
+    my %obs;
+    my $park = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+
+        await $receive->();                              # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+
+        $conn->on_complete(sub {
+            $obs{complete}++;
+            $obs{complete_connected} = $conn->is_connected ? 1 : 0;
+            $obs{complete_reason}    = $conn->disconnect_reason;
+            $obs{complete_code}      = $conn->close_code;
+            $obs{complete_creason}   = $conn->close_reason;
+        });
+        $conn->on_disconnect(sub {
+            my ($reason) = @_;
+            $obs{disconnect}++;
+            $obs{disconnect_reason}  = $reason;
+            $obs{disconnect_code}    = $conn->close_code;
+            $obs{disconnect_creason} = $conn->close_reason;
+        });
+        $conn->on_end(sub { $obs{end}++ });
+        $conn->end_future->on_ready(sub { $obs{end_future}++ });
+
+        if ($o{prime_bytes}) {
+            my $chunk = 'x' x 60000;
+            my $n = int($o{prime_bytes} / 60000) + 1;
+            for my $i (1 .. $n) {
+                await $send->({ type => 'websocket.send', bytes => $chunk });
+            }
+        }
+
+        my $d = await $receive->();                      # the peer's websocket.disconnect
+        $obs{recv_type}      = $d->{type};
+        $obs{recv_connected} = $conn->is_connected ? 1 : 0;
+        # close_received is now true: this reciprocal Close hits the 8429 branch.
+        await $send->({ type => 'websocket.close', code => 1000, reason => 'srvbye' });
+        $obs{sent_close} = 1;
+
+        if ($o{park}) { $obs{parked} = 1; await $park; }
+        $obs{app_returned} = 1;
+        return;
+    };
+    return (\%obs, $park, $app);
+}
+
+# =============================================================================
+# 0. THE FIX-1 REGRESSION (reciprocal-Close-after-peer). The app receives the
+#    peer's Close, THEN sends its own -- so `close_received` is true at the send
+#    (the 8429 branch). On base that branch ended the scope EAGERLY
+#    (_handle_disconnect_and_close 'client_closed'): terminal marked with the
+#    transport still OPEN and NO finish bound. Now it routes through the SAME
+#    bounded server-owned closure the parser peer-Close path uses: the scope is
+#    clean ONLY at the (bounded) transport closure, never eagerly. Three phases:
+#    transport held open -> NOT clean + a finish bound armed; transport closes ->
+#    CLEAN with the peer's code; transport stalls past the bound ->
+#    close_incomplete with the peer's code. RED on base (eager terminal, no bound).
+# =============================================================================
+subtest 'Fix 1: reciprocal Close held open -> not clean, finish bound armed' => sub {
+    my ($obs, $park, $app) = peer_first_app(park => 1);
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+
+    my ($conn) = values %{$server->{connections}};
+    my $cs     = $conn->{current_connection_state};
+    my $stream = $conn->{stream};
+    {
+        # Hold the server-owned transport close open so the intermediate state is
+        # observable: the reciprocal Close must NOT mark the scope clean while the
+        # transport is still open, and it MUST arm the finish bound.
+        no warnings 'redefine';
+        local *IO::Async::Stream::close_when_empty = sub { $obs->{close_requested}++ };
+        syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+        ok(pump_until(sub { $obs->{sent_close} && $obs->{close_requested} }, 3),
+            'app received the peer Close and sent its reciprocal Close');
+        is($obs->{recv_type}, 'websocket.disconnect', 'app received the peer Close');
+        ok($stream->write_handle, 'the actual transport remains open (close deliberately held)');
+        ok(!$cs->response_complete,
+            'NOT clean: no eager terminal while the transport is still open');
+        ok(!$obs->{complete} && !$obs->{disconnect}, 'no terminal fired yet');
+        ok($conn->{ws_close_deadline} && $conn->{ws_close_deadline}->is_running,
+            'the finish bound is armed and live (bounded server-owned closure)');
+    }
+    $stream->close_now;
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'Fix 1: reciprocal Close, transport closes -> clean with the peer code' => sub {
+    my ($obs, $park, $app) = peer_first_app(park => 1);
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+
+    # Peer answers, then only reads and waits for the server's EOF (RFC 6455
+    # 7.1.1). The server owns and finishes the transport close -> clean.
+    syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+    ok(pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5), 'a terminal fired');
+    ok($obs->{complete}, 'on_complete fired -- clean at the server-owned transport closure');
+    is($obs->{complete}, 1, 'on_complete fired exactly once');
+    is($obs->{complete_reason}, undef, 'disconnect_reason undef -- a clean end');
+    is($obs->{complete_connected}, 0, 'is_connected() false at the clean end');
+    is($obs->{complete_code}, 1001, 'close_code is the peer code (not the app intent 1000)');
+    is($obs->{complete_creason}, 'peerbye', 'close_reason is the peer text');
+    ok(!$obs->{disconnect}, 'on_disconnect did NOT fire (no eager client_closed)');
+    ok(pump_until(sub { server_closed_transport($sock) }, 3),
+        'the SERVER closed the transport -- the client saw EOF without closing TCP');
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'Fix 1: reciprocal Close, transport stalls -> close_incomplete, peer code' => sub {
+    my @logs;
+    my ($obs, $park, $app) = peer_first_app(park => 1, prime_bytes => 4 * 1024 * 1024);
+    my $server = start_server($app,
+        ws_close_timeout     => 0.5,
+        write_high_watermark => 64 * 1024 * 1024,
+        log_level            => 'info',
+        logger               => sub { push @logs, $_[0]->{message} // '' });
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+
+    my ($conn) = values %{$server->{connections}};
+    ok(pump_until(sub { $conn->_get_write_buffer_size > 0 }, 5),
+        'the primed message is stuck in the write queue (the peer is not reading)');
+    # Peer answers but never reads: the server-owned close cannot finish draining.
+    syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+    ok(pump_until(sub { $obs->{sent_close} }, 5), 'app sent its reciprocal Close');
+    assert_bounded_close_incomplete($obs, $conn, \@logs, 'Fix1-stall');
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
 # =============================================================================
 # 1. handler RETURNS after Close; peer answers then WAITS for the server to
 #    close the transport (never closes TCP) -> CLEAN, close_code = peer. THE
@@ -623,9 +774,10 @@ subtest 'close_timeout resolution emits a structured observability log line' => 
 #     the peer then refuses to read, so the server-owned close (close_when_empty)
 #     can never finish draining and the scope was left waiting forever (h1
 #     INFO-2). Now a finite finish bound (ws_close_timeout) ends the scope
-#     abnormally with `close_incomplete` / close_code 1006 (Www.pod "Standard
-#     Disconnect Reasons"; RFC 6455 7.1.5) -- DISTINCT from close_timeout (a
-#     silent peer): here the peer DID answer. WS-CLOSE-TRUTH-4. RED on base
+#     abnormally with `close_incomplete`, which PRESERVES the peer's
+#     close_code/close_reason (the peer sent a valid Close; category 4,
+#     WS-CLOSE-TRUTH-5) -- only disconnect_reason names the outcome. DISTINCT
+#     from close_timeout (a silent peer): here the peer DID answer. RED on base
 #     (no finish bound -> the scope hangs, no terminal fires).
 # =============================================================================
 
@@ -661,15 +813,26 @@ sub stuck_closing_connection {
 
     # The peer answers (app-initiated) or initiates (peer-initiated) its Close,
     # completing the closing handshake -- but it never reads, so the
-    # server-owned transport close cannot finish draining.
-    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'peerbye'));
+    # server-owned transport close cannot finish draining. The peer's Close
+    # carries a code (1001) DISTINCT from the app's own (1000) and a nonempty
+    # reason, so the preserved-peer-code assertions cannot pass on the app's
+    # intent; an empty peer Close (1005/undef) is exercised by its own case.
+    my $peer_close = exists $o{peer_close_payload}
+        ? $o{peer_close_payload}
+        : pack('n', 1001) . 'peerbye';
+    syswrite($sock, make_websocket_frame(8, $peer_close));
     return ($obs, $conn, \@logs, $sock, $server, $park);
 }
 
 # The completed handshake is NOT a clean end (the transport has not finished):
-# the scope waits under the finish bound and then resolves close_incomplete/1006.
+# the scope waits under the finish bound and then resolves close_incomplete,
+# which PRESERVES the peer's close_code/close_reason (WS-CLOSE-TRUTH-5): the peer
+# sent a valid Close, so its code stands; only disconnect_reason names the
+# outcome. Expected peer code/reason default to the distinct 1001/'peerbye'.
 sub assert_bounded_close_incomplete {
-    my ($obs, $conn, $logs, $label) = @_;
+    my ($obs, $conn, $logs, $label, %exp) = @_;
+    $exp{code}   = 1001      unless exists $exp{code};
+    $exp{reason} = 'peerbye' unless exists $exp{reason};
 
     ok(pump_until(sub { $conn->{ws_close_deadline} && $conn->{ws_close_deadline}->is_running }, 3),
         "$label: the finish bound is armed and live after the handshake completed");
@@ -682,8 +845,10 @@ sub assert_bounded_close_incomplete {
         "$label: reason is close_incomplete (the peer answered; the transport never finished)");
     isnt($obs->{disconnect_reason}, 'close_timeout',
         "$label: specifically NOT close_timeout");
-    is($obs->{disconnect_code}, 1006, "$label: close_code is 1006 (RFC 6455 7.1.5)");
-    is($obs->{disconnect_creason}, undef, "$label: close_reason is undef at 1006");
+    is($obs->{disconnect_code}, $exp{code},
+        "$label: close_code is the PEER's code $exp{code}, preserved (WS-CLOSE-TRUTH-5)");
+    is($obs->{disconnect_creason}, $exp{reason},
+        "$label: close_reason is the peer's, preserved (WS-CLOSE-TRUTH-5)");
     is($obs->{disconnect}, 1, "$label: on_disconnect fired exactly once");
     is($obs->{end}, 1, "$label: on_end fired exactly once");
     ok($obs->{end_future}, "$label: end_future resolved");
@@ -691,10 +856,11 @@ sub assert_bounded_close_incomplete {
 
     my @hits = grep { /close_incomplete/ && /finish bound/i } @$logs;
     is(scalar(@hits), 1, "$label: exactly one structured close_incomplete log line");
-    like($hits[0], qr/1006/, "$label: the line records the abnormal close_code 1006");
+    unlike($hits[0], qr/close_code 1006/,
+        "$label: the log line does not hardcode 1006 (WS-CLOSE-TRUTH-5)");
 }
 
-subtest 'app close, peer answers, transport never finishes -> close_incomplete/1006' => sub {
+subtest 'app close, peer answers, transport never finishes -> close_incomplete (peer code preserved)' => sub {
     my ($obs, $conn, $logs, $sock, $server, $park) =
         stuck_closing_connection(send_close => 1, ws_close_timeout => 0.5);
     assert_bounded_close_incomplete($obs, $conn, $logs, 'app-initiated');
@@ -703,10 +869,26 @@ subtest 'app close, peer answers, transport never finishes -> close_incomplete/1
     shutdown_server($server);
 };
 
-subtest 'peer close, server reciprocates, transport never finishes -> close_incomplete/1006' => sub {
+subtest 'peer close, server reciprocates, transport never finishes -> close_incomplete (peer code preserved)' => sub {
     my ($obs, $conn, $logs, $sock, $server, $park) =
         stuck_closing_connection(send_close => 0, ws_close_timeout => 0.5);
     assert_bounded_close_incomplete($obs, $conn, $logs, 'peer-initiated');
+    $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+# The empty peer-Close case: the peer's Close carried NO code, so the accessor
+# reports 1005/undef (RFC 6455 "no status code"), and close_incomplete preserves
+# THAT -- not a forced 1006 (WS-CLOSE-TRUTH-5). Distinguishes "peer code
+# preserved" from "no override at all": an empty Close still preserves its own
+# (empty) outcome.
+subtest 'peer close (no code), transport never finishes -> close_incomplete preserves 1005/undef' => sub {
+    my ($obs, $conn, $logs, $sock, $server, $park) =
+        stuck_closing_connection(send_close => 0, ws_close_timeout => 0.5,
+            peer_close_payload => '');   # empty Close: no status code
+    assert_bounded_close_incomplete($obs, $conn, $logs, 'empty-peer-Close',
+        code => 1005, reason => undef);
     $park->done unless $park->is_ready;
     close($sock);
     shutdown_server($server);

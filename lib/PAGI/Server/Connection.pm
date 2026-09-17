@@ -1045,16 +1045,14 @@ sub _h2_end_ws_stream {
         # Populate the peer's Close before the mark, so a callback reading
         # close_code/close_reason sees the final value (Www.pod "State
         # Transition Order"). _set_ws_close no-ops once terminal, so a stream
-        # _h2_on_close already ended keeps its recorded peer Close. EXCEPTION:
-        # close_incomplete is defined with close_code 1006 (Www.pod "Standard
-        # Disconnect Reasons"; RFC 6455 7.1.5) even though the peer's Close was
-        # seen -- the closing handshake completed but the stream-level close did
-        # not, so the abnormal closure, not the peer's negotiated code, is what
-        # close_code reports (the h2 twin of h1's _handle_disconnect exception).
-        $stream->{connection_state}->_set_ws_close(
-            $self->_end_reason($stream) eq 'close_incomplete'
-                ? (1006, undef)
-                : $self->_ws_peer_close_pair($stream));
+        # _h2_on_close already ended keeps its recorded peer Close.
+        # close_incomplete is armed only at handshake completion (the peer sent a
+        # valid Close), so it is ALWAYS a category-4 case: it PRESERVES the peer's
+        # code/reason like every other abnormal outcome after a peer Close, via
+        # _ws_peer_close_pair (the peer's code, or 1005 when its Close carried
+        # none). Only disconnect_reason names the outcome (WS-CLOSE-TRUTH-5; the
+        # h2 twin of h1's _handle_disconnect).
+        $stream->{connection_state}->_set_ws_close($self->_ws_peer_close_pair($stream));
         $stream->{connection_state}->_mark_disconnected($self->_end_reason($stream), $self->_end_detail($stream));
     }
     $self->_h2_ws_enqueue_disconnect($stream, $self->_end_code($stream), $self->_end_reason($stream));
@@ -4023,7 +4021,8 @@ sub _h2_process_ws_frames {
             # leaves the stream half-closed forever, so _h2_on_close never runs and
             # the scope hangs. Arm one finite per-stream finish bound (ws_close_timeout,
             # reusing the disposed slot) so a stuck finish ends the scope abnormally
-            # with close_incomplete / 1006 instead of hanging (WS-CLOSE-TRUTH-4).
+            # with close_incomplete instead of hanging; close_incomplete preserves the
+            # peer's close code (WS-CLOSE-TRUTH-5).
             # Full stream closure disposes it (_h2_end_ws_stream). The h2 twin of
             # h1's _initiate_ws_h1_transport_close.
             $self->_arm_ws_h2_finish_bound($stream_id, $stream);
@@ -5057,8 +5056,8 @@ sub _initiate_ws_h1_transport_close {
     # finish closing -- a peer that answered its Close and then stopped reading
     # leaves close_when_empty pending forever (h1 INFO-2). Arm one finite finish
     # bound (ws_close_timeout) BEFORE initiating the close, so a stuck finish
-    # ends the scope abnormally with close_incomplete / 1006 instead of hanging
-    # (WS-CLOSE-TRUTH-4). The cooperative close finishes well within the bound
+    # ends the scope abnormally with close_incomplete instead of hanging
+    # (WS-CLOSE-TRUTH-5; close_incomplete preserves the peer's close code). The cooperative close finishes well within the bound
     # and disposes it (the terminal path's _dispose_ws_close_deadline). Distinct
     # from close_timeout (a silent peer, armed at the send): here the peer
     # answered, so the abnormal reason is close_incomplete, not close_timeout.
@@ -5074,8 +5073,8 @@ sub _initiate_ws_h1_transport_close {
 # deadline machinery's on_deadline seam; the finish bound lives in the same
 # ws_close_deadline slot the terminal path disposes, so a clean transport
 # closure disarms it automatically. On expiry the transport never finished:
-# force-close and end the scope abnormally with close_incomplete / 1006 (Www.pod
-# "Standard Disconnect Reasons"; RFC 6455 7.1.5) -- NOT close_timeout.
+# force-close and end the scope abnormally with close_incomplete, which preserves
+# the peer's close code/reason (WS-CLOSE-TRUTH-5) -- NOT close_timeout.
 sub _arm_ws_h1_finish_bound {
     my ($self) = @_;
 
@@ -5095,7 +5094,7 @@ sub _arm_ws_h1_finish_bound {
         # default/quiet threshold.
         $conn->_log(warn => "WebSocket close-finish bound expired "
             . "(close_incomplete, $conn->{ws_close_timeout}s) - force-closing the "
-            . "transport, ending scope abnormally with close_code 1006")
+            . "transport, ending scope abnormally (close_code preserves the peer's)")
             if $conn->{server} && $conn->{server}->can('_log');
         $conn->_resolve_h1_ws_closing('close_incomplete',
             detail    => 'transport did not finish closing within ws_close_timeout',
@@ -5200,8 +5199,8 @@ sub _enter_ws_h2_closing_phase {
 # ws_close_deadline slot the terminal path (_h2_end_ws_stream) disposes, so a
 # clean full stream closure disarms it automatically. On expiry the stream never
 # finished (a client that answered its Close but withheld its END_STREAM): RST it
-# and end the scope abnormally with close_incomplete / 1006 (Www.pod "Standard
-# Disconnect Reasons"; RFC 6455 7.1.5) -- NOT close_timeout (the peer answered).
+# and end the scope abnormally with close_incomplete, which preserves the peer's
+# close code/reason (WS-CLOSE-TRUTH-5) -- NOT close_timeout (the peer answered).
 # Per-stream: a sibling ws stream on the same connection is untouched. The h2 twin
 # of _arm_ws_h1_finish_bound.
 sub _arm_ws_h2_finish_bound {
@@ -5221,7 +5220,7 @@ sub _arm_ws_h2_finish_bound {
         # default/quiet threshold.
         $conn->_log(warn => "HTTP/2 WebSocket stream $stream_id close-finish bound "
             . "expired (close_incomplete, $conn->{ws_close_timeout}s) - resetting the "
-            . "stream, ending scope abnormally with close_code 1006")
+            . "stream, ending scope abnormally (close_code preserves the peer's)")
             if $conn->{server} && $conn->{server}->can('_log');
         $conn->_resolve_h2_ws_closing($stream_id, $scope, 'close_incomplete',
             detail => 'stream did not finish closing within ws_close_timeout');
@@ -6655,17 +6654,13 @@ sub _handle_disconnect {
                 # preserved even when the outcome is abnormal for another
                 # reason), otherwise RFC 6455 1006 -- never the server's own
                 # code. Populated before the mark so a callback sees the final
-                # value. EXCEPTION: close_incomplete is defined with close_code
-                # 1006 (Www.pod "Standard Disconnect Reasons"; RFC 6455 7.1.5)
-                # even though the peer's Close was seen -- the closing handshake
-                # completed but the transport-level close did not, so the
-                # abnormal transport closure, not the peer's negotiated code, is
-                # what close_code reports.
+                # value. close_incomplete is armed only at handshake completion
+                # (the peer sent a valid Close), so it too is a category-4 case:
+                # it PRESERVES the peer's code/reason via _ws_peer_close_pair (the
+                # peer's code, or 1005 when its Close carried none), and only
+                # disconnect_reason names the outcome (WS-CLOSE-TRUTH-5).
                 if (($self->{scope_kind} // '') eq 'websocket') {
-                    $cs->_set_ws_close(
-                        $reason eq 'close_incomplete'
-                            ? (1006, undef)
-                            : $self->_ws_peer_close_pair($self));
+                    $cs->_set_ws_close($self->_ws_peer_close_pair($self));
                 }
                 $cs->_mark_disconnected(
                     $self->_end_reason($self), $self->_end_detail($self), $sync);
@@ -8428,11 +8423,23 @@ sub _create_websocket_send {
             # close deadline, and the terminal outcome is decided there.
             if ($weak_self->{close_received}) {
                 # The peer had already sent its Close, so this reciprocal Close
-                # completes the handshake (RFC 6455 5.5.1); the peer path has
-                # already initiated the server-owned transport close. Nothing is
-                # left to wait for -- close now, and the completed-handshake clean
-                # end (ws_peer_closed + client_closed) is marked by the teardown.
-                $weak_self->_handle_disconnect_and_close('client_closed');
+                # completes the handshake (RFC 6455 5.5.1). Both Closes are now
+                # exchanged, so the SERVER owns the transport close and the scope
+                # is clean ONLY at that (bounded) transport closure -- exactly
+                # like every other completed handshake (Www.pod L857-869, RFC
+                # 6455 7.1.1), NEVER an eager terminal with the transport still
+                # open. Route through the SAME bounded server-owned closure the
+                # parser peer-Close path uses. Idempotent with that path: if the
+                # parser already armed the finish bound and initiated the close,
+                # this is a no-op that lets it govern -- the finish-bound
+                # double-arm guard PRESERVES the existing deadline (it does not
+                # restart it), and close_when_empty on an already-closing stream
+                # does nothing; otherwise it initiates the close and arms the
+                # bound here. The terminal notification and the request
+                # accounting still run exactly once, in _resolve_h1_ws_closing
+                # (first-wins via _ws_closing_finished / _disconnect_handled), so
+                # neither is duplicated when both paths reach the closure.
+                $weak_self->_initiate_ws_h1_transport_close;
             }
             else {
                 # The peer has not answered yet: arm the bounded wait. Armed at
