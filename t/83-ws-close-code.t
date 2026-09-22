@@ -132,6 +132,19 @@ sub ws_upgrade {
     return $got;
 }
 
+sub ws_refusal_request {
+    my ($sock) = @_;
+    my $key = 'dGhlIHNhbXBsZSBub25jZQ==';
+    syswrite($sock,
+          "GET / HTTP/1.1\r\n"
+        . "Host: localhost\r\n"
+        . "Upgrade: websocket\r\n"
+        . "Connection: Upgrade\r\n"
+        . "Sec-WebSocket-Key: $key\r\n"
+        . "Sec-WebSocket-Version: 13\r\n"
+        . "\r\n");
+}
+
 # A parked accepted-WebSocket app that records close_code/close_reason at the
 # instant each terminal callback fires. $pre_park, if given, runs after the
 # callbacks are registered and before the app parks (used to have the app send
@@ -171,6 +184,34 @@ sub build_ws_app {
     };
 
     return ($app, \%obs, $park);
+}
+
+sub build_refusing_ws_app {
+    my %seen = (complete => 0, end => 0, disconnect => 0);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+        await $receive->();
+        my $snapshot = sub {
+            return [ $conn->close_code, $conn->close_reason,
+                $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                $conn->disconnect_reason, $conn->disconnect_detail ];
+        };
+        $conn->on_complete(sub { ++$seen{complete}; $seen{at_complete} = $snapshot->() });
+        $conn->on_end(sub { ++$seen{end}; $seen{at_end} = $snapshot->() });
+        $conn->on_disconnect(sub { ++$seen{disconnect} });
+        my $end = $conn->end_future;
+        await $send->({ type => 'http.response.start', status => 403,
+                        headers => [['content-length', length 'Access denied']] });
+        $seen{before_body} = $conn->close_code;
+        await $send->({ type => 'http.response.body', body => 'Access denied' });
+        $seen{end_value} = await $end;
+        $seen{after_end} = $snapshot->();
+        $seen{receive_type} = (await $receive->())->{type};
+        $seen{returned} = 1;
+    };
+    return ($app, \%seen);
 }
 
 # =============================================================================
@@ -270,6 +311,33 @@ subtest 'server-initiated close, peer silent -> close_code 1006, not the server 
 
     $park->done unless $park->is_ready;
     pump_until(sub { $obs->{app_returned} }, 3);
+    shutdown_server($server);
+};
+
+subtest 'a websocket refusal populates 1006 before its clean completion' => sub {
+    my ($app, $seen) = build_refusing_ws_app();
+    my $server = start_server($app);
+    my $sock = connect_client($server->port);
+    ws_refusal_request($sock);
+    my ($wire, $eof) = ('', 0);
+    ok(pump_until(sub {
+        my $buf;
+        my $n = sysread($sock, $buf, 4096);
+        $wire .= $buf if defined $n && $n > 0;
+        $eof = 1 if defined $n && $n == 0;
+        return $eof && $seen->{returned} && $seen->{complete} && $seen->{end};
+    }, 5), 'refusing application and callbacks completed');
+    like($wire, qr/^HTTP\/1\.1 403 Forbidden\r\n/, 'refusal returned HTTP 403');
+    my (undef, $body) = split /\r\n\r\n/, $wire, 2;
+    is($body, 'Access denied', 'refusal returned the exact decoded body');
+    is($seen->{before_body}, undef, 'no close metadata before refusal completion');
+    is($seen->{at_complete}, [1006, undef, 1, 0, undef, undef], 'complete sees terminal facts');
+    is($seen->{at_end}, [1006, undef, 1, 0, undef, undef], 'end sees terminal facts');
+    is($seen->{after_end}, [1006, undef, 1, 0, undef, undef], 'end future sees terminal facts');
+    is([@{$seen}{qw(complete end disconnect)}], [1, 1, 0], 'clean callback families');
+    is($seen->{end_value}, undef, 'successful end future');
+    is($seen->{receive_type}, 'http.disconnect', 'no synthetic WebSocket disconnect');
+    close $sock;
     shutdown_server($server);
 };
 

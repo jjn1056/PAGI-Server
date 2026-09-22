@@ -480,11 +480,21 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
         my $app = async sub {
             my ($scope, $receive, $send) = @_;
             await $receive->() if $scope->{type} ne 'sse';
+            my $conn = $scope->{'pagi.connection'};
+            my $snapshot = sub { [ $conn->close_code, $conn->close_reason,
+                $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                $conn->disconnect_reason, $conn->disconnect_detail ] };
+            $conn->on_complete(sub { $r{complete}++ });
+            $conn->on_end(sub { $r{at_end} = $snapshot->() });
             await $send->({ type => 'http.response.start', status => $STATUS,
                             headers => [['content-type', 'text/plain']] });
             await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+            $r{after_chunk} = $snapshot->();
             $r{parked} = 1;
             await $released;         # still running when the client drops
+            $r{finish_err} = do { local $@;
+                eval { await $send->({ type => 'http.response.body', body => 'last' }) }; $@ };
+            $r{after_release} = $snapshot->();
             $r{returned} = 1;
             return;
         };
@@ -500,23 +510,42 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
         $server->shutdown->get;
 
         is($r{returned}, 1, "h1 $kind: the app returned after the client had gone");
+        if ($kind eq 'websocket') {
+            is($r{after_chunk}, [undef, undef, 0, 1, undef, undef],
+                'h1 websocket: the partial refusal stays active');
+            is([@{$r{at_end}}[0 .. 4]], [1006, undef, 0, 0, 'client_closed'],
+                'h1 websocket: interruption records terminal metadata before on_end');
+            is($r{complete}, undef, 'h1 websocket: interruption never completes the response');
+            is($r{after_release}, $r{at_end},
+                'h1 websocket: a failed final body cannot overwrite the terminal snapshot');
+        }
         ok(!(scalar grep { /incomplete response/i } @warnings),
             "h1 $kind: no incomplete-response error was logged") or diag("warnings: @warnings");
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 4 unless $have_h2;
+        skip 'HTTP/2 not available', 8 unless $have_h2;
         for my $kind (@SCOPES) {
             my %r;
             my $released = $loop->new_future;
             my $app = async sub {
                 my ($scope, $receive, $send) = @_;
                 await $receive->() if $scope->{type} ne 'sse';
+                my $conn = $scope->{'pagi.connection'};
+                my $snapshot = sub { [ $conn->close_code, $conn->close_reason,
+                    $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                    $conn->disconnect_reason, $conn->disconnect_detail ] };
+                $conn->on_complete(sub { $r{complete}++ });
+                $conn->on_end(sub { $r{at_end} = $snapshot->() });
                 await $send->({ type => 'http.response.start', status => $STATUS,
                                 headers => [['content-type', 'text/plain']] });
                 await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
+                $r{after_chunk} = $snapshot->();
                 $r{parked} = 1;
                 await $released;
+                $r{finish_err} = do { local $@;
+                    eval { await $send->({ type => 'http.response.body', body => 'last' }) }; $@ };
+                $r{after_release} = $snapshot->();
                 $r{returned} = 1;
                 return;
             };
@@ -538,6 +567,15 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
             $loop->remove($server);
 
             is($r{returned}, 1, "h2 $kind: the app returned after the client had gone");
+            if ($kind eq 'websocket') {
+                is($r{after_chunk}, [undef, undef, 0, 1, undef, undef],
+                    'h2 websocket: the partial refusal stays active');
+                is([@{$r{at_end}}[0 .. 4]], [1006, undef, 0, 0, 'client_closed'],
+                    'h2 websocket: interruption records terminal metadata before on_end');
+                is($r{complete}, undef, 'h2 websocket: interruption never completes the response');
+                is($r{after_release}, $r{at_end},
+                    'h2 websocket: a failed final body cannot overwrite the terminal snapshot');
+            }
             ok(!(scalar grep { /incomplete|without ending the scope cleanly/i } @warnings),
                 "h2 $kind: no incomplete-response error was logged") or diag("warnings: @warnings");
         }
@@ -1195,8 +1233,12 @@ sub trailers_refusal_app {
                         trailers => 1,
                         headers  => [['content-type', 'text/plain']] });
         await $send->({ type => 'http.response.body', body => 'nope' });
+        $r->{after_body} = [ $conn->close_code, $conn->response_complete ? 1 : 0,
+                              $conn->is_connected ? 1 : 0 ];
         await $send->({ type => 'http.response.trailers',
                         headers => [['x-refusal-trailer', 'yes']] });
+        $r->{after_trailers} = [ $conn->close_code, $conn->response_complete ? 1 : 0,
+                                  $conn->is_connected ? 1 : 0 ];
         my $after = $receive->();
         await Future->wait_any($after->without_cancel, $loop->delay_future(after => 0.4));
         $r->{after_event} = $after->is_ready ? $after->get : undef;
@@ -1225,13 +1267,17 @@ subtest 'a refusal terminated by http.response.trailers is a clean end' => sub {
         is($r{after_event}, $END_EVENT{$kind},
             "h1 $kind: a receive() after the trailers reports the scope's end, with no reason");
         is($r{conn}->response_complete, 1, "h1 $kind: response_complete is true");
+        if ($kind eq 'websocket') {
+            is($r{after_body}, [undef, 0, 1], 'h1 websocket: trailers are still pending after the body');
+            is($r{after_trailers}, [1006, 1, 0], 'h1 websocket: trailers set close metadata at completion');
+        }
         is($r{conn}->disconnect_reason, undef, "h1 $kind: disconnect_reason is undef");
         is($r{complete}, 1, "h1 $kind: on_complete fired exactly once");
         is($r{disconnect}, undef, "h1 $kind: on_disconnect never fired");
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 16 unless $have_h2;
+        skip 'HTTP/2 not available', 18 unless $have_h2;
         for my $kind (@SCOPES) {
             my %r;
             my ($h, $body) = h2_fetch(app => trailers_refusal_app(\%r), kind => $kind,
@@ -1243,6 +1289,10 @@ subtest 'a refusal terminated by http.response.trailers is a clean end' => sub {
             is($r{after_event}, $END_EVENT{$kind},
                 "h2 $kind: a receive() after the trailers reports the scope's end, with no reason");
             is($r{conn}->response_complete, 1, "h2 $kind: response_complete is true");
+            if ($kind eq 'websocket') {
+                is($r{after_body}, [undef, 0, 1], 'h2 websocket: trailers are still pending after the body');
+                is($r{after_trailers}, [1006, 1, 0], 'h2 websocket: trailers set close metadata at completion');
+            }
             is($r{conn}->disconnect_reason, undef, "h2 $kind: disconnect_reason is undef");
             is($r{complete}, 1, "h2 $kind: on_complete fired exactly once");
             is($r{disconnect}, undef, "h2 $kind: on_disconnect never fired");

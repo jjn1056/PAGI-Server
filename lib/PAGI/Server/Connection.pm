@@ -1234,15 +1234,23 @@ sub _h2_scope_end_event {
 # allows for an answer that send produced.
 sub _h2_end_scope_output {
     my ($self, $stream) = @_;
-    $stream->{connection_state}->_mark_complete if $stream->{connection_state};
+    if (my $conn = $stream->{connection_state}) {
+        $conn->_set_ws_close(1006, undef)
+            if $stream->{is_websocket} && !defined $conn->close_code;
+        $conn->_mark_complete;
+    }
     $self->_h2_wake_pending($stream);
     return;
 }
 
 sub _h1_end_scope_output {
     my ($self) = @_;
-    $self->{current_connection_state}->_mark_complete
-        if $self->{current_connection_state};
+    if (my $conn = $self->{current_connection_state}) {
+        $conn->_set_ws_close(1006, undef)
+            if ($self->{scope_kind} // '') eq 'websocket'
+                && !defined $conn->close_code;
+        $conn->_mark_complete;
+    }
     $self->_wake_receive_pending;
     return;
 }
