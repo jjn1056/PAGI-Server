@@ -250,6 +250,65 @@ sub parked_ws_app {
     };
 }
 
+subtest 'a websocket refusal preserves 1006 before its clean completion' => sub {
+    my %seen = (complete => 0, end => 0, disconnect => 0);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+        await $receive->();
+        my $snapshot = sub {
+            return [ $conn->close_code, $conn->close_reason,
+                $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                $conn->disconnect_reason, $conn->disconnect_detail ];
+        };
+        $conn->on_complete(sub { ++$seen{complete}; $seen{at_complete} = $snapshot->() });
+        $conn->on_end(sub { ++$seen{end}; $seen{at_end} = $snapshot->() });
+        $conn->on_disconnect(sub { ++$seen{disconnect} });
+        my $end = $conn->end_future;
+        await $send->({ type => 'http.response.start', status => 403, headers => [] });
+        $seen{before_body} = $conn->close_code;
+        await $send->({ type => 'http.response.body', body => 'Access denied' });
+        $seen{end_value} = await $end;
+        $seen{after_end} = $snapshot->();
+        $seen{receive_type} = (await $receive->())->{type};
+        $seen{returned} = 1;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my ($status, $body, $sid) = ('', '');
+    my %server_end_stream;
+    require Net::HTTP2::nghttp2::Session;
+    my $client = Net::HTTP2::nghttp2::Session->new_client(callbacks => {
+        on_begin_headers => sub { 0 },
+        on_header => sub { my (undef, $name, $value) = @_; $status = $value if $name eq ':status'; 0 },
+        on_frame_recv => sub {
+            my ($frame) = @_;
+            $server_end_stream{$frame->{stream_id}} = 1
+                if $frame->{type} == 0 && ($frame->{flags} & 0x1);
+            0
+        },
+        on_data_chunk_recv => sub { my (undef, $data) = @_; $body .= $data; 0 },
+        on_stream_close => sub { 0 },
+    });
+    complete_h2_handshake($client, $client_sock);
+    $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub {
+        $seen{returned} && $seen{complete} && $seen{end} && $server_end_stream{$sid}
+    }), 'refusing application, callbacks, and server END_STREAM completed');
+    is($status, '403', 'refusal returned HTTP 403');
+    is($body, 'Access denied', 'refusal returned exactly the HTTP body');
+    ok($server_end_stream{$sid}, 'the response DATA frame carried server END_STREAM');
+    is($seen{before_body}, undef, 'no close metadata before refusal completion');
+    is($seen{at_complete}, [1006, undef, 1, 0, undef, undef], 'complete sees terminal facts');
+    is($seen{at_end}, [1006, undef, 1, 0, undef, undef], 'end sees terminal facts');
+    is($seen{after_end}, [1006, undef, 1, 0, undef, undef], 'end future sees terminal facts');
+    is([@seen{qw(complete end disconnect)}], [1, 1, 0], 'clean callback families');
+    is($seen{end_value}, undef, 'successful end future');
+    is($seen{receive_type}, 'http.disconnect', 'no synthetic WebSocket disconnect');
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
 # ============================================================
 # 1. Peer Close(1000,'bye')+END_STREAM -> on_complete, close_code/reason set.
 # ============================================================
