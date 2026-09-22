@@ -309,15 +309,22 @@ subtest 'a complete-body refusal is the same response an http scope would send' 
 
 subtest 'a streamed refusal delivers its first chunk before the terminal one' => sub {
     for my $kind (@SCOPES) {
+        my %r;
         my $gate = $loop->new_future;
         my $app = async sub {
             my ($scope, $receive, $send) = @_;
             await $receive->() if $scope->{type} ne 'sse';
+            my $conn = $scope->{'pagi.connection'};
+            my $snapshot = sub { [ $conn->close_code, $conn->close_reason,
+                $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                $conn->disconnect_reason, $conn->disconnect_detail ] };
             await $send->({ type => 'http.response.start', status => $STATUS,
                             headers => [['content-type', 'text/plain']] });
             await $send->({ type => 'http.response.body', body => 'first', more => 1 });
+            $r{after_chunk} = $snapshot->();
             await $gate;
             await $send->({ type => 'http.response.body', body => 'last', more => 0 });
+            $r{after_final} = $snapshot->();
             return;
         };
         my $server = create_server($app);
@@ -326,26 +333,41 @@ subtest 'a streamed refusal delivers its first chunk before the terminal one' =>
         like($$wire, qr/\r\n\r\n5\r\nfirst\r\n/,
             "h1 $kind: the first chunk is on the wire before the terminal one is sent");
         unlike($$wire, qr/last/, "h1 $kind: the terminal chunk has not been sent yet");
+        if ($kind eq 'websocket') {
+            is($r{after_chunk}, [undef, undef, 0, 1, undef, undef],
+                'h1 websocket: a nonterminal chunk leaves metadata pending');
+        }
         $gate->done;
         $pump->(25, sub { $$wire =~ /0\r\n\r\n\z/ });
         like($$wire, qr/4\r\nlast\r\n0\r\n\r\n\z/,
             "h1 $kind: the terminal chunk and the chunked terminator follow");
+        if ($kind eq 'websocket') {
+            is($r{after_final}, [1006, undef, 1, 0, undef, undef],
+                'h1 websocket: the final body records the clean terminal snapshot');
+        }
         close $sock;
         $server->shutdown->get;
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 4 unless $have_h2;
+        skip 'HTTP/2 not available', 6 unless $have_h2;
         for my $kind (@SCOPES) {
+            my %r;
             my $gate = $loop->new_future;
             my $app = async sub {
                 my ($scope, $receive, $send) = @_;
                 await $receive->() if $scope->{type} ne 'sse';
+                my $conn = $scope->{'pagi.connection'};
+                my $snapshot = sub { [ $conn->close_code, $conn->close_reason,
+                    $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
+                    $conn->disconnect_reason, $conn->disconnect_detail ] };
                 await $send->({ type => 'http.response.start', status => $STATUS,
                                 headers => [['content-type', 'text/plain']] });
                 await $send->({ type => 'http.response.body', body => 'first', more => 1 });
+                $r{after_chunk} = $snapshot->();
                 await $gate;
                 await $send->({ type => 'http.response.body', body => 'last', more => 0 });
+                $r{after_final} = $snapshot->();
                 return;
             };
             my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
@@ -357,9 +379,17 @@ subtest 'a streamed refusal delivers its first chunk before the terminal one' =>
             $client_sock->syswrite($client->mem_send);
             exchange_frames($client, $client_sock, 25, sub { $body eq 'first' });
             is($body, 'first', "h2 $kind: the first DATA frame arrived before the terminal chunk");
+            if ($kind eq 'websocket') {
+                is($r{after_chunk}, [undef, undef, 0, 1, undef, undef],
+                    'h2 websocket: a nonterminal chunk leaves metadata pending');
+            }
             $gate->done;
             exchange_frames($client, $client_sock, 25, sub { $body eq 'firstlast' });
             is($body, 'firstlast', "h2 $kind: the terminal chunk follows");
+            if ($kind eq 'websocket') {
+                is($r{after_final}, [1006, undef, 1, 0, undef, undef],
+                    'h2 websocket: the final body records the clean terminal snapshot');
+            }
             $stream_io->close_now;
             $loop->remove($server);
         }
@@ -485,7 +515,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
                 $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
                 $conn->disconnect_reason, $conn->disconnect_detail ] };
             $conn->on_complete(sub { $r{complete}++ });
-            $conn->on_end(sub { $r{at_end} = $snapshot->() });
+            $conn->on_end(sub { ++$r{end}; $r{at_end} = $snapshot->() });
             await $send->({ type => 'http.response.start', status => $STATUS,
                             headers => [['content-type', 'text/plain']] });
             await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
@@ -516,6 +546,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
             is([@{$r{at_end}}[0 .. 4]], [1006, undef, 0, 0, 'client_closed'],
                 'h1 websocket: interruption records terminal metadata before on_end');
             is($r{complete}, undef, 'h1 websocket: interruption never completes the response');
+            is($r{end}, 1, 'h1 websocket: interruption notifies on_end once');
             is($r{after_release}, $r{at_end},
                 'h1 websocket: a failed final body cannot overwrite the terminal snapshot');
         }
@@ -524,7 +555,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
     }
 
     SKIP: {
-        skip 'HTTP/2 not available', 8 unless $have_h2;
+        skip 'HTTP/2 not available', 9 unless $have_h2;
         for my $kind (@SCOPES) {
             my %r;
             my $released = $loop->new_future;
@@ -536,7 +567,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
                     $conn->response_complete ? 1 : 0, $conn->is_connected ? 1 : 0,
                     $conn->disconnect_reason, $conn->disconnect_detail ] };
                 $conn->on_complete(sub { $r{complete}++ });
-                $conn->on_end(sub { $r{at_end} = $snapshot->() });
+                $conn->on_end(sub { ++$r{end}; $r{at_end} = $snapshot->() });
                 await $send->({ type => 'http.response.start', status => $STATUS,
                                 headers => [['content-type', 'text/plain']] });
                 await $send->({ type => 'http.response.body', body => 'partial', more => 1 });
@@ -573,6 +604,7 @@ subtest 'an abandoned refusal is not logged once the client has already gone' =>
                 is([@{$r{at_end}}[0 .. 4]], [1006, undef, 0, 0, 'client_closed'],
                     'h2 websocket: interruption records terminal metadata before on_end');
                 is($r{complete}, undef, 'h2 websocket: interruption never completes the response');
+                is($r{end}, 1, 'h2 websocket: interruption notifies on_end once');
                 is($r{after_release}, $r{at_end},
                     'h2 websocket: a failed final body cannot overwrite the terminal snapshot');
             }
