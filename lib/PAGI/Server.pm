@@ -1710,6 +1710,43 @@ B<CLI:> C<--ws-idle-timeout 300>
 B<Note:> For more sophisticated keep-alive behavior with ping/pong, use
 C<< $ws->keepalive($interval, $timeout) >> for protocol-level ping/pong.
 
+=item ws_close_timeout => $seconds
+
+Maximum time in seconds the server waits for a WebSocket closing handshake to
+complete after the application has initiated it with C<websocket.close>, before
+ending the scope abnormally with the C<close_timeout> disconnect reason (close
+code C<1006>).
+
+A completed closing handshake requires the peer to answer the server's Close
+with its own Close and the transport then to close. A peer that never answers
+would otherwise leave the scope waiting forever; this option is the finite
+bound on that wait that L<PAGI::Spec::Www> requires the server to enforce.
+
+B<Default:> 10
+
+This bound is B<finite and positive>. Unlike C<ws_idle_timeout> and
+C<sse_idle_timeout>, C<0> does not disable it -- the closing-handshake wait must
+always be bounded -- so C<0>, a negative value, and a non-finite value (C<Inf>,
+C<NaN>) are all rejected at construction.
+
+Entering the closing phase cancels the scope's activity timers (the WebSocket
+keepalive/pong timeout and the idle timeout) so that this deadline is the sole
+bound governing the phase.
+
+B<Example:>
+
+    # Wait up to 30s for the peer to complete the closing handshake
+    my $server = PAGI::Server->new(
+        app              => $app,
+        ws_close_timeout => 30,
+    );
+
+B<CLI:> A C<--ws-close-timeout> flag is a deliberate follow-up and is not yet
+implemented; for now set this option through the constructor.
+
+B<See also:> L<PAGI::Spec::Www/"Standard Disconnect Reasons"> for
+C<close_timeout>, and its C<close_code>/C<close_reason> rules for C<1006>.
+
 =item sse_idle_timeout => $seconds
 
 Maximum time in seconds an SSE connection can be idle without any events
@@ -2434,6 +2471,18 @@ B<Graceful shutdown for maintenance:>
 
 =cut
 
+# True only for a finite, strictly positive number. Rejects 0, negatives,
+# non-numbers, NaN (never > 0), and +/-Inf (isinf). Used to validate bounds
+# that must always be finite, such as ws_close_timeout.
+sub _is_finite_positive {
+    my ($val) = @_;
+    return 0 unless defined $val;
+    return 0 unless Scalar::Util::looks_like_number($val);
+    return 0 unless $val > 0;
+    return 0 if POSIX::isinf($val);
+    return 1;
+}
+
 sub _init {
     my ($self, $params) = @_;
 
@@ -2584,6 +2633,9 @@ sub _init {
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
+    $self->{ws_close_timeout}    = delete $params->{ws_close_timeout} // 10;  # Bound on the WebSocket closing-handshake wait (finite, positive; no "zero disables")
+    die "Invalid ws_close_timeout '$self->{ws_close_timeout}' - must be a finite, positive number of seconds; the WebSocket closing-handshake wait is always bounded (there is no 'zero disables')\n"
+        unless _is_finite_positive($self->{ws_close_timeout});
     $self->{heartbeat_timeout}   = delete $params->{heartbeat_timeout} // 50;  # Worker heartbeat timeout (0 = disabled)
     $self->{lifespan_startup_timeout} = delete $params->{lifespan_startup_timeout} // 30;  # Max wait for lifespan startup signal
     die "Invalid lifespan_startup_timeout '0' - the PAGI Lifespan spec requires that a server must not block startup indefinitely waiting for a lifespan signal\n"
@@ -2779,6 +2831,12 @@ sub configure {
     }
     if (exists $params{sse_idle_timeout}) {
         $self->{sse_idle_timeout} = delete $params{sse_idle_timeout};
+    }
+    if (exists $params{ws_close_timeout}) {
+        my $t = delete $params{ws_close_timeout};
+        die "Invalid ws_close_timeout '$t' - must be a finite, positive number of seconds; the WebSocket closing-handshake wait is always bounded (there is no 'zero disables')\n"
+            unless _is_finite_positive($t);
+        $self->{ws_close_timeout} = $t;
     }
     if (exists $params{http2}) {
         $self->{http2} = delete $params{http2};
@@ -4110,6 +4168,7 @@ sub _run_as_worker {
         request_timeout     => $self->{request_timeout},
         ws_idle_timeout     => $self->{ws_idle_timeout},
         sse_idle_timeout    => $self->{sse_idle_timeout},
+        ws_close_timeout    => $self->{ws_close_timeout},
         sync_file_threshold => $self->{sync_file_threshold},
         max_receive_queue   => $self->{max_receive_queue},
         max_disconnect_receives => $self->{max_disconnect_receives},
@@ -4306,6 +4365,7 @@ sub _on_connection {
         request_timeout   => $self->{request_timeout},
         ws_idle_timeout   => $self->{ws_idle_timeout},
         sse_idle_timeout  => $self->{sse_idle_timeout},
+        ws_close_timeout  => $self->{ws_close_timeout},
         max_body_size     => $self->{max_body_size},
         access_log        => $self->{access_log},
         _access_log_formatter => $self->{_access_log_formatter},

@@ -15,6 +15,13 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 # including "a server-detected protocol violation, timeout, or transport loss
 # before a clean end" -- is ABNORMAL with the applicable standard token.
 #
+# COMPLETING the closing handshake requires the PEER's Close, not the app's own
+# send state alone (Www.pod L857-869; deviation WS-CLOSE-TRUTH-1): sending
+# websocket.close (send state 'closed') INITIATES the handshake and holds the
+# scope pending under the close deadline until the peer's Close arrives. So an
+# app-initiated close is clean only once ws_peer_closed is also set; app close
+# with no peer Close is pending, not clean.
+#
 # _h2_ws_clean_end is the one place that decision is made for HTTP/2: both
 # _h2_on_close and the dispatch wrapper ask it, and its answer picks
 # _mark_complete over _mark_disconnected, which is Server Requirement 3
@@ -43,9 +50,20 @@ my $loop = IO::Async::Loop->new;
 
 my @cases = (
     {
-        name   => 'application sent websocket.close on an accepted socket',
-        stream => { seq_state => 'closed' },
+        # App close AND peer Close = a completed handshake (Www.pod L857-869 /
+        # WS-CLOSE-TRUTH-1). The app's own websocket.close initiates it; the
+        # peer's Close completes it.
+        name   => 'app close completed by the peer Close on an accepted socket',
+        stream => { seq_state => 'closed', ws_peer_closed => 1 },
         clean  => 1,
+    },
+    {
+        # App close ALONE, peer never answered: the scope is held PENDING under
+        # the close deadline (Www.pod L857-863 / WS-CLOSE-TRUTH-1), NOT clean --
+        # the send state alone does not complete the handshake.
+        name   => 'app close alone, no peer Close (pending, not clean)',
+        stream => { seq_state => 'closed' },
+        clean  => 0,
     },
     {
         name   => 'peer Close frame validated on an accepted socket',
@@ -82,10 +100,11 @@ my @cases = (
         clean  => 0,
     },
     {
-        # The send state alone now says whether the handshake completed:
         # advance_websocket rejects websocket.close before accept, so 'closed'
-        # is reachable only from 'accepted' and no separate accept flag is
-        # kept. A scope still in the handshake is never a clean end.
+        # is reachable only from 'accepted' and no separate accept flag is kept;
+        # but the send state alone is not a completed handshake (that needs the
+        # peer's Close -- see the app-close cases above). A scope still in the
+        # handshake is never a clean end.
         name   => 'still connecting',
         stream => { seq_state => 'connecting' },
         clean  => 0,
@@ -105,13 +124,19 @@ subtest 'clean-end classification, one case per ending' => sub {
 };
 
 subtest 'the classifier reads the stream, not the object' => sub {
-    # Both halves of a clean end must be sufficient on their own, and neither
-    # may be confused for the other.
+    # A completed handshake needs the PEER's Close (Www.pod L857-869 /
+    # WS-CLOSE-TRUTH-1): the receive half is the load-bearing one. The app's own
+    # send half ('closed') is NOT sufficient on its own -- it is completed only
+    # once the peer's Close also validates.
+    ok(!PAGI::Server::Connection::_h2_ws_clean_end(
+        { seq_state => 'closed' }),
+        'send half alone is NOT enough -- the peer Close is required');
     ok(PAGI::Server::Connection::_h2_ws_clean_end(
-        { seq_state => 'closed' }), 'send half alone is enough');
+        { seq_state => 'closed', ws_peer_closed => 1 }),
+        'send half completed by the peer Close is clean');
     ok(PAGI::Server::Connection::_h2_ws_clean_end(
         { seq_state => 'accepted', ws_peer_closed => 1 }),
-        'receive half alone is enough');
+        'receive half alone (a peer-initiated close) is enough');
     ok(!PAGI::Server::Connection::_h2_ws_clean_end(
         { seq_state => 'accepted', close_received => 1 }),
         'close_received is NOT the receive half: it is set before the frame validates');
@@ -171,7 +196,10 @@ subtest 'a server protocol close on an unmarked object ends abnormally' => sub {
 };
 
 subtest 'a completed closing handshake on an unmarked object ends cleanly' => sub {
-    my $got = drive_h2_on_close(seq_state => 'closed');
+    # A completed handshake is the app's Close (send state 'closed') AND the
+    # peer's Close (ws_peer_closed); app close alone is held pending, not clean
+    # (Www.pod L857-869 / WS-CLOSE-TRUTH-1).
+    my $got = drive_h2_on_close(seq_state => 'closed', ws_peer_closed => 1);
 
     is($got->{seen}{complete}, 1, 'on_complete fired once');
     ok(!$got->{seen}{disconnect}, 'on_disconnect did not fire');

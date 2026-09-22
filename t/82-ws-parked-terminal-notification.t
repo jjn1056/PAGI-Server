@@ -17,12 +17,15 @@
 # returns while the test observes it. The only thing that can deliver its
 # terminal notification is the server's own frame/transport handling.
 #
-# Case 1 (peer Close while parked) is the load-bearing regression: on h1 the
-# Close parser cached the disconnect event and set the disconnect-handled guard
-# but never marked the scope's connection state, so on_complete never fired for
-# a parked app. Case 2 (abrupt drop while parked) shares the harness and guards
-# the abnormal path against regressing -- it takes the transport-close route,
-# not the Close parser, so it is expected to pass on base as well as after.
+# Case 1 (peer Close while parked) pins the server-owned close (RFC 6455 7.1.1,
+# WS-CLOSE-TRUTH-3): the peer's Close plus the server's reciprocal Close is a
+# completed handshake, and the SERVER then closes the transport; on_complete
+# fires for the parked app AT that server-driven transport closure, with the
+# client never closing TCP. Case 1b is the same for a handler that returns
+# immediately after the disconnect (rather than parking). Case 2 (abrupt drop
+# while parked) shares the harness and guards the abnormal path against
+# regressing -- an abrupt drop with no handshake is on_disconnect / the standard
+# token.
 # =============================================================================
 
 use strict;
@@ -118,6 +121,16 @@ sub shutdown_server {
     eval { $loop->remove($server) };
 }
 
+# Drain any server bytes on $sock and report whether the SERVER has closed its
+# end (a defined sysread of 0 bytes is EOF). Proves server-owned closure
+# (RFC 6455 7.1.1): the client only reads and never closes TCP itself.
+sub server_closed_transport {
+    my ($sock) = @_;
+    my $buf;
+    my $n = sysread($sock, $buf, 4096);
+    return (defined $n && $n == 0) ? 1 : 0;
+}
+
 # Perform the h1 WebSocket upgrade on $sock and pump until the 101 is seen.
 sub ws_upgrade {
     my ($sock) = @_;
@@ -143,7 +156,12 @@ sub ws_upgrade {
 
 # Build the parked app and the observation hash + park Future it closes over.
 # One instance per subtest (the server takes one app per connection).
+#   drain_return => 1  after the callbacks are registered, do ONE receive()
+#                      (drains the peer's websocket.disconnect) then return
+#                      immediately, instead of parking forever. Exercises a
+#                      handler that returns right after the disconnect.
 sub build_parked_app {
+    my (%opt) = @_;
     my %obs;
     my $park = $loop->new_future;
 
@@ -169,6 +187,13 @@ sub build_parked_app {
             $obs{disconnect_reason}    = $reason;
         });
 
+        if ($opt{drain_return}) {
+            my $d = await $receive->();              # the peer's disconnect
+            $obs{drained_type} = $d->{type};
+            $obs{app_returned} = 1;
+            return;
+        }
+
         $obs{parked} = 1;
         await $park;          # never calls receive() again; never drains
         $obs{app_returned} = 1;
@@ -179,7 +204,8 @@ sub build_parked_app {
 }
 
 # =============================================================================
-# 1. h1 peer Close while parked -> on_complete, without the app returning.
+# 1. h1 peer Close while parked -> on_complete at the SERVER-driven transport
+#    closure, without the app returning and without the client closing TCP.
 #    RED on base (nothing fires); GREEN after the fix. Load-bearing.
 # =============================================================================
 
@@ -192,9 +218,10 @@ subtest 'h1: a parked app is notified on_complete when the peer sends a Close' =
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
     ok(pump_until(sub { $obs->{parked} }, 5), 'app accepted and parked');
 
-    # Peer sends a clean Close (code 1000, reason 'bye'). TCP is left open, so
-    # the ONLY thing that can deliver the terminal notification is the Close
-    # parser's mark -- not any later transport close.
+    # Peer sends a clean Close (code 1000, reason 'bye') then only reads: it
+    # never closes TCP. The completed handshake makes the SERVER close the
+    # transport (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3), and on_complete fires at that
+    # server-driven closure.
     syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
 
     ok(pump_until(sub { $obs->{complete} }, 5),
@@ -206,11 +233,47 @@ subtest 'h1: a parked app is notified on_complete when the peer sends a Close' =
     ok(!$obs->{disconnect}, 'on_disconnect did NOT fire (clean end, not abnormal)');
     ok(!$obs->{app_returned},
         'the app never returned -- the notice arrived without it draining receive()');
+    # Drain the server's reciprocal Close frame, then observe its FIN: the client
+    # never closed TCP, so a server EOF proves the server owns the closure.
+    ok(pump_until(sub { server_closed_transport($sock) }, 3),
+        'the SERVER closed the transport (client saw EOF, never closed TCP)');
 
     # Let the parked app return so the connection tears down cleanly.
     $park->done unless $park->is_ready;
     pump_until(sub { $obs->{app_returned} }, 3);
 
+    close($sock);
+    shutdown_server($server);
+};
+
+# =============================================================================
+# 1b. h1 peer Close, handler RETURNS immediately after draining the disconnect
+#     (does not park) -> on_complete at the server-driven transport closure.
+#     The returns-immediately twin of case 1 on the peer-initiated path.
+# =============================================================================
+
+subtest 'h1: a handler that returns right after the peer Close reaches a clean end' => sub {
+    my ($app, $obs, $park) = build_parked_app(drain_return => 1);
+
+    my $server = start_server($app);
+    my $sock   = connect_client($server->port);
+
+    # The 101 means the app has accepted and is now awaiting the peer disconnect.
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
+
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+
+    pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5);
+
+    is($obs->{drained_type}, 'websocket.disconnect', 'the handler drained the peer disconnect');
+    ok($obs->{app_returned}, 'the handler returned immediately after the disconnect');
+    ok($obs->{complete}, 'on_complete fired -- clean end at the server-driven closure');
+    is($obs->{complete_reason}, undef, 'disconnect_reason() undef -- clean');
+    ok(!$obs->{disconnect}, 'on_disconnect did NOT fire');
+    ok(pump_until(sub { server_closed_transport($sock) }, 3),
+        'the SERVER closed the transport (client saw EOF)');
+
+    $park->done unless $park->is_ready;
     close($sock);
     shutdown_server($server);
 };

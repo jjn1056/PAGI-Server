@@ -441,4 +441,53 @@ subtest 'ending one h2 WS stream leaves its sibling connected and running' => su
     $loop->remove($server);
 };
 
+# ============================================================
+# 5. STAGED (peer-initiated): the peer sends its valid Close but WITHHOLDS its
+#    END_STREAM, and the application drains the disconnect and RETURNS before the
+#    stream fully closes. A completed handshake is CLEAN only at FULL stream
+#    closure -- the client's END_STREAM too (RFC 8441 5; WS-CLOSE-TRUTH-3) -- so
+#    the clean end must NOT be marked at the peer's Close frame alone.
+#      (a) after the Close WITHOUT END_STREAM the app returns and NO terminal has
+#          fired (the peer-initiated dispatch-tail no longer marks complete early);
+#      (b) the client's END_STREAM then completes it CLEAN exactly once.
+#    RED on base: the dispatch tail marked the scope complete at the peer's Close
+#    frame (before the client's END_STREAM). Sending Close+END_STREAM together
+#    (as cases 1,2,4 do) cannot prove this ordering, so this case splits them.
+# ============================================================
+subtest 'peer-initiated staged: clean only at full stream closure, not at the Close frame' => sub {
+    my %obs;
+    my $app = draining_ws_app(\%obs);
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{accepted} }),
+        'app accepted and entered its receive loop');
+
+    # STAGE (a): the peer's valid Close frame, but NOT END_STREAM. The app drains
+    # the websocket.disconnect, does one turn of async work, and returns.
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'bye'), 0);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} }),
+        'the app drained the disconnect and returned');
+    ok($obs{'/ws'}{saw_disconnect_event},
+        'the app saw the peer Close as a websocket.disconnect');
+    ok(!$obs{'/ws'}{complete},
+        'NOT clean yet -- the client has not sent its END_STREAM (RFC 8441 5)');
+    ok(!$obs{'/ws'}{disconnect},
+        'and not abnormal either -- the handshake frame was valid (scope PENDING)');
+
+    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN.
+    send_stream_data($client, $client_sock, $sid, '', 1);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{complete} }),
+        'on_complete fired once the stream fully closed');
+    is($obs{'/ws'}{complete}, 1, 'on_complete fired exactly once');
+    is($obs{'/ws'}{complete_reason}, undef,
+        'disconnect_reason() undef -- a completed handshake is a clean end');
+    ok(!$obs{'/ws'}{disconnect}, 'on_disconnect did NOT fire (clean end, not abnormal)');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
 done_testing;
