@@ -263,7 +263,9 @@ sub app_initiated_close {
             $obs->{$path}{reason} = $c->close_reason;
         });
         $c->on_end(sub { $obs->{$path}{end}++ });
-        $c->end_future->on_ready(sub { $obs->{$path}{end_future}++ });
+        # The test owns this cancellation-isolated observer past app return.
+        $obs->{$path}{end_observer} = $c->end_future;
+        $obs->{$path}{end_observer}->on_ready(sub { $obs->{$path}{end_future}++ });
 
         await $send->({ type => 'websocket.close', code => $code, reason => $reason });
         $obs->{$path}{closed_sent} = 1;

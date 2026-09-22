@@ -191,7 +191,9 @@ sub build_app {
             $obs{disconnect_creason} = $conn->close_reason;
         });
         $conn->on_end(sub { $obs{end}++ });
-        $conn->end_future->on_ready(sub { $obs{end_future}++ });
+        # The test owns this cancellation-isolated observer past app return.
+        $obs{end_observer} = $conn->end_future;
+        $obs{end_observer}->on_ready(sub { $obs{end_future}++ });
 
         if ($o{prime_bytes}) {
             # Fill the server's write queue past the socket buffers with many
@@ -265,7 +267,9 @@ sub peer_first_app {
             $obs{disconnect_creason} = $conn->close_reason;
         });
         $conn->on_end(sub { $obs{end}++ });
-        $conn->end_future->on_ready(sub { $obs{end_future}++ });
+        # The test owns this cancellation-isolated observer past app return.
+        $obs{end_observer} = $conn->end_future;
+        $obs{end_observer}->on_ready(sub { $obs{end_future}++ });
 
         if ($o{prime_bytes}) {
             my $chunk = 'x' x 60000;
