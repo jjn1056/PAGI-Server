@@ -1,0 +1,151 @@
+[
+   {
+      "bytes" : 1024,
+      "callbacks" : 0,
+      "chunks" : 1,
+      "mode" : "plain",
+      "queue_entries_inspected" : 1,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 1024,
+      "callbacks" : 1,
+      "chunks" : 1,
+      "mode" : "on_write",
+      "queue_entries_inspected" : 1,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 1024,
+      "callbacks" : 1,
+      "chunks" : 1,
+      "mode" : "on_flush",
+      "queue_entries_inspected" : 1,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 1024,
+      "callbacks" : 0,
+      "chunks" : 1,
+      "mode" : "writer_counter",
+      "queue_entries_inspected" : 1,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 8192,
+      "callbacks" : 0,
+      "chunks" : 8,
+      "mode" : "plain",
+      "queue_entries_inspected" : 64,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 8192,
+      "callbacks" : 8,
+      "chunks" : 8,
+      "mode" : "on_write",
+      "queue_entries_inspected" : 64,
+      "successful_writer_calls" : 8,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 8192,
+      "callbacks" : 8,
+      "chunks" : 8,
+      "mode" : "on_flush",
+      "queue_entries_inspected" : 64,
+      "successful_writer_calls" : 8,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 8192,
+      "callbacks" : 0,
+      "chunks" : 8,
+      "mode" : "writer_counter",
+      "queue_entries_inspected" : 64,
+      "successful_writer_calls" : 1,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 65536,
+      "callbacks" : 0,
+      "chunks" : 64,
+      "mode" : "plain",
+      "queue_entries_inspected" : 4096,
+      "successful_writer_calls" : 8,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 65536,
+      "callbacks" : 64,
+      "chunks" : 64,
+      "mode" : "on_write",
+      "queue_entries_inspected" : 4096,
+      "successful_writer_calls" : 64,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 65536,
+      "callbacks" : 64,
+      "chunks" : 64,
+      "mode" : "on_flush",
+      "queue_entries_inspected" : 4096,
+      "successful_writer_calls" : 64,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 65536,
+      "callbacks" : 0,
+      "chunks" : 64,
+      "mode" : "writer_counter",
+      "queue_entries_inspected" : 4096,
+      "successful_writer_calls" : 8,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 262144,
+      "callbacks" : 0,
+      "chunks" : 256,
+      "mode" : "plain",
+      "queue_entries_inspected" : 65536,
+      "successful_writer_calls" : 32,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 262144,
+      "callbacks" : 256,
+      "chunks" : 256,
+      "mode" : "on_write",
+      "queue_entries_inspected" : 65536,
+      "successful_writer_calls" : 256,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 262144,
+      "callbacks" : 256,
+      "chunks" : 256,
+      "mode" : "on_flush",
+      "queue_entries_inspected" : 65536,
+      "successful_writer_calls" : 256,
+      "would_block_attempts" : 1
+   },
+   {
+      "bytes" : 262144,
+      "callbacks" : 0,
+      "chunks" : 256,
+      "mode" : "writer_counter",
+      "queue_entries_inspected" : 65536,
+      "successful_writer_calls" : 32,
+      "would_block_attempts" : 1
+   },
+   {
+      "actual_bytes" : 57344,
+      "case" : "partial_flush",
+      "on_flush_counter" : 65536
+   }
+]

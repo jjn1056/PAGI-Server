@@ -1,0 +1,116 @@
+ok 1 - plain/1 pre-write measurement
+ok 2 - plain/1 post-write measurement
+ok 3 - plain/1 EAGAIN keeps all bytes
+ok 4 - plain/1 writes all bytes
+ok 5 - plain/1 empty queue
+ok 6 - plain/1 quadratic queue entries visited
+ok 7 - on_write/1 pre-write measurement
+ok 8 - on_write/1 post-write measurement
+ok 9 - on_write/1 EAGAIN keeps all bytes
+ok 10 - on_write accounts for partial flush
+ok 11 - on_write/1 writes all bytes
+ok 12 - on_write/1 empty queue
+ok 13 - on_write/1 counter returns to zero
+ok 14 - on_write/1 quadratic queue entries visited
+ok 15 - on_flush/1 pre-write measurement
+ok 16 - on_flush/1 post-write measurement
+ok 17 - on_flush/1 EAGAIN keeps all bytes
+ok 18 - on_flush/1 writes all bytes
+ok 19 - on_flush/1 empty queue
+ok 20 - on_flush/1 counter returns to zero
+ok 21 - on_flush/1 quadratic queue entries visited
+ok 22 - writer_counter/1 pre-write measurement
+ok 23 - writer_counter/1 post-write measurement
+ok 24 - writer_counter/1 EAGAIN keeps all bytes
+ok 25 - writer_counter/1 writes all bytes
+ok 26 - writer_counter/1 empty queue
+ok 27 - writer_counter/1 counter returns to zero
+ok 28 - writer_counter/1 quadratic queue entries visited
+ok 29 - plain/8 pre-write measurement
+ok 30 - plain/8 post-write measurement
+ok 31 - plain/8 EAGAIN keeps all bytes
+ok 32 - plain/8 writes all bytes
+ok 33 - plain/8 empty queue
+ok 34 - plain/8 quadratic queue entries visited
+ok 35 - on_write/8 pre-write measurement
+ok 36 - on_write/8 post-write measurement
+ok 37 - on_write/8 EAGAIN keeps all bytes
+ok 38 - on_write accounts for partial flush
+ok 39 - on_write/8 writes all bytes
+ok 40 - on_write/8 empty queue
+ok 41 - on_write/8 counter returns to zero
+ok 42 - on_write/8 quadratic queue entries visited
+ok 43 - on_flush/8 pre-write measurement
+ok 44 - on_flush/8 post-write measurement
+ok 45 - on_flush/8 EAGAIN keeps all bytes
+ok 46 - on_flush/8 writes all bytes
+ok 47 - on_flush/8 empty queue
+ok 48 - on_flush/8 counter returns to zero
+ok 49 - on_flush/8 quadratic queue entries visited
+ok 50 - writer_counter/8 pre-write measurement
+ok 51 - writer_counter/8 post-write measurement
+ok 52 - writer_counter/8 EAGAIN keeps all bytes
+ok 53 - writer_counter/8 writes all bytes
+ok 54 - writer_counter/8 empty queue
+ok 55 - writer_counter/8 counter returns to zero
+ok 56 - writer_counter/8 quadratic queue entries visited
+ok 57 - plain/64 pre-write measurement
+ok 58 - plain/64 post-write measurement
+ok 59 - plain/64 EAGAIN keeps all bytes
+ok 60 - plain/64 writes all bytes
+ok 61 - plain/64 empty queue
+ok 62 - plain/64 quadratic queue entries visited
+ok 63 - on_write/64 pre-write measurement
+ok 64 - on_write/64 post-write measurement
+ok 65 - on_write/64 EAGAIN keeps all bytes
+ok 66 - on_write accounts for partial flush
+ok 67 - on_write/64 writes all bytes
+ok 68 - on_write/64 empty queue
+ok 69 - on_write/64 counter returns to zero
+ok 70 - on_write/64 quadratic queue entries visited
+ok 71 - on_flush/64 pre-write measurement
+ok 72 - on_flush/64 post-write measurement
+ok 73 - on_flush/64 EAGAIN keeps all bytes
+ok 74 - on_flush/64 writes all bytes
+ok 75 - on_flush/64 empty queue
+ok 76 - on_flush/64 counter returns to zero
+ok 77 - on_flush/64 quadratic queue entries visited
+ok 78 - writer_counter/64 pre-write measurement
+ok 79 - writer_counter/64 post-write measurement
+ok 80 - writer_counter/64 EAGAIN keeps all bytes
+ok 81 - writer_counter/64 writes all bytes
+ok 82 - writer_counter/64 empty queue
+ok 83 - writer_counter/64 counter returns to zero
+ok 84 - writer_counter/64 quadratic queue entries visited
+ok 85 - plain/256 pre-write measurement
+ok 86 - plain/256 post-write measurement
+ok 87 - plain/256 EAGAIN keeps all bytes
+ok 88 - plain/256 writes all bytes
+ok 89 - plain/256 empty queue
+ok 90 - plain/256 quadratic queue entries visited
+ok 91 - on_write/256 pre-write measurement
+ok 92 - on_write/256 post-write measurement
+ok 93 - on_write/256 EAGAIN keeps all bytes
+ok 94 - on_write accounts for partial flush
+ok 95 - on_write/256 writes all bytes
+ok 96 - on_write/256 empty queue
+ok 97 - on_write/256 counter returns to zero
+ok 98 - on_write/256 quadratic queue entries visited
+ok 99 - on_flush/256 pre-write measurement
+ok 100 - on_flush/256 post-write measurement
+ok 101 - on_flush/256 EAGAIN keeps all bytes
+ok 102 - on_flush/256 writes all bytes
+ok 103 - on_flush/256 empty queue
+ok 104 - on_flush/256 counter returns to zero
+ok 105 - on_flush/256 quadratic queue entries visited
+ok 106 - writer_counter/256 pre-write measurement
+ok 107 - writer_counter/256 post-write measurement
+ok 108 - writer_counter/256 EAGAIN keeps all bytes
+ok 109 - writer_counter/256 writes all bytes
+ok 110 - writer_counter/256 empty queue
+ok 111 - writer_counter/256 counter returns to zero
+ok 112 - writer_counter/256 quadratic queue entries visited
+ok 113 - partial write leaves 56 KiB buffered
+ok 114 - on_flush counter still reports 64 KiB
+ok 115 - on_flush has not fired during partial write
+1..115
