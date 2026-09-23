@@ -14,6 +14,13 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class HarnessChecks(unittest.TestCase):
+    def test_small_sample_without_p99_is_not_an_error(self):
+        output = "Average: 0.0211 secs\nRequests/sec: 94.3425\n50% in 0.0208 secs\n0% in 0.0000 secs\n[200] 96 responses\n"
+        result = runner.parse_hey(output)
+        self.assertEqual(result['responses'], 96)
+        self.assertEqual(result['p50_s'], .0208)
+        self.assertIsNone(result['p99_s'])
+
     def test_summary_reports_checkout_labels_and_rates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'results.jsonl'

@@ -74,7 +74,15 @@ def parse_hey(output):
         raise RuntimeError(f'Unexpected status distribution: {codes}')
     patterns = {'rps': r'Requests/sec:\s+([\d.]+)', 'average_s': r'Average:\s+([\d.]+)',
                 'p50_s': r'50% in ([\d.]+)', 'p99_s': r'99% in ([\d.]+)'}
-    result = {key: float(re.search(pattern, output).group(1)) for key, pattern in patterns.items()}
+    result = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, output)
+        if match:
+            result[key] = float(match.group(1))
+        elif key in ('p50_s', 'p99_s'):
+            result[key] = None  # hey can omit percentiles for small samples.
+        else:
+            raise RuntimeError(f'Load report missing {key}; inspect raw output')
     result['responses'] = sum(int(count) for _, count in codes)
     return result
 

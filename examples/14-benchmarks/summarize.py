@@ -41,11 +41,12 @@ for workers in sorted({key[0] for key in groups}):
         rate = 'messages_per_second' if case == 'websocket' else 'rps'
         r, m = mean(x[rate] for x in release), mean(x[rate] for x in main)
         def latency(rows):
-            if case == 'websocket':
-                p50, p99 = mean(x['p50_ms'] for x in rows), mean(x['p99_ms'] for x in rows)
-            else:
-                p50, p99 = 1000 * mean(x['p50_s'] for x in rows), 1000 * mean(x['p99_s'] for x in rows)
-            return f'{p50:.2f}/{p99:.2f}'
+            keys, scale = (('p50_ms', 'p99_ms'), 1) if case == 'websocket' else (('p50_s', 'p99_s'), 1000)
+            values = []
+            for key in keys:
+                samples = [x[key] for x in rows]
+                values.append('n/a' if any(x is None for x in samples) else f'{scale * mean(samples):.2f}')
+            return '/'.join(values)
         print(f'| {case} | {len(release)}/{len(main)} | {r:,.1f} | {m:,.1f} | {100*(m/r-1):+.1f}% | {latency(release)} | {latency(main)} |')
     print('\nRates: HTTP requests/sec, SSE completed streams/sec, WebSocket echoes/sec.')
     print('Each latency cell averages per-run percentiles; it is not a pooled percentile.')
