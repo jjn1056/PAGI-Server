@@ -113,6 +113,25 @@ The single-process Perl client can itself become the bottleneck, especially with
 16 server workers. This is a latency/regression probe, not a capacity claim.
 `--ws-connections` is independent of HTTP `--concurrency` and defaults to 20.
 
+## Compare two checkouts
+
+The default comparison remains installed release versus current checkout. To
+compare an unchanged checkout with an experiment branch, use `--baseline-repo`:
+
+```sh
+python3 examples/14-benchmarks/run.py \
+  --baseline-repo /path/to/unchanged/PAGI-Server \
+  --output /tmp/pagi-experiment-w1 --seconds 10 --workers 1 --concurrency 50
+```
+
+The candidate is this runner's checkout by default (override with `--repo`).
+Both servers use the same example files from this runner's directory. Samples
+are labeled **baseline/candidate**, and default order is baseline → candidate →
+candidate → baseline. If overriding `--order`, use those labels. Metadata records
+both module paths, revisions, dirty status and library hashes; version banners
+alone do not identify a checkout. Summarize this comparison separately from the
+older installed-release measurements.
+
 ## Results and interpretation
 
 A live summary is available while a run is in progress:

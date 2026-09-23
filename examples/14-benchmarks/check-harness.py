@@ -14,6 +14,18 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class HarnessChecks(unittest.TestCase):
+    def test_summary_reports_checkout_labels_and_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            row = dict(workers=1, case='get', variant='baseline', seconds=10,
+                       concurrency=50, rps=100, p50_s=.01, p99_s=.02, run_id='one')
+            path.write_text(json.dumps(row) + '\n' + json.dumps(row | {'variant':'candidate', 'rps':110}) + '\n')
+            result = subprocess.run([sys.executable, str(HERE/'summarize.py'), str(path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('Baseline rate', result.stdout)
+            self.assertIn('Candidate rate', result.stdout)
+            self.assertIn('+10.0%', result.stdout)
+
     def test_summary_rejects_mixed_load_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'results.jsonl'

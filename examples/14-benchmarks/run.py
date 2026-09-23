@@ -110,7 +110,10 @@ def run_one(args, variant, case, env, perl, installed):
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
     stamp = f'{time.time_ns()}-{variant}-{case}-w{args.workers}'
-    prefix = [perl, installed] if variant == 'release' else [perl, '-I' + str(args.repo / 'lib'), str(args.repo / 'bin/pagi-server')]
+    is_baseline = variant in ('release', 'baseline')
+    source = args.baseline_repo if is_baseline else args.repo
+    prefix = ([perl, installed] if source is None else
+              [perl, '-I' + str(source / 'lib'), str(source / 'bin/pagi-server')])
     command = prefix + ['--loop', 'EV', '--workers', str(args.workers), '--env', 'production',
                         '--port', str(port), str(HERE / (app + '.pl'))]
     with (args.output / (stamp + '.server.log')).open('w') as log:
@@ -165,37 +168,52 @@ def run_one(args, variant, case, env, perl, installed):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=HERE.parents[1])
+    parser.add_argument('--baseline-repo', type=Path, help='compare another checkout with --repo instead of the installed release')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=10)
     parser.add_argument('--workers', type=int, default=1)
     parser.add_argument('--concurrency', type=int, default=50)
     parser.add_argument('--ws-connections', type=int, default=20)
     parser.add_argument('--cases', nargs='+', choices=CASES, default=CASES)
-    parser.add_argument('--order', nargs='+', choices=['release', 'main'], default=['release', 'main', 'main', 'release'])
+    parser.add_argument('--order', nargs='+', choices=['release', 'main', 'baseline', 'candidate'])
     args = parser.parse_args()
     if min(args.seconds, args.workers, args.concurrency, args.ws_connections) <= 0:
         parser.error('numeric settings must be positive')
     args.repo = args.repo.resolve()
+    if args.baseline_repo:
+        args.baseline_repo = args.baseline_repo.resolve()
+    labels = ('baseline', 'candidate') if args.baseline_repo else ('release', 'main')
+    args.order = args.order or [labels[0], labels[1], labels[1], labels[0]]
+    if any(label not in labels for label in args.order):
+        parser.error(f'use --order labels {labels} for this comparison')
     args.output.mkdir(parents=True, exist_ok=True)
     if (args.output / 'results.jsonl').exists() or list(args.output.glob('*-metadata.json')):
         parser.error('use a fresh output directory for each experiment')
     args.run_id = str(time.time_ns())
     perl, installed = shutil.which('perl'), shutil.which('pagi-server')
-    if not perl or not installed or not shutil.which('hey'):
+    if not perl or (not installed and not args.baseline_repo) or not shutil.which('hey'):
         parser.error('perl, installed pagi-server, and hey must be on PATH')
     env = dict(os.environ, LIBEV_FLAGS='8', PERL_FUTURE_NO_XS='1')
     # Preserve perlbrew/local::lib paths; record them so development overrides are visible.
     probe = 'use PAGI::Server; use Future; print "$^V $PAGI::Server::VERSION $INC{q(PAGI/Server.pm)} $INC{q(Future.pm)}\\n";'
-    metadata = {'settings': vars(args) | {'repo': str(args.repo), 'output': str(args.output)},
+    metadata = {'settings': vars(args) | {'repo': str(args.repo), 'output': str(args.output), 'baseline_repo': str(args.baseline_repo) if args.baseline_repo else None},
                 'perl': perl, 'installed_runner': installed, 'env': {key: env.get(key) for key in ('LIBEV_FLAGS', 'PERL_FUTURE_NO_XS', 'PERL5LIB', 'PERL5OPT')},
                 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=args.repo, text=True).strip(),
                 'status': subprocess.check_output(['git', 'status', '--short'], cwd=args.repo, text=True),
                 'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 'checkout_lib_sha256': {str(p.relative_to(args.repo)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((args.repo/'lib').rglob('*.pm'))},
                 'app_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in HERE.glob('*.pl')}}
-    for variant in ('release', 'main'):
-        command = [perl] + (['-I' + str(args.repo / 'lib')] if variant == 'main' else []) + ['-e', probe]
+    for variant, source in zip(labels, (args.baseline_repo, args.repo)):
+        command = [perl] + (['-I' + str(source / 'lib')] if source else []) + ['-e', probe]
         metadata[variant] = subprocess.check_output(command, env=env, text=True).strip()
+        if source:
+            metadata[variant + '_source'] = {
+                'repo': str(source),
+                'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip(),
+                'status': subprocess.check_output(['git', 'status', '--short'], cwd=source, text=True),
+                'lib_sha256': {str(p.relative_to(source)): hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in sorted((source / 'lib').rglob('*.pm'))},
+            }
     (args.output / f'{args.run_id}-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     for case in args.cases:
         for variant in args.order:

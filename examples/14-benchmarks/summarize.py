@@ -22,14 +22,19 @@ for path in args.results:
                 parser.error(f'incompatible experiments for {key}; summarize these runs separately')
             identities[key] = identity
             groups[key][row['variant']].append(row)
+variants_seen = {variant for variants in groups.values() for variant in variants}
+labels = ('baseline', 'candidate') if variants_seen <= {'baseline', 'candidate'} else ('release', 'main')
+if not variants_seen <= set(labels):
+    parser.error('summarize installed-release and checkout comparisons separately')
+left, right = labels
 for workers in sorted({key[0] for key in groups}):
     print(f'\n## {workers} worker(s)\n')
-    print('| Case | Samples release/main | Release rate | Main rate | Change | Release p50/p99 ms | Main p50/p99 ms |')
+    print(f'| Case | Samples {left}/{right} | {left.title()} rate | {right.title()} rate | Change | {left.title()} p50/p99 ms | {right.title()} p50/p99 ms |')
     print('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
     for (count, case), variants in groups.items():
         if count != workers:
             continue
-        release, main = variants['release'], variants['main']
+        release, main = variants[left], variants[right]
         if not release or not main:
             print(f'| {case} | {len(release)}/{len(main)} | pending | pending | — | — | — |')
             continue
