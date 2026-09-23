@@ -32,10 +32,10 @@ Repository /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server; worktree .work
 **Consumes:** Existing ConnectionState API and three-argument PAGI receive/send callbacks.
 **Produces:** Identical API/behavior with fewer allocations/wrappers.
 
-- [ ] Verify unchanged baseline: `perlbrew exec --with perl-5.42.2@default prove -lr -j4 t` (save log). Investigate failures before attributing them to refactoring.
-- [ ] Replace `_connected => \\$connected` / `_reason => \\$reason` with ordinary scalar fields; replace all `${$self->{_connected}}` / `${$self->{_reason}}` accesses; remove now-unused lexical variables. Confirm no references escape the class with `rg '_connected|_reason' lib t`.
-- [ ] Run `prove -l t/37-connection-state.t t/connection-state-response-started.t t/69-connection-state-protocol-scopes.t t/84-terminal-callback-deferral.t t/85-terminal-callback-graceful-shutdown.t t/http2/30-connection-state.t` under the same perlbrew environment; commit only this change.
-- [ ] Hoist the inner HTTP async receive function out of the returned wrapper:
+- [x] Verify unchanged baseline: `perlbrew exec --with perl-5.42.2@default prove -lr -j4 t` (save log). Investigate failures before attributing them to refactoring.
+- [x] Replace `_connected => \\$connected` / `_reason => \\$reason` with ordinary scalar fields; replace all `${$self->{_connected}}` / `${$self->{_reason}}` accesses; remove now-unused lexical variables. Confirm no references escape the class with `rg '_connected|_reason' lib t`.
+- [x] Run `prove -l t/37-connection-state.t t/connection-state-response-started.t t/69-connection-state-protocol-scopes.t t/84-terminal-callback-deferral.t t/85-terminal-callback-graceful-shutdown.t t/http2/30-connection-state.t` under the same perlbrew environment; commit only this change.
+- [x] Hoist the inner HTTP async receive function out of the returned wrapper:
 
 ```perl
 my $receive_body = async sub { ...existing receive implementation... };
@@ -48,10 +48,10 @@ return sub {
 ```
 
 The body keeps call-local `$parked` and response variables. Keep weak connection capture and all existing tracking. Do not touch SSE/WebSocket receive in this experiment.
-- [ ] Run `prove -l t/03-request-body.t t/75-max-disconnect-receives.t t/76-h1-receive-after-disconnect.t t/77-receive-after-clean-end.t t/78-response-before-request-body.t t/79-body-limit-after-response-started.t t/80-unread-body-keepalive.t`; commit only this change.
-- [ ] Return the HTTP/1 send async function directly and move its current scope-completion check to its successful common tail. Reorganize HEAD success branches so they reach that tail. Keep transport-gone guards as no-op exits, file/fh rollback and exceptions, state publishing and terminal predicate. Audit every `return` in the function; success paths including HEAD/trailers/refusals must reach the tail, failures must not.
-- [ ] Run `prove -l t/01-hello-http.t t/10-http-compliance.t t/42-file-response.t t/53-trailers-framing.t t/71-http-refusal-on-protocol-scopes.t t/77-receive-after-clean-end.t t/78-response-before-request-body.t t/http-incomplete-response.t t/84-terminal-callback-deferral.t t/85-terminal-callback-graceful-shutdown.t`; inspect backpressure and failed file tests, adding an observable regression test only if needed; commit separately.
-- [ ] Review cumulative diff for behavioral changes or added machinery. Run final `prove -lr -j4 t` and `git diff --check`. Independent review must assess early returns, timing, lifetime and failures. If inlining cannot stay small and correct, retain the wrapper and report that limitation rather than inventing new state.
+- [x] Run `prove -l t/03-request-body.t t/75-max-disconnect-receives.t t/76-h1-receive-after-disconnect.t t/77-receive-after-clean-end.t t/78-response-before-request-body.t t/79-body-limit-after-response-started.t t/80-unread-body-keepalive.t`; commit only this change.
+- [x] Return the HTTP/1 send async function directly and move its current scope-completion check to its successful common tail. Reorganize HEAD success branches so they reach that tail. Keep transport-gone guards as no-op exits, file/fh rollback and exceptions, state publishing and terminal predicate. Audit every `return` in the function; success paths including HEAD/trailers/refusals must reach the tail, failures must not.
+- [x] Run `prove -l t/01-hello-http.t t/10-http-compliance.t t/42-file-response.t t/53-trailers-framing.t t/71-http-refusal-on-protocol-scopes.t t/77-receive-after-clean-end.t t/78-response-before-request-body.t t/http-incomplete-response.t t/84-terminal-callback-deferral.t t/85-terminal-callback-graceful-shutdown.t`; inspect backpressure and failed file tests, adding an observable regression test only if needed; commit separately.
+- [x] Review cumulative diff for behavioral changes or added machinery. Run final `prove -lr -j4 t` and `git diff --check`. Independent review must assess early returns, timing, lifetime and failures. If inlining cannot stay small and correct, retain the wrapper and report that limitation rather than inventing new state.
 
 ## Task 2: Preserve examples and make the runner compare checkouts
 
@@ -59,9 +59,9 @@ The body keeps call-local `$parked` and response variables. Keep weak connection
 **Consumes:** Existing runner baseline (installed release versus checkout), exactly the same app bytes.
 **Produces:** Explicit main-versus-candidate comparison with reproducible metadata.
 
-- [ ] Copy and commit existing examples/index as a baseline artifact, preserving app hashes and earlier baseline samples.
-- [ ] Add optional `--baseline-repo PATH` so the baseline slot launches that checkout's `perl -Ilib bin/pagi-server`; retain installed-release comparison by default. Label rows and summary as baseline/candidate when used, record actual module paths and git heads for both, and hash both library trees. Update existing report scripts without silently mixing older runs.
-- [ ] Exercise runner smoke checks and summary-isolation tests against baseline main and candidate. The measured HTTP/SSE payload checks and all WebSocket echo validations must pass before load.
+- [x] Copy and commit existing examples/index as a baseline artifact, preserving app hashes and earlier baseline samples.
+- [x] Add optional `--baseline-repo PATH` so the baseline slot launches that checkout's `perl -Ilib bin/pagi-server`; retain installed-release comparison by default. Label rows and summary as baseline/candidate when used, record actual module paths and git heads for both, and hash both library trees. Update existing report scripts without silently mixing older runs.
+- [x] Exercise runner smoke checks and summary-isolation tests against baseline main and candidate. The measured HTTP/SSE payload checks and all WebSocket echo validations must pass before load.
 
 ## Task 3: Benchmark and report
 
@@ -69,7 +69,25 @@ The body keeps call-local `$parked` and response variables. Keep weak connection
 **Consumes:** Green runtime branch and unchanged root main; no tests running concurrently.
 **Produces:** Honest measured comparison, no speculative performance claim.
 
-- [ ] Run baseline→candidate→candidate→baseline for all 10 existing workload variants, 10 seconds each with one-second warmup: one worker/50 HTTP clients then 16 workers/500 HTTP clients. WebSocket uses 20 persistent connections.
-- [ ] Include means, individual samples, p50/p99 latencies, source revisions, environment and commands. Compare with previous installed-release baseline only as context, not as a fresh paired measurement.
-- [ ] If gains are small/noisy or a regression appears, rerun the affected HTTP comparisons for 30 seconds in alternating order before concluding. Do not optimize further during measurement.
-- [ ] Record results, net code changes, test totals and review findings. Keep branch/worktree for user review; do not merge, push, or tag.
+- [x] Run baseline→candidate→candidate→baseline for all 10 existing workload variants, 10 seconds each with one-second warmup: one worker/50 HTTP clients then 16 workers/500 HTTP clients. WebSocket uses 20 persistent connections.
+- [x] Include means, individual samples, p50/p99 latencies, source revisions, environment and commands. Compare with previous installed-release baseline only as context, not as a fresh paired measurement.
+- [x] If gains are small/noisy or a regression appears, rerun the affected HTTP comparisons for 30 seconds in alternating order before concluding. Do not optimize further during measurement.
+- [x] Record results, net code changes, test totals and review findings. Keep branch/worktree for user review; do not merge, push, or tag.
+
+## Execution outcome
+
+Completed on experiment/http-simplification. Baseline full suite: 176 files /
+1,249 tests; candidate: 177 files / 1,263 tests. Runtime commits d5fe7ee,
+f77e69a and ac30cc8 remove 18 net lines. Independent reviews found no substantive
+correctness or scope issue. The send change permits receive resumption before
+send-Future readiness, an ordering allowed by the current spec; the new regression
+covers reentrant cancellation while preserving clean terminal facts and deferred
+callbacks. Thus "identical behavior" above means the public contract, not identical
+incidental Future readiness inside resumed receive code.
+
+All 100 measured samples completed. Longer comparisons are mixed, with the
+clearest positive result in repeated sends (+6.2%). This does not establish
+recovery of the release regression. See
+[the measured report](../../../examples/14-benchmarks/SIMPLIFICATION-2026-09-23.md)
+for all samples, latency, limitations and commands. Branch remains local; no
+merge, push or tag. Root main release work remains intact.
