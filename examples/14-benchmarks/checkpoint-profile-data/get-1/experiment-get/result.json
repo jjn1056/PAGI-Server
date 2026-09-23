@@ -1,0 +1,11 @@
+{
+  "variant": "experiment",
+  "case": "get",
+  "mode": "sub",
+  "rps": 1836.8828,
+  "average_s": 0.0133,
+  "p50_s": 0.0131,
+  "p99_s": 0.0199,
+  "responses": 2000,
+  "profile_subroutines": 1092
+}
