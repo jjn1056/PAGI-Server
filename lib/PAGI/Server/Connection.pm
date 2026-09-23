@@ -6117,7 +6117,7 @@ sub _create_send {
         // sub { $weak_self->{h1_seq} = $_[0] if $weak_self };
     $publish->($seq);
 
-    my $send_event = async sub  {
+    return async sub {
         my ($event) = @_;
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed};
@@ -6211,14 +6211,11 @@ sub _create_send {
             # stream write instead of one per headers/chunk/terminator.
             $weak_self->{_resp_pending} = $response;
         }
+        elsif ($type eq 'http.response.body' && $is_head_request) {
+            # HEAD has headers but no body; still reach scope completion below.
+            $weak_self->_flush_pending_headers;
+        }
         elsif ($type eq 'http.response.body') {
-            # For HEAD requests, suppress the body
-            if ($is_head_request) {
-                # HEAD has headers but no body, so flush the buffered headers now.
-                $weak_self->_flush_pending_headers;
-                return;  # Don't send any body for HEAD
-            }
-
             # --- BACKPRESSURE CHECK ---
             # Wait for buffer to drain if we're above high watermark
             # This prevents unbounded memory growth with slow clients
@@ -6313,20 +6310,13 @@ sub _create_send {
                 $weak_self->_notify_transport_write;
             }
         }
-        elsif ($type eq 'http.response.trailers') {
+        # HEAD accepts and discards trailers after advancing the machine.
+        elsif ($type eq 'http.response.trailers' && !$is_head_request) {
             # No "return unless $expects_trailers" guard here: advance_http
             # (called unconditionally above, line ~2886) already croaks for
             # undeclared trailers -- "cannot send http.response.trailers:
             # trailers were not declared or body is not complete" -- before
             # execution ever reaches this branch, so the guard was dead code.
-
-            if ($is_head_request) {
-                # HEAD: accept-and-discard, per PAGI Www.pod's HEAD rule
-                # (mirrors the h2 HEAD block from Phase 2 Task 1). The
-                # generic advance_http call above already advanced the
-                # machine; transmit nothing.
-                return;
-            }
 
             unless ($chunked) {
                 # Trailers ride chunked framing only (RFC 7230); a
@@ -6389,20 +6379,14 @@ sub _create_send {
             # write buffer will be flushed by the event loop.
         }
 
+        # The HTTP/1.1 twin of _h2_create_send's terminal-event site. The
+        # scope ends at successful final output, request body read or not.
+        # Publish terminal facts before resuming a parked receive; terminal
+        # callbacks remain deferred by ConnectionState.
+        $weak_self->_h1_end_scope_output
+            if $weak_self
+            && PAGI::Server::EventValidator::scope_send_clean('http', $seq);
         return;
-    };
-
-    # The HTTP/1.1 twin of _h2_create_send's terminal-event site, and the same
-    # one site for all of them. The scope ends at the server's last output,
-    # request body read or not; what is left of an unread request body is the
-    # transport's business, and the request tail still decides it.
-    return sub {
-        my ($event) = @_;
-        return $send_event->($event)->on_done(sub {
-            $weak_self->_h1_end_scope_output
-                if $weak_self
-                && PAGI::Server::EventValidator::scope_send_clean('http', $seq);
-        });
     };
 }
 
