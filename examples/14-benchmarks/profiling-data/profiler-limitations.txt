@@ -1,0 +1,21 @@
+NYTProf 6.15, Future::AsyncAwait 0.71, Perl 5.42.2
+CPU clock request: clock 12 not available (clock_gettime not supported on this system)
+Split POST with subroutine profiling: clock 12 not available (clock_gettime not supported on this system)
+PAGI::Server 0.002013 (PAGI 0.002008) listening on http://127.0.0.1:50582/
+  serving   /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/examples/14-benchmarks/post.pl
+  mode      production (--env)
+  lifespan  not supported, continuing without it (application raised: Expected HTTP scope)
+  loop      EV, max_conn 1000, http2 available, tls available, future_xs available
+Using default max_connections (1000). For production, consider tuning this value based on your workload. See 'perldoc PAGI::Server' for guidance.
+Future::AsyncAwait panic: TODO: Unsure how to handle savestack entry of SAVEt_ALLOC=0
+
+Repeat with slowops=0: PAGI::Server 0.002013 (PAGI 0.002008) listening on http://127.0.0.1:50679/
+  serving   /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/examples/14-benchmarks/post.pl
+  mode      production (--env)
+  lifespan  not supported, continuing without it (application raised: Expected HTTP scope)
+  loop      EV, max_conn 1000, http2 available, tls available, future_xs available
+Using default max_connections (1000). For production, consider tuning this value based on your workload. See 'perldoc PAGI::Server' for guidance.
+Future::AsyncAwait panic: TODO: Unsure how to handle savestack entry of SAVEt_ALLOC=0
+
+Statement-only minimal await probe: panic: unimplemented op custom (#390) called at await-probe.pl line 6.
+Subroutine-only minimal await probe passed; incompatibility is not universal to every await.

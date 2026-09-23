@@ -160,3 +160,5 @@ influence the result. These examples intentionally leave those limits visible.
 The initial release/main comparison is recorded in [BASELINE-2026-09-22.md](BASELINE-2026-09-22.md).
 
 The simplification experiment is recorded in [SIMPLIFICATION-2026-09-23.md](SIMPLIFICATION-2026-09-23.md), comparing unchanged main with the isolated test branch.
+
+The follow-up [NYTProf investigation](PROFILING-2026-09-23.md) records request-path call counts and a sustained-I/O delay in deferred terminal callbacks.
