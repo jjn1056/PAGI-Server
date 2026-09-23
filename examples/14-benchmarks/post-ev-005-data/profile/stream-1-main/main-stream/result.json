@@ -1,0 +1,11 @@
+{
+  "variant": "main",
+  "case": "stream",
+  "mode": "sub",
+  "rps": 83.9524,
+  "average_s": 0.2939,
+  "p50_s": 0.2905,
+  "p99_s": 0.6446,
+  "responses": 500,
+  "profile_subroutines": 1101
+}

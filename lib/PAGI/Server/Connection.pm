@@ -5894,10 +5894,6 @@ async sub _read_chunked_body {
 sub _create_receive {
     my ($self, $request) = @_;
 
-    my $content_length = $request->{content_length};
-    my $is_chunked = $request->{chunked} // 0;
-    my $expect_continue = $request->{expect_continue} // 0;
-
     # What this closure consumes of the body, and whether it let the client
     # send it, live on the request record rather than in here: the request tail
     # asks the same questions after the application returns, to decide what of
@@ -5905,10 +5901,6 @@ sub _create_receive {
     $request->{body_complete}   = 0;
     $request->{body_bytes_read} = 0;
     $request->{continue_sent}   = 0;
-    my $chunk_size = 65536;  # 64KB chunks for large bodies
-
-    # For requests without Content-Length and not chunked, treat as no body
-    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
 
     weaken(my $weak_self = $self);
 
@@ -5928,147 +5920,12 @@ sub _create_receive {
         return PAGI::Server::EventValidator::scope_send_clean('http', $weak_self->{h1_seq});
     };
 
-    my $receive_body = async sub {
-        return { type => 'http.disconnect' } unless $weak_self;
-
-        # True once this call has waited: the answer it then gets is a
-        # delivery of the scope's terminal state, not a repeat request
-        # for it, so the cap does not count it.
-        my $parked = 0;
-
-        if ($weak_self->{closed}) {
-            return await $disconnect->($parked);
-        }
-
-        # Check queue first - events from disconnect handler
-        if (@{$weak_self->{receive_queue}}) {
-            return shift @{$weak_self->{receive_queue}};
-        }
-
-        # http.disconnect is the answer to a receive after a completed
-        # response (Www.pod "Disconnected Client"), so resolve now rather
-        # than park until the transport happens to close -- on a keep-alive
-        # connection that could be the next request's lifetime away. Asked
-        # ahead of the request body, read or not: the scope ended at the
-        # terminal response event.
-        if ($scope_ended->()) {
-            return await $disconnect->($parked);
-        }
-
-        # If body is already complete, wait for disconnect
-        if ($request->{body_complete}) {
-            if (!$weak_self->{receive_pending}) {
-                $weak_self->{receive_pending} = Future->new;
-            }
-
-            if ($weak_self->{closed}) {
-                $weak_self->{receive_pending} = undef;
-                return await $disconnect->($parked);
-            }
-
-            $parked = 1;
-            my $result = await $weak_self->{receive_pending};
-            # receive_pending may be completed with a value (disconnect event)
-            # or just done() as a signal
-            return $result if ref $result eq 'HASH';
-            # If no value, check queue
-            if (@{$weak_self->{receive_queue}}) {
-                return shift @{$weak_self->{receive_queue}};
-            }
-            return await $disconnect->($parked);
-        }
-
-        # For requests without body, return empty body immediately
-        if (!$has_body) {
-            $request->{body_complete} = 1;
-            return {
-                type => 'http.request',
-                body => '',
-                more => 0,
-            };
-        }
-
-        # Send 100 Continue if client expects it (before reading body)
-        if ($expect_continue && !$request->{continue_sent}) {
-            $request->{continue_sent} = 1;
-            $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
-        }
-
-        # Handle chunked Transfer-Encoding
-        if ($is_chunked) {
-            return await $weak_self->_read_chunked_body(
-                'http.request',
-                $disconnect,
-                \$request->{body_complete},
-                \$request->{body_bytes_read},
-                $scope_ended,
-                $disconnect,
-            );
-        }
-
-        # Handle Content-Length based body reading
-        my $remaining = $content_length - $request->{body_bytes_read};
-
-        if ($remaining <= 0) {
-            $request->{body_complete} = 1;
-            return {
-                type => 'http.request',
-                body => '',
-                more => 0,
-            };
-        }
-
-        # Wait for data if buffer is empty
-        while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-            if (!$weak_self->{receive_pending}) {
-                $weak_self->{receive_pending} = Future->new;
-            }
-            $parked = 1;
-            await $weak_self->{receive_pending};
-            $weak_self->{receive_pending} = undef;
-
-            # Check queue after waiting
-            if (@{$weak_self->{receive_queue}}) {
-                return shift @{$weak_self->{receive_queue}};
-            }
-
-            # The scope ended under this call. Same rule, same order, as
-            # the head of this closure.
-            return await $disconnect->($parked) if $scope_ended->();
-        }
-
-        # Return disconnect if closed while waiting
-        if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
-            return await $disconnect->($parked);
-        }
-
-        # Read up to chunk_size or remaining bytes, whichever is smaller
-        my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
-        $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
-
-        my $body = substr($weak_self->{buffer}, 0, $to_read, '');
-        $request->{body_bytes_read} += length($body);
-
-        # Check if we've read all the body
-        my $more = ($request->{body_bytes_read} < $content_length) ? 1 : 0;
-
-        if (!$more) {
-            $request->{body_complete} = 1;
-        }
-
-        return {
-            type => 'http.request',
-            body => $body,
-            more => $more,
-        };
-    };
-
     # Return a wrapper that tracks the Future from the async receive
     return sub {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return $disconnect->() if $weak_self->{closed};
 
-        my $future = $receive_body->();
+        my $future = $weak_self->_receive_http_body($request, $disconnect, $scope_ended);
 
         # Track this Future so we can cancel it on close
         push @{$weak_self->{receive_futures}}, $future;
@@ -6077,6 +5934,153 @@ sub _create_receive {
         @{$weak_self->{receive_futures}} = grep { !$_->is_ready } @{$weak_self->{receive_futures}};
 
         return $future;
+    };
+}
+
+# Shared implementation: only the receive wrapper and its scope callbacks are
+# constructed per request. Shift before weakening so @_ cannot keep the
+# connection alive while this coroutine is suspended.
+async sub _receive_http_body {
+    weaken(my $weak_self = shift);
+    my ($request, $disconnect, $scope_ended) = @_;
+
+    my $content_length = $request->{content_length};
+    my $is_chunked = $request->{chunked} // 0;
+    my $expect_continue = $request->{expect_continue} // 0;
+    my $chunk_size = 65536;  # 64KB chunks for large bodies
+    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
+
+    return { type => 'http.disconnect' } unless $weak_self;
+
+    # True once this call has waited: the answer it then gets is a
+    # delivery of the scope's terminal state, not a repeat request
+    # for it, so the cap does not count it.
+    my $parked = 0;
+
+    if ($weak_self->{closed}) {
+        return await $disconnect->($parked);
+    }
+
+    # Check queue first - events from disconnect handler
+    if (@{$weak_self->{receive_queue}}) {
+        return shift @{$weak_self->{receive_queue}};
+    }
+
+    # http.disconnect is the answer to a receive after a completed
+    # response (Www.pod "Disconnected Client"), so resolve now rather
+    # than park until the transport happens to close -- on a keep-alive
+    # connection that could be the next request's lifetime away. Asked
+    # ahead of the request body, read or not: the scope ended at the
+    # terminal response event.
+    if ($scope_ended->()) {
+        return await $disconnect->($parked);
+    }
+
+    # If body is already complete, wait for disconnect
+    if ($request->{body_complete}) {
+        if (!$weak_self->{receive_pending}) {
+            $weak_self->{receive_pending} = Future->new;
+        }
+
+        if ($weak_self->{closed}) {
+            $weak_self->{receive_pending} = undef;
+            return await $disconnect->($parked);
+        }
+
+        $parked = 1;
+        my $result = await $weak_self->{receive_pending};
+        # receive_pending may be completed with a value (disconnect event)
+        # or just done() as a signal
+        return $result if ref $result eq 'HASH';
+        # If no value, check queue
+        if (@{$weak_self->{receive_queue}}) {
+            return shift @{$weak_self->{receive_queue}};
+        }
+        return await $disconnect->($parked);
+    }
+
+    # For requests without body, return empty body immediately
+    if (!$has_body) {
+        $request->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Send 100 Continue if client expects it (before reading body)
+    if ($expect_continue && !$request->{continue_sent}) {
+        $request->{continue_sent} = 1;
+        $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+    }
+
+    # Handle chunked Transfer-Encoding
+    if ($is_chunked) {
+        return await $weak_self->_read_chunked_body(
+            'http.request',
+            $disconnect,
+            \$request->{body_complete},
+            \$request->{body_bytes_read},
+            $scope_ended,
+            $disconnect,
+        );
+    }
+
+    # Handle Content-Length based body reading
+    my $remaining = $content_length - $request->{body_bytes_read};
+
+    if ($remaining <= 0) {
+        $request->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Wait for data if buffer is empty
+    while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
+        if (!$weak_self->{receive_pending}) {
+            $weak_self->{receive_pending} = Future->new;
+        }
+        $parked = 1;
+        await $weak_self->{receive_pending};
+        $weak_self->{receive_pending} = undef;
+
+        # Check queue after waiting
+        if (@{$weak_self->{receive_queue}}) {
+            return shift @{$weak_self->{receive_queue}};
+        }
+
+        # The scope ended under this call. Same rule, same order, as
+        # the head of this closure.
+        return await $disconnect->($parked) if $scope_ended->();
+    }
+
+    # Return disconnect if closed while waiting
+    if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
+        return await $disconnect->($parked);
+    }
+
+    # Read up to chunk_size or remaining bytes, whichever is smaller
+    my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
+    $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
+
+    my $body = substr($weak_self->{buffer}, 0, $to_read, '');
+    $request->{body_bytes_read} += length($body);
+
+    # Check if we've read all the body
+    my $more = ($request->{body_bytes_read} < $content_length) ? 1 : 0;
+
+    if (!$more) {
+        $request->{body_complete} = 1;
+    }
+
+    return {
+        type => 'http.request',
+        body => $body,
+        more => $more,
     };
 }
 

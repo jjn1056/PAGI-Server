@@ -1,0 +1,10 @@
+{
+  "variant": "main",
+  "case": "post-observe",
+  "mode": "off",
+  "rps": 2852.6653,
+  "average_s": 0.0087,
+  "p50_s": 0.0086,
+  "p99_s": 0.0111,
+  "responses": 10000
+}

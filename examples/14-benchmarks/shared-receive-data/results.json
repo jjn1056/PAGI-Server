@@ -1,0 +1,330 @@
+{
+  "runs": [
+    {
+      "variant": "experiment",
+      "case": "stream",
+      "mode": "off",
+      "rps": 238.8267,
+      "average_s": 0.1045,
+      "p50_s": 0.1018,
+      "p99_s": 0.1535,
+      "responses": 5000,
+      "label": "after",
+      "phase": "confirm",
+      "sample": "confirm/stream-0-after/experiment-stream/result.json",
+      "process_cpu_s": 21.95,
+      "peak_rss_mib": 45.12890625
+    },
+    {
+      "variant": "main",
+      "case": "stream",
+      "mode": "off",
+      "rps": 236.9944,
+      "average_s": 0.1054,
+      "p50_s": 0.1046,
+      "p99_s": 0.1334,
+      "responses": 5000,
+      "label": "before",
+      "phase": "confirm",
+      "sample": "confirm/stream-1-before/main-stream/result.json",
+      "process_cpu_s": 22.1,
+      "peak_rss_mib": 45.015625
+    },
+    {
+      "variant": "main",
+      "case": "stream",
+      "mode": "off",
+      "rps": 240.4103,
+      "average_s": 0.1038,
+      "p50_s": 0.1025,
+      "p99_s": 0.1589,
+      "responses": 5000,
+      "label": "before",
+      "phase": "confirm",
+      "sample": "confirm/stream-2-before/main-stream/result.json",
+      "process_cpu_s": 21.84,
+      "peak_rss_mib": 45.38671875
+    },
+    {
+      "variant": "experiment",
+      "case": "stream",
+      "mode": "off",
+      "rps": 220.5664,
+      "average_s": 0.1132,
+      "p50_s": 0.1087,
+      "p99_s": 0.1764,
+      "responses": 5000,
+      "label": "after",
+      "phase": "confirm",
+      "sample": "confirm/stream-3-after/experiment-stream/result.json",
+      "process_cpu_s": 23.57,
+      "peak_rss_mib": 46.796875
+    },
+    {
+      "variant": "main",
+      "case": "get",
+      "mode": "off",
+      "rps": 3205.2342,
+      "average_s": 0.0078,
+      "p50_s": 0.0076,
+      "p99_s": 0.0111,
+      "responses": 30000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/get-0-before/main-get/result.json",
+      "process_cpu_s": 9.72,
+      "peak_rss_mib": 37.16796875
+    },
+    {
+      "variant": "experiment",
+      "case": "get",
+      "mode": "off",
+      "rps": 3411.1591,
+      "average_s": 0.0073,
+      "p50_s": 0.0073,
+      "p99_s": 0.0088,
+      "responses": 30000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/get-1-after/experiment-get/result.json",
+      "process_cpu_s": 9.129999999999999,
+      "peak_rss_mib": 37.67578125
+    },
+    {
+      "variant": "experiment",
+      "case": "get",
+      "mode": "off",
+      "rps": 3371.8326,
+      "average_s": 0.0074,
+      "p50_s": 0.0073,
+      "p99_s": 0.0091,
+      "responses": 30000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/get-2-after/experiment-get/result.json",
+      "process_cpu_s": 9.209999999999999,
+      "peak_rss_mib": 37.70703125
+    },
+    {
+      "variant": "main",
+      "case": "get",
+      "mode": "off",
+      "rps": 3252.4813,
+      "average_s": 0.0077,
+      "p50_s": 0.0076,
+      "p99_s": 0.0098,
+      "responses": 30000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/get-3-before/main-get/result.json",
+      "process_cpu_s": 9.53,
+      "peak_rss_mib": 37.0859375
+    },
+    {
+      "variant": "main",
+      "case": "post-observe",
+      "mode": "off",
+      "rps": 2860.8525,
+      "average_s": 0.0087,
+      "p50_s": 0.0085,
+      "p99_s": 0.0127,
+      "responses": 30000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/post-observe-0-before/main-post-observe/result.json",
+      "process_cpu_s": 10.77,
+      "peak_rss_mib": 37.91796875
+    },
+    {
+      "variant": "experiment",
+      "case": "post-observe",
+      "mode": "off",
+      "rps": 2848.3575,
+      "average_s": 0.0088,
+      "p50_s": 0.0085,
+      "p99_s": 0.0131,
+      "responses": 30000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/post-observe-1-after/experiment-post-observe/result.json",
+      "process_cpu_s": 10.83,
+      "peak_rss_mib": 37.7734375
+    },
+    {
+      "variant": "experiment",
+      "case": "post-observe",
+      "mode": "off",
+      "rps": 2697.3901,
+      "average_s": 0.0093,
+      "p50_s": 0.0087,
+      "p99_s": 0.017,
+      "responses": 30000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/post-observe-2-after/experiment-post-observe/result.json",
+      "process_cpu_s": 11.209999999999999,
+      "peak_rss_mib": 37.8671875
+    },
+    {
+      "variant": "main",
+      "case": "post-observe",
+      "mode": "off",
+      "rps": 2668.274,
+      "average_s": 0.0094,
+      "p50_s": 0.009,
+      "p99_s": 0.0163,
+      "responses": 30000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/post-observe-3-before/main-post-observe/result.json",
+      "process_cpu_s": 11.66,
+      "peak_rss_mib": 36.86328125
+    },
+    {
+      "variant": "main",
+      "case": "stream",
+      "mode": "off",
+      "rps": 241.7531,
+      "average_s": 0.1032,
+      "p50_s": 0.1021,
+      "p99_s": 0.1382,
+      "responses": 5000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/stream-0-before/main-stream/result.json",
+      "process_cpu_s": 21.79,
+      "peak_rss_mib": 45.15625
+    },
+    {
+      "variant": "experiment",
+      "case": "stream",
+      "mode": "off",
+      "rps": 253.1802,
+      "average_s": 0.0986,
+      "p50_s": 0.0965,
+      "p99_s": 0.1552,
+      "responses": 5000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/stream-1-after/experiment-stream/result.json",
+      "process_cpu_s": 20.810000000000002,
+      "peak_rss_mib": 44.9140625
+    },
+    {
+      "variant": "experiment",
+      "case": "stream",
+      "mode": "off",
+      "rps": 254.0267,
+      "average_s": 0.0983,
+      "p50_s": 0.0969,
+      "p99_s": 0.1281,
+      "responses": 5000,
+      "label": "after",
+      "phase": "runs",
+      "sample": "runs/stream-2-after/experiment-stream/result.json",
+      "process_cpu_s": 20.66,
+      "peak_rss_mib": 45.296875
+    },
+    {
+      "variant": "main",
+      "case": "stream",
+      "mode": "off",
+      "rps": 223.4438,
+      "average_s": 0.1118,
+      "p50_s": 0.1069,
+      "p99_s": 0.2002,
+      "responses": 5000,
+      "label": "before",
+      "phase": "runs",
+      "sample": "runs/stream-3-before/main-stream/result.json",
+      "process_cpu_s": 23.3,
+      "peak_rss_mib": 43.6484375
+    }
+  ],
+  "summary": {
+    "stream-confirmation": {
+      "before": {
+        "rps": 238.70235000000002,
+        "process_cpu_s": 21.97,
+        "peak_rss_mib": 45.201171875,
+        "rps_samples": [
+          236.9944,
+          240.4103
+        ]
+      },
+      "after": {
+        "rps": 229.69655,
+        "process_cpu_s": 22.759999999999998,
+        "peak_rss_mib": 45.962890625,
+        "rps_samples": [
+          238.8267,
+          220.5664
+        ]
+      },
+      "delta_pct": -3.7728158101501763
+    },
+    "get": {
+      "before": {
+        "rps": 3228.85775,
+        "process_cpu_s": 9.625,
+        "peak_rss_mib": 37.126953125,
+        "rps_samples": [
+          3205.2342,
+          3252.4813
+        ]
+      },
+      "after": {
+        "rps": 3391.4958500000002,
+        "process_cpu_s": 9.169999999999998,
+        "peak_rss_mib": 37.69140625,
+        "rps_samples": [
+          3411.1591,
+          3371.8326
+        ]
+      },
+      "delta_pct": 5.037016573430653
+    },
+    "post-observe": {
+      "before": {
+        "rps": 2764.56325,
+        "process_cpu_s": 11.215,
+        "peak_rss_mib": 37.390625,
+        "rps_samples": [
+          2860.8525,
+          2668.274
+        ]
+      },
+      "after": {
+        "rps": 2772.8738000000003,
+        "process_cpu_s": 11.02,
+        "peak_rss_mib": 37.8203125,
+        "rps_samples": [
+          2848.3575,
+          2697.3901
+        ]
+      },
+      "delta_pct": 0.3006098702932558
+    },
+    "stream": {
+      "before": {
+        "rps": 232.59845,
+        "process_cpu_s": 22.545,
+        "peak_rss_mib": 44.40234375,
+        "rps_samples": [
+          241.7531,
+          223.4438
+        ]
+      },
+      "after": {
+        "rps": 253.60345,
+        "process_cpu_s": 20.735,
+        "peak_rss_mib": 45.10546875,
+        "rps_samples": [
+          253.1802,
+          254.0267
+        ]
+      },
+      "delta_pct": 9.03058468360387
+    }
+  }
+}

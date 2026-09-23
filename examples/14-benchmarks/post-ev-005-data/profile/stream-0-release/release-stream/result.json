@@ -1,0 +1,11 @@
+{
+  "variant": "release",
+  "case": "stream",
+  "mode": "sub",
+  "rps": 92.702,
+  "average_s": 0.266,
+  "p50_s": 0.26,
+  "p99_s": 0.5842,
+  "responses": 500,
+  "profile_subroutines": 1083
+}

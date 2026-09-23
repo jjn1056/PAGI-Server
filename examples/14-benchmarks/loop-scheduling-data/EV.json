@@ -1,0 +1,75 @@
+{
+  "all_events": [
+    {
+      "event": "io",
+      "reads": 1,
+      "round": 1
+    },
+    {
+      "event": "io",
+      "reads": 2,
+      "round": 2
+    },
+    {
+      "event": "io",
+      "reads": 3,
+      "round": 3
+    },
+    {
+      "event": "io",
+      "reads": 4,
+      "round": 4
+    },
+    {
+      "event": "io",
+      "reads": 5,
+      "round": 5
+    },
+    {
+      "event": "from_io",
+      "reads": 5,
+      "round": 6
+    },
+    {
+      "event": "before_loop",
+      "reads": 5,
+      "round": 6
+    },
+    {
+      "event": "nested",
+      "reads": 5,
+      "round": 7
+    }
+  ],
+  "backend": "EV",
+  "busy_events": [
+    {
+      "event": "io",
+      "reads": 1,
+      "round": 1
+    },
+    {
+      "event": "io",
+      "reads": 2,
+      "round": 2
+    },
+    {
+      "event": "io",
+      "reads": 3,
+      "round": 3
+    },
+    {
+      "event": "io",
+      "reads": 4,
+      "round": 4
+    },
+    {
+      "event": "io",
+      "reads": 5,
+      "round": 5
+    }
+  ],
+  "future_ready_after": 1,
+  "future_ready_during_io": 0,
+  "version": "0.04"
+}

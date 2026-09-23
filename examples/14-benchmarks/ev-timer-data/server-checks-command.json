@@ -1,0 +1,27 @@
+{
+  "command": [
+    "prove",
+    "-l",
+    "-j4",
+    "t/37-connection-state.t",
+    "t/69-connection-state-protocol-scopes.t",
+    "t/84-terminal-callback-deferral.t",
+    "t/85-terminal-callback-graceful-shutdown.t",
+    "t/http-terminal-send-reentrant-cancel.t",
+    "t/sse-close.t",
+    "t/sse-decline.t",
+    "t/ws-close-parity.t",
+    "t/ws-close-no-duplicate-frame.t",
+    "t/http2/30-connection-state.t",
+    "t/http2/25-sse-decline.t",
+    "t/http2/ws-close-no-duplicate-frame-h2.t"
+  ],
+  "cwd": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification",
+  "loaded": "IO::Async::Loop::EV\n/private/tmp/pagi-ev-timer-20260923/candidate/lib/IO/Async/Loop/EV.pm\n",
+  "env": {
+    "PERL5LIB": "/private/tmp/pagi-ev-timer-20260923/candidate/lib:/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5",
+    "IO_ASYNC_LOOP": "EV",
+    "LIBEV_FLAGS": "8",
+    "PERL_FUTURE_NO_XS": "1"
+  }
+}

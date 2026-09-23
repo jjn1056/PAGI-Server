@@ -1,0 +1,10 @@
+{
+  "variant": "experiment",
+  "case": "stream",
+  "mode": "off",
+  "rps": 253.1802,
+  "average_s": 0.0986,
+  "p50_s": 0.0965,
+  "p99_s": 0.1552,
+  "responses": 5000
+}

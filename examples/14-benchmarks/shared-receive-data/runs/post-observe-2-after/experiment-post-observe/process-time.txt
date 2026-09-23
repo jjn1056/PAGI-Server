@@ -1,0 +1,18 @@
+       11.59 real        10.04 user         1.17 sys
+            39706624  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               12146  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+               30205  messages sent
+               30206  messages received
+                   2  signals received
+                  41  voluntary context switches
+                9454  involuntary context switches
+         38102083317  instructions retired
+         40066594036  cycles elapsed
+            35565568  peak memory footprint

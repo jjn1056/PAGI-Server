@@ -1,0 +1,10 @@
+{
+  "variant": "experiment",
+  "case": "post-observe",
+  "mode": "off",
+  "rps": 2727.5129,
+  "average_s": 0.0091,
+  "p50_s": 0.009,
+  "p99_s": 0.0116,
+  "responses": 10000
+}
