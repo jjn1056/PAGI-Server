@@ -31,6 +31,7 @@ Examples assume you understand the core PAGI specification (see the `PAGI::Spec`
 9. `11-job-runner` - background job processing example
 10. `12-utf8` - UTF-8 handling demonstration
 11. `13-custom-logging` - sending the server's diagnostics somewhere else (needs `Log::Dispatch`)
+12. `14-benchmarks` - repeatable HTTP, SSE, and WebSocket workloads with release/checkout comparison tools
 
 Also included: `backpressure-test` - demonstrates backpressure handling (unnumbered utility example)
 

@@ -1,0 +1,49 @@
+{
+  "settings": {
+    "repo": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server",
+    "output": "/tmp/pagi-baseline-20260922-w1",
+    "seconds": 10,
+    "workers": 1,
+    "concurrency": 50,
+    "ws_connections": 20,
+    "cases": [
+      "get",
+      "get-observe",
+      "post",
+      "post-observe",
+      "single",
+      "single-observe",
+      "stream",
+      "stream-observe",
+      "sse",
+      "websocket"
+    ],
+    "order": [
+      "release",
+      "main",
+      "main",
+      "release"
+    ]
+  },
+  "perl": "/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl",
+  "installed_runner": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin/pagi-server",
+  "env": {
+    "LIBEV_FLAGS": "8",
+    "PERL_FUTURE_NO_XS": "1",
+    "PERL5LIB": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5",
+    "PERL5OPT": null
+  },
+  "head": "4625b006aa136844ab80f9163bcffc25db748cb3",
+  "status": " M Changes\n M examples/01-hello-http/app.pl\n M lib/PAGI/Server.pm\n M lib/PAGI/Server/AppNormalizer.pm\n M lib/PAGI/Server/AsyncFile.pm\n M lib/PAGI/Server/Connection.pm\n M lib/PAGI/Server/ConnectionState.pm\n M lib/PAGI/Server/EventValidator.pm\n M lib/PAGI/Server/Protocol/HTTP1.pm\n M lib/PAGI/Server/Protocol/HTTP2.pm\n M lib/PAGI/Server/Runner.pm\n M lib/PAGI/Server/TransportState.pm\n?? examples/14-benchmarks/\n",
+  "app_sha256": {
+    "post.pl": "8c943cfd3382b13a96acd15ea970008530f1f7bb72ddbb05b0c067b5fb0ff272",
+    "ws-client.pl": "12dde75958e78981d30b002f293674547e4cfedcd3800fa1f01f4adbcaab1999",
+    "check-apps.pl": "a19825168c297fd013de5b619cc57e46461d7b2f0e344c1b5a731cc219057f47",
+    "sse.pl": "60605708f19a54ea4b420622e27d6a521967cc5aca7e38405fa0898407d131d8",
+    "stream.pl": "e2fe5dcefefdb74167b58c7420f524d8acc0e8cf8221096b101b50b34b567c77",
+    "get.pl": "cf9ba00377f8d2350c7fdd5a6cdbd96ba5489ee1b6272b860f4377561cb9be79",
+    "websocket.pl": "d30e971be7e48e3d45833b80188e043b1984228cc6eca7b3d48d9fa8fd5f729c"
+  },
+  "release": "v5.42.2 0.002013 /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server.pm /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm",
+  "main": "v5.42.2 0.002014 /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server.pm /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm"
+}
