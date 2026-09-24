@@ -1,0 +1,4 @@
+{"case": "stream", "variant": "baseline", "stamp": "1790213807992391000-baseline-stream-w1", "cpu_s": 19.72, "server_total_requests": 3289, "cpu_us_per_request": 5995.743387047735, "rss_mib": 44.359375, "load_file": "stream-0-load.txt"}
+{"case": "stream", "variant": "candidate", "stamp": "1790213832984783000-candidate-stream-w1", "cpu_s": 21.6, "server_total_requests": 5007, "cpu_us_per_request": 4313.960455362492, "rss_mib": 53.859375, "load_file": "stream-1-load.txt"}
+{"case": "stream", "variant": "candidate", "stamp": "1790213857805441000-candidate-stream-w1", "cpu_s": 21.310000000000002, "server_total_requests": 5702, "cpu_us_per_request": 3737.285163100667, "rss_mib": 54.84375, "load_file": "stream-2-load.txt"}
+{"case": "stream", "variant": "baseline", "stamp": "1790213882025786000-baseline-stream-w1", "cpu_s": 21.28, "server_total_requests": 5512, "cpu_us_per_request": 3860.6676342525398, "rss_mib": 45.3359375, "load_file": "stream-3-load.txt"}

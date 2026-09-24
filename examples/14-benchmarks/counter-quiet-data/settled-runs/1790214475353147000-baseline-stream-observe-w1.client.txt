@@ -1,0 +1,44 @@
+
+Summary:
+  Total:	20.0233 secs
+  Slowest:	0.2376 secs
+  Fastest:	0.0270 secs
+  Average:	0.0961 secs
+  Requests/sec:	260.0474
+  
+
+Response time histogram:
+  0.027 [1]	|
+  0.048 [9]	|
+  0.069 [10]	|
+  0.090 [858]	|■■■■■■■■
+  0.111 [4164]	|■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.132 [150]	|■
+  0.153 [4]	|
+  0.174 [4]	|
+  0.195 [2]	|
+  0.217 [2]	|
+  0.238 [3]	|
+
+
+Latency distribution:
+  10% in 0.0876 secs
+  25% in 0.0917 secs
+  50% in 0.0955 secs
+  75% in 0.0999 secs
+  90% in 0.1046 secs
+  95% in 0.1090 secs
+  99% in 0.1177 secs
+
+Details (average, fastest, slowest):
+  DNS+dialup:	0.0000 secs, 0.0270 secs, 0.2376 secs
+  DNS-lookup:	0.0000 secs, 0.0000 secs, 0.0000 secs
+  req write:	0.0000 secs, 0.0000 secs, 0.0002 secs
+  resp wait:	0.0201 secs, 0.0053 secs, 0.1641 secs
+  resp read:	0.0760 secs, 0.0039 secs, 0.1063 secs
+
+Status code distribution:
+  [200]	5207 responses
+
+
+
