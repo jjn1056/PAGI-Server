@@ -1,0 +1,17 @@
+ok 1 - enqueue counter matches queue
+ok 2 - EAGAIN does not subtract bytes
+ok 3 - partial write counter matches queue
+ok 4 - partial write consumed exactly 8 KiB
+ok 5 - full drain counter zero
+ok 6 - graceful close retains queued bytes
+ok 7 - old counter resets before graceful drain
+ok 8 - later write callback makes raw counter negative
+ok 9 - stream still holds remaining bytes
+ok 10 - raw counter ends negative after graceful drain
+ok 11 - getter clamp conceals negative raw counter
+ok 12 - closing stream rejects new bytes
+ok 13 - old counter includes rejected bytes
+ok 14 - stream reports rejection
+ok 15 - write error closes connection
+ok 16 - old counter reports zero after error
+1..16
