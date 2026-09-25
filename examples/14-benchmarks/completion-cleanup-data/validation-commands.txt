@@ -1,0 +1,11 @@
+Baseline (host access required for local sockets):
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 prove -l t/37-connection-state.t t/56-post-completion-exception.t t/84-terminal-callback-deferral.t t/http-terminal-send-reentrant-cancel.t t/http-incomplete-response.t t/http-receive-ownership.t
+
+After cleanup (host access required for local sockets):
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 prove -l t/37-connection-state.t t/56-post-completion-exception.t t/84-terminal-callback-deferral.t t/http-terminal-send-reentrant-cancel.t t/http-incomplete-response.t t/http-receive-ownership.t t/10-http-compliance.t t/42-file-response.t t/53-trailers-framing.t t/72-abort.t t/77-receive-after-clean-end.t t/78-response-before-request-body.t t/79-body-limit-after-response-started.t t/80-unread-body-keepalive.t t/85-terminal-callback-graceful-shutdown.t
+
+Benchmark (fresh output directories and baseline snapshot required):
+perlbrew exec --with perl-5.42.2@default python3 -B compare.py
+python3 summarize.py
+perlbrew exec --with perl-5.42.2@default python3 -B recheck.py
+python3 summarize-recheck.py

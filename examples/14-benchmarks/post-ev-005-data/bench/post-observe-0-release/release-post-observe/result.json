@@ -1,0 +1,10 @@
+{
+  "variant": "release",
+  "case": "post-observe",
+  "mode": "off",
+  "rps": 3050.1751,
+  "average_s": 0.0081,
+  "p50_s": 0.008,
+  "p99_s": 0.0106,
+  "responses": 10000
+}

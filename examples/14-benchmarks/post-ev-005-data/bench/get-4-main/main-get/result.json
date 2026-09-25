@@ -1,0 +1,10 @@
+{
+  "variant": "main",
+  "case": "get",
+  "mode": "off",
+  "rps": 2485.543,
+  "average_s": 0.01,
+  "p50_s": 0.0084,
+  "p99_s": 0.0315,
+  "responses": 10000
+}

@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/pagi-benchmark/listener-20260925/compare.py", line 42, in <module>
+    b.run_one(args,label,case,env,perl,installed)
+  File "/home/ubuntu/pagi-benchmark/listener-20260925/listener-harness.py", line 187, in run_one
+    result = subprocess.run(burst_command, env=env,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2116, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/usr/lib/python3.12/subprocess.py", line 1253, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['taskset', '-c', '2,3', '/usr/bin/hey', '-c', '500', '-disable-keepalive', '-n', '500', 'http://127.0.0.1:59801/']' timed out after 3 seconds

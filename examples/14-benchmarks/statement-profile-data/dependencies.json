@@ -1,0 +1,8 @@
+{
+  "perl_version": "v5.42.2",
+  "adapter_version": "0.05",
+  "nytprof_version": "6.15",
+  "adapter_file": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/IO/Async/Loop/EV.pm",
+  "ev_version": "4.37",
+  "adapter_sha256": "c1464e1609a4856cb64913aa1a87cfa9fce06b766ccf3ca56ee23bd29d170c4d"
+}

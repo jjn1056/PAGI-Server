@@ -1,0 +1,292 @@
+{
+   "abstract" : "Reference server for the PAGI specification",
+   "archive" : "PAGI-Server-0.002013.tar.gz",
+   "author" : "JJNAPIORK",
+   "authorized" : true,
+   "changes_file" : "Changes",
+   "checksum_md5" : "0a4272bfe04900c2e7718c0c1ce31765",
+   "checksum_sha256" : "a67b638775d282b115245b6c4e67a20e6d013dc2096a80af88fe3b3700ceb23a",
+   "date" : "2026-09-03T20:48:52",
+   "dependency" : [
+      {
+         "module" : "JSON::MaybeXS",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "1.004003"
+      },
+      {
+         "module" : "Time::HiRes",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "1.9764"
+      },
+      {
+         "module" : "Net::Async::WebSocket::Client",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "0.14"
+      },
+      {
+         "module" : "Net::Async::HTTP",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "0.49"
+      },
+      {
+         "module" : "Test2::V0",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "0.000159"
+      },
+      {
+         "module" : "URI",
+         "phase" : "test",
+         "relationship" : "requires",
+         "version" : "1.60"
+      },
+      {
+         "module" : "ExtUtils::MakeMaker",
+         "phase" : "configure",
+         "relationship" : "requires",
+         "version" : "0"
+      },
+      {
+         "module" : "Future::AsyncAwait",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.66"
+      },
+      {
+         "module" : "perl",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "5.018"
+      },
+      {
+         "module" : "URI::Escape",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "5.09"
+      },
+      {
+         "module" : "HTTP::Parser::XS",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.17"
+      },
+      {
+         "module" : "Future",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.50"
+      },
+      {
+         "module" : "IO::Socket::IP",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.43"
+      },
+      {
+         "module" : "IO::Async",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.802"
+      },
+      {
+         "module" : "Protocol::WebSocket",
+         "phase" : "runtime",
+         "relationship" : "requires",
+         "version" : "0.26"
+      },
+      {
+         "module" : "Future::IO",
+         "phase" : "runtime",
+         "relationship" : "recommends",
+         "version" : "0.23"
+      },
+      {
+         "module" : "Net::HTTP2::nghttp2",
+         "phase" : "runtime",
+         "relationship" : "recommends",
+         "version" : "0.009"
+      },
+      {
+         "module" : "IO::Socket::SSL",
+         "phase" : "runtime",
+         "relationship" : "recommends",
+         "version" : "2.074"
+      },
+      {
+         "module" : "IO::Async::SSL",
+         "phase" : "runtime",
+         "relationship" : "recommends",
+         "version" : "0.25"
+      },
+      {
+         "module" : "Dist::Zilla::Plugin::MetaJSON",
+         "phase" : "develop",
+         "relationship" : "requires",
+         "version" : "0"
+      },
+      {
+         "module" : "Dist::Zilla",
+         "phase" : "develop",
+         "relationship" : "requires",
+         "version" : "6.030"
+      },
+      {
+         "module" : "Dist::Zilla::Plugin::MetaResources",
+         "phase" : "develop",
+         "relationship" : "requires",
+         "version" : "0"
+      },
+      {
+         "module" : "Dist::Zilla::Plugin::MetaNoIndex",
+         "phase" : "develop",
+         "relationship" : "requires",
+         "version" : "0"
+      },
+      {
+         "module" : "Dist::Zilla::Plugin::Prereqs::FromCPANfile",
+         "phase" : "develop",
+         "relationship" : "requires",
+         "version" : "0"
+      }
+   ],
+   "deprecated" : false,
+   "distribution" : "PAGI-Server",
+   "download_url" : "https://cpan.metacpan.org/authors/id/J/JJ/JJNAPIORK/PAGI-Server-0.002013.tar.gz",
+   "first" : false,
+   "id" : "Ueiayzcsd0T0JiUqNQQs33gBRvc",
+   "license" : [
+      "artistic_2"
+   ],
+   "main_module" : "PAGI::Server",
+   "maturity" : "released",
+   "metadata" : {
+      "abstract" : "Reference server for the PAGI specification",
+      "author" : [
+         "John Napiorkowski <jjnapiork@cpan.org>"
+      ],
+      "dynamic_config" : 0,
+      "generated_by" : "Dist::Zilla version 6.037, CPAN::Meta::Converter version 2.150010, CPAN::Meta::Converter version 2.150013",
+      "license" : [
+         "artistic_2"
+      ],
+      "meta-spec" : {
+         "url" : "http://search.cpan.org/perldoc?CPAN::Meta::Spec",
+         "version" : 2
+      },
+      "name" : "PAGI-Server",
+      "no_index" : {
+         "directory" : [
+            "examples",
+            "t",
+            "xt",
+            "inc",
+            "local",
+            "perl5",
+            "fatlib",
+            "example",
+            "blib",
+            "examples",
+            "eg"
+         ],
+         "package" : [
+            "PAGI::Server::AppNormalizer",
+            "PAGI::Server::Protocol::HTTP2::Session"
+         ]
+      },
+      "prereqs" : {
+         "configure" : {
+            "requires" : {
+               "ExtUtils::MakeMaker" : "0"
+            }
+         },
+         "develop" : {
+            "requires" : {
+               "Dist::Zilla" : "6.030",
+               "Dist::Zilla::Plugin::MetaJSON" : "0",
+               "Dist::Zilla::Plugin::MetaNoIndex" : "0",
+               "Dist::Zilla::Plugin::MetaResources" : "0",
+               "Dist::Zilla::Plugin::Prereqs::FromCPANfile" : "0"
+            }
+         },
+         "runtime" : {
+            "recommends" : {
+               "Future::IO" : "0.23",
+               "IO::Async::SSL" : "0.25",
+               "IO::Socket::SSL" : "2.074",
+               "Net::HTTP2::nghttp2" : "0.009"
+            },
+            "requires" : {
+               "Future" : "0.50",
+               "Future::AsyncAwait" : "0.66",
+               "HTTP::Parser::XS" : "0.17",
+               "IO::Async" : "0.802",
+               "IO::Socket::IP" : "0.43",
+               "Protocol::WebSocket" : "0.26",
+               "URI::Escape" : "5.09",
+               "perl" : "5.018"
+            }
+         },
+         "test" : {
+            "requires" : {
+               "JSON::MaybeXS" : "1.004003",
+               "Net::Async::HTTP" : "0.49",
+               "Net::Async::WebSocket::Client" : "0.14",
+               "Test2::V0" : "0.000159",
+               "Time::HiRes" : "1.9764",
+               "URI" : "1.60"
+            }
+         }
+      },
+      "release_status" : "stable",
+      "resources" : {
+         "bugtracker" : {
+            "web" : "https://github.com/jjn1056/pagi-server/issues"
+         },
+         "homepage" : "https://github.com/jjn1056/pagi-server",
+         "repository" : {
+            "type" : "git",
+            "url" : "https://github.com/jjn1056/pagi-server.git",
+            "web" : "https://github.com/jjn1056/pagi-server"
+         }
+      },
+      "version" : "0.002013",
+      "x_generated_by_perl" : "v5.42.2",
+      "x_serialization_backend" : "Cpanel::JSON::XS version 4.42",
+      "x_spdx_expression" : "Artistic-2.0"
+   },
+   "name" : "PAGI-Server-0.002013",
+   "provides" : [
+      "PAGI::Server",
+      "PAGI::Server::AsyncFile",
+      "PAGI::Server::Connection",
+      "PAGI::Server::ConnectionState",
+      "PAGI::Server::EventValidator",
+      "PAGI::Server::Protocol::HTTP1",
+      "PAGI::Server::Protocol::HTTP2",
+      "PAGI::Server::Runner",
+      "PAGI::Server::TransportState"
+   ],
+   "resources" : {
+      "bugtracker" : {
+         "web" : "https://github.com/jjn1056/pagi-server/issues"
+      },
+      "homepage" : "https://github.com/jjn1056/pagi-server",
+      "repository" : {
+         "type" : "git",
+         "url" : "https://github.com/jjn1056/pagi-server.git",
+         "web" : "https://github.com/jjn1056/pagi-server"
+      }
+   },
+   "stat" : {
+      "mode" : 33188,
+      "mtime" : 1788468532,
+      "size" : 577854
+   },
+   "status" : "latest",
+   "version" : "0.002013",
+   "version_numified" : 0.002013
+}

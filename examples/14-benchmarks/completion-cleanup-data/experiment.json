@@ -1,0 +1,30 @@
+{
+  "branch": "experiment/http-simplification",
+  "base": "07a03b8c3d46a8b582a4e2e8cb8e6ae3f2b39e2e",
+  "before_tests": "6 files / 68 tests PASS with local socket access",
+  "after_tests": "15 files / 253 tests PASS",
+  "full_suite_rerun": false,
+  "scope": "Normal HTTP application-return completion only",
+  "excluded": [
+    "post-completion exception path",
+    "SSE and WebSocket lifecycle",
+    "HTTP/2 lifecycle",
+    "other deferred candidates"
+  ],
+  "order": [
+    "release",
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline",
+    "release"
+  ],
+  "seconds": 20,
+  "workers": 1,
+  "http_concurrency": 25,
+  "cases": [
+    "get",
+    "post-observe",
+    "stream-observe"
+  ]
+}

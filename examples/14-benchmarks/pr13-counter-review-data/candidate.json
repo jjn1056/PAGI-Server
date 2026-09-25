@@ -1,0 +1,8 @@
+{
+  "base": "b9a03bb29a8b2e23b9f19a4a1851c8b31546843a",
+  "source_commit": "b8dd6ee",
+  "converted_write_sites": 28,
+  "candidate_connection_sha256": "c77228808ef12be47e8cf31fea117675df17b2fb8a684683a3adce08183f93ce",
+  "base_connection_sha256": "4f7f69383919e09fb706dac2ce01c9e6a07e0b3a8fb6276ea72a0a1d0c70640f",
+  "warning": "Diagnostic only. Known close/reset and rejected-write limitations retained; not a release candidate."
+}

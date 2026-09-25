@@ -1,0 +1,1 @@
+{"messages":128375,"p99_ms":2.05444400000943,"close_reply_p50_ms":2.89146299996901,"p50_ms":1.53874800002995,"connections":20,"connect_p50_ms":7.71138899995094,"elapsed":10.00109396,"messages_per_second":12836.0957824657}

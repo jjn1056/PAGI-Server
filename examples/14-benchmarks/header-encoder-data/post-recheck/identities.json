@@ -1,0 +1,57 @@
+{
+  "release": {
+    "loaded": {
+      "future": "Future",
+      "connection": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm",
+      "version": "0.002013",
+      "adapter": "0.05",
+      "server": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server.pm"
+    },
+    "sha256": {
+      "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server.pm": "275024caf352e2bb158dd655abb6d27170849330d74d67351a466a0ef695d652",
+      "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm": "9c2c03046b609b2f08877b18bb7e3e0428ff9f0b84790ac553de39f3ffffa39b"
+    }
+  },
+  "baseline": {
+    "loaded": {
+      "connection": "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/Connection.pm",
+      "adapter": "0.05",
+      "version": "0.002013",
+      "server": "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server.pm",
+      "future": "Future"
+    },
+    "sha256": {
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/Connection.pm": "38dcec217ce99abd1095f281a6632e58fb7cdaabcc4f89d094b7f7e6f68a77a7",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/Protocol/HTTP1.pm": "ca4b6af290bc5b7a7226f4794c2709f09883a8ec99f75c07369b2b897c8b0a85",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+      "/private/tmp/pagi-header-encoder-20260924/before/lib/PAGI/Server.pm": "55770ce354e8ec981e05927748f67c81c66097771ac8ddca7516000d75a7a844"
+    }
+  },
+  "candidate": {
+    "loaded": {
+      "connection": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm",
+      "server": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server.pm",
+      "future": "Future",
+      "adapter": "0.05",
+      "version": "0.002013"
+    },
+    "sha256": {
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm": "bd6c27969fb5720b9d8cb2431a2f7846558b117925e92aa088747370af592f8c",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Protocol/HTTP1.pm": "4ba8e8b5ab4032481f418857925b536a9b8f337a27f6f1c6dd81d64de872a097",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+      "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server.pm": "55770ce354e8ec981e05927748f67c81c66097771ac8ddca7516000d75a7a844"
+    }
+  }
+}

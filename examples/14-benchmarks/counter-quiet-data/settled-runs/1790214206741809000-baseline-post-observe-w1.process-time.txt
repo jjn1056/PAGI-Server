@@ -1,0 +1,18 @@
+       21.53 real        19.04 user         2.22 sys
+            39469056  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               10941  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+               61090  messages sent
+               61092  messages received
+                   2  signals received
+                 179  voluntary context switches
+                4599  involuntary context switches
+         75545783294  instructions retired
+         75893206970  cycles elapsed
+            35168256  peak memory footprint

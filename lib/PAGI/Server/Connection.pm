@@ -2,7 +2,7 @@ package PAGI::Server::Connection;
 use strict;
 use warnings;
 
-our $VERSION = '0.002013';
+our $VERSION = '0.002014';
 
 use Future;
 use Future::AsyncAwait;
@@ -1254,9 +1254,8 @@ sub _h2_scope_end_event {
 # Www.pod "Meaning per scope" puts the end at the server finishing its output,
 # not at the application's return, so marking here is what stops a client reset
 # arriving in between from taking the object somewhere else: "the first to
-# occur wins", and the terminal state never reopens. The marks are idempotent,
-# so _h2_on_close and the h1 request tail mark the same object again for
-# nothing. The wake comes after the mark, never before, because the object must
+# occur wins", and the terminal state never reopens. The wake comes after
+# the mark, never before, because the object must
 # be terminal before a pending receive resumes (Www.pod "State Transition
 # Order"): Future::AsyncAwait resumes an awaiting coroutine inline off ->done
 # and its first act may be to read the object. That resumption lands inside the
@@ -5547,16 +5546,6 @@ async sub _handle_request {
         # Stop stall timer - request completed successfully
         $self->_stop_stall_timer;
 
-        # Request finished cleanly: fire on_complete (not on_disconnect) on the
-        # HTTP connection-state object. Must happen on BOTH the keep-alive and
-        # close paths, and before the keep-alive branch clears the state below.
-        # Once marked complete, the non-keep-alive _handle_disconnect_and_close
-        # call below no-ops the state transition, so on_disconnect never fires for
-        # a completed request.
-        if (my $conn_state = $self->{current_connection_state}) {
-            $conn_state->_mark_complete;
-        }
-
         # A request has now completed on this connection: the idle timer's next
         # expiry (if the connection stays open awaiting another request) reports
         # keepalive_timeout rather than idle_timeout.
@@ -5894,10 +5883,6 @@ async sub _read_chunked_body {
 sub _create_receive {
     my ($self, $request) = @_;
 
-    my $content_length = $request->{content_length};
-    my $is_chunked = $request->{chunked} // 0;
-    my $expect_continue = $request->{expect_continue} // 0;
-
     # What this closure consumes of the body, and whether it let the client
     # send it, live on the request record rather than in here: the request tail
     # asks the same questions after the application returns, to decide what of
@@ -5905,10 +5890,6 @@ sub _create_receive {
     $request->{body_complete}   = 0;
     $request->{body_bytes_read} = 0;
     $request->{continue_sent}   = 0;
-    my $chunk_size = 65536;  # 64KB chunks for large bodies
-
-    # For requests without Content-Length and not chunked, treat as no body
-    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
 
     weaken(my $weak_self = $self);
 
@@ -5933,141 +5914,7 @@ sub _create_receive {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return $disconnect->() if $weak_self->{closed};
 
-        # The actual async implementation
-        my $future = (async sub {
-            return { type => 'http.disconnect' } unless $weak_self;
-
-            # True once this call has waited: the answer it then gets is a
-            # delivery of the scope's terminal state, not a repeat request
-            # for it, so the cap does not count it.
-            my $parked = 0;
-
-            if ($weak_self->{closed}) {
-                return await $disconnect->($parked);
-            }
-
-            # Check queue first - events from disconnect handler
-            if (@{$weak_self->{receive_queue}}) {
-                return shift @{$weak_self->{receive_queue}};
-            }
-
-            # http.disconnect is the answer to a receive after a completed
-            # response (Www.pod "Disconnected Client"), so resolve now rather
-            # than park until the transport happens to close -- on a keep-alive
-            # connection that could be the next request's lifetime away. Asked
-            # ahead of the request body, read or not: the scope ended at the
-            # terminal response event.
-            if ($scope_ended->()) {
-                return await $disconnect->($parked);
-            }
-
-            # If body is already complete, wait for disconnect
-            if ($request->{body_complete}) {
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-
-                if ($weak_self->{closed}) {
-                    $weak_self->{receive_pending} = undef;
-                    return await $disconnect->($parked);
-                }
-
-                $parked = 1;
-                my $result = await $weak_self->{receive_pending};
-                # receive_pending may be completed with a value (disconnect event)
-                # or just done() as a signal
-                return $result if ref $result eq 'HASH';
-                # If no value, check queue
-                if (@{$weak_self->{receive_queue}}) {
-                    return shift @{$weak_self->{receive_queue}};
-                }
-                return await $disconnect->($parked);
-            }
-
-            # For requests without body, return empty body immediately
-            if (!$has_body) {
-                $request->{body_complete} = 1;
-                return {
-                    type => 'http.request',
-                    body => '',
-                    more => 0,
-                };
-            }
-
-            # Send 100 Continue if client expects it (before reading body)
-            if ($expect_continue && !$request->{continue_sent}) {
-                $request->{continue_sent} = 1;
-                $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
-            }
-
-            # Handle chunked Transfer-Encoding
-            if ($is_chunked) {
-                return await $weak_self->_read_chunked_body(
-                    'http.request',
-                    $disconnect,
-                    \$request->{body_complete},
-                    \$request->{body_bytes_read},
-                    $scope_ended,
-                    $disconnect,
-                );
-            }
-
-            # Handle Content-Length based body reading
-            my $remaining = $content_length - $request->{body_bytes_read};
-
-            if ($remaining <= 0) {
-                $request->{body_complete} = 1;
-                return {
-                    type => 'http.request',
-                    body => '',
-                    more => 0,
-                };
-            }
-
-            # Wait for data if buffer is empty
-            while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
-                if (!$weak_self->{receive_pending}) {
-                    $weak_self->{receive_pending} = Future->new;
-                }
-                $parked = 1;
-                await $weak_self->{receive_pending};
-                $weak_self->{receive_pending} = undef;
-
-                # Check queue after waiting
-                if (@{$weak_self->{receive_queue}}) {
-                    return shift @{$weak_self->{receive_queue}};
-                }
-
-                # The scope ended under this call. Same rule, same order, as
-                # the head of this closure.
-                return await $disconnect->($parked) if $scope_ended->();
-            }
-
-            # Return disconnect if closed while waiting
-            if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
-                return await $disconnect->($parked);
-            }
-
-            # Read up to chunk_size or remaining bytes, whichever is smaller
-            my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
-            $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
-
-            my $body = substr($weak_self->{buffer}, 0, $to_read, '');
-            $request->{body_bytes_read} += length($body);
-
-            # Check if we've read all the body
-            my $more = ($request->{body_bytes_read} < $content_length) ? 1 : 0;
-
-            if (!$more) {
-                $request->{body_complete} = 1;
-            }
-
-            return {
-                type => 'http.request',
-                body => $body,
-                more => $more,
-            };
-        })->();
+        my $future = $weak_self->_receive_http_body($request, $disconnect, $scope_ended);
 
         # Track this Future so we can cancel it on close
         push @{$weak_self->{receive_futures}}, $future;
@@ -6079,12 +5926,156 @@ sub _create_receive {
     };
 }
 
+# Shared implementation: only the receive wrapper and its scope callbacks are
+# constructed per request. Shift before weakening so @_ cannot keep the
+# connection alive while this coroutine is suspended.
+async sub _receive_http_body {
+    weaken(my $weak_self = shift);
+    my ($request, $disconnect, $scope_ended) = @_;
+
+    my $content_length = $request->{content_length};
+    my $is_chunked = $request->{chunked} // 0;
+    my $expect_continue = $request->{expect_continue} // 0;
+    my $chunk_size = 65536;  # 64KB chunks for large bodies
+    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;
+
+    return { type => 'http.disconnect' } unless $weak_self;
+
+    # True once this call has waited: the answer it then gets is a
+    # delivery of the scope's terminal state, not a repeat request
+    # for it, so the cap does not count it.
+    my $parked = 0;
+
+    if ($weak_self->{closed}) {
+        return await $disconnect->($parked);
+    }
+
+    # Check queue first - events from disconnect handler
+    if (@{$weak_self->{receive_queue}}) {
+        return shift @{$weak_self->{receive_queue}};
+    }
+
+    # http.disconnect is the answer to a receive after a completed
+    # response (Www.pod "Disconnected Client"), so resolve now rather
+    # than park until the transport happens to close -- on a keep-alive
+    # connection that could be the next request's lifetime away. Asked
+    # ahead of the request body, read or not: the scope ended at the
+    # terminal response event.
+    if ($scope_ended->()) {
+        return await $disconnect->($parked);
+    }
+
+    # If body is already complete, wait for disconnect
+    if ($request->{body_complete}) {
+        if (!$weak_self->{receive_pending}) {
+            $weak_self->{receive_pending} = Future->new;
+        }
+
+        if ($weak_self->{closed}) {
+            $weak_self->{receive_pending} = undef;
+            return await $disconnect->($parked);
+        }
+
+        $parked = 1;
+        my $result = await $weak_self->{receive_pending};
+        # receive_pending may be completed with a value (disconnect event)
+        # or just done() as a signal
+        return $result if ref $result eq 'HASH';
+        # If no value, check queue
+        if (@{$weak_self->{receive_queue}}) {
+            return shift @{$weak_self->{receive_queue}};
+        }
+        return await $disconnect->($parked);
+    }
+
+    # For requests without body, return empty body immediately
+    if (!$has_body) {
+        $request->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Send 100 Continue if client expects it (before reading body)
+    if ($expect_continue && !$request->{continue_sent}) {
+        $request->{continue_sent} = 1;
+        $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+    }
+
+    # Handle chunked Transfer-Encoding
+    if ($is_chunked) {
+        return await $weak_self->_read_chunked_body(
+            'http.request',
+            $disconnect,
+            \$request->{body_complete},
+            \$request->{body_bytes_read},
+            $scope_ended,
+            $disconnect,
+        );
+    }
+
+    # Handle Content-Length based body reading
+    my $remaining = $content_length - $request->{body_bytes_read};
+
+    if ($remaining <= 0) {
+        $request->{body_complete} = 1;
+        return {
+            type => 'http.request',
+            body => '',
+            more => 0,
+        };
+    }
+
+    # Wait for data if buffer is empty
+    while (length($weak_self->{buffer}) == 0 && !$weak_self->{closed}) {
+        if (!$weak_self->{receive_pending}) {
+            $weak_self->{receive_pending} = Future->new;
+        }
+        $parked = 1;
+        await $weak_self->{receive_pending};
+        $weak_self->{receive_pending} = undef;
+
+        # Check queue after waiting
+        if (@{$weak_self->{receive_queue}}) {
+            return shift @{$weak_self->{receive_queue}};
+        }
+
+        # The scope ended under this call. Same rule, same order, as
+        # the head of this closure.
+        return await $disconnect->($parked) if $scope_ended->();
+    }
+
+    # Return disconnect if closed while waiting
+    if ($weak_self->{closed} && length($weak_self->{buffer}) == 0) {
+        return await $disconnect->($parked);
+    }
+
+    # Read up to chunk_size or remaining bytes, whichever is smaller
+    my $to_read = $remaining < $chunk_size ? $remaining : $chunk_size;
+    $to_read = length($weak_self->{buffer}) if length($weak_self->{buffer}) < $to_read;
+
+    my $body = substr($weak_self->{buffer}, 0, $to_read, '');
+    $request->{body_bytes_read} += length($body);
+
+    # Check if we've read all the body
+    my $more = ($request->{body_bytes_read} < $content_length) ? 1 : 0;
+
+    if (!$more) {
+        $request->{body_complete} = 1;
+    }
+
+    return {
+        type => 'http.request',
+        body => $body,
+        more => $more,
+    };
+}
+
 sub _create_send {
     my ($self, $request, %opt) = @_;
 
-    my $chunked = 0;
-    my $expects_trailers = 0;
-    my $seq = 'initial';
     # Refusing a websocket handshake or an sse stream is an ordinary HTTP
     # response and delegates its wire work here, so that on the wire it is
     # identical to the same response on an http scope (Www.pod "Refusing the
@@ -6108,301 +6099,295 @@ sub _create_send {
 
     weaken(my $weak_self = $self);
 
-    # Publish the closure-local $seq where the scope's owner reads it, so the
+    # Publish the private send state where the scope's owner reads it, so the
     # app-return path can tell a completed response from one the app left
     # incomplete: the connection for an http scope, and for a refusal the
     # refusing scope's own send closure, which passes its own publisher.
     my $publish = $opt{on_state}
         // sub { $weak_self->{h1_seq} = $_[0] if $weak_self };
-    $publish->($seq);
+    $publish->('initial');
 
-    my $send_event = async sub  {
-        my ($event) = @_;
+    my $state = {
+        chunked => 0, expects_trailers => 0, seq => 'initial',
+        publish => $publish, is_refusal => $is_refusal,
+        is_head_request => $is_head_request, http_version => $http_version,
+        is_http10 => $is_http10, client_wants_keepalive => $client_wants_keepalive,
+    };
+    return sub {
         return Future->done unless $weak_self;
-        return Future->done if $weak_self->{closed};
+        return $weak_self->_send_http_event($state, @_);
+    };
+}
 
-        # Reset stall timer on write activity
-        $weak_self->_reset_stall_timer;
+# One coroutine body shared by all HTTP sends. Shift before weakening so @_
+# cannot retain the connection while a write or file read is suspended.
+async sub _send_http_event {
+    weaken(my $weak_self = shift);
+    my ($state, $event) = @_;
+    return Future->done unless $weak_self;
+    return Future->done if $weak_self->{closed};
 
-        my $type = $event->{type} // '';
+    # Reset stall timer on write activity
+    $weak_self->_reset_stall_timer;
 
-        # Mandatory event validation and sequencing (PAGI spec compliance).
-        # Order per spec: transport-closed no-op check above runs first.
-        PAGI::Server::EventValidator::validate_http_send(
-            $event, { extensions => $weak_self->{extensions} });
-        my $seq_before_advance = $seq;
-        $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
-        $publish->($seq);
+    my $type = $event->{type} // '';
 
-        if ($type eq 'http.response.start') {
-            $weak_self->{response_started} = 1;
-            $weak_self->{current_connection_state}->_mark_response_started
-                if $weak_self->{current_connection_state};
-            $weak_self->{response_status} = $event->{status} // 200;  # Track for logging
-            $expects_trailers = $event->{trailers} // 0;
+    # Mandatory event validation and sequencing (PAGI spec compliance).
+    # Order per spec: transport-closed no-op check above runs first.
+    PAGI::Server::EventValidator::validate_http_send(
+        $event, { extensions => $weak_self->{extensions} });
+    my $seq_before_advance = $state->{seq};
+    $state->{seq} = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
+    $state->{publish}->($state->{seq});
 
-            my $status = $event->{status} // 200;
-            my $headers = $event->{headers} // [];
-            # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
-            # strip any app-supplied values before they reach the wire.
-            $headers = $weak_self->_h1_strip_connection_headers($headers);
+    if ($type eq 'http.response.start') {
+        $weak_self->{response_started} = 1;
+        $weak_self->{current_connection_state}->_mark_response_started
+            if $weak_self->{current_connection_state};
+        $weak_self->{response_status} = $event->{status} // 200;  # Track for logging
+        $state->{expects_trailers} = $event->{trailers} // 0;
 
-            # Check if we need chunked encoding (no Content-Length)
-            my $has_content_length = 0;
-            for my $h (@$headers) {
-                if (lc($h->[0]) eq 'content-length') {
-                    $has_content_length = 1;
-                    last;
-                }
+        my $status = $event->{status} // 200;
+        my $headers = $event->{headers} // [];
+        # PAGI spec — HTTP/1.1 owns Transfer-Encoding and Connection;
+        # strip any app-supplied values before they reach the wire.
+        $headers = $weak_self->_h1_strip_connection_headers($headers);
+
+        # Check if we need chunked encoding (no Content-Length)
+        my $has_content_length = 0;
+        for my $h (@$headers) {
+            if (lc($h->[0]) eq 'content-length') {
+                $has_content_length = 1;
+                last;
             }
-
-            # Add Date header, but only if the app didn't already supply one.
-            my @final_headers = @$headers;
-            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
-                push @final_headers, ['date', $weak_self->{protocol}->format_date];
-            }
-
-            # PAGI spec Upgrade companion rule: over HTTP/1.1, a response
-            # carrying an app-supplied Upgrade header (e.g. 426 Upgrade
-            # Required) must also carry 'upgrade' among the server-supplied
-            # Connection tokens -- RFC 9110 requires the pair from any
-            # Upgrade sender, and the app's own Connection header was
-            # stripped above. HTTP/1.0 has no upgrade mechanism.
-            if (!$is_http10 && grep { lc($_->[0]) eq 'upgrade' } @final_headers) {
-                push @final_headers, ['connection', 'upgrade'];
-            }
-
-            # For HEAD requests, don't use chunked encoding (no body will be sent)
-            # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
-            if ($is_head_request || $is_http10) {
-                $chunked = 0;
-                if ($is_http10) {
-                    if (!$has_content_length) {
-                        # No Content-Length means we can't do keep-alive
-                        push @final_headers, ['connection', 'close'];
-                    } elsif ($client_wants_keepalive && !$is_refusal) {
-                        # HTTP/1.0 client requested keep-alive and we can honor it
-                        # Must explicitly acknowledge with Connection: keep-alive
-                        push @final_headers, ['connection', 'keep-alive'];
-                    }
-                }
-            } else {
-                $chunked = !$has_content_length;
-            }
-
-            # Www.pod "Refusing the handshake"/"Refusing the stream": on
-            # HTTP/1.1 the server closes the connection after a refusal and
-            # the response carries Connection: close, so a pooling client does
-            # not reuse the socket. Appended rather than replacing, because a
-            # refusal that answers with 426 Upgrade Required already carries
-            # the server-supplied 'upgrade' token above and needs both.
-            if ($is_refusal && !grep { lc($_->[0]) eq 'connection' && lc($_->[1]) eq 'close' } @final_headers) {
-                push @final_headers, ['connection', 'close'];
-            }
-
-            my $response = $weak_self->{protocol}->serialize_response_start(
-                $status, \@final_headers, $chunked, $http_version
-            );
-
-            # Buffer the headers instead of writing them now; they are flushed
-            # together with the first body write (or at finalization). This
-            # coalesces the common "start + complete body" case into a single
-            # stream write instead of one per headers/chunk/terminator.
-            $weak_self->{_resp_pending} = $response;
         }
-        elsif ($type eq 'http.response.body') {
-            # For HEAD requests, suppress the body
-            if ($is_head_request) {
-                # HEAD has headers but no body, so flush the buffered headers now.
-                $weak_self->_flush_pending_headers;
-                return;  # Don't send any body for HEAD
+
+        # Add Date header, but only if the app didn't already supply one.
+        my @final_headers = @$headers;
+        unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
+            push @final_headers, ['date', $weak_self->{protocol}->format_date];
+        }
+
+        # PAGI spec Upgrade companion rule: over HTTP/1.1, a response
+        # carrying an app-supplied Upgrade header (e.g. 426 Upgrade
+        # Required) must also carry 'upgrade' among the server-supplied
+        # Connection tokens -- RFC 9110 requires the pair from any
+        # Upgrade sender, and the app's own Connection header was
+        # stripped above. HTTP/1.0 has no upgrade mechanism.
+        if (!$state->{is_http10} && grep { lc($_->[0]) eq 'upgrade' } @final_headers) {
+            push @final_headers, ['connection', 'upgrade'];
+        }
+
+        # For HEAD requests, don't use chunked encoding (no body will be sent)
+        # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
+        if ($state->{is_head_request} || $state->{is_http10}) {
+            $state->{chunked} = 0;
+            if ($state->{is_http10}) {
+                if (!$has_content_length) {
+                    # No Content-Length means we can't do keep-alive
+                    push @final_headers, ['connection', 'close'];
+                } elsif ($state->{client_wants_keepalive} && !$state->{is_refusal}) {
+                    # HTTP/1.0 client requested keep-alive and we can honor it
+                    # Must explicitly acknowledge with Connection: keep-alive
+                    push @final_headers, ['connection', 'keep-alive'];
+                }
             }
+        } else {
+            $state->{chunked} = !$has_content_length;
+        }
 
-            # --- BACKPRESSURE CHECK ---
-            # Wait for buffer to drain if we're above high watermark
-            # This prevents unbounded memory growth with slow clients
-            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
-                await $weak_self->_wait_for_drain;
-                # Re-check connection state after await
-                return Future->done unless $weak_self;
-                return Future->done if $weak_self->{closed};
-            }
-            # --- END BACKPRESSURE CHECK ---
+        # Www.pod "Refusing the handshake"/"Refusing the stream": on
+        # HTTP/1.1 the server closes the connection after a refusal and
+        # the response carries Connection: close, so a pooling client does
+        # not reuse the socket. Appended rather than replacing, because a
+        # refusal that answers with 426 Upgrade Required already carries
+        # the server-supplied 'upgrade' token above and needs both.
+        if ($state->{is_refusal} && !grep { lc($_->[0]) eq 'connection' && lc($_->[1]) eq 'close' } @final_headers) {
+            push @final_headers, ['connection', 'close'];
+        }
 
-            # Determine body source: body, file, or fh (mutually exclusive)
-            my $body = $event->{body};
-            my $file = $event->{file};
-            my $fh = $event->{fh};
-            my $offset = $event->{offset} // 0;
-            my $length = $event->{length};
+        # App fields were checked before sequence advancement; additions
+        # above are server-generated Date and framing/connection fields.
+        my $response = $weak_self->{protocol}->_encode_response_start(
+            $status, \@final_headers, $state->{chunked}, $state->{http_version}
+        );
 
-            if (defined $file) {
-                # File path response - stream from file (async, non-blocking)
-                # File responses are implicitly complete (more is ignored) on
-                # success. A failed file/fh send must NOT mark the response
-                # complete: advance_http already advanced $seq to a terminal
-                # state before we got here (it can't know the read will fail),
-                # so on failure we roll $seq back to its pre-event value. That
-                # lets a conforming app recover with a normal error body
-                # instead of being permanently locked out by "response already
-                # complete" for a body that was never actually sent.
-                $weak_self->_flush_pending_headers;   # headers before the file body
-                eval {
-                    # h2 parity (Connection.pm _h2_create_send file arm): fail
-                    # fast on a missing/unreadable file with the same messages,
-                    # ahead of _send_file_response's own -s/open, which would
-                    # otherwise report a less specific error for the same fault.
-                    die "File not found: $file\n"  unless -f $file;
-                    die "Cannot read file: $file\n" unless -r $file;
+        # Buffer the headers instead of writing them now; they are flushed
+        # together with the first body write (or at finalization). This
+        # coalesces the common "start + complete body" case into a single
+        # stream write instead of one per headers/chunk/terminator.
+        $weak_self->{_resp_pending} = $response;
+    }
+    elsif ($type eq 'http.response.body' && $state->{is_head_request}) {
+        # HEAD has headers but no body; still reach scope completion below.
+        $weak_self->_flush_pending_headers;
+    }
+    elsif ($type eq 'http.response.body') {
+        # --- BACKPRESSURE CHECK ---
+        # Wait for buffer to drain if we're above high watermark
+        # This prevents unbounded memory growth with slow clients
+        if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {
+            await $weak_self->_wait_for_drain;
+            # Re-check connection state after await
+            return Future->done unless $weak_self;
+            return Future->done if $weak_self->{closed};
+        }
+        # --- END BACKPRESSURE CHECK ---
 
-                    await $weak_self->_send_file_response($file, $offset, $length, $chunked);
-                    1;
-                } or do {
-                    my $error = $@;
-                    $seq = $seq_before_advance;
-                    $publish->($seq);
-                    die $error;
-                };
-            }
-            elsif (defined $fh) {
-                # Filehandle response - stream from handle (async, non-blocking)
-                # Filehandle responses are implicitly complete (more is ignored)
-                # on success; see the file-path comment above for why a failed
-                # send must roll $seq back instead of leaving it 'complete'.
-                $weak_self->_flush_pending_headers;   # headers before the fh body
-                eval {
-                    await $weak_self->_send_fh_response($fh, $offset, $length, $chunked);
-                    1;
-                } or do {
-                    my $error = $@;
-                    $seq = $seq_before_advance;
-                    $publish->($seq);
-                    die $error;
-                };
+        # Determine body source: body, file, or fh (mutually exclusive)
+        my $body = $event->{body};
+        my $file = $event->{file};
+        my $fh = $event->{fh};
+        my $offset = $event->{offset} // 0;
+        my $length = $event->{length};
+
+        if (defined $file) {
+            # File path response - stream from file (async, non-blocking)
+            # File responses are implicitly complete (more is ignored) on
+            # success. A failed file/fh send must NOT mark the response
+            # complete: advance_http already advanced $state->{seq} to a terminal
+            # state before we got here (it can't know the read will fail),
+            # so on failure we roll $state->{seq} back to its pre-event value. That
+            # lets a conforming app recover with a normal error body
+            # instead of being permanently locked out by "response already
+            # complete" for a body that was never actually sent.
+            $weak_self->_flush_pending_headers;   # headers before the file body
+            eval {
+                # h2 parity (Connection.pm _h2_create_send file arm): fail
+                # fast on a missing/unreadable file with the same messages,
+                # ahead of _send_file_response's own -s/open, which would
+                # otherwise report a less specific error for the same fault.
+                die "File not found: $file\n"  unless -f $file;
+                die "Cannot read file: $file\n" unless -r $file;
+
+                await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked});
+                1;
+            } or do {
+                my $error = $@;
+                $state->{seq} = $seq_before_advance;
+                $state->{publish}->($state->{seq});
+                die $error;
+            };
+        }
+        elsif (defined $fh) {
+            # Filehandle response - stream from handle (async, non-blocking)
+            # Filehandle responses are implicitly complete (more is ignored)
+            # on success; see the file-path comment above for why a failed
+            # send must roll $state->{seq} back instead of leaving it 'complete'.
+            $weak_self->_flush_pending_headers;   # headers before the fh body
+            eval {
+                await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked});
+                1;
+            } or do {
+                my $error = $@;
+                $state->{seq} = $seq_before_advance;
+                $state->{publish}->($state->{seq});
+                die $error;
+            };
+        }
+        else {
+            # Traditional body response
+            $body //= '';
+            my $more = $event->{more} // 0;
+
+            $weak_self->{_response_size} += length($body);
+
+            # Coalesce any buffered headers, the body (chunk framing if
+            # chunked), and the final terminator into a single stream write.
+            # The common start + complete-body response becomes one write
+            # rather than three.
+            my $out = $weak_self->{_resp_pending};
+            $out = '' unless defined $out;
+            $weak_self->{_resp_pending} = undef;
+
+            if ($state->{chunked}) {
+                if (length $body) {
+                    my $len = sprintf("%x", length($body));
+                    $out .= "$len\r\n$body\r\n";
+                }
+                if (!$more && !$state->{expects_trailers}) {
+                    $out .= "0\r\n\r\n";
+                }
             }
             else {
-                # Traditional body response
-                $body //= '';
-                my $more = $event->{more} // 0;
-
-                $weak_self->{_response_size} += length($body);
-
-                # Coalesce any buffered headers, the body (chunk framing if
-                # chunked), and the final terminator into a single stream write.
-                # The common start + complete-body response becomes one write
-                # rather than three.
-                my $out = $weak_self->{_resp_pending};
-                $out = '' unless defined $out;
-                $weak_self->{_resp_pending} = undef;
-
-                if ($chunked) {
-                    if (length $body) {
-                        my $len = sprintf("%x", length($body));
-                        $out .= "$len\r\n$body\r\n";
-                    }
-                    if (!$more && !$expects_trailers) {
-                        $out .= "0\r\n\r\n";
-                    }
-                }
-                else {
-                    $out .= $body;
-                }
-
-                $weak_self->{stream}->write($out) if length $out;
-                $weak_self->_notify_transport_write;
+                $out .= $body;
             }
+
+            $weak_self->{stream}->write($out) if length $out;
+            $weak_self->_notify_transport_write;
         }
-        elsif ($type eq 'http.response.trailers') {
-            # No "return unless $expects_trailers" guard here: advance_http
-            # (called unconditionally above, line ~2886) already croaks for
-            # undeclared trailers -- "cannot send http.response.trailers:
-            # trailers were not declared or body is not complete" -- before
-            # execution ever reaches this branch, so the guard was dead code.
+    }
+    # HEAD accepts and discards trailers after advancing the machine.
+    elsif ($type eq 'http.response.trailers' && !$state->{is_head_request}) {
+        # No "return unless $state->{expects_trailers}" guard here: advance_http
+        # (called unconditionally above, line ~2886) already croaks for
+        # undeclared trailers -- "cannot send http.response.trailers:
+        # trailers were not declared or body is not complete" -- before
+        # execution ever reaches this branch, so the guard was dead code.
 
-            if ($is_head_request) {
-                # HEAD: accept-and-discard, per PAGI Www.pod's HEAD rule
-                # (mirrors the h2 HEAD block from Phase 2 Task 1). The
-                # generic advance_http call above already advanced the
-                # machine; transmit nothing.
-                return;
-            }
-
-            unless ($chunked) {
-                # Trailers ride chunked framing only (RFC 7230); a
-                # content-length response has no place to put them, and
-                # silently dropping promised trailers lies to the
-                # application. advance_http already advanced $seq to
-                # 'complete' generically above (it can't know the framing
-                # can't carry trailers) -- roll it back to its pre-event
-                # value, same guard/hoist pattern used by the file/fh arms
-                # above, so the machine stays 'awaiting_trailers' and never
-                # claims a response completed that never actually went out.
-                # advance_http is a pure function with no side effects beyond
-                # its return value, which is what makes advance-then-rollback
-                # safe.
-                $seq = $seq_before_advance;
-                $publish->($seq);
-                die "http.response.trailers requires chunked framing (response declared content-length)\n";
-            }
-
-            # RFC 9110 section 6.5.1 additionally forbids connection-specific/
-            # framing fields in trailers outright, on any HTTP version -- not
-            # just the PAGI spec's h1 response-header rule this strip
-            # otherwise exists for. Strip at ingestion, same placement as
-            # every h1 response-header site above.
-            my $trailer_headers = $weak_self->_h1_strip_connection_headers($event->{headers} // []);
-
-            # Send final chunk + trailers (prepend any still-buffered headers).
-            my $trailers = $weak_self->{_resp_pending} // '';
-            $weak_self->{_resp_pending} = undef;
-            $trailers .= "0\r\n";
-
-            my @validated_trailers;
-            for my $header (@$trailer_headers) {
-                my ($name, $value) = @$header;
-                $name  = _validate_header_name($name);
-                $value = _validate_header_value($value);
-                push @validated_trailers, [$name, $value];
-            }
-            $trailers .= $weak_self->{protocol}->serialize_trailers(\@validated_trailers);
-
-            $weak_self->{stream}->write($trailers);
-        }
-        elsif ($type eq 'http.fullflush') {
-            # Fullflush extension - force immediate TCP buffer flush.
-            # validate_http_send (called above, unconditionally) already
-            # croaks "Extension not enabled: fullflush" when the extension
-            # isn't advertised, so no re-check is needed here.
-
-            # Force flush by ensuring TCP_NODELAY and flushing any pending writes
-            my $handle = $weak_self->{stream}->write_handle;
-            if ($handle && $handle->can('setsockopt')) {
-                # Ensure TCP_NODELAY is set to disable Nagle buffering
-                require Socket;
-                $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
-            }
-
-            # In IO::Async, writes are queued and sent when the event loop allows.
-            # The above TCP_NODELAY ensures no Nagle buffering delays.
-            # For this reference implementation, we return immediately as the
-            # write buffer will be flushed by the event loop.
+        unless ($state->{chunked}) {
+            # Trailers ride chunked framing only (RFC 7230); a
+            # content-length response has no place to put them, and
+            # silently dropping promised trailers lies to the
+            # application. advance_http already advanced $state->{seq} to
+            # 'complete' generically above (it can't know the framing
+            # can't carry trailers) -- roll it back to its pre-event
+            # value, same guard/hoist pattern used by the file/fh arms
+            # above, so the machine stays 'awaiting_trailers' and never
+            # claims a response completed that never actually went out.
+            # advance_http is a pure function with no side effects beyond
+            # its return value, which is what makes advance-then-rollback
+            # safe.
+            $state->{seq} = $seq_before_advance;
+            $state->{publish}->($state->{seq});
+            die "http.response.trailers requires chunked framing (response declared content-length)\n";
         }
 
-        return;
-    };
+        # RFC 9110 section 6.5.1 additionally forbids connection-specific/
+        # framing fields in trailers outright, on any HTTP version -- not
+        # just the PAGI spec's h1 response-header rule this strip
+        # otherwise exists for. Strip at ingestion, same placement as
+        # every h1 response-header site above.
+        my $trailer_headers = $weak_self->_h1_strip_connection_headers($event->{headers} // []);
 
-    # The HTTP/1.1 twin of _h2_create_send's terminal-event site, and the same
-    # one site for all of them. The scope ends at the server's last output,
-    # request body read or not; what is left of an unread request body is the
-    # transport's business, and the request tail still decides it.
-    return sub {
-        my ($event) = @_;
-        return $send_event->($event)->on_done(sub {
-            $weak_self->_h1_end_scope_output
-                if $weak_self
-                && PAGI::Server::EventValidator::scope_send_clean('http', $seq);
-        });
-    };
+        # Send final chunk + trailers (prepend any still-buffered headers).
+        my $trailers = $weak_self->{_resp_pending} // '';
+        $weak_self->{_resp_pending} = undef;
+        $trailers .= "0\r\n";
+
+        # Validation already ran before sequence advancement and stripping.
+        $trailers .= $weak_self->{protocol}->_encode_trailers($trailer_headers);
+
+        $weak_self->{stream}->write($trailers);
+    }
+    elsif ($type eq 'http.fullflush') {
+        # Fullflush extension - force immediate TCP buffer flush.
+        # validate_http_send (called above, unconditionally) already
+        # croaks "Extension not enabled: fullflush" when the extension
+        # isn't advertised, so no re-check is needed here.
+
+        # Force flush by ensuring TCP_NODELAY and flushing any pending writes
+        my $handle = $weak_self->{stream}->write_handle;
+        if ($handle && $handle->can('setsockopt')) {
+            # Ensure TCP_NODELAY is set to disable Nagle buffering
+            require Socket;
+            $handle->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+        }
+
+        # In IO::Async, writes are queued and sent when the event loop allows.
+        # The above TCP_NODELAY ensures no Nagle buffering delays.
+        # For this reference implementation, we return immediately as the
+        # write buffer will be flushed by the event loop.
+    }
+
+    # The HTTP/1.1 twin of _h2_create_send's terminal-event site. The
+    # scope ends at successful final output, request body read or not.
+    # Publish terminal facts before resuming a parked receive; terminal
+    # callbacks remain deferred by ConnectionState.
+    $weak_self->_h1_end_scope_output
+        if $weak_self
+        && PAGI::Server::EventValidator::scope_send_clean('http', $state->{seq});
+    return;
 }
 
 # Flush any response headers buffered by http.response.start that were not yet

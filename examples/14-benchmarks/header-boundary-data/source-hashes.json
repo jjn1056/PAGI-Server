@@ -1,0 +1,7 @@
+{
+  "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm": "38dcec217ce99abd1095f281a6632e58fb7cdaabcc4f89d094b7f7e6f68a77a7",
+  "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+  "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Protocol/HTTP1.pm": "ca4b6af290bc5b7a7226f4794c2709f09883a8ec99f75c07369b2b897c8b0a85",
+  "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/t/15-crlf-injection.t": "eff6a3294773afbdc116c0f573abe76cfbdc4da3ed9caa6d7647b6a3a2c7cb21",
+  "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/t/52-mandatory-validation.t": "1ad7fdde7c43bc244dcc3b266334b42bce2f1b9cffd6d19d34592e998be8c27a"
+}

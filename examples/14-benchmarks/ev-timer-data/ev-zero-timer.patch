@@ -1,0 +1,11 @@
+--- a/lib/IO/Async/Loop/EV.pm
++++ b/lib/IO/Async/Loop/EV.pm
+@@ -155,7 +155,7 @@
+    $when eq "later" or croak "Expected 'when' to be 'later'";
+ 
+    my $key;
+-   my $w = EV::idle sub {
++   my $w = EV::timer 0, 0, sub {
+       delete $self->{watch_idle}{$key};
+       goto &$code;
+    };

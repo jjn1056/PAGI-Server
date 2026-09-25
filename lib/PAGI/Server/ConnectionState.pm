@@ -3,7 +3,7 @@ package PAGI::Server::ConnectionState;
 use strict;
 use warnings;
 
-our $VERSION = '0.002013';
+our $VERSION = '0.002014';
 
 use Scalar::Util qw(weaken);
 
@@ -71,9 +71,6 @@ a reference to the parent Connection object for lazy Future creation.
 sub new {
     my ($class, %args) = @_;
 
-    my $connected = 1;
-    my $reason = undef;
-
     my $self = bless {
         # Connection reference for lazy Future creation (will be weakened)
         _connection => $args{connection},
@@ -81,9 +78,9 @@ sub new {
         # Not weakened: diagnostics must survive the connection going away.
         _server     => $args{server},
 
-        # State (scalar refs - for internal consistency)
-        _connected => \$connected,
-        _reason    => \$reason,
+        # State
+        _connected => 1,
+        _reason    => undef,
         _detail    => undef,        # free-text diagnostic for the abnormal end, or undef
 
         # Optional teardown hook installed by the owning Connection: called as
@@ -132,7 +129,7 @@ messages from the receive queue.
 
 sub is_connected {
     my $self = shift;
-    return ${$self->{_connected}} ? 1 : 0;
+    return $self->{_connected} ? 1 : 0;
 }
 
 =head2 response_started
@@ -208,7 +205,7 @@ See L<PAGI::Spec::Www/"Standard Disconnect Reasons"> for the authoritative list.
 
 sub disconnect_reason {
     my $self = shift;
-    return ${$self->{_reason}};
+    return $self->{_reason};
 }
 
 =head2 disconnect_detail
@@ -273,7 +270,7 @@ sub close_reason { return $_[0]->{_close_reason} }
 # a no-op, so a peer Close already recorded is never clobbered.
 sub _set_ws_close {
     my ($self, $code, $reason) = @_;
-    return unless ${$self->{_connected}};
+    return unless $self->{_connected};
     $self->{_close_code}   = $code;
     $self->{_close_reason} = $reason;
     return;
@@ -381,8 +378,8 @@ sub disconnect_future {
         # Resolve immediately only for an ABNORMAL end. After a clean completion
         # the connection is closed but this Future is deliberately left pending —
         # completion is not a disconnect (on_complete is the completion signal).
-        if (!${$self->{_connected}} && !$self->{_completed}) {
-            $self->{_future}->done(${$self->{_reason}});
+        if (!$self->{_connected} && !$self->{_completed}) {
+            $self->{_future}->done($self->{_reason});
         }
     }
 
@@ -449,8 +446,8 @@ sub end_future {
         # Resolve immediately for BOTH terminal outcomes. Unlike disconnect_future,
         # a clean completion also resolves this Future — with undef, since _reason
         # stays undef on the clean path and carries the token on the abnormal one.
-        if (!${$self->{_connected}}) {
-            $self->{_end_future}->done(${$self->{_reason}});
+        if (!$self->{_connected}) {
+            $self->{_end_future}->done($self->{_reason});
         }
     }
 
@@ -492,7 +489,7 @@ sub on_disconnect {
     my ($self, $cb) = @_;
 
     # Still in flight: register for later.
-    if (${$self->{_connected}}) {
+    if ($self->{_connected}) {
         push @{$self->{_callbacks}}, $cb;
         return;
     }
@@ -501,7 +498,7 @@ sub on_disconnect {
     # completion (on_disconnect means "something went wrong").
     return if $self->{_completed};
 
-    eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+    eval { $cb->($self->{_reason}, $self->{_detail}) };
     $self->_log(error => "on_disconnect callback error: $@") if $@;
 }
 
@@ -538,7 +535,7 @@ sub on_complete {
     my ($self, $cb) = @_;
 
     # Still in flight: register for later.
-    if (${$self->{_connected}}) {
+    if ($self->{_connected}) {
         push @{$self->{_complete_callbacks}}, $cb;
         return;
     }
@@ -588,14 +585,14 @@ sub on_end {
     my ($self, $cb) = @_;
 
     # Still in flight: register for later.
-    if (${$self->{_connected}}) {
+    if ($self->{_connected}) {
         push @{$self->{_end_callbacks}}, $cb;
         return;
     }
 
     # Terminal: fire for either outcome. _reason/_detail carry the abnormal
     # token/detail and are both undef on a clean end, so one path serves both.
-    eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+    eval { $cb->($self->{_reason}, $self->{_detail}) };
     $self->_log(error => "on_end callback error: $@") if $@;
 }
 
@@ -640,11 +637,11 @@ sub _mark_disconnected {
     my ($self, $reason, $detail, $sync) = @_;
 
     # Already terminal - no-op (idempotent)
-    return unless ${$self->{_connected}};
+    return unless $self->{_connected};
 
     # 1. Update state (the synchronous facts, immediate at the transition).
-    ${$self->{_connected}} = 0;
-    ${$self->{_reason}} = $reason // 'unknown';
+    $self->{_connected} = 0;
+    $self->{_reason} = $reason // 'unknown';
     $self->{_detail} = $detail;
 
     # 2. Deliver the signal on the event loop, never synchronously inside the
@@ -656,21 +653,21 @@ sub _mark_disconnected {
         # Resolve futures if they exist (lazy - may not have been created).
         # end_future is the all-outcome sibling; on this path it carries the reason.
         if ($self->{_future} && !$self->{_future}->is_ready) {
-            $self->{_future}->done(${$self->{_reason}});
+            $self->{_future}->done($self->{_reason});
         }
         if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
-            $self->{_end_future}->done(${$self->{_reason}});
+            $self->{_end_future}->done($self->{_reason});
         }
 
         # Invoke on_disconnect callbacks with (reason, detail).
         for my $cb (@{$self->{_callbacks}}) {
-            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            eval { $cb->($self->{_reason}, $self->{_detail}) };
             $self->_log(error => "on_disconnect callback error: $@") if $@;
         }
 
         # Invoke on_end callbacks (the all-outcome observer) with (reason, detail).
         for my $cb (@{$self->{_end_callbacks}}) {
-            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            eval { $cb->($self->{_reason}, $self->{_detail}) };
             $self->_log(error => "on_end callback error: $@") if $@;
         }
 
@@ -713,13 +710,13 @@ sub _mark_complete {
     my ($self) = @_;
 
     # Already terminal (disconnected or completed) - no-op (idempotent).
-    return unless ${$self->{_connected}};
+    return unless $self->{_connected};
 
     # Mark the completed terminal state (the synchronous facts, immediate at the
     # transition: response_complete() is true before any delivery). Reason stays
     # undef; the disconnect Future is deliberately left pending (completion is
     # not a disconnect).
-    ${$self->{_connected}} = 0;
+    $self->{_connected} = 0;
     $self->{_completed}    = 1;
 
     # Deliver the signal on the event loop, never synchronously inside the
@@ -728,7 +725,7 @@ sub _mark_complete {
         # Resolve end_future if it exists. _reason stays undef on the clean path,
         # so the all-outcome sibling resolves with undef here.
         if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
-            $self->{_end_future}->done(${$self->{_reason}});
+            $self->{_end_future}->done($self->{_reason});
         }
 
         # Invoke completion callbacks (no reason argument).
@@ -739,7 +736,7 @@ sub _mark_complete {
 
         # Invoke on_end callbacks with (undef, undef) -- a clean end carries neither.
         for my $cb (@{$self->{_end_callbacks}}) {
-            eval { $cb->(${$self->{_reason}}, $self->{_detail}) };
+            eval { $cb->($self->{_reason}, $self->{_detail}) };
             $self->_log(error => "on_end callback error: $@") if $@;
         }
 
@@ -769,7 +766,7 @@ reached either terminal state.
 
 sub abort {
     my ($self, $detail) = @_;
-    return unless ${$self->{_connected}};
+    return unless $self->{_connected};
 
     my $hook = delete $self->{_on_abort};
     # State first, so the hook (and anything it resumes) observes app_abort.

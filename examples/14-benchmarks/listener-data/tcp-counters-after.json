@@ -1,0 +1,9 @@
+{
+  "at": "2026-09-25T15:14:36.641696+00:00",
+  "cumulative_since_boot": {
+    "ListenOverflows": 0,
+    "ListenDrops": 0,
+    "TCPReqQFullDoCookies": 0,
+    "TCPReqQFullDrop": 0
+  }
+}

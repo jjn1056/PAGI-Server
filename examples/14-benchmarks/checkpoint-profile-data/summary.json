@@ -1,0 +1,942 @@
+{
+  "get": {
+    "Future::PP::new": {
+      "release": {
+        "calls": [
+          8878,
+          8878
+        ],
+        "mean_exclusive_s": 0.012033,
+        "exclusive_us_per_request": 5.462097140263277
+      },
+      "experiment": {
+        "calls": [
+          8878,
+          8878
+        ],
+        "mean_exclusive_s": 0.013191999999999999,
+        "exclusive_us_per_request": 5.988197911938265
+      }
+    },
+    "Future::PP::on_done": {
+      "release": {
+        "calls": [
+          53,
+          53
+        ],
+        "mean_exclusive_s": 0.00033549999999999997,
+        "exclusive_us_per_request": 0.15229232864275985
+      },
+      "experiment": {
+        "calls": [
+          53,
+          53
+        ],
+        "mean_exclusive_s": 0.0003015,
+        "exclusive_us_per_request": 0.13685882886972311
+      }
+    },
+    "IO::Async::Loop::EV::watch_idle": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.013737,
+        "exclusive_us_per_request": 6.235587834770767
+      }
+    },
+    "IO::Async::Loop::later": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0042994999999999995,
+        "exclusive_us_per_request": 1.9516568315932814
+      }
+    },
+    "IO::Async::Stream::Writer::BEGIN@3": {
+      "release": {
+        "calls": [
+          1,
+          1
+        ],
+        "mean_exclusive_s": 6.5000000000000004e-06,
+        "exclusive_us_per_request": 0.0029505220154335
+      },
+      "experiment": {
+        "calls": [
+          1,
+          1
+        ],
+        "mean_exclusive_s": 7e-06,
+        "exclusive_us_per_request": 0.0031774852473899226
+      }
+    },
+    "IO::Async::Stream::Writer::__ANON__[(eval 33)[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Struct/Dumb.pm:366]:16]": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.007426499999999999,
+        "exclusive_us_per_request": 3.3710848842487513
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.007911999999999999,
+        "exclusive_us_per_request": 3.591466182478438
+      }
+    },
+    "IO::Async::Stream::Writer::data": {
+      "release": {
+        "calls": [
+          11015,
+          11015
+        ],
+        "mean_exclusive_s": 0.006940999999999999,
+        "exclusive_us_per_request": 3.1507035860190644
+      },
+      "experiment": {
+        "calls": [
+          11015,
+          11015
+        ],
+        "mean_exclusive_s": 0.007273,
+        "exclusive_us_per_request": 3.3014071720381297
+      }
+    },
+    "IO::Async::Stream::Writer::new": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.007294999999999999,
+        "exclusive_us_per_request": 3.311393554244212
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.007783,
+        "exclusive_us_per_request": 3.5329096686336814
+      }
+    },
+    "IO::Async::Stream::Writer::on_flush": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.001252,
+        "exclusive_us_per_request": 0.5683159328188834
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.001366,
+        "exclusive_us_per_request": 0.6200635497049478
+      }
+    },
+    "IO::Async::Stream::Writer::on_write": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0019060000000000001,
+        "exclusive_us_per_request": 0.8651838402178849
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.001789,
+        "exclusive_us_per_request": 0.8120744439400817
+      }
+    },
+    "IO::Async::Stream::Writer::writelen": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.001313,
+        "exclusive_us_per_request": 0.596005447117567
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.00134,
+        "exclusive_us_per_request": 0.6082614616432138
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]": {
+      "release": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.0748,
+        "exclusive_us_per_request": 33.95369950068089
+      },
+      "experiment": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6121]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          6609,
+          6609
+        ],
+        "mean_exclusive_s": 0.0061375,
+        "exclusive_us_per_request": 2.785973672265093
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6394]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.08634800000000001,
+        "exclusive_us_per_request": 39.19564230594644
+      }
+    },
+    "PAGI::Server::Connection::_begin_body_discard": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0031790000000000004,
+        "exclusive_us_per_request": 1.443032228778938
+      }
+    },
+    "PAGI::Server::Connection::_create_receive": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.006477,
+        "exclusive_us_per_request": 2.9400817067635043
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0124735,
+        "exclusive_us_per_request": 5.662051747616886
+      }
+    },
+    "PAGI::Server::Connection::_create_send": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0104965,
+        "exclusive_us_per_request": 4.764639128461189
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.015861,
+        "exclusive_us_per_request": 7.199727644121652
+      }
+    },
+    "PAGI::Server::Connection::_discard_unread_body": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0022545,
+        "exclusive_us_per_request": 1.0233772128915115
+      }
+    },
+    "PAGI::Server::Connection::_get_write_buffer_size": {
+      "release": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.009150499999999999,
+        "exclusive_us_per_request": 4.153654108034497
+      },
+      "experiment": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.0096335,
+        "exclusive_us_per_request": 4.372900590104403
+      }
+    },
+    "PAGI::Server::Connection::_h1_abort_hook": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.00571,
+        "exclusive_us_per_request": 2.591920108942351
+      }
+    },
+    "PAGI::Server::Connection::_h1_end_scope_output": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0062515,
+        "exclusive_us_per_request": 2.8377212891511574
+      }
+    },
+    "PAGI::Server::Connection::_wake_receive_pending": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0018449999999999999,
+        "exclusive_us_per_request": 0.837494325919201
+      }
+    },
+    "PAGI::Server::ConnectionState::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/ConnectionState.pm:748]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.0060955,
+        "exclusive_us_per_request": 2.7669087607807534
+      }
+    },
+    "PAGI::Server::ConnectionState::_deliver_terminal": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.007979,
+        "exclusive_us_per_request": 3.621879255560599
+      }
+    },
+    "PAGI::Server::ConnectionState::_mark_complete": {
+      "release": {
+        "calls": [
+          2203,
+          2203
+        ],
+        "mean_exclusive_s": 0.004442,
+        "exclusive_us_per_request": 2.0163413527008625
+      },
+      "experiment": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.009825,
+        "exclusive_us_per_request": 4.4598275079437135
+      }
+    },
+    "PAGI::Server::EventValidator::scope_send_clean": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          4406,
+          4406
+        ],
+        "mean_exclusive_s": 0.0064075,
+        "exclusive_us_per_request": 2.9085338175215614
+      }
+    }
+  },
+  "stream": {
+    "Future::PP::new": {
+      "release": {
+        "calls": [
+          47167,
+          47167
+        ],
+        "mean_exclusive_s": 0.0640665,
+        "exclusive_us_per_request": 91.1330014224751
+      },
+      "experiment": {
+        "calls": [
+          47167,
+          47167
+        ],
+        "mean_exclusive_s": 0.0693355,
+        "exclusive_us_per_request": 98.6280227596017
+      }
+    },
+    "Future::PP::on_done": {
+      "release": {
+        "calls": [
+          53,
+          53
+        ],
+        "mean_exclusive_s": 0.0002795,
+        "exclusive_us_per_request": 0.39758179231863444
+      },
+      "experiment": {
+        "calls": [
+          53,
+          53
+        ],
+        "mean_exclusive_s": 0.0003785,
+        "exclusive_us_per_request": 0.5384068278805121
+      }
+    },
+    "IO::Async::Loop::EV::watch_idle": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.00757,
+        "exclusive_us_per_request": 10.768136557610243
+      }
+    },
+    "IO::Async::Loop::later": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.002386,
+        "exclusive_us_per_request": 3.39402560455192
+      }
+    },
+    "IO::Async::Stream::Writer::BEGIN@3": {
+      "release": {
+        "calls": [
+          1,
+          1
+        ],
+        "mean_exclusive_s": 5.5e-06,
+        "exclusive_us_per_request": 0.007823613086770981
+      },
+      "experiment": {
+        "calls": [
+          1,
+          1
+        ],
+        "mean_exclusive_s": 7e-06,
+        "exclusive_us_per_request": 0.00995732574679943
+      }
+    },
+    "IO::Async::Stream::Writer::__ANON__[(eval 33)[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Struct/Dumb.pm:366]:16]": {
+      "release": {
+        "calls": [
+          44992,
+          44992
+        ],
+        "mean_exclusive_s": 0.1282485,
+        "exclusive_us_per_request": 182.4302987197724
+      },
+      "experiment": {
+        "calls": [
+          44992,
+          44992
+        ],
+        "mean_exclusive_s": 0.14696749999999997,
+        "exclusive_us_per_request": 209.05761024182073
+      }
+    },
+    "IO::Async::Stream::Writer::data": {
+      "release": {
+        "calls": [
+          3037663,
+          3037663
+        ],
+        "mean_exclusive_s": 1.130945,
+        "exclusive_us_per_request": 1608.7411095305831
+      },
+      "experiment": {
+        "calls": [
+          3037663,
+          3037663
+        ],
+        "mean_exclusive_s": 1.2606964999999999,
+        "exclusive_us_per_request": 1793.3093883357042
+      }
+    },
+    "IO::Async::Stream::Writer::new": {
+      "release": {
+        "calls": [
+          44992,
+          44992
+        ],
+        "mean_exclusive_s": 0.10655200000000001,
+        "exclusive_us_per_request": 151.56756756756758
+      },
+      "experiment": {
+        "calls": [
+          44992,
+          44992
+        ],
+        "mean_exclusive_s": 0.12292399999999999,
+        "exclusive_us_per_request": 174.85633001422474
+      }
+    },
+    "IO::Async::Stream::Writer::on_flush": {
+      "release": {
+        "calls": [
+          133570,
+          133570
+        ],
+        "mean_exclusive_s": 0.049404,
+        "exclusive_us_per_request": 70.27596017069702
+      },
+      "experiment": {
+        "calls": [
+          133570,
+          133570
+        ],
+        "mean_exclusive_s": 0.053537,
+        "exclusive_us_per_request": 76.15504978662874
+      }
+    },
+    "IO::Async::Stream::Writer::on_write": {
+      "release": {
+        "calls": [
+          183483,
+          183483
+        ],
+        "mean_exclusive_s": 0.070433,
+        "exclusive_us_per_request": 100.1891891891892
+      },
+      "experiment": {
+        "calls": [
+          183483,
+          183483
+        ],
+        "mean_exclusive_s": 0.0756635,
+        "exclusive_us_per_request": 107.6294452347084
+      }
+    },
+    "IO::Async::Stream::Writer::writelen": {
+      "release": {
+        "calls": [
+          94905,
+          94905
+        ],
+        "mean_exclusive_s": 0.036225499999999994,
+        "exclusive_us_per_request": 51.52987197724039
+      },
+      "experiment": {
+        "calls": [
+          94905,
+          94905
+        ],
+        "mean_exclusive_s": 0.040177500000000005,
+        "exclusive_us_per_request": 57.15149359886203
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]": {
+      "release": {
+        "calls": [
+          45695,
+          45695
+        ],
+        "mean_exclusive_s": 0.5559799999999999,
+        "exclusive_us_per_request": 790.8677098150781
+      },
+      "experiment": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6121]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          46398,
+          46398
+        ],
+        "mean_exclusive_s": 0.040409,
+        "exclusive_us_per_request": 57.480796586059746
+      }
+    },
+    "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6394]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          45695,
+          45695
+        ],
+        "mean_exclusive_s": 0.6985220000000001,
+        "exclusive_us_per_request": 993.6301564722619
+      }
+    },
+    "PAGI::Server::Connection::_begin_body_discard": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0020355,
+        "exclusive_us_per_request": 2.895448079658606
+      }
+    },
+    "PAGI::Server::Connection::_create_receive": {
+      "release": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0034825,
+        "exclusive_us_per_request": 4.953769559032717
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0064445,
+        "exclusive_us_per_request": 9.167140825035561
+      }
+    },
+    "PAGI::Server::Connection::_create_send": {
+      "release": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0059515,
+        "exclusive_us_per_request": 8.465860597439544
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.007975,
+        "exclusive_us_per_request": 11.344238975817921
+      }
+    },
+    "PAGI::Server::Connection::_discard_unread_body": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0013479999999999998,
+        "exclusive_us_per_request": 1.917496443812233
+      }
+    },
+    "PAGI::Server::Connection::_get_write_buffer_size": {
+      "release": {
+        "calls": [
+          90687,
+          90687
+        ],
+        "mean_exclusive_s": 2.0992165,
+        "exclusive_us_per_request": 2986.0832147937413
+      },
+      "experiment": {
+        "calls": [
+          90687,
+          90687
+        ],
+        "mean_exclusive_s": 2.309663,
+        "exclusive_us_per_request": 3285.438122332859
+      }
+    },
+    "PAGI::Server::Connection::_h1_abort_hook": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0029415,
+        "exclusive_us_per_request": 4.184210526315789
+      }
+    },
+    "PAGI::Server::Connection::_h1_end_scope_output": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.003589,
+        "exclusive_us_per_request": 5.105263157894737
+      }
+    },
+    "PAGI::Server::Connection::_wake_receive_pending": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.001075,
+        "exclusive_us_per_request": 1.5291607396870555
+      }
+    },
+    "PAGI::Server::ConnectionState::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/ConnectionState.pm:748]": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.004933,
+        "exclusive_us_per_request": 7.017069701280228
+      }
+    },
+    "PAGI::Server::ConnectionState::_deliver_terminal": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.004823,
+        "exclusive_us_per_request": 6.860597439544808
+      }
+    },
+    "PAGI::Server::ConnectionState::_mark_complete": {
+      "release": {
+        "calls": [
+          703,
+          703
+        ],
+        "mean_exclusive_s": 0.0028390000000000004,
+        "exclusive_us_per_request": 4.038406827880513
+      },
+      "experiment": {
+        "calls": [
+          1406,
+          1406
+        ],
+        "mean_exclusive_s": 0.00464,
+        "exclusive_us_per_request": 6.600284495021337
+      }
+    },
+    "PAGI::Server::EventValidator::scope_send_clean": {
+      "release": {
+        "calls": [
+          0,
+          0
+        ],
+        "mean_exclusive_s": 0,
+        "exclusive_us_per_request": 0.0
+      },
+      "experiment": {
+        "calls": [
+          45695,
+          45695
+        ],
+        "mean_exclusive_s": 0.058702500000000005,
+        "exclusive_us_per_request": 83.50284495021339
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+Command terminated by signal 6
+user_s=0.14 system_s=0.03 maxrss_kib=51400 major_faults=0

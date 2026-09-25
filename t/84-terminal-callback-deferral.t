@@ -10,7 +10,7 @@
 # synchronous FACTS stay immediate at the transition.
 #
 # On HTTP/1.1 the clean terminal transition (_mark_complete) runs in the
-# terminal send's on_done, as that send resolves and before the application's
+# terminal send's successful tail, before the application's
 # await continuation resumes. So right after `await $send->(terminal body)`:
 #
 #   * response_complete() is already true                -- the fact is immediate

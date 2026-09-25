@@ -1,0 +1,38 @@
+[
+   {
+      "actual" : 57344,
+      "case" : "partial-write",
+      "raw" : 57344,
+      "reported" : 57344
+   },
+   {
+      "actual" : 65536,
+      "case" : "after-close-before-drain",
+      "raw" : 0,
+      "reported" : 0
+   },
+   {
+      "actual" : 57344,
+      "case" : "after-close-partial-drain",
+      "raw" : -8192,
+      "reported" : 0
+   },
+   {
+      "actual" : 0,
+      "case" : "after-close-full-drain",
+      "raw" : -65536,
+      "reported" : 0
+   },
+   {
+      "actual" : 65536,
+      "case" : "write-rejected-while-closing",
+      "raw" : 65636,
+      "reported" : 65636
+   },
+   {
+      "actual" : 0,
+      "case" : "write-error-close",
+      "raw" : 0,
+      "reported" : 0
+   }
+]

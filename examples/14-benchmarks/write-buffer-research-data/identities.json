@@ -1,0 +1,9 @@
+{
+  "head": "92d39ed79000a7a95077d2e9e09e6d93c75fccbf",
+  "sha256": {
+    "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm": "4f7f69383919e09fb706dac2ce01c9e6a07e0b3a8fb6276ea72a0a1d0c70640f",
+    "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+    "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/IO/Async/Stream.pm": "634ece4e387b4b12ba6274340f324f558b980209739e79ac181b406a23a0d24a",
+    "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/IO/Async/SSL.pm": "c45aa3a759de33e5b2e2d0a00dd33528d7953eab8713ce6d274ec7e55a45b310"
+  }
+}

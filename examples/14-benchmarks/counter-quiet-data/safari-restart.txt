@@ -1,0 +1,1 @@
+User reported Safari restart at 2026-09-24T01:37:10.504404+00:00; 1 samples completed. Mark overlapping run as transition evidence and retain it.

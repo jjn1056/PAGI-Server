@@ -1,0 +1,43 @@
+127.0.0.1 - - [25/Sep/2026:13:57:32 +0000] "GET /1" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:13:57:32 +0000] "GET /2" 200 0.000s
+    # Failed test 'suspended send has no strong connection ownership'
+    # at /tmp/pagi-last-two-20260925/send-lifetime.t line 84.
+    # +---------------------------------------------+----+---------+
+    # | GOT                                         | OP | CHECK   |
+    # +---------------------------------------------+----+---------+
+    # | Local::DrainConnection=HASH(0x7fdc90234450) | IS | <UNDEF> |
+    # +---------------------------------------------+----+---------+
+    (If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '74')
+
+    # Failed test 'send settles when drain resumes after owner disappears'
+    # at /tmp/pagi-last-two-20260925/send-lifetime.t line 86.
+
+# Failed test 'pending body send does not retain its connection'
+# at /tmp/pagi-last-two-20260925/send-lifetime.t line 87.
+# Seeded srand with seed '20260925' from local date.
+/tmp/pagi-last-two-20260925/send-lifetime.t .. 
+Dubious, test returned 1 (wstat 256, 0x100)
+Failed 1/3 subtests 
+
+Test Summary Report
+-------------------
+/tmp/pagi-last-two-20260925/send-lifetime.t (Wstat: 256 (exited 1) Tests: 3 Failed: 1)
+  Failed test:  3
+  Non-zero exit status: 1
+Files=1, Tests=3,  1 wallclock secs ( 0.01 usr  0.01 sys +  0.26 cusr  0.03 csys =  0.31 CPU)
+Result: FAIL
+Command [env PERL_FUTURE_NO_XS=1 prove -I/tmp/pagi-last-two-20260925/strong-owner/lib -Ilib /tmp/pagi-last-two-20260925/send-lifetime.t] terminated with exit code 1 ($? = 256) under the following perl environment:
+Command terminated with non-zero status.
+Current perl:
+  Name: perl-5.42.2@default
+  Path: /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl
+  Config: -de -Dprefix=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2 -Aeval:scriptdir=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+  Compiled at: Jul 12 2026 09:24:10
+
+perlbrew:
+  version: 0.92
+  ENV:
+    PERLBREW_ROOT: /Users/jnapiorkowski/perl5/perlbrew
+    PERLBREW_HOME: /Users/jnapiorkowski/.perlbrew
+    PERLBREW_PATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin:/Users/jnapiorkowski/perl5/perlbrew/bin:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+    PERLBREW_MANPATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/man:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/man

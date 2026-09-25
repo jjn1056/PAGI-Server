@@ -1,0 +1,97 @@
+[
+  {
+    "case": "get",
+    "samples": {
+      "baseline": [
+        3357.8538,
+        2606.377
+      ],
+      "candidate": [
+        2922.6811,
+        2834.746
+      ]
+    },
+    "means": {
+      "baseline": 2982.1153999999997,
+      "candidate": 2878.71355
+    },
+    "mean_difference_percent": -3.4673993501391553,
+    "interpretation": "Inconclusive: short samples with substantial within-variant variation."
+  },
+  {
+    "case": "post-observe",
+    "samples": {
+      "baseline": [
+        2449.5096,
+        2011.3155
+      ],
+      "candidate": [
+        2489.6458,
+        1265.484
+      ]
+    },
+    "means": {
+      "baseline": 2230.41255,
+      "candidate": 1877.5648999999999
+    },
+    "mean_difference_percent": -15.819837903978806,
+    "interpretation": "Inconclusive: short samples with substantial within-variant variation."
+  },
+  {
+    "case": "stream",
+    "samples": {
+      "baseline": [
+        211.2703,
+        263.3859
+      ],
+      "candidate": [
+        258.0098,
+        236.0334
+      ]
+    },
+    "means": {
+      "baseline": 237.3281,
+      "candidate": 247.02159999999998
+    },
+    "mean_difference_percent": 4.084429951615487,
+    "interpretation": "Inconclusive: short samples with substantial within-variant variation."
+  },
+  {
+    "case": "sse",
+    "samples": {
+      "baseline": [
+        116.575,
+        71.3894
+      ],
+      "candidate": [
+        128.4188,
+        65.4912
+      ]
+    },
+    "means": {
+      "baseline": 93.9822,
+      "candidate": 96.95500000000001
+    },
+    "mean_difference_percent": 3.1631521713686217,
+    "interpretation": "Inconclusive: short samples with substantial within-variant variation."
+  },
+  {
+    "case": "websocket",
+    "samples": {
+      "baseline": [
+        3435.02675792208,
+        4727.51864518986
+      ],
+      "candidate": [
+        4260.73869364123,
+        4732.06050703009
+      ]
+    },
+    "means": {
+      "baseline": 4081.27270155597,
+      "candidate": 4496.399600335661
+    },
+    "mean_difference_percent": 10.1715060260841,
+    "interpretation": "Inconclusive: short samples with substantial within-variant variation."
+  }
+]

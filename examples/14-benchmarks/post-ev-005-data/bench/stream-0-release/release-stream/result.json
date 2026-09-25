@@ -1,0 +1,10 @@
+{
+  "variant": "release",
+  "case": "stream",
+  "mode": "off",
+  "rps": 233.668,
+  "average_s": 0.1069,
+  "p50_s": 0.1054,
+  "p99_s": 0.1403,
+  "responses": 5000
+}

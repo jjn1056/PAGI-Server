@@ -1,0 +1,29 @@
+{
+  "adapter_suite": {
+    "command": "perlbrew exec --with perl-5.42.2@default prove -lr t",
+    "cwd": "/tmp/pagi-ev-timer-20260923/candidate",
+    "exit_code": 0,
+    "files": 13,
+    "tests": 121,
+    "wall_seconds": 16,
+    "note": "Suite emits Unsupported $loop->is_running diagnostic; tests pass."
+  },
+  "regression": {
+    "path": "later-busy.t",
+    "pristine_exit_code": 1,
+    "candidate_exit_code": 0,
+    "drivers": [
+      "IO::Async",
+      "native EV"
+    ],
+    "failures_before": [
+      "initial callback progress",
+      "I/O-queued callback progress",
+      "nested callback progress",
+      "Future progress"
+    ],
+    "candidate_assertions_per_driver": 9
+  },
+  "scope": "Isolated CPAN 0.04 copy; no installed module changes",
+  "ordering_limit": "Zero timer probe matches UV: initial callback before first I/O, I/O-queued callback next round, nested callback following round. It restores progress but does not match Poll/Select exact after-current-I/O ordering."
+}

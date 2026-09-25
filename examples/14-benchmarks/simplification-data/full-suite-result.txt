@@ -1,0 +1,6 @@
+Command: perlbrew exec --with perl-5.42.2@default prove -lr -j4 t
+Checkout: PAGI-Server/.worktrees/experiment-http-simplification
+Runtime HEAD: ac30cc8
+All tests successful.
+Files=177, Tests=1263, 305 wallclock secs (0.72 usr 0.34 sys + 56.71 cusr 9.06 csys = 66.83 CPU)
+Result: PASS

@@ -1,0 +1,62 @@
+[
+   {
+      "app_fields" : 1,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 1,
+         "PAGI::Server::EventValidator::check_header_value" : 1,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 2,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 2
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 1,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 2,
+         "PAGI::Server::EventValidator::check_header_value" : 2,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 1,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 1
+      },
+      "event" : "trailers"
+   },
+   {
+      "app_fields" : 10,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 10,
+         "PAGI::Server::EventValidator::check_header_value" : 10,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 11,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 11
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 10,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 20,
+         "PAGI::Server::EventValidator::check_header_value" : 20,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 10,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 10
+      },
+      "event" : "trailers"
+   },
+   {
+      "app_fields" : 30,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 30,
+         "PAGI::Server::EventValidator::check_header_value" : 30,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 31,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 31
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 30,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 60,
+         "PAGI::Server::EventValidator::check_header_value" : 60,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_name" : 30,
+         "PAGI::Server::Protocol::HTTP1::_validate_header_value" : 30
+      },
+      "event" : "trailers"
+   }
+]

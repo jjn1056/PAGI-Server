@@ -1,0 +1,98 @@
+{
+  "settings": {
+    "repo": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification",
+    "baseline_repo": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server",
+    "output": "/tmp/pagi-simplification-20260923-w16",
+    "seconds": 10,
+    "workers": 16,
+    "concurrency": 500,
+    "ws_connections": 20,
+    "cases": [
+      "get",
+      "get-observe",
+      "post",
+      "post-observe",
+      "single",
+      "single-observe",
+      "stream",
+      "stream-observe",
+      "sse",
+      "websocket"
+    ],
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "run_id": "1790171953693127000"
+  },
+  "perl": "/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl",
+  "installed_runner": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin/pagi-server",
+  "env": {
+    "LIBEV_FLAGS": "8",
+    "PERL_FUTURE_NO_XS": "1",
+    "PERL5LIB": "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5",
+    "PERL5OPT": null
+  },
+  "head": "20655cd0c883b4920047cff907f47d38c3c51f70",
+  "status": "",
+  "runner_sha256": "f3a9d5c6078e8484641cd26179797963a32a516cd4d7c27306e00723d8cea08a",
+  "checkout_lib_sha256": {
+    "lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+    "lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+    "lib/PAGI/Server/Connection.pm": "0693f19954259256cc0958a82eeb9d8403179fb20ce59148df5368cbbd1ec31e",
+    "lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+    "lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+    "lib/PAGI/Server/Protocol/HTTP1.pm": "ca4b6af290bc5b7a7226f4794c2709f09883a8ec99f75c07369b2b897c8b0a85",
+    "lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+    "lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+    "lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+    "lib/PAGI/Server.pm": "55770ce354e8ec981e05927748f67c81c66097771ac8ddca7516000d75a7a844"
+  },
+  "app_sha256": {
+    "post.pl": "8c943cfd3382b13a96acd15ea970008530f1f7bb72ddbb05b0c067b5fb0ff272",
+    "ws-client.pl": "12dde75958e78981d30b002f293674547e4cfedcd3800fa1f01f4adbcaab1999",
+    "check-apps.pl": "a19825168c297fd013de5b619cc57e46461d7b2f0e344c1b5a731cc219057f47",
+    "sse.pl": "60605708f19a54ea4b420622e27d6a521967cc5aca7e38405fa0898407d131d8",
+    "stream.pl": "e2fe5dcefefdb74167b58c7420f524d8acc0e8cf8221096b101b50b34b567c77",
+    "get.pl": "cf9ba00377f8d2350c7fdd5a6cdbd96ba5489ee1b6272b860f4377561cb9be79",
+    "websocket.pl": "d30e971be7e48e3d45833b80188e043b1984228cc6eca7b3d48d9fa8fd5f729c"
+  },
+  "baseline": "v5.42.2 0.002014 /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server.pm /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm",
+  "baseline_source": {
+    "repo": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server",
+    "head": "4625b006aa136844ab80f9163bcffc25db748cb3",
+    "status": " M Changes\n M examples/01-hello-http/app.pl\n M examples/README.md\n M lib/PAGI/Server.pm\n M lib/PAGI/Server/AppNormalizer.pm\n M lib/PAGI/Server/AsyncFile.pm\n M lib/PAGI/Server/Connection.pm\n M lib/PAGI/Server/ConnectionState.pm\n M lib/PAGI/Server/EventValidator.pm\n M lib/PAGI/Server/Protocol/HTTP1.pm\n M lib/PAGI/Server/Protocol/HTTP2.pm\n M lib/PAGI/Server/Runner.pm\n M lib/PAGI/Server/TransportState.pm\n?? examples/14-benchmarks/\n",
+    "lib_sha256": {
+      "lib/PAGI/Server/AppNormalizer.pm": "63fc0a9ccdae60581a2339ca928ffd0d310d1c1f4dea1a2d623d8fc26ec263f6",
+      "lib/PAGI/Server/AsyncFile.pm": "1d3a745a0dad67845edff989aefde31e279357cfb9f60b13ee5da7383f2a99b7",
+      "lib/PAGI/Server/Connection.pm": "d7b5f0648ecb92e274e9bcbefff51c0841fcc12a39cb62c2279135e1686a7863",
+      "lib/PAGI/Server/ConnectionState.pm": "141575dae38b073491943406ed7212d01fdb9f85bca8f64928f4e570cd72e221",
+      "lib/PAGI/Server/EventValidator.pm": "0e0175856e59c25184f5dd6c96f503ee2c5618fcc2b06e8f45f4dfb02a6c826d",
+      "lib/PAGI/Server/Protocol/HTTP1.pm": "e8bd2808f3aebe499c8e187dc1711e1fd8746a1303b0fdc130976f9d8edab572",
+      "lib/PAGI/Server/Protocol/HTTP2.pm": "7fa462dda2d77dfb6384b3b5b56998347b419a29187de9eb51173b1d4c255c04",
+      "lib/PAGI/Server/Runner.pm": "aae67d73f5ac3243753cc689f42b8b88fbd89c7f5ecfa57735f7b707c29dcc51",
+      "lib/PAGI/Server/TransportState.pm": "6e41e74ba178b8c6565f6954826bc04b7627d78e876dcf9a49ed7e8d919fc59a",
+      "lib/PAGI/Server.pm": "3c70f2c3727129b0f0376f108b00af1674ac17057fbaf6169f0b09ce887e688a"
+    }
+  },
+  "candidate": "v5.42.2 0.002013 /Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server.pm /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm",
+  "candidate_source": {
+    "repo": "/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification",
+    "head": "20655cd0c883b4920047cff907f47d38c3c51f70",
+    "status": "",
+    "lib_sha256": {
+      "lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+      "lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+      "lib/PAGI/Server/Connection.pm": "0693f19954259256cc0958a82eeb9d8403179fb20ce59148df5368cbbd1ec31e",
+      "lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+      "lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+      "lib/PAGI/Server/Protocol/HTTP1.pm": "ca4b6af290bc5b7a7226f4794c2709f09883a8ec99f75c07369b2b897c8b0a85",
+      "lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+      "lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+      "lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+      "lib/PAGI/Server.pm": "55770ce354e8ec981e05927748f67c81c66097771ac8ddca7516000d75a7a844"
+    }
+  }
+}

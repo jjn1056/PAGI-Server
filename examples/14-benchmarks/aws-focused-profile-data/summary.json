@@ -1,0 +1,707 @@
+{
+  "warning": "CPU times include substantial profiling overhead, startup and teardown. Do not infer native gains or sum inclusive and exclusive times.",
+  "cases": {
+    "get": {
+      "release": {
+        "runs": [
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 13.359196617336151
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.3477032481260807
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.618623870843744
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.101518354795311
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.1419757832019988
+              },
+              "terminal_delivery": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_later": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_watch_idle": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "clean_predicate": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "abort_hook_factory": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "future_new": {
+                "calls": 20878,
+                "exclusive_cpu_us_per_request": 6.148299058235633
+              },
+              "state_publication": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "terminal_callback": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              }
+            }
+          },
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 13.045935037478378
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.285988852585047
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.63271189698251
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.019757832019988
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.0785508360561216
+              },
+              "terminal_delivery": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_later": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_watch_idle": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "clean_predicate": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "abort_hook_factory": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "future_new": {
+                "calls": 20878,
+                "exclusive_cpu_us_per_request": 6.1702863732462045
+              },
+              "state_publication": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "terminal_callback": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              }
+            }
+          }
+        ],
+        "mean_roles": {
+          "scope_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 13.202565827407264
+          },
+          "connection_state_new": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.316846050355564
+          },
+          "receive_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 2.625667883913127
+          },
+          "send_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.06063809340765
+          },
+          "completion_mark": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 2.11026330962906
+          },
+          "terminal_delivery": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "loop_later": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "loop_watch_idle": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "clean_predicate": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "abort_hook_factory": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "future_new": {
+            "calls_per_request": 4.012684989429175,
+            "exclusive_cpu_us_per_request": 6.159292715740919
+          },
+          "state_publication": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "terminal_callback": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          }
+        }
+      },
+      "current": {
+        "runs": [
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 15.451970017297715
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.681587545646742
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.7488948683451855
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 7.323313472996348
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.490447818566212
+              },
+              "terminal_delivery": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 6.052854122621564
+              },
+              "loop_later": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.6768595041322314
+              },
+              "loop_watch_idle": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.305208533538344
+              },
+              "clean_predicate": {
+                "calls": 10406,
+                "exclusive_cpu_us_per_request": 3.389102440899481
+              },
+              "abort_hook_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.0524120699596384
+              },
+              "future_new": {
+                "calls": 20878,
+                "exclusive_cpu_us_per_request": 6.262675379588699
+              },
+              "state_publication": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 3.9575052854122617
+              },
+              "terminal_callback": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.3732846434749186
+              }
+            }
+          },
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 15.221141649048628
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.601018643090524
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.616279069767442
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 7.0714587737843555
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.447261195464155
+              },
+              "terminal_delivery": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.917605227753219
+              },
+              "loop_later": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.5565635210455504
+              },
+              "loop_watch_idle": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.367595617912742
+              },
+              "clean_predicate": {
+                "calls": 10406,
+                "exclusive_cpu_us_per_request": 3.2237170862963676
+              },
+              "abort_hook_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.0049394580049973
+              },
+              "future_new": {
+                "calls": 20878,
+                "exclusive_cpu_us_per_request": 6.077051700941764
+              },
+              "state_publication": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 3.883720930232558
+              },
+              "terminal_callback": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.3480876417451473
+              }
+            }
+          }
+        ],
+        "mean_roles": {
+          "scope_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 15.336555833173172
+          },
+          "connection_state_new": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.641303094368633
+          },
+          "receive_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.682586969056314
+          },
+          "send_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 7.197386123390352
+          },
+          "completion_mark": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.468854507015184
+          },
+          "terminal_delivery": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 5.985229675187392
+          },
+          "loop_later": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.616711512588891
+          },
+          "loop_watch_idle": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 5.336402075725543
+          },
+          "clean_predicate": {
+            "calls_per_request": 2.0,
+            "exclusive_cpu_us_per_request": 3.3064097635979244
+          },
+          "abort_hook_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 2.028675763982318
+          },
+          "future_new": {
+            "calls_per_request": 4.012684989429175,
+            "exclusive_cpu_us_per_request": 6.169863540265231
+          },
+          "state_publication": {
+            "calls_per_request": 3.0,
+            "exclusive_cpu_us_per_request": 3.92061310782241
+          },
+          "terminal_callback": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 2.360686142610033
+          }
+        }
+      }
+    },
+    "post-observe": {
+      "release": {
+        "runs": [
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 13.551162790697676
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.4169133192389007
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.6846434749183166
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.360753411493369
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.721141649048626
+              },
+              "terminal_delivery": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_later": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_watch_idle": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "clean_predicate": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "abort_hook_factory": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "future_new": {
+                "calls": 26081,
+                "exclusive_cpu_us_per_request": 7.480837978089564
+              },
+              "state_publication": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "terminal_callback": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              }
+            }
+          },
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 13.073611378051124
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.4671535652508165
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.636421295406496
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.155410340188353
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.600134537766673
+              },
+              "terminal_delivery": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_later": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "loop_watch_idle": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "clean_predicate": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "abort_hook_factory": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "future_new": {
+                "calls": 26081,
+                "exclusive_cpu_us_per_request": 7.37265039400346
+              },
+              "state_publication": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              },
+              "terminal_callback": {
+                "calls": 0,
+                "exclusive_cpu_us_per_request": 0.0
+              }
+            }
+          }
+        ],
+        "mean_roles": {
+          "scope_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 13.3123870843744
+          },
+          "connection_state_new": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.442033442244859
+          },
+          "receive_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 2.6605323851624063
+          },
+          "send_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.258081875840861
+          },
+          "completion_mark": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.660638093407649
+          },
+          "terminal_delivery": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "loop_later": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "loop_watch_idle": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "clean_predicate": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "abort_hook_factory": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "future_new": {
+            "calls_per_request": 5.012684989429175,
+            "exclusive_cpu_us_per_request": 7.426744186046513
+          },
+          "state_publication": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          },
+          "terminal_callback": {
+            "calls_per_request": 0.0,
+            "exclusive_cpu_us_per_request": 0.0
+          }
+        }
+      },
+      "current": {
+        "runs": [
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 15.70372861810494
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.7320584278300974
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.7283874687680183
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 7.443398039592543
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.645531424178359
+              },
+              "terminal_delivery": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 6.056467422640784
+              },
+              "loop_later": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.6303863155871614
+              },
+              "loop_watch_idle": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.484547376513549
+              },
+              "clean_predicate": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 4.753891985393042
+              },
+              "abort_hook_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 2.0256390543916973
+              },
+              "future_new": {
+                "calls": 26081,
+                "exclusive_cpu_us_per_request": 7.647607149721314
+              },
+              "state_publication": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 3.9856236786469346
+              },
+              "terminal_callback": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.600365173938113
+              }
+            }
+          },
+          {
+            "requests": 5203,
+            "roles": {
+              "scope_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 15.170689986546224
+              },
+              "connection_state_new": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.64974053430713
+              },
+              "receive_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.608245243128964
+              },
+              "send_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 7.205266192581203
+              },
+              "completion_mark": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.578762252546608
+              },
+              "terminal_delivery": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.955679415721699
+              },
+              "loop_later": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 3.5661157024793386
+              },
+              "loop_watch_idle": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 5.310839900057659
+              },
+              "clean_predicate": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 4.72921391504901
+              },
+              "abort_hook_factory": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 1.9156063809340769
+              },
+              "future_new": {
+                "calls": 26081,
+                "exclusive_cpu_us_per_request": 7.470709206227176
+              },
+              "state_publication": {
+                "calls": 15609,
+                "exclusive_cpu_us_per_request": 3.8753027099750144
+              },
+              "terminal_callback": {
+                "calls": 5203,
+                "exclusive_cpu_us_per_request": 4.596847972323659
+              }
+            }
+          }
+        ],
+        "mean_roles": {
+          "scope_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 15.43720930232558
+          },
+          "connection_state_new": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.6908994810686138
+          },
+          "receive_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.668316355948491
+          },
+          "send_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 7.3243321160868735
+          },
+          "completion_mark": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.6121468383624835
+          },
+          "terminal_delivery": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 6.0060734191812415
+          },
+          "loop_later": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 3.59825100903325
+          },
+          "loop_watch_idle": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 5.397693638285604
+          },
+          "clean_predicate": {
+            "calls_per_request": 3.0,
+            "exclusive_cpu_us_per_request": 4.741552950221026
+          },
+          "abort_hook_factory": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 1.970622717662887
+          },
+          "future_new": {
+            "calls_per_request": 5.012684989429175,
+            "exclusive_cpu_us_per_request": 7.559158177974245
+          },
+          "state_publication": {
+            "calls_per_request": 3.0,
+            "exclusive_cpu_us_per_request": 3.9304631943109745
+          },
+          "terminal_callback": {
+            "calls_per_request": 1.0,
+            "exclusive_cpu_us_per_request": 4.598606573130886
+          }
+        }
+      }
+    }
+  },
+  "telemetry": {
+    "interval_samples": 67,
+    "max": {
+      "swap_in": 0,
+      "swap_out": 0,
+      "io_wait_percent": 1,
+      "steal_percent": 0
+    }
+  },
+  "completed_profile_runs": 12
+}

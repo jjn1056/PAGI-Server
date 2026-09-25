@@ -1,0 +1,16 @@
+Baseline behavior check:
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 prove -lv /tmp/pagi-header-encoder-20260924/http-header-boundary.t
+
+Candidate regression check (local socket access):
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 prove -l t/http-header-boundary.t t/10-http-compliance.t t/15-crlf-injection.t t/21-quick-wins.t t/40-event-validation.t t/52-mandatory-validation.t t/53-trailers-framing.t t/55-sse-alignment.t t/57-date-consistency.t t/58-h1-connection-header-ownership.t t/71-http-refusal-on-protocol-scopes.t t/http-incomplete-response.t t/56-post-completion-exception.t t/84-terminal-callback-deferral.t t/http-terminal-send-reentrant-cancel.t
+
+Negative control: temporary EventValidator copy with check_header_value returning its argument unchecked, loaded ahead of production lib. The new boundary tests FAIL on invalid start and GET/HEAD trailers as expected; production source is not edited by this control.
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 perl -I/tmp/pagi-header-encoder-20260924/mutant -Ilib /tmp/pagi-header-encoder-20260924/http-header-boundary.t
+
+Example/harness checks:
+perlbrew exec --with perl-5.42.2@default env PERL_FUTURE_NO_XS=1 perl examples/14-benchmarks/check-apps.pl
+python3 -B examples/14-benchmarks/check-harness.py
+
+Native benchmark:
+perlbrew exec --with perl-5.42.2@default python3 -B /tmp/pagi-header-encoder-20260924/compare.py
+python3 /tmp/pagi-header-encoder-20260924/summarize.py

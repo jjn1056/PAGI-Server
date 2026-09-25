@@ -1,0 +1,1294 @@
+{
+  "experiment-get": {
+    "request_count": 2203,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.016278,
+        "inclusive_s": 0.016278,
+        "line": 5894,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 7.389014979573309
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.027614,
+        "inclusive_s": 0.065984,
+        "line": 5713,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 12.534725374489332
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.014989,
+        "inclusive_s": 0.017315,
+        "line": 6083,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 6.8039037675896505
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.005311,
+        "inclusive_s": 0.005311,
+        "line": 6966,
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.4108034498411257
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.116528,
+        "inclusive_s": 0.711008,
+        "line": 5443,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 52.895142986836134
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.003131,
+        "inclusive_s": 0.003131,
+        "line": 5630,
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.4212437585111213
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.005843,
+        "inclusive_s": 0.045177,
+        "line": 1276,
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.6522923286427598
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.001683,
+        "inclusive_s": 0.001683,
+        "line": 1291,
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 0.76395823876532
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.010806,
+        "inclusive_s": 0.010806,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.905129369042215
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output",
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.009558,
+        "inclusive_s": 0.039079,
+        "line": 709,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 4.338629142078983
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_mark_complete"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.007829,
+        "inclusive_s": 0.029521,
+        "line": 299,
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 3.5537902859736716
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.00945,
+        "inclusive_s": 0.042922,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 4.2896050839763955
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.006374,
+        "inclusive_s": 0.006374,
+        "line": 560,
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 2.8933272809804813
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 8878,
+        "exclusive_s": 0.012592,
+        "inclusive_s": 0.012592,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 4.029959146618248,
+        "exclusive_us_per_request": 5.715842033590558
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server.pm:3398]"
+        ],
+        "calls": 53,
+        "exclusive_s": 0.000337,
+        "inclusive_s": 0.01556,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 0.024058102587380843,
+        "exclusive_us_per_request": 0.15297321833862915
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_deliver_terminal"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.004184,
+        "inclusive_s": 0.019952,
+        "line": 903,
+        "name": "IO::Async::Loop::later",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.8992283250113482
+      },
+      {
+        "callers": [
+          "IO::Async::Loop::later"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.013524,
+        "inclusive_s": 0.015768,
+        "line": 149,
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 6.138901497957331
+      },
+      {
+        "callers": [
+          "EV::run",
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 2799,
+        "exclusive_s": 0.007878,
+        "inclusive_s": 0.007878,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 1.2705401724920562,
+        "exclusive_us_per_request": 3.5760326827054016
+      }
+    ]
+  },
+  "release-get": {
+    "request_count": 2203,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.006581,
+        "inclusive_s": 0.006581,
+        "line": 4208,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.9872900590104403
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.024448,
+        "inclusive_s": 0.060105,
+        "line": 4079,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 11.097594189741262
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.010722,
+        "inclusive_s": 0.010722,
+        "line": 4349,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.8669995460735365
+      },
+      {
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.090526,
+        "inclusive_s": 0.58811,
+        "line": 3907,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 41.092147072174306
+      },
+      {
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.010003,
+        "inclusive_s": 0.010003,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.540626418520199
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.00435,
+        "inclusive_s": 0.00435,
+        "line": 436,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.9745801180208806
+      },
+      {
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.009243,
+        "inclusive_s": 0.042548,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 4.1956423059464365
+      },
+      {
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 8878,
+        "exclusive_s": 0.011755,
+        "inclusive_s": 0.011755,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 4.029959146618248,
+        "exclusive_us_per_request": 5.3359055832955065
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server.pm:3216]"
+        ],
+        "calls": 53,
+        "exclusive_s": 0.000267,
+        "inclusive_s": 0.014946,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 0.024058102587380843,
+        "exclusive_us_per_request": 0.12119836586472992
+      },
+      {
+        "name": "IO::Async::Loop::later",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 527,
+        "exclusive_s": 0.000415,
+        "inclusive_s": 0.000415,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 0.2392192464820699,
+        "exclusive_us_per_request": 0.18837948252383113
+      }
+    ]
+  },
+  "main-get": {
+    "request_count": 2203,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.012612,
+        "inclusive_s": 0.012612,
+        "line": 5894,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 5.724920562868816
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.027271,
+        "inclusive_s": 0.066899,
+        "line": 5713,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 12.379028597367226
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.016453,
+        "inclusive_s": 0.018499,
+        "line": 6082,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 7.468452110758057
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.005314,
+        "inclusive_s": 0.005314,
+        "line": 6981,
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.412165229232864
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.100986,
+        "inclusive_s": 0.714326,
+        "line": 5443,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 45.840217884702675
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.002716,
+        "inclusive_s": 0.002716,
+        "line": 5630,
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.23286427598729
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6404]"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.005758,
+        "inclusive_s": 0.04286,
+        "line": 1276,
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.6137085792101677
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.001511,
+        "inclusive_s": 0.001511,
+        "line": 1291,
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 0.6858828869723105
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.011559,
+        "inclusive_s": 0.011559,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 5.246935996368588
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output",
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.009307,
+        "inclusive_s": 0.037111,
+        "line": 712,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 4.224693599636859
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_mark_complete"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.007596,
+        "inclusive_s": 0.027804,
+        "line": 302,
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 3.4480254198819793
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6392]"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.008762,
+        "inclusive_s": 0.041352,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 3.9773036768043575
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6404]"
+        ],
+        "calls": 4406,
+        "exclusive_s": 0.005929,
+        "inclusive_s": 0.005929,
+        "line": 560,
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 2.6913300045392647
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 8878,
+        "exclusive_s": 0.012399,
+        "inclusive_s": 0.012399,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 4.029959146618248,
+        "exclusive_us_per_request": 5.628234226055379
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6405]",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server.pm:3398]"
+        ],
+        "calls": 4459,
+        "exclusive_s": 0.015247,
+        "inclusive_s": 0.091088,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 2.024058102587381,
+        "exclusive_us_per_request": 6.921016795279165
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_deliver_terminal"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.003931,
+        "inclusive_s": 0.018782,
+        "line": 903,
+        "name": "IO::Async::Loop::later",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.7843849296413978
+      },
+      {
+        "callers": [
+          "IO::Async::Loop::later"
+        ],
+        "calls": 2203,
+        "exclusive_s": 0.012602,
+        "inclusive_s": 0.014851,
+        "line": 149,
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 5.720381298229687
+      },
+      {
+        "callers": [
+          "EV::run",
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 2815,
+        "exclusive_s": 0.008478,
+        "inclusive_s": 0.008478,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 1.2778029959146617,
+        "exclusive_us_per_request": 3.8483885610531092
+      }
+    ]
+  },
+  "release-stream": {
+    "request_count": 703,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.00372,
+        "inclusive_s": 0.00372,
+        "line": 4208,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 5.291607396870555
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.013385,
+        "inclusive_s": 0.03212,
+        "line": 4079,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 19.039829302987197
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.005806,
+        "inclusive_s": 0.005806,
+        "line": 4349,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 8.258890469416786
+      },
+      {
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.047174,
+        "inclusive_s": 6.379685,
+        "line": 3907,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 67.10384068278805
+      },
+      {
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.005713,
+        "inclusive_s": 0.005713,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 8.126600284495021
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.003042,
+        "inclusive_s": 0.003042,
+        "line": 436,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.327169274537695
+      },
+      {
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]"
+        ],
+        "calls": 45695,
+        "exclusive_s": 0.087175,
+        "inclusive_s": 0.257234,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 65.0,
+        "exclusive_us_per_request": 124.00426742532005
+      },
+      {
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 47167,
+        "exclusive_s": 0.061337,
+        "inclusive_s": 0.061337,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 67.09388335704125,
+        "exclusive_us_per_request": 87.25035561877667
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server.pm:3216]"
+        ],
+        "calls": 53,
+        "exclusive_s": 0.000322,
+        "inclusive_s": 0.017676,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 0.07539118065433854,
+        "exclusive_us_per_request": 0.45803698435277385
+      },
+      {
+        "name": "IO::Async::Loop::later",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls": 0,
+        "exclusive_s": 0,
+        "calls_per_request": 0.0,
+        "exclusive_us_per_request": 0.0
+      },
+      {
+        "callers": [
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 799,
+        "exclusive_s": 0.000923,
+        "inclusive_s": 0.000923,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 1.1365576102418207,
+        "exclusive_us_per_request": 1.3129445234708392
+      }
+    ]
+  },
+  "main-stream": {
+    "request_count": 703,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.00719,
+        "inclusive_s": 0.00719,
+        "line": 5894,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 10.2275960170697
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.014403,
+        "inclusive_s": 0.037749,
+        "line": 5713,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 20.48790896159317
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.00835,
+        "inclusive_s": 0.009107,
+        "line": 6082,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 11.877667140825036
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.002621,
+        "inclusive_s": 0.002621,
+        "line": 6981,
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 3.728307254623044
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.052829,
+        "inclusive_s": 7.139349,
+        "line": 5443,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 75.1479374110953
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.001918,
+        "inclusive_s": 0.001918,
+        "line": 5630,
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.728307254623044
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6404]"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.003583,
+        "inclusive_s": 0.02619,
+        "line": 1276,
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 5.096728307254623
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.001042,
+        "inclusive_s": 0.001042,
+        "line": 1291,
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.4822190611664297
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.007504,
+        "inclusive_s": 0.007504,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 10.67425320056899
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output",
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 1406,
+        "exclusive_s": 0.005154,
+        "inclusive_s": 0.022073,
+        "line": 712,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 7.331436699857752
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_mark_complete"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.00463,
+        "inclusive_s": 0.016919,
+        "line": 302,
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 6.586059743954481
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6392]"
+        ],
+        "calls": 45695,
+        "exclusive_s": 0.088975,
+        "inclusive_s": 0.27061,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 65.0,
+        "exclusive_us_per_request": 126.56472261735419
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6404]"
+        ],
+        "calls": 45695,
+        "exclusive_s": 0.055239,
+        "inclusive_s": 0.055239,
+        "line": 560,
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls_per_request": 65.0,
+        "exclusive_us_per_request": 78.57610241820768
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 47167,
+        "exclusive_s": 0.066244,
+        "inclusive_s": 0.066244,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 67.09388335704125,
+        "exclusive_us_per_request": 94.23044096728307
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server/Connection.pm:6405]",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/lib/PAGI/Server.pm:3398]"
+        ],
+        "calls": 45748,
+        "exclusive_s": 0.143446,
+        "inclusive_s": 0.346135,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 65.07539118065434,
+        "exclusive_us_per_request": 204.04836415362732
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_deliver_terminal"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.002588,
+        "inclusive_s": 0.011702,
+        "line": 903,
+        "name": "IO::Async::Loop::later",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 3.681365576102418
+      },
+      {
+        "callers": [
+          "IO::Async::Loop::later"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.007428,
+        "inclusive_s": 0.009114,
+        "line": 149,
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 10.566145092460882
+      },
+      {
+        "callers": [
+          "EV::run",
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 1482,
+        "exclusive_s": 0.005816,
+        "inclusive_s": 0.005816,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 2.108108108108108,
+        "exclusive_us_per_request": 8.273115220483641
+      }
+    ]
+  },
+  "experiment-stream": {
+    "request_count": 703,
+    "selected": [
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.010138,
+        "inclusive_s": 0.010138,
+        "line": 5894,
+        "name": "PAGI::Server::Connection::_create_receive",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 14.421052631578947
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.014442,
+        "inclusive_s": 0.037573,
+        "line": 5713,
+        "name": "PAGI::Server::Connection::_create_scope",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 20.543385490753913
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.007921,
+        "inclusive_s": 0.008805,
+        "line": 6083,
+        "name": "PAGI::Server::Connection::_create_send",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 11.267425320056898
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.002813,
+        "inclusive_s": 0.002813,
+        "line": 6966,
+        "name": "PAGI::Server::Connection::_h1_abort_hook",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.001422475106685
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_try_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.065009,
+        "inclusive_s": 6.942853,
+        "line": 5443,
+        "name": "PAGI::Server::Connection::_handle_request",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 92.47368421052632
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.001971,
+        "inclusive_s": 0.001971,
+        "line": 5630,
+        "name": "PAGI::Server::Connection::_begin_body_discard",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 2.803698435277383
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.003474,
+        "inclusive_s": 0.025571,
+        "line": 1276,
+        "name": "PAGI::Server::Connection::_h1_end_scope_output",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 4.941678520625889
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.001115,
+        "inclusive_s": 0.001115,
+        "line": 1291,
+        "name": "PAGI::Server::Connection::_wake_receive_pending",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 1.5860597439544808
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_create_scope"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.006759,
+        "inclusive_s": 0.006759,
+        "line": 71,
+        "name": "PAGI::Server::ConnectionState::new",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 9.614509246088193
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::_h1_end_scope_output",
+          "PAGI::Server::Connection::_handle_request"
+        ],
+        "calls": 1406,
+        "exclusive_s": 0.00472,
+        "inclusive_s": 0.021524,
+        "line": 709,
+        "name": "PAGI::Server::ConnectionState::_mark_complete",
+        "calls_per_request": 2.0,
+        "exclusive_us_per_request": 6.714082503556188
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_mark_complete"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.004533,
+        "inclusive_s": 0.016804,
+        "line": 299,
+        "name": "PAGI::Server::ConnectionState::_deliver_terminal",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 6.448079658605974
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 45695,
+        "exclusive_s": 0.097254,
+        "inclusive_s": 0.282094,
+        "line": 79,
+        "name": "PAGI::Server::EventValidator::validate_http_send",
+        "calls_per_request": 65.0,
+        "exclusive_us_per_request": 138.34139402560456
+      },
+      {
+        "callers": [
+          "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server/Connection.pm:6390]"
+        ],
+        "calls": 45695,
+        "exclusive_s": 0.054479,
+        "inclusive_s": 0.054479,
+        "line": 560,
+        "name": "PAGI::Server::EventValidator::scope_send_clean",
+        "calls_per_request": 65.0,
+        "exclusive_us_per_request": 77.4950213371266
+      },
+      {
+        "callers": [
+          "Future::PP::done",
+          "Future::PP::fail",
+          "Future::PP::without_cancel",
+          "IO::Async::Future::new",
+          "PAGI::Server::_run_lifespan_startup"
+        ],
+        "calls": 47167,
+        "exclusive_s": 0.064584,
+        "inclusive_s": 0.064584,
+        "line": 59,
+        "name": "Future::PP::new",
+        "calls_per_request": 67.09388335704125,
+        "exclusive_us_per_request": 91.86913229018492
+      },
+      {
+        "callers": [
+          "IO::Async::Listener::on_read_ready",
+          "PAGI::Server::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/lib/PAGI/Server.pm:3398]"
+        ],
+        "calls": 53,
+        "exclusive_s": 0.000359,
+        "inclusive_s": 0.018342,
+        "line": 430,
+        "name": "Future::PP::on_done",
+        "calls_per_request": 0.07539118065433854,
+        "exclusive_us_per_request": 0.5106685633001422
+      },
+      {
+        "callers": [
+          "PAGI::Server::ConnectionState::_deliver_terminal"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.002577,
+        "inclusive_s": 0.01163,
+        "line": 903,
+        "name": "IO::Async::Loop::later",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 3.665718349928876
+      },
+      {
+        "callers": [
+          "IO::Async::Loop::later"
+        ],
+        "calls": 703,
+        "exclusive_s": 0.007371,
+        "inclusive_s": 0.009053,
+        "line": 149,
+        "name": "IO::Async::Loop::EV::watch_idle",
+        "calls_per_request": 1.0,
+        "exclusive_us_per_request": 10.485064011379801
+      },
+      {
+        "callers": [
+          "EV::run",
+          "Future::PP::cancel",
+          "IO::Async::Timer::stop"
+        ],
+        "calls": 1502,
+        "exclusive_s": 0.005578,
+        "inclusive_s": 0.005578,
+        "line": 0,
+        "name": "EV::Timer::DESTROY",
+        "calls_per_request": 2.136557610241821,
+        "exclusive_us_per_request": 7.934566145092461
+      }
+    ]
+  }
+}

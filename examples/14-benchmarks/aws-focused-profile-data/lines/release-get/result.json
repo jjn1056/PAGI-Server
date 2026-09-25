@@ -1,0 +1,11 @@
+{
+  "variant": "release",
+  "case": "get",
+  "mode": "line",
+  "rps": 329.309,
+  "average_s": 0.0741,
+  "p50_s": 0.0749,
+  "p99_s": 0.093,
+  "responses": 2000,
+  "profile_subroutines": 1073
+}

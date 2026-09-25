@@ -1,0 +1,10 @@
+{
+  "variant": "experiment",
+  "case": "get",
+  "mode": "off",
+  "rps": 3001.4688,
+  "average_s": 0.0083,
+  "p50_s": 0.0082,
+  "p99_s": 0.0105,
+  "responses": 10000
+}

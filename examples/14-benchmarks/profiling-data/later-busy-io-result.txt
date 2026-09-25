@@ -1,0 +1,3 @@
+Perl 5.42.2; IO::Async 0.805; IO::Async::Loop::EV 0.04; EV 4.37
+read_callbacks=32102 later_during_busy_io=0 later_after_io_stopped=1
+exit=0

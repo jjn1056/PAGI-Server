@@ -1,0 +1,25 @@
+t/accept-batching.t .. 
+# Seeded srand with seed '20260925' from local date.
+ok 1 - first readiness event accepted a full batch (fairness bound respected)
+ok 2 - second event drained the remainder
+ok 3 - no phantom accepts once the queue is empty
+ok 4 - accepted sockets are nonblocking
+1..4
+ok
+t/00-load.t .......... 
+# Seeded srand with seed '20260925' from local date.
+ok 1 - PAGI::Server loads
+ok 2 - PAGI::Server::AppNormalizer loads
+ok 3 - PAGI::Server::Connection loads
+ok 4 - PAGI::Server::Listener loads
+ok 5 - PAGI::Server::ConnectionState loads
+ok 6 - PAGI::Server::EventValidator loads
+ok 7 - PAGI::Server::AsyncFile loads
+ok 8 - PAGI::Server::Protocol::HTTP1 loads
+ok 9 - PAGI::Server::Runner loads
+ok 10 - PAGI::Server::Protocol::HTTP2 loads
+1..10
+ok
+All tests successful.
+Files=2, Tests=14,  1 wallclock secs ( 0.02 usr  0.01 sys +  0.47 cusr  0.09 csys =  0.59 CPU)
+Result: PASS

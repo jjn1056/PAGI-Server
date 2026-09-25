@@ -1,0 +1,11 @@
+{
+  "variant": "experiment",
+  "case": "stream",
+  "mode": "sub",
+  "rps": 90.4594,
+  "average_s": 0.273,
+  "p50_s": 0.2697,
+  "p99_s": 0.6571,
+  "responses": 500,
+  "profile_subroutines": 1099
+}

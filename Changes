@@ -2,6 +2,20 @@
 
 0.002014 - UNRELEASED
 
+  Performance
+  - Share HTTP receive/send implementations and simplify connection-state
+    storage while preserving cancellation, backpressure and terminal callbacks.
+  - Complete normal HTTP scopes at successful output completion; avoid the
+    redundant application-return completion path.
+  - Validate headers at public entry points without repeating validation in
+    private serialization of already-checked response headers and trailers.
+  - Batch up to 64 pending socket accepts per readiness event. Stop the batch
+    if its callback pauses, closes or removes the listener; SSL-extension
+    listeners keep their existing acceptor. This reduces first-response delays
+    during connection bursts.
+  - Add repeatable HTTP, streaming, SSE and WebSocket benchmark examples, with
+    release comparisons and recorded limits in examples/14-benchmarks.
+
   Specification
   - max_body_size: a request body of undeclared length that crosses the limit
     after the application has started its response now ends the scope with
@@ -15,7 +29,7 @@
     stream-close queries the server uses to end a scope whose request body the
     client never finished; 0.011 makes a submit from inside a callback safe and
     refuses a re-entrant mem_send instead of corrupting its buffer).
-  - Implements HTTP/WebSocket/SSE sub-spec 0.6 (PAGI 0.002009); scopes report
+  - Implements HTTP/WebSocket/SSE sub-spec 0.6 (PAGI 0.002010); scopes report
     spec_version '0.6'. The core PAGI version key is unchanged at '0.5'.
     See PAGI::Upgrading.
 
@@ -29,6 +43,16 @@
   - pagi.connection on websocket and sse scopes on HTTP/1.1 and HTTP/2, with
     abort($detail), disconnect_detail, response_complete as a boolean, and
     on_disconnect callbacks receiving (reason, detail). New reason app_abort.
+  - on_end and cancellation-isolated end_future observe either a clean or an
+    abnormal end without consuming the receive queue. close_code and
+    close_reason expose the WebSocket peer's Close, with 1005 for a Close
+    carrying no code and 1006/undef at termination without a peer Close;
+    both accessors remain undef on HTTP and SSE scopes.
+  - Terminal facts are populated before notifications. on_complete, on_end,
+    on_disconnect and terminal Future resolution are delivered outside the
+    application's send/receive call stack, including after the handler
+    returns. Server-driven shutdown delivers pending notifications before
+    stopping the loop.
   - Accepted-socket clean end is a completed closing handshake; a bare drop
     is client_closed on both transports (was an empty reason on h2 socket
     close).
@@ -48,6 +72,23 @@
     8.1) once the response is on the wire, instead of leaving a finished
     stream open for the life of the connection.
 
+  WebSocket closure
+  - Both application-initiated and peer-initiated closing handshakes reach a
+    clean end only when the server-owned transport or HTTP/2 stream closes.
+    Sending a Close alone no longer marks the scope complete; a parked or
+    returned handler does not prevent terminal notification.
+  - A peer that never answers the server's Close ends with close_timeout and
+    code 1006. A transport lost before the deadline keeps its transport-loss
+    reason. A peer that answers but whose transport/stream never finishes
+    closing within the finish bound ends with close_incomplete, preserving
+    the peer's Close code and reason.
+  - The peer-response deadline is retired when a valid peer Close arrives.
+    The finish bound then governs transport closure; shutdown preempts either
+    wait with server_shutdown. HTTP/2 deadlines apply to individual streams.
+  - An application's first valid websocket.close racing the server's reply to
+    a peer Close succeeds without writing a second Close frame. Both close
+    orderings send exactly one Close per direction for a valid handshake.
+
   Refusals
   - Refusing a handshake or stream is an ordinary HTTP response: http.response.*
     before websocket.accept or sse.start, through the ordinary HTTP path
@@ -55,6 +96,11 @@
     and sse.http.response.* removed; the websocket.http.response extension is
     no longer advertised; websocket.close before accept fails. A websocket
     refusal's status must be 300 or above; an sse refusal may carry any status.
+  - A completed WebSocket HTTP refusal populates close_code 1006 and
+    close_reason undef before completion notifications when no peer Close
+    was observed. The HTTP response still ends cleanly: on_complete and
+    on_end fire, and disconnect_reason remains undef. Covers both transports,
+    including streamed responses and trailers.
 
   Bug fixes (measured against 0.002013)
   - h2: a connection nghttp2 tore down for a peer protocol violation reported
@@ -125,6 +171,11 @@
     startup, and --future-xs / PAGI_FUTURE_XS=1 answer "currently unavailable".
 
   Limits
+  - ws_close_timeout (constructor/configure option, default 10 seconds) bounds
+    each WebSocket closing phase: first the peer response, then transport
+    completion. It must be finite and positive; zero does not disable it.
+    Closing cancels keepalive/pong and idle timers so they cannot report a
+    competing timeout. No CLI option is provided yet.
   - max_disconnect_receives (--max-disconnect-receives, default 100): the
     bound the spec allows on how many receives one scope may have answered
     with the scope's end before they fail instead. Every receive after the
