@@ -1,0 +1,51 @@
+t/00-load.t ....................... ok
+App did not return a coderef at t/01-hello-http.t line 25.
+t/01-hello-http.t ................. 
+Dubious, test returned 2 (wstat 512, 0x200)
+No subtests run 
+127.0.0.1 - - [25/Sep/2026:16:29:34 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:16:29:34 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:16:29:34 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:16:29:34 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:16:29:34 +0000] "GET /" 200 0.000s
+t/02-streaming.t .................. ok
+Failed to load /home/ubuntu/pagi-benchmark/buffers-20260925/checks/t/../examples/03-request-body/app.pl: No such file or directory at t/03-request-body.t line 22.
+t/03-request-body.t ............... 
+Dubious, test returned 2 (wstat 512, 0x200)
+No subtests run 
+App did not return coderef at t/04-websocket.t line 18.
+t/04-websocket.t .................. 
+Dubious, test returned 2 (wstat 512, 0x200)
+No subtests run 
+App did not return coderef at t/05-sse.t line 22.
+t/05-sse.t ........................ 
+Dubious, test returned 2 (wstat 512, 0x200)
+No subtests run 
+App did not return a coderef at t/08-tls.t line 51.
+t/08-tls.t ........................ 
+Dubious, test returned 2 (wstat 512, 0x200)
+No subtests run 
+t/51-transport-state.t ............ ok
+t/80-unread-body-keepalive.t ...... ok
+t/http2/11-streaming.t ............ skipped: HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)
+t/http2/19-transport-callbacks.t .. skipped: HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)
+
+Test Summary Report
+-------------------
+t/01-hello-http.t               (Wstat: 512 (exited 2) Tests: 0 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: No plan found in TAP output
+t/03-request-body.t             (Wstat: 512 (exited 2) Tests: 0 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: No plan found in TAP output
+t/04-websocket.t                (Wstat: 512 (exited 2) Tests: 0 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: No plan found in TAP output
+t/05-sse.t                      (Wstat: 512 (exited 2) Tests: 0 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: No plan found in TAP output
+t/08-tls.t                      (Wstat: 512 (exited 2) Tests: 0 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: No plan found in TAP output
+Files=11, Tests=38,  3 wallclock secs ( 0.03 usr  0.02 sys +  1.41 cusr  0.26 csys =  1.72 CPU)
+Result: FAIL

@@ -176,3 +176,22 @@ design: callback cost and existing traffic may change the tradeoff, and this
 sweep does not establish a universal optimum or elapsed-time bound. No setting
 is added now. See [LISTENER-2026-09-25.md](LISTENER-2026-09-25.md) and
 `listener-data/`. AWS was stopped after downloading and checking the evidence.
+
+## Larger I/O chunks — measured, adoption deferred, 2026-09-25
+
+Compared default 8 KiB reads/writes with 64 KiB on snapshots of 5c960b2,
+without autoflush or other runtime changes. AWS median rates versus saved:
+1 MiB POST +306.7%, single-send 64 KiB download +42.2%, chunked download
++2.8%, 500-client GET -0.5%. Small GET/POST/SSE/WebSocket controls are close.
+
+Mixed traffic exposes the cost: bulk downloads +191.2%, competing small
+requests -10.5%, small-request p99 18.9 to 19.9 ms. Fixed concurrency lets
+the faster bulk clients request more data; this is not equal offered bulk
+byte rate. Preserve the candidate patch for discussion rather than changing
+both defaults automatically. Isolating larger reads from larger writes is
+a possible next experiment, not a demonstrated result.
+
+27 smoke and 69 timed runs passed. Focused Linux checks: 11 files / 78 tests;
+two HTTP/2 files skipped for unavailable binding. The local runtime remains
+unchanged and AWS is stopped. See [BUFFER-SIZES-2026-09-25.md](BUFFER-SIZES-2026-09-25.md)
+and `buffer-size-data/` for the complete release comparison and evidence.

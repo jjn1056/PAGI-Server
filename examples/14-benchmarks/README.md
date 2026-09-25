@@ -197,3 +197,8 @@ At 500 new connections under established traffic, first-response p99 falls from
 suite passes: 182 files / 1,282 tests. A separate size sweep supports 64 as a
 starting default; a public tuning option remains deferred. The report preserves
 release comparisons, streaming/SSE tradeoffs, raw results and the isolated patch.
+
+The subsequent [read/write chunk-size experiment](BUFFER-SIZES-2026-09-25.md)
+found substantial large-upload/download gains from 64 KiB I/O, with a measurable
+tradeoff for small requests competing against bulk downloads. Its patch remains
+an experiment; the working runtime's buffer settings are unchanged.
