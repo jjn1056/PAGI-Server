@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.002013';
+our $VERSION = '0.002014';
 
 # Future::XS is kept out for now. Future::XS 0.15 warns "lost a sequence
 # Future" whenever a without_cancel observer is dropped before its original

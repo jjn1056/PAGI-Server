@@ -2,7 +2,7 @@ package PAGI::Server::Protocol::HTTP1;
 use strict;
 use warnings;
 
-our $VERSION = '0.002013';
+our $VERSION = '0.002014';
 
 use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
