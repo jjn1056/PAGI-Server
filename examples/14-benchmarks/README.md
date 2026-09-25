@@ -57,6 +57,73 @@ To run the installed release instead, omit `-Ilib` and use the installed
 `pagi-server` executable. Check its startup banner and the module paths in the
 recorded metadata; an inherited development `PERL5LIB` can contaminate a comparison.
 
+## Tuning I/O chunk sizes
+
+The working server defaults to **65536-byte reads (64 KiB)** and
+**8192-byte writes (8 KiB)**. Both are configurable independently:
+
+| Workload / priority | Starting read / write sizes | Tradeoff |
+| --- | --- | --- |
+| General use or substantial uploads | 65536 / 8192 (defaults) | Larger reads improve bulk-upload efficiency, but can increase transient memory use and small-request latency under competing upload load. |
+| Many small requests or small uploads; latency-sensitive GETs competing with uploads | Compare 8192 / 8192 against defaults | Smaller chunks can favor fairness. Tiny GET-only results did not establish a material throughput advantage for smaller reads. |
+| Bulk downloads | Try 65536 / 65536 | Larger writes can improve bulk throughput at the cost of capacity for competing small responses. |
+| Mixed traffic, SSE or WebSocket | Start with defaults and measure | Track small-request p95/p99, message latency and memory alongside bulk bytes/sec; a chunk size provides no latency guarantee. |
+
+For example, launch **one** of these at a time from the repository root:
+
+```sh
+# Compare smaller chunks on small requests and uploads.
+perl -Ilib bin/pagi-server --env production \
+  --read-buffer-size 8192 --write-buffer-size 8192 examples/14-benchmarks/post.pl
+
+# Default sizes, suitable for the bulk-upload comparison.
+perl -Ilib bin/pagi-server --env production \
+  --read-buffer-size 65536 --write-buffer-size 8192 examples/14-benchmarks/post.pl
+
+# Opt in to larger writes for bulk downloads (request /?single=1).
+perl -Ilib bin/pagi-server --env production \
+  --read-buffer-size 65536 --write-buffer-size 65536 examples/14-benchmarks/stream.pl
+```
+
+The installed CPAN release 0.002013 does not have these flags. Use its native
+defaults when comparing release, and record explicit settings for the current
+checkout. Keep loop, workers, client load and payload sizes fixed when comparing
+settings. A tiny hello response alone cannot evaluate bulk-transfer tradeoffs.
+For competing GET/upload or GET/download traffic, use the mixed-workload
+drivers preserved with the reports below.
+
+Programmatic startup configuration is equivalent:
+
+```perl
+my $server = PAGI::Server->new(
+    app               => $app,
+    read_buffer_size  => 65536,
+    write_buffer_size => 8192,
+);
+# Before starting workers or accepting connections:
+$server->configure(read_buffer_size => 8192);
+```
+
+Values must be positive integer byte counts, without suffixes such as `64k`.
+Zero does not disable anything. These settings apply to new connection streams,
+including TLS and HTTP/2; multiplexed HTTP/2 streams share their connection's
+settings. They do not retune existing connections or already-forked workers.
+
+These are I/O chunk lengths, not total buffer capacities, kernel socket buffer
+sizes, body limits or promised PAGI event/frame sizes. An operation can transfer
+fewer bytes and does not wait to fill the chunk. `write_high_watermark` and
+`write_low_watermark` still control queued-output backpressure independently.
+Memory effects depend on traffic and buffering; a larger size does not reserve
+exactly that many extra bytes per connection.
+
+The [four-way comparison](READ-SIZE-2026-09-25.md) includes release and both
+directional choices. Read-only 64 KiB improved isolated 1 MiB upload rate about
+4.2x versus saved code. Under competing uploads, small GET throughput fell
+6.6% and p99 rose from 17.15 to 19.95 ms. These fixed-concurrency bulk clients
+offered more bytes when faster; the results do not imply that penalty at a
+fixed offered byte rate or prove performance with 16 workers. Larger is not
+universally better. See also the [initial experiment](BUFFER-SIZES-2026-09-25.md).
+
 ## Repeatable release/main comparison
 
 Requirements: Python 3.9+, `hey`, and the server's Perl dependencies. The optional
@@ -200,10 +267,12 @@ release comparisons, streaming/SSE tradeoffs, raw results and the isolated patch
 
 The subsequent [read/write chunk-size experiment](BUFFER-SIZES-2026-09-25.md)
 found substantial large-upload/download gains from 64 KiB I/O, with a measurable
-tradeoff for small requests competing against bulk downloads. Its patch remains
-an experiment; the working runtime's buffer settings are unchanged.
+tradeoff for small requests competing against bulk downloads. The both-directions
+patch remains experimental; both settings are now public options, with larger
+reads only enabled by default.
 
 The [read-only follow-up](READ-SIZE-2026-09-25.md) compares all four variants
 together and checks both upload and download competition. Larger reads retain
 the upload gain but also shift capacity under competing upload traffic. The
-report records the choices; the default runtime remains unchanged.
+report records the choices. The adopted defaults are now 64 KiB reads and
+8 KiB writes; see the tuning guide above for when to override them.

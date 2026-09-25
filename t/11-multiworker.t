@@ -118,9 +118,26 @@ subtest 'Single worker mode continues to work' => sub {
 # process); if max_connections isn't threaded through, the worker silently
 # falls back to the effective_max_connections default (1000) regardless of
 # what the master was configured with.
-subtest 'max_connections propagates to the worker that enforces it' => sub {
+subtest 'connection settings propagate to the worker that enforces them' => sub {
     my ($port_fh, $port_file) = tempfile(UNLINK => 1);
     close $port_fh;
+    my ($sizes_fh, $sizes_file) = tempfile(UNLINK => 1);
+    close $sizes_fh;
+
+    # Observe configuration in the real worker, preserving Stream's behavior.
+    # A file carries observations across fork; a parent array cannot do that.
+    my $original = \&IO::Async::Stream::configure;
+    no warnings 'redefine';
+    local *IO::Async::Stream::configure = sub {
+        my ($stream, %args) = @_;
+        if (exists $args{read_len} || exists $args{write_len}) {
+            open my $out, '>>', $sizes_file or die "Cannot write $sizes_file: $!";
+            print {$out} join(' ', map { defined($_) ? $_ : 'unset' }
+                @args{qw(read_len write_len)}), "\n";
+            close $out;
+        }
+        return $original->($stream, %args);
+    };
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -155,6 +172,8 @@ subtest 'max_connections propagates to the worker that enforces it' => sub {
             port            => 0,
             workers         => 1,
             max_connections => 1,  # Only allow 1 connection, per worker
+            read_buffer_size => 16384,
+            write_buffer_size => 32768,
             quiet           => 1,
         );
         $child_loop->add($server);
@@ -241,6 +260,10 @@ subtest 'max_connections propagates to the worker that enforces it' => sub {
 
     like($response, qr/503/,
         'second connection gets 503: worker enforces the propagated max_connections, not the 1000 default');
+    open my $sizes_in, '<', $sizes_file or die "Cannot read $sizes_file: $!";
+    my $sizes = do { local $/; <$sizes_in> };
+    close $sizes_in;
+    is($sizes, "16384 32768\n", 'custom I/O sizes reached the worker connection stream');
 };
 
 # Note: Multi-worker functional tests require complex process management

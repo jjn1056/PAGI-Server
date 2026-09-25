@@ -258,6 +258,8 @@ sub new {
         max_ws_frame_size => $args{max_ws_frame_size} // 65536,  # Max WebSocket frame size in bytes
         sync_file_threshold => $args{sync_file_threshold} // 65536,  # Threshold for sync file reads (default 64KB)
         validate_events => $args{validate_events} // 0,  # Deprecated: core event validation is mandatory; this flag is retained for compatibility and controls nothing.
+        read_buffer_size  => $args{read_buffer_size} // 65536,
+        write_buffer_size => $args{write_buffer_size} // 8192,
         # Send-side backpressure (watermarks in bytes)
         # Defaults match Python asyncio: 64KB high, 16KB low (high/4)
         write_high_watermark => $args{write_high_watermark} // 65536,   # 64KB - pause sending above this
@@ -382,8 +384,10 @@ sub start {
     # Set up idle timeout timer
     $self->_start_idle_timer;
 
-    # Set up read handler
+    # Configure I/O chunk lengths and the read handler.
     $stream->configure(
+        read_len  => $self->{read_buffer_size},
+        write_len => $self->{write_buffer_size},
         on_read => sub  {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;

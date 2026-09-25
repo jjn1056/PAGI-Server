@@ -1330,6 +1330,65 @@ I<Rule of thumb:> Set C<max_connections> to roughly 80% of your file
 descriptor limit to leave headroom for database connections, log files,
 and other resources.
 
+=item read_buffer_size => $bytes
+
+Maximum chunk length requested for a stream read, in bytes.
+Default: 65536 (64 KiB). CLI: C<--read-buffer-size BYTES>.
+
+Larger reads can improve throughput for large uploads by moving more data per
+I/O operation. Under load they can also increase transient memory use and the
+latency of small requests competing with those uploads. For many small requests
+or small uploads, especially when tail latency matters, compare the default
+with 8192 (8 KiB) on your actual traffic. Smaller reads are a tuning choice,
+not a promise of higher tiny-GET throughput.
+
+=item write_buffer_size => $bytes
+
+Maximum chunk length offered for a stream write, in bytes.
+Default: 8192 (8 KiB). CLI: C<--write-buffer-size BYTES>.
+
+For bulk downloads, try 65536 (64 KiB). Larger writes can improve bulk
+throughput while reducing the capacity available for competing small responses.
+The default retains smaller write chunks. Measure small-request p95/p99 and
+memory use alongside bulk bytes per second when tuning either direction.
+
+B<Using these settings:>
+
+    my $server = PAGI::Server->new(
+        app               => $app,
+        read_buffer_size  => 65536,
+        write_buffer_size => 8192,
+    );
+
+    # Try smaller reads for latency-sensitive mixed traffic.
+    # Configure before starting workers or serving connections.
+    $server->configure(read_buffer_size => 8192);
+
+Both settings take positive integers in bytes; zero does not disable anything
+and suffixes such as C<64k> are not accepted. Omitted or undefined constructor
+values use defaults. In C<configure>, omitted fields remain unchanged and an
+explicit C<undef> is invalid. A rejected field retains its previous value.
+
+The settings apply to each new connection's underlying stream, including TLS,
+HTTP, SSE, WebSocket and HTTP/2. HTTP/2 streams on one connection share the
+same I/O settings. Set them during startup: configuration changes do not
+retune open connections or already-forked workers.
+
+These are I/O chunk lengths, not total buffer capacities, kernel socket buffer
+sizes, request-body limits, or guaranteed PAGI event or WebSocket frame sizes.
+Reads and writes may transfer fewer bytes. The stream does not wait to fill a
+chunk before making progress, and a 64 KiB setting does not preallocate exactly
+64 KiB per connection. Neither setting guarantees a streaming-message latency.
+
+C<write_buffer_size> is independent of C<write_high_watermark> and
+C<write_low_watermark>: the size controls a write chunk, while the watermarks
+control backpressure on queued output. Changing a chunk size changes neither
+the watermarks nor C<max_body_size>.
+
+See F<examples/14-benchmarks> in the source distribution for reusable workloads
+and recorded comparisons, including mixed traffic. The measured bulk-transfer
+gains are workload dependent, not a guarantee that larger sizes always win.
+
 =item write_high_watermark => $bytes
 
 B<Power user setting.> Maximum bytes to buffer in the socket write queue
@@ -2484,6 +2543,14 @@ sub _is_finite_positive {
     return 1;
 }
 
+sub _validate_io_buffer_size {
+    my ($name, $value) = @_;
+    die "Invalid $name - must be a positive integer number of bytes\n"
+        unless defined($value) && !ref($value)
+            && $value =~ /\A[0-9]+\z/ && $value > 0;
+    return $value;
+}
+
 sub _init {
     my ($self, $params) = @_;
 
@@ -2644,6 +2711,10 @@ sub _init {
     $self->{lifespan_mode}    = delete $params->{lifespan_mode} // 'auto';  # auto (default) | on (decline is fatal)
     die "Invalid lifespan_mode '$self->{lifespan_mode}' - must be 'auto' or 'on' ('off' is nonconforming: the PAGI Lifespan spec forbids skipping the protocol)\n"
         unless $self->{lifespan_mode} =~ /\A(?:auto|on)\z/;
+    $self->{read_buffer_size} = _validate_io_buffer_size(
+        'read_buffer_size', delete $params->{read_buffer_size} // 65536);
+    $self->{write_buffer_size} = _validate_io_buffer_size(
+        'write_buffer_size', delete $params->{write_buffer_size} // 8192);
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
@@ -2716,6 +2787,12 @@ END_HTTP2_ERROR
 
 sub configure {
     my ($self, %params) = @_;
+
+    for my $name (qw(read_buffer_size write_buffer_size)) {
+        if (exists $params{$name}) {
+            $self->{$name} = _validate_io_buffer_size($name, delete $params{$name});
+        }
+    }
 
     if (exists $params{app}) {
         my $app = delete $params{app};
@@ -4181,6 +4258,8 @@ sub _run_as_worker {
         max_receive_queue   => $self->{max_receive_queue},
         max_disconnect_receives => $self->{max_disconnect_receives},
         max_ws_frame_size   => $self->{max_ws_frame_size},
+        read_buffer_size  => $self->{read_buffer_size},
+        write_buffer_size => $self->{write_buffer_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
         max_connections   => $self->{max_connections},
@@ -4383,6 +4462,8 @@ sub _on_connection {
         max_ws_frame_size => $self->{max_ws_frame_size},
         sync_file_threshold => $self->{sync_file_threshold},
         validate_events   => $self->{validate_events},
+        read_buffer_size  => $self->{read_buffer_size},
+        write_buffer_size => $self->{write_buffer_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
         transport_type    => ($listener_spec && $listener_spec->{type}) // 'tcp',

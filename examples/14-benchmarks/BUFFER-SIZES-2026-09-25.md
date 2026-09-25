@@ -2,6 +2,12 @@
 
 ## Decision
 
+**Adoption update, 2026-09-25:** After the four-way follow-up, the working server
+adopted 65536-byte reads with 8192-byte writes and made both independently
+configurable. Larger writes remain opt-in. See the
+[tuning guide](README.md#tuning-io-chunk-sizes). The decision and measurements
+below describe the original experiment, before this adoption.
+
 Preserve the candidate for discussion; do not change the working runtime yet.
 Larger chunks give substantial bulk-transfer gains, but the mixed workload
 exposes a tradeoff: almost three times the bulk-download throughput accompanies

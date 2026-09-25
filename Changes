@@ -3,6 +3,11 @@
 0.002014 - UNRELEASED
 
   Performance
+  - Make stream I/O chunk sizes configurable with read_buffer_size and
+    write_buffer_size (CLI: --read-buffer-size / --write-buffer-size).
+    Increase the read default from 8192 to 65536 bytes for bulk uploads;
+    retain the 8192-byte write default. Document tuning for small requests,
+    bulk transfers, memory use and competing-request latency.
   - Share HTTP receive/send implementations and simplify connection-state
     storage while preserving cancellation, backpressure and terminal callbacks.
   - Complete normal HTTP scopes at successful output completion; avoid the

@@ -152,7 +152,22 @@ pagi-server --http2 --ssl-cert cert.pem --ssl-key key.pem ./app.pl
 ```
 
 Run `perldoc pagi-server` for the full list of options (workers, timeouts,
-limits, watermarks, TLS, listeners, and more).
+limits, I/O chunk sizes, watermarks, TLS, listeners, and more).
+
+Reads default to 64 KiB and writes to 8 KiB. For many small requests/uploads,
+or small requests competing with bulk uploads, try smaller reads and compare
+tail latency as well as throughput:
+
+```bash
+pagi-server --read-buffer-size 8192 --write-buffer-size 8192 app.pl
+```
+
+For bulk downloads, try `--write-buffer-size 65536`; larger chunks can improve
+bulk throughput at the expense of competing small requests. These are I/O
+chunk lengths, not body limits or backpressure watermarks. See
+`perldoc PAGI::Server` (`read_buffer_size` / `write_buffer_size`) and the
+[benchmark tuning guide](examples/14-benchmarks/README.md#tuning-io-chunk-sizes)
+for examples and tradeoffs.
 
 ## Examples
 

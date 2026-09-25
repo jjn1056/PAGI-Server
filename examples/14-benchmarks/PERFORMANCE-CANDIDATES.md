@@ -198,6 +198,11 @@ and `buffer-size-data/` for the complete release comparison and evidence.
 
 ## Read-only chunk size — measured, adoption deferred, 2026-09-25
 
+**Subsequent adoption, 2026-09-25:** Adopted 65536-byte reads and retained
+8192-byte writes, exposing both as independent constructor/CLI options. See
+[operator tuning guidance](README.md#tuning-io-chunk-sizes). The deferred
+decision below records the state at measurement time; the results remain intact.
+
 A fresh four-way comparison isolates read_len=65536 from write_len=65536.
 Read-only retains the isolated 1 MiB upload gain (946 vs 224 req/s saved) and
 leaves single-send downloads near saved (3,847 vs 3,867). GET500 is effectively
