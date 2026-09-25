@@ -102,3 +102,22 @@ Keep the retained changes. Most of the remaining release gap predates this
 performance work. No old prototype was revived, no runtime edit was made, and
 no further profiling was performed. See AWS-CHECKPOINTS-2026-09-24.md for the
 complete release-inclusive table, samples, host checks and limits.
+
+## Canonical checkpoint and focused AWS profile — 2026-09-25
+
+The retained work is committed as 874b120 on experiment/http-simplification.
+Fresh targeted checks pass (15 files / 201 tests); independent review found no
+blockers. Twelve CPU profiles compare CPAN 0.002013 with that exact commit for
+GET and buffered POST. Future allocation counts are identical; each version
+constructs one connection state and marks completion once per request. Current
+adds one deferred terminal delivery and three state-publisher calls per request,
+plus lifecycle checks. No large safely removable operation was established.
+
+A possible bounded simplification is consolidating send-state ownership instead
+of copying lexical state through a publisher; it has no demonstrated native
+speedup and must preserve refusal delegation, rollback and terminal semantics.
+Do not remove callback deferral or add a cache/flag on the strength of the
+profile. The split-body POST preflight triggers an AsyncAwait panic under
+NYTProf; final POST profiles cover buffered requests only. The uninstrumented
+benchmark harness remains unchanged. No runtime edits were made. See
+AWS-FOCUSED-PROFILE-2026-09-25.md for evidence and limits. AWS is stopped.

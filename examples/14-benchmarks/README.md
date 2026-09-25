@@ -166,3 +166,11 @@ The initial release/main comparison is recorded in [BASELINE-2026-09-22.md](BASE
 The simplification experiment is recorded in [SIMPLIFICATION-2026-09-23.md](SIMPLIFICATION-2026-09-23.md), comparing unchanged main with the isolated test branch.
 
 The follow-up [NYTProf investigation](PROFILING-2026-09-23.md) records request-path call counts and a sustained-I/O delay in deferred terminal callbacks.
+
+### Canonical performance checkpoint and focused AWS profile
+
+The retained performance work is saved at `874b120` on
+`experiment/http-simplification`. See
+[AWS-FOCUSED-PROFILE-2026-09-25.md](AWS-FOCUSED-PROFILE-2026-09-25.md)
+for the release/current CPU profile, call counts, native benchmark reference,
+and buffered-POST profiling limitation.

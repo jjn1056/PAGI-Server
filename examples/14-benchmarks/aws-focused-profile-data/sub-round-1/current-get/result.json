@@ -1,0 +1,11 @@
+{
+  "variant": "current",
+  "case": "get",
+  "mode": "sub",
+  "rps": 1427.7083,
+  "average_s": 0.0173,
+  "p50_s": 0.0173,
+  "p99_s": 0.0182,
+  "responses": 5000,
+  "profile_subroutines": 1092
+}

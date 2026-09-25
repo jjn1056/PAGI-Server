@@ -1,0 +1,11 @@
+{
+  "variant": "current",
+  "case": "post-observe",
+  "mode": "sub",
+  "rps": 1339.8682,
+  "average_s": 0.0185,
+  "p50_s": 0.0185,
+  "p99_s": 0.0197,
+  "responses": 5000,
+  "profile_subroutines": 1097
+}
