@@ -1,0 +1,5055 @@
+[
+   {
+      "file" : "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm",
+      "lines" : [
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@2" : [
+                  1,
+                  1.1e-05,
+                  1e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "strict::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@2" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 2,
+            "seconds" : 1.6e-05,
+            "text" : "use strict;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@3" : [
+                  1,
+                  1.7e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "warnings::import" : [
+                  1,
+                  1.3e-05,
+                  6e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@3" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 3,
+            "seconds" : 2.2e-05,
+            "text" : "use warnings;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 5,
+            "seconds" : 2.3e-05,
+            "text" : "our $VERSION = '0.002013';\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@7" : [
+                  1,
+                  3e-06,
+                  3e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@7" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 7,
+            "seconds" : 1.2e-05,
+            "text" : "use Future;\n"
+         },
+         {
+            "calls" : {
+               "Future::AsyncAwait::import" : [
+                  1,
+                  8e-06,
+                  2e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@8" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@8" : [
+                  1,
+                  1.2e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 8,
+            "seconds" : 1.5e-05,
+            "text" : "use Future::AsyncAwait;\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  1.3e-05,
+                  1.3e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@9" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@9" : [
+                  1,
+                  1.7e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 9,
+            "seconds" : 1.4e-05,
+            "text" : "use Scalar::Util qw(weaken refaddr);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@10" : [
+                  1,
+                  0.013982,
+                  0.000503,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@10" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 10,
+            "seconds" : 0.0001,
+            "text" : "use Protocol::WebSocket::Handshake::Server;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@11" : [
+                  1,
+                  4e-06,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@11" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 11,
+            "seconds" : 1.7e-05,
+            "text" : "use Protocol::WebSocket::Frame;\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  3.8e-05,
+                  3.8e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@12" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@12" : [
+                  1,
+                  4.3e-05,
+                  5e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 12,
+            "seconds" : 3.1e-05,
+            "text" : "use Digest::SHA qw(sha1_base64);\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  2.6e-05,
+                  2.6e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@13" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@13" : [
+                  1,
+                  3.2e-05,
+                  6e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 13,
+            "seconds" : 1.8e-05,
+            "text" : "use Encode;\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  1.9e-05,
+                  1.9e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@14" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@14" : [
+                  1,
+                  0.001171,
+                  0.001084,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 14,
+            "seconds" : 9.4e-05,
+            "text" : "use URI::Escape qw(uri_unescape);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@15" : [
+                  1,
+                  0.000609,
+                  0.00052,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@15" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 15,
+            "seconds" : 0.000133,
+            "text" : "use IO::Async::Timer::Countdown;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@16" : [
+                  1,
+                  2.7e-05,
+                  2.6e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@16" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 16,
+            "seconds" : 4e-05,
+            "text" : "use IO::Async::Timer::Periodic;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@17" : [
+                  1,
+                  5.5e-05,
+                  8e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "Time::HiRes::import" : [
+                  1,
+                  2.1e-05,
+                  2.1e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@17" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 17,
+            "seconds" : 1.7e-05,
+            "text" : "use Time::HiRes qw(gettimeofday tv_interval);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@18" : [
+                  1,
+                  0.013551,
+                  0.001551,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@18" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 18,
+            "seconds" : 0.000114,
+            "text" : "use PAGI::Server::AsyncFile;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@19" : [
+                  1,
+                  0.001483,
+                  0.001421,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@19" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 19,
+            "seconds" : 0.000128,
+            "text" : "use PAGI::Server::ConnectionState;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@20" : [
+                  1,
+                  0.000745,
+                  0.000688,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@20" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 20,
+            "seconds" : 0.000103,
+            "text" : "use PAGI::Server::TransportState;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@21" : [
+                  1,
+                  0.002955,
+                  0.002907,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "UNIVERSAL::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@21" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 21,
+            "seconds" : 0.000103,
+            "text" : "use PAGI::Server::EventValidator;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@24" : [
+                  1,
+                  2.9e-05,
+                  6e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "constant::import" : [
+                  1,
+                  2.3e-05,
+                  2e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@24" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 24,
+            "seconds" : 0.001544,
+            "text" : "use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 27,
+            "seconds" : 0,
+            "text" : "my $_cached_log_timestamp;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 28,
+            "seconds" : 1e-06,
+            "text" : "my $_cached_log_time = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 49,
+            "seconds" : 3.2e-05,
+            "text" : "my %H2_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 }\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 109,
+            "seconds" : 1e-06,
+            "text" : "my %H1_CONNECTION_SPECIFIC_HEADER = map { $_ => 1 } qw(transfer-encoding connection);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 115,
+            "seconds" : 0.000322000000000001,
+            "text" : "    my $self = shift;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 116,
+            "seconds" : 0.00025,
+            "text" : "    my ($headers) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 117,
+            "seconds" : 0.000212,
+            "text" : "    my @kept;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 118,
+            "seconds" : 0.000552000000000006,
+            "text" : "    for my $h (@$headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 119,
+            "seconds" : 0.000585000000000007,
+            "text" : "        my ($name, $value) = @$h;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 120,
+            "seconds" : 0.000804000000000013,
+            "text" : "        if ($H1_CONNECTION_SPECIFIC_HEADER{lc $name}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 124,
+            "seconds" : 0.001217,
+            "text" : "        push @kept, $h;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 126,
+            "seconds" : 0.00208299999999996,
+            "text" : "    return \\@kept;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 134,
+            "seconds" : 0.00027,
+            "text" : "    my ($headers) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 135,
+            "seconds" : 0.000193,
+            "text" : "    my @values;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 136,
+            "seconds" : 0.000598000000000007,
+            "text" : "    for my $h (@$headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 8806,
+            "line" : 137,
+            "seconds" : 0.00182899999999995,
+            "text" : "        push @values, $h->[1] if $h->[0] eq 'accept';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 139,
+            "seconds" : 0.00208599999999996,
+            "text" : "    return 0 unless @values;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 208,
+            "seconds" : 0.000263,
+            "text" : "    my ($class, %args) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 289,
+            "seconds" : 0.000827,
+            "text" : "        client_host       => '127.0.0.1',\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 296,
+            "seconds" : 1.2e-05,
+            "text" : "    if ($self->{tls_enabled}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 300,
+            "seconds" : 0.000116,
+            "text" : "    return $self;\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  1.8e-05,
+                  1.8e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@303" : null
+                  }
+               ],
+               "PAGI::Server::Connection::BEGIN@303" : [
+                  1,
+                  2.7e-05,
+                  9e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 303,
+            "seconds" : 0.005662,
+            "text" : "use Socket qw(IPPROTO_TCP TCP_NODELAY);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 306,
+            "seconds" : 9e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 308,
+            "seconds" : 1.3e-05,
+            "text" : "    my $stream = $self->{stream};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 309,
+            "seconds" : 4.6e-05,
+            "text" : "    weaken(my $weak_self = $self);\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Handle::write_handle" : [
+                  52,
+                  3.6e-05,
+                  3.6e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 312,
+            "seconds" : 4.4e-05,
+            "text" : "    my $handle = $stream->write_handle // $stream->read_handle;\n"
+         },
+         {
+            "calls" : {
+               "UNIVERSAL::can" : [
+                  52,
+                  3.7e-05,
+                  3.7e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 313,
+            "seconds" : 0.000119,
+            "text" : "    if ($self->{transport_type} eq 'tcp' && $handle && $handle->can('setsockopt')) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 314,
+            "seconds" : 1.6e-05,
+            "text" : "        eval {\n"
+         },
+         {
+            "calls" : {
+               "IO::Socket::setsockopt" : [
+                  52,
+                  0.000215,
+                  0.000215,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 315,
+            "seconds" : 5e-05,
+            "text" : "            $handle->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);\n"
+         },
+         {
+            "calls" : {
+               "UNIVERSAL::can" : [
+                  52,
+                  3.8e-05,
+                  3.8e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 321,
+            "seconds" : 0.000103,
+            "text" : "    if ($self->{transport_type} eq 'unix') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 328,
+            "seconds" : 1.5e-05,
+            "text" : "        eval {\n"
+         },
+         {
+            "calls" : {
+               "IO::Socket::IP::peerhost" : [
+                  52,
+                  0.000968,
+                  0.000197,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 329,
+            "seconds" : 9.39999999999998e-05,
+            "text" : "            $self->{client_host} = $handle->peerhost // '127.0.0.1';\n"
+         },
+         {
+            "calls" : {
+               "IO::Socket::IP::peerport" : [
+                  52,
+                  0.000544,
+                  0.000151,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 330,
+            "seconds" : 9.79999999999999e-05,
+            "text" : "            $self->{client_port} = $handle->peerport // 0;\n"
+         },
+         {
+            "calls" : {
+               "IO::Socket::IP::sockhost" : [
+                  52,
+                  0.000532,
+                  0.000146,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 331,
+            "seconds" : 7.29999999999999e-05,
+            "text" : "            $self->{server_host} = $handle->sockhost // '127.0.0.1';\n"
+         },
+         {
+            "calls" : {
+               "IO::Socket::IP::sockport" : [
+                  52,
+                  0.000497,
+                  0.000142,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 332,
+            "seconds" : 6.49999999999999e-05,
+            "text" : "            $self->{server_port} = $handle->sockport // 5000;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 338,
+            "seconds" : 1.2e-05,
+            "text" : "    if ($self->{alpn_protocol} && $self->{alpn_protocol} eq 'h2' && $self->{h2_protocol}) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_start_idle_timer" : [
+                  52,
+                  0.004187,
+                  0.000488,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 343,
+            "seconds" : 4.5e-05,
+            "text" : "    $self->_start_idle_timer;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 348,
+            "seconds" : 0.00070000000000001,
+            "text" : "        my ($s, $buffref, $eof) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 349,
+            "seconds" : 0.000483000000000004,
+            "text" : "            return 0 unless $weak_self;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_reset_idle_timer" : [
+                  2234,
+                  0.029927,
+                  0.007669,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:413]" : null
+                  }
+               ]
+            },
+            "count" : 2234,
+            "line" : 352,
+            "seconds" : 0.00172599999999996,
+            "text" : "            $weak_self->_reset_idle_timer;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 355,
+            "seconds" : 0.000460000000000005,
+            "text" : "            $weak_self->_reset_stall_timer if $weak_self->{handling_request};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 357,
+            "seconds" : 0.00103000000000001,
+            "text" : "            $weak_self->{buffer} .= $$buffref;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 358,
+            "seconds" : 0.000530000000000006,
+            "text" : "            $$buffref = '';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 360,
+            "seconds" : 0.000219999999999999,
+            "text" : "            if ($eof) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_handle_disconnect_and_close" : [
+                  31,
+                  0.005366,
+                  8.5e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:413]" : null
+                  }
+               ]
+            },
+            "count" : 31,
+            "line" : 362,
+            "seconds" : 2e-05,
+            "text" : "                $weak_self->_handle_disconnect_and_close('client_closed');\n"
+         },
+         {
+            "calls" : {},
+            "count" : 31,
+            "line" : 363,
+            "seconds" : 3.2e-05,
+            "text" : "                return 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 367,
+            "seconds" : 0.000529000000000006,
+            "text" : "            if ($weak_self->{h2c_enabled} && !$weak_self->{is_h2}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 384,
+            "seconds" : 0.000513000000000005,
+            "text" : "            eval {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 386,
+            "seconds" : 0.000425000000000004,
+            "text" : "                if ($weak_self->{is_h2}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 392,
+            "seconds" : 0.000382000000000002,
+            "text" : "                if ($weak_self->{websocket_mode}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 398,
+            "seconds" : 0.000301000000000001,
+            "text" : "                if ($weak_self->{receive_pending} && !$weak_self->{receive_pending}->is_ready) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_try_handle_request" : [
+                  2203,
+                  0.746346,
+                  0.029742,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:413]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 404,
+            "seconds" : 0.00179799999999995,
+            "text" : "                $weak_self->_try_handle_request;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 406,
+            "seconds" : 0.000655000000000009,
+            "text" : "            if (my $error = $@) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 412,
+            "seconds" : 0.002374,
+            "text" : "            return 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 415,
+            "seconds" : 8e-06,
+            "text" : "            return unless $weak_self;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_handle_disconnect_and_close" : [
+                  52,
+                  0,
+                  0.000196,
+                  0,
+                  0,
+                  0.00028,
+                  1,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:418]" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 417,
+            "seconds" : 7.19999999999999e-05,
+            "text" : "            $weak_self->_handle_disconnect_and_close('client_closed');\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Stream::configure" : [
+                  52,
+                  0.000808,
+                  0.000497,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::start" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 441,
+            "seconds" : 0.00033,
+            "text" : "    );\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 454,
+            "seconds" : 1e-05,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 456,
+            "seconds" : 1.6e-05,
+            "text" : "    return if $self->{idle_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 457,
+            "seconds" : 2.3e-05,
+            "text" : "    return unless $self->{timeout} && $self->{timeout} > 0 && $self->{server};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 459,
+            "seconds" : 2.4e-05,
+            "text" : "    weaken(my $weak_self = $self);\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Timer::new" : [
+                  52,
+                  0.001151,
+                  0.000203,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_start_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 470,
+            "seconds" : 0.000239,
+            "text" : "    );\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 471,
+            "seconds" : 1.3e-05,
+            "text" : "    $self->{idle_timer} = $timer;\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Notifier::add_child" : [
+                  52,
+                  0.001529,
+                  0.000271,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_start_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 472,
+            "seconds" : 4.9e-05,
+            "text" : "    $self->{server}->add_child($timer);\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Timer::start" : [
+                  52,
+                  0.001019,
+                  0.000339,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_start_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 473,
+            "seconds" : 7.39999999999999e-05,
+            "text" : "    $timer->start;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 477,
+            "seconds" : 0.000297,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 479,
+            "seconds" : 0.00108100000000001,
+            "text" : "    return unless $self->{idle_timer};\n"
+         },
+         {
+            "calls" : {
+               "Time::HiRes::time" : [
+                  2234,
+                  0.001695,
+                  0.001695,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_reset_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 2234,
+            "line" : 486,
+            "seconds" : 0.00391900000000001,
+            "text" : "    my $now = Time::HiRes::time();\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2234,
+            "line" : 487,
+            "seconds" : 0.002396,
+            "text" : "    return if defined $self->{_idle_reset_at} && ($now - $self->{_idle_reset_at}) < 0.05;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 695,
+            "line" : 488,
+            "seconds" : 0.000142,
+            "text" : "    $self->{_idle_reset_at} = $now;\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Timer::Countdown::reset" : [
+                  695,
+                  0.020208,
+                  0.003559,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_reset_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 695,
+            "line" : 490,
+            "seconds" : 0.000581000000000007,
+            "text" : "    $self->{idle_timer}->reset;\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Timer::is_running" : [
+                  695,
+                  0.000355,
+                  0.000355,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_reset_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 695,
+            "line" : 491,
+            "seconds" : 0.001151,
+            "text" : "    $self->{idle_timer}->start unless $self->{idle_timer}->is_running;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 495,
+            "seconds" : 6e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 497,
+            "seconds" : 1.5e-05,
+            "text" : "    return unless $self->{idle_timer};\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Timer::is_running" : [
+                  52,
+                  7.3e-05,
+                  7.3e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_stop_idle_timer" : null
+                  }
+               ],
+               "IO::Async::Timer::stop" : [
+                  52,
+                  0.000487,
+                  0.000319,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_stop_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 498,
+            "seconds" : 6.69999999999999e-05,
+            "text" : "    $self->{idle_timer}->stop if $self->{idle_timer}->is_running;\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Notifier::remove_child" : [
+                  52,
+                  0.001602,
+                  0.000462,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_stop_idle_timer" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 501,
+            "seconds" : 4.9e-05,
+            "text" : "    if ($self->{server}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 504,
+            "seconds" : 0.000386,
+            "text" : "    $self->{idle_timer} = undef;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@1796" : [
+                  1,
+                  2.3e-05,
+                  6e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "warnings::unimport" : [
+                  1,
+                  1.7e-05,
+                  1.2e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@1796" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 1796,
+            "seconds" : 0.017882,
+            "text" : "                    { no warnings 'closed';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3298,
+            "seconds" : 0.000243999999999999,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3300,
+            "seconds" : 0.00190299999999994,
+            "text" : "    return unless $self->{request_timeout} && $self->{request_timeout} > 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3325,
+            "seconds" : 0.000495000000000006,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3327,
+            "seconds" : 0.00434100000000024,
+            "text" : "    return unless $self->{stall_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2255,
+            "line" : 3333,
+            "seconds" : 0.000209,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2255,
+            "line" : 3335,
+            "seconds" : 0.00159599999999997,
+            "text" : "    return unless $self->{stall_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3379,
+            "seconds" : 1e-05,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3381,
+            "seconds" : 6.1e-05,
+            "text" : "    return unless $self->{ws_idle_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3426,
+            "seconds" : 7e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3428,
+            "seconds" : 4.3e-05,
+            "text" : "    return unless $self->{sse_idle_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3449,
+            "seconds" : 0.000506000000000006,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3451,
+            "seconds" : 0.000823000000000013,
+            "text" : "    return 0 unless $self->{stream};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3455,
+            "seconds" : 0.000967000000000016,
+            "text" : "    my $queue = $self->{stream}{writequeue} // [];\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3456,
+            "seconds" : 0.000435000000000004,
+            "text" : "    my $total = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3458,
+            "seconds" : 0.00150499999999997,
+            "text" : "    for my $writer (@$queue) {\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Stream::Writer::data" : [
+                  2203,
+                  0.001845,
+                  0.001845,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_get_write_buffer_size" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3459,
+            "seconds" : 0.00191999999999995,
+            "text" : "        my $data = $writer->data;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3460,
+            "seconds" : 0.00128999999999999,
+            "text" : "        if (defined $data && !ref $data) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 3465,
+            "seconds" : 0.00379100000000017,
+            "text" : "    return $total;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3477,
+            "seconds" : 0.000301000000000001,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3478,
+            "seconds" : 0.000420000000000003,
+            "text" : "    weaken(my $w = $self);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_get_write_buffer_size" : [
+                  2203,
+                  0.008424,
+                  0.006579,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:3480]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3480,
+            "seconds" : 0.00295800000000006,
+            "text" : "        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3481,
+            "seconds" : 0.00222899999999998,
+            "text" : "        high      => sub { $w ? $w->{write_high_watermark} : undef },\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::new" : [
+                  2203,
+                  0.008351,
+                  0.008351,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_h1_transport_state" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3489,
+            "seconds" : 0.00938999999999999,
+            "text" : "    );\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3515,
+            "seconds" : 0.000274,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3516,
+            "seconds" : 0.000424000000000003,
+            "text" : "    my $ts = $self->{current_transport_state};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::_check_watermarks" : [
+                  2203,
+                  0.027793,
+                  0.006311,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_notify_transport_write" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3517,
+            "seconds" : 0.00299500000000007,
+            "text" : "    $ts->_check_watermarks if $ts;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3587,
+            "seconds" : 9e-06,
+            "text" : "    my ($self, $reason) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3588,
+            "seconds" : 5e-06,
+            "text" : "    $reason //= 'connection closed';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3590,
+            "seconds" : 4.2e-05,
+            "text" : "    my @waiters = splice @{$self->{_drain_waiters}};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3591,
+            "seconds" : 2.6e-05,
+            "text" : "    for my $f (@waiters) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3600,
+            "seconds" : 5.1e-05,
+            "text" : "    $self->{_drain_fires} = [];\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 3601,
+            "seconds" : 0.000114,
+            "text" : "    $self->{_drain_check_active} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3737,
+            "seconds" : 6e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3739,
+            "seconds" : 3.2e-05,
+            "text" : "    $self->{ws_waiting_pong} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3741,
+            "seconds" : 4.5e-05,
+            "text" : "    return unless $self->{ws_pong_timeout};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3750,
+            "seconds" : 3e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_cancel_ws_pong_timeout" : [
+                  52,
+                  6.8e-05,
+                  6.8e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_stop_ws_keepalive" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 3753,
+            "seconds" : 4.4e-05,
+            "text" : "    $self->_cancel_ws_pong_timeout;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3755,
+            "seconds" : 4.1e-05,
+            "text" : "    return unless $self->{ws_keepalive_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3801,
+            "seconds" : 9e-06,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 3803,
+            "seconds" : 3.5e-05,
+            "text" : "    return unless $self->{sse_keepalive_timer};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3813,
+            "seconds" : 0.000284,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3815,
+            "seconds" : 0.000335000000000001,
+            "text" : "    return if $self->{closed};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3816,
+            "seconds" : 0.000179,
+            "text" : "    return if $self->{handling_request};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Protocol::HTTP1::parse_request" : [
+                  2203,
+                  0.059599,
+                  0.050702,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3819,
+            "seconds" : 0.00271000000000003,
+            "text" : "    my ($request, $consumed) = $self->{protocol}->parse_request($self->{buffer});\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3821,
+            "seconds" : 0.000187,
+            "text" : "    return unless $request;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3824,
+            "seconds" : 0.00102100000000001,
+            "text" : "    substr($self->{buffer}, 0, $consumed) = '';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3827,
+            "seconds" : 0.000399000000000003,
+            "text" : "    if ($request->{error}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3836,
+            "seconds" : 0.000629000000000008,
+            "text" : "    if ($self->{max_body_size} && defined $request->{content_length}) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_is_websocket_upgrade" : [
+                  2203,
+                  0.008337,
+                  0.008337,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3846,
+            "seconds" : 0.00198199999999995,
+            "text" : "    my $is_websocket = $self->_is_websocket_upgrade($request);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_is_sse_request" : [
+                  2203,
+                  0.008037,
+                  0.00339,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3849,
+            "seconds" : 0.00159899999999997,
+            "text" : "    my $is_sse = !$is_websocket && $self->_is_sse_request($request);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3852,
+            "seconds" : 0.000343000000000002,
+            "text" : "    $self->{handling_request} = 1;\n"
+         },
+         {
+            "calls" : {
+               "Time::HiRes::gettimeofday" : [
+                  2203,
+                  0.00133,
+                  0.00133,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3853,
+            "seconds" : 0.00405699999999996,
+            "text" : "    $self->{request_start} = [gettimeofday];\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3854,
+            "seconds" : 0.000388000000000003,
+            "text" : "    $self->{current_request} = $request;  # Store for access logging\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3856,
+            "seconds" : 0.000813000000000013,
+            "text" : "    if ($is_websocket) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_start_stall_timer" : [
+                  2203,
+                  0.001665,
+                  0.001665,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3862,
+            "seconds" : 0.00143999999999998,
+            "text" : "        $self->_start_stall_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_handle_request" : [
+                  2203,
+                  0.591793,
+                  0.089177,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3863,
+            "seconds" : 0.00183799999999995,
+            "text" : "        $self->{request_future} = $self->_handle_request($request);\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Notifier::adopt_future" : [
+                  2203,
+                  0.045843,
+                  0.01652,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_try_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3868,
+            "seconds" : 0.00971199999999989,
+            "text" : "    $self->{server}->adopt_future($self->{request_future});\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3872,
+            "seconds" : 0.000383000000000003,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3875,
+            "seconds" : 0.00021,
+            "text" : "    my $has_upgrade = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3876,
+            "seconds" : 0.000155,
+            "text" : "    my $has_connection_upgrade = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3877,
+            "seconds" : 0.000157,
+            "text" : "    my $has_ws_key = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3879,
+            "seconds" : 0.00106200000000001,
+            "text" : "    for my $header (@{$request->{headers}}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 8806,
+            "line" : 3880,
+            "seconds" : 0.00197899999999994,
+            "text" : "        my ($name, $value) = @$header;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 8806,
+            "line" : 3881,
+            "seconds" : 0.00288600000000005,
+            "text" : "        if ($name eq 'upgrade' && lc($value) eq 'websocket') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3893,
+            "seconds" : 0.00201699999999995,
+            "text" : "    return $has_upgrade && $has_connection_upgrade && $has_ws_key;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3897,
+            "seconds" : 0.000327000000000001,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_accept_signals_sse" : [
+                  2203,
+                  0.004647,
+                  0.004647,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_is_sse_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3904,
+            "seconds" : 0.00344200000000012,
+            "text" : "    return _accept_signals_sse($request->{headers});\n"
+         },
+         {
+            "calls" : {
+               "Future::_base::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm:423]" : [
+                  2203,
+                  0.012542,
+                  0.003229,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3907,
+            "seconds" : 0.00560900000000032,
+            "text" : "async sub _handle_request {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3908,
+            "seconds" : 0.000256,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_create_scope" : [
+                  2203,
+                  0.057952,
+                  0.023979,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3910,
+            "seconds" : 0.00143199999999998,
+            "text" : "    my $scope = $self->_create_scope($request);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_create_receive" : [
+                  2203,
+                  0.006452,
+                  0.006452,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3911,
+            "seconds" : 0.00152299999999997,
+            "text" : "    my $receive = $self->_create_receive($request);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_create_send" : [
+                  2203,
+                  0.010433,
+                  0.010433,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3912,
+            "seconds" : 0.00148599999999997,
+            "text" : "    my $send = $self->_create_send($request);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3914,
+            "seconds" : 0.000524000000000006,
+            "text" : "    eval {\n"
+         },
+         {
+            "calls" : {
+               "Future::_base::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm:352]" : [
+                  2203,
+                  0.003505,
+                  0.002466,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ],
+               "Future::_base::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm:558]" : [
+                  2203,
+                  0.004509,
+                  0.002271,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ],
+               "PAGI::Server::Runner::__ANON__[/Users/jnapiorkowski/Desktop/PAGI-Project/PAGI-Server/.worktrees/experiment-http-simplification/examples/14-benchmarks/get.pl:15]" : [
+                  2203,
+                  0.389617,
+                  0.031659,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3915,
+            "seconds" : 0.00655200000000053,
+            "text" : "        await $self->{app}->($scope, $receive, $send);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3918,
+            "seconds" : 0.000601000000000007,
+            "text" : "    if (my $error = $@) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3963,
+            "seconds" : 0.000383000000000003,
+            "text" : "    if (!$self->{response_started}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 3981,
+            "seconds" : 0.000878000000000014,
+            "text" : "    if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_flush_pending_headers" : [
+                  2203,
+                  0.00199,
+                  0.00199,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3996,
+            "seconds" : 0.00154599999999997,
+            "text" : "    $self->_flush_pending_headers;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_write_access_log" : [
+                  2203,
+                  0.001511,
+                  0.001511,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 3999,
+            "seconds" : 0.00126299999999999,
+            "text" : "    $self->_write_access_log;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::_on_request_complete" : [
+                  2203,
+                  0.001658,
+                  0.001658,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4002,
+            "seconds" : 0.00182199999999995,
+            "text" : "    $self->{server}->_on_request_complete if $self->{server};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_stall_timer" : [
+                  2203,
+                  0.001224,
+                  0.001224,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4005,
+            "seconds" : 0.00143299999999998,
+            "text" : "    $self->_stop_stall_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::ConnectionState::_mark_complete" : [
+                  2203,
+                  0.004726,
+                  0.004726,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4013,
+            "seconds" : 0.00178999999999996,
+            "text" : "    if (my $conn_state = $self->{current_connection_state}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4020,
+            "seconds" : 0.000372000000000003,
+            "text" : "    $self->{_served_a_request} = 1;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_should_keep_alive" : [
+                  2203,
+                  0.006497,
+                  0.006497,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_request" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4023,
+            "seconds" : 0.00164599999999997,
+            "text" : "    my $keep_alive = $self->_should_keep_alive($request);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4025,
+            "seconds" : 0.0465979999999995,
+            "text" : "    if ($keep_alive) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4027,
+            "seconds" : 0.000359000000000002,
+            "text" : "        $self->{handling_request} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4028,
+            "seconds" : 0.000330000000000002,
+            "text" : "        $self->{response_started} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4029,
+            "seconds" : 0.000403000000000003,
+            "text" : "        $self->{h1_seq} = 'initial';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4030,
+            "seconds" : 0.000366000000000002,
+            "text" : "        $self->{_resp_pending} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4031,
+            "seconds" : 0.000295000000000001,
+            "text" : "        $self->{response_status} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4032,
+            "seconds" : 0.000256,
+            "text" : "        $self->{_response_size} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4033,
+            "seconds" : 0.000782000000000013,
+            "text" : "        $self->{request_start} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4034,
+            "seconds" : 0.000332000000000002,
+            "text" : "        $self->{current_request} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4035,
+            "seconds" : 0.00202799999999995,
+            "text" : "        $self->{request_future} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4036,
+            "seconds" : 0.000303000000000001,
+            "text" : "        $self->{current_connection_state} = undef;  # Clear for next request\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4037,
+            "seconds" : 0.000265,
+            "text" : "        $self->{current_transport_state}  = undef;  # New request gets a fresh handle\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4040,
+            "seconds" : 0.000954000000000017,
+            "text" : "        if (length($self->{buffer}) > 0) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4050,
+            "seconds" : 0.000320000000000001,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4052,
+            "seconds" : 0.000571000000000007,
+            "text" : "    my $http_version = $request->{http_version} // '1.1';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4055,
+            "seconds" : 0.00019,
+            "text" : "    my $connection_header;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4056,
+            "seconds" : 0.000881000000000014,
+            "text" : "    for my $header (@{$request->{headers}}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 8806,
+            "line" : 4057,
+            "seconds" : 0.00241099999999999,
+            "text" : "        if ($header->[0] eq 'connection') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4064,
+            "seconds" : 0.000421000000000004,
+            "text" : "    if ($http_version eq '1.1') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4065,
+            "seconds" : 0.000214,
+            "text" : "        return 0 if $connection_header && $connection_header =~ /close/;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4066,
+            "seconds" : 0.00206199999999995,
+            "text" : "        return 1;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4080,
+            "seconds" : 0.000258,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::ConnectionState::new" : [
+                  2203,
+                  0.01032,
+                  0.01032,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_create_scope" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4087,
+            "seconds" : 0.002457,
+            "text" : "    );\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4088,
+            "seconds" : 0.000396000000000003,
+            "text" : "    $self->{current_connection_state} = $connection_state;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_get_extensions_for_scope" : [
+                  2203,
+                  0.003265,
+                  0.003265,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_create_scope" : null
+                  }
+               ],
+               "PAGI::Server::Connection::_get_scheme" : [
+                  2203,
+                  0.001834,
+                  0.001834,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_create_scope" : null
+                  }
+               ],
+               "PAGI::Server::Connection::_h1_transport_state" : [
+                  2203,
+                  0.018554,
+                  0.010203,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_create_scope" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4117,
+            "seconds" : 0.0167139999999992,
+            "text" : "        'pagi.transport'  => ($self->{current_transport_state} = $self->_h1_transport_state),\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4120,
+            "seconds" : 0.00215999999999997,
+            "text" : "    return $scope;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4209,
+            "seconds" : 0.000277,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4211,
+            "seconds" : 0.000414000000000003,
+            "text" : "    my $content_length = $request->{content_length};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4212,
+            "seconds" : 0.000461000000000004,
+            "text" : "    my $is_chunked = $request->{chunked} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4213,
+            "seconds" : 0.000300000000000001,
+            "text" : "    my $expect_continue = $request->{expect_continue} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4214,
+            "seconds" : 0.000168,
+            "text" : "    my $continue_sent = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4215,
+            "seconds" : 0.000137,
+            "text" : "    my $body_complete = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4216,
+            "seconds" : 0.000152,
+            "text" : "    my $bytes_read = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4217,
+            "seconds" : 0.000164,
+            "text" : "    my $chunk_size = 65536;  # 64KB chunks for large bodies\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4220,
+            "seconds" : 0.000458000000000005,
+            "text" : "    my $has_body = defined($content_length) && $content_length > 0 || $is_chunked;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4222,
+            "seconds" : 0.000432000000000004,
+            "text" : "    weaken(my $weak_self = $self);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4346,
+            "seconds" : 0.00405999999999995,
+            "text" : "    };\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4350,
+            "seconds" : 0.000278,
+            "text" : "    my ($self, $request) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4352,
+            "seconds" : 0.00017,
+            "text" : "    my $chunked = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4353,
+            "seconds" : 0.000163,
+            "text" : "    my $expects_trailers = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4354,
+            "seconds" : 0.000349000000000002,
+            "text" : "    my $seq = 'initial';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4358,
+            "seconds" : 0.00071800000000001,
+            "text" : "    $self->{h1_seq} = $seq;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4359,
+            "seconds" : 0.000778000000000012,
+            "text" : "    my $is_head_request = ($request->{method} // '') eq 'HEAD';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4360,
+            "seconds" : 0.000590000000000007,
+            "text" : "    my $http_version = $request->{http_version} // '1.1';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4361,
+            "seconds" : 0.000402000000000003,
+            "text" : "    my $is_http10 = ($http_version eq '1.0');\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4364,
+            "seconds" : 0.000211,
+            "text" : "    my $client_wants_keepalive = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4365,
+            "seconds" : 0.000236,
+            "text" : "    if ($is_http10) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4374,
+            "seconds" : 0.000248,
+            "text" : "    weaken(my $weak_self = $self);\n"
+         },
+         {
+            "calls" : {
+               "Future::_base::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Future.pm:423]" : [
+                  4406,
+                  0.027515,
+                  0.007418,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 4406,
+            "line" : 4376,
+            "seconds" : 0.0130759999999989,
+            "text" : "    return async sub  {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4377,
+            "seconds" : 0.000547000000000007,
+            "text" : "        my ($event) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4378,
+            "seconds" : 0.000507000000000006,
+            "text" : "        return Future->done unless $weak_self;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4379,
+            "seconds" : 0.000808000000000012,
+            "text" : "        return Future->done if $weak_self->{closed};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_reset_stall_timer" : [
+                  4406,
+                  0.003065,
+                  0.003065,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 4406,
+            "line" : 4382,
+            "seconds" : 0.00290800000000006,
+            "text" : "        $weak_self->_reset_stall_timer;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4384,
+            "seconds" : 0.000806000000000012,
+            "text" : "        my $type = $event->{type} // '';\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::validate_http_send" : [
+                  4406,
+                  0.043675,
+                  0.009479,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 4406,
+            "line" : 4389,
+            "seconds" : 0.00553200000000039,
+            "text" : "            $event, { extensions => $weak_self->{extensions} });\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4390,
+            "seconds" : 0.000728000000000009,
+            "text" : "        my $seq_before_advance = $seq;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::advance_http" : [
+                  4406,
+                  0.021175,
+                  0.014689,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 4406,
+            "line" : 4391,
+            "seconds" : 0.00295300000000006,
+            "text" : "        $seq = PAGI::Server::EventValidator::advance_http($seq, $event);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4392,
+            "seconds" : 0.000970000000000017,
+            "text" : "        $weak_self->{h1_seq} = $seq;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4394,
+            "seconds" : 0.00128299999999999,
+            "text" : "        if ($type eq 'http.response.start') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4395,
+            "seconds" : 0.000474000000000005,
+            "text" : "            $weak_self->{response_started} = 1;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::ConnectionState::_mark_response_started" : [
+                  2203,
+                  0.001659,
+                  0.001659,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4397,
+            "seconds" : 0.00174099999999995,
+            "text" : "                if $weak_self->{current_connection_state};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4398,
+            "seconds" : 0.000547000000000006,
+            "text" : "            $weak_self->{response_status} = $event->{status} // 200;  # Track for logging\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4399,
+            "seconds" : 0.000425000000000004,
+            "text" : "            $expects_trailers = $event->{trailers} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4401,
+            "seconds" : 0.000305000000000001,
+            "text" : "            my $status = $event->{status} // 200;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4402,
+            "seconds" : 0.000281,
+            "text" : "            my $headers = $event->{headers} // [];\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_h1_strip_connection_headers" : [
+                  2203,
+                  0.005322,
+                  0.005322,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4405,
+            "seconds" : 0.00171799999999996,
+            "text" : "            $headers = $weak_self->_h1_strip_connection_headers($headers);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4408,
+            "seconds" : 0.000184,
+            "text" : "            my $has_content_length = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4409,
+            "seconds" : 0.000538000000000006,
+            "text" : "            for my $h (@$headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4410,
+            "seconds" : 0.001194,
+            "text" : "                if (lc($h->[0]) eq 'content-length') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4417,
+            "seconds" : 0.000830000000000012,
+            "text" : "            my @final_headers = @$headers;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Protocol::HTTP1::format_date" : [
+                  2203,
+                  0.002886,
+                  0.002886,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4418,
+            "seconds" : 0.00448600000000009,
+            "text" : "            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4428,
+            "seconds" : 0.00145799999999998,
+            "text" : "            if (!$is_http10 && grep { lc($_->[0]) eq 'upgrade' } @final_headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4434,
+            "seconds" : 0.000620000000000008,
+            "text" : "            if ($is_head_request || $is_http10) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4447,
+            "seconds" : 0.000559000000000006,
+            "text" : "                $chunked = !$has_content_length;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Protocol::HTTP1::serialize_response_start" : [
+                  2203,
+                  0.027297,
+                  0.020101,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4451,
+            "seconds" : 0.00236399999999999,
+            "text" : "                $status, \\@final_headers, $chunked, $http_version\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4458,
+            "seconds" : 0.00245900000000002,
+            "text" : "            $weak_self->{_resp_pending} = $response;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4462,
+            "seconds" : 0.000206,
+            "text" : "            if ($is_head_request) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_get_write_buffer_size" : [
+                  2203,
+                  0.003518,
+                  0.003518,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4471,
+            "seconds" : 0.00188599999999994,
+            "text" : "            if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4480,
+            "seconds" : 0.000386000000000003,
+            "text" : "            my $body = $event->{body};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4481,
+            "seconds" : 0.000319000000000001,
+            "text" : "            my $file = $event->{file};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4482,
+            "seconds" : 0.000320000000000001,
+            "text" : "            my $fh = $event->{fh};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4483,
+            "seconds" : 0.000327000000000001,
+            "text" : "            my $offset = $event->{offset} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4484,
+            "seconds" : 0.000261,
+            "text" : "            my $length = $event->{length};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4486,
+            "seconds" : 0.001118,
+            "text" : "            if (defined $file) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4532,
+            "seconds" : 0.000205,
+            "text" : "                $body //= '';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4533,
+            "seconds" : 0.000307000000000001,
+            "text" : "                my $more = $event->{more} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4535,
+            "seconds" : 0.000538000000000006,
+            "text" : "                $weak_self->{_response_size} += length($body);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4541,
+            "seconds" : 0.000421000000000004,
+            "text" : "                my $out = $weak_self->{_resp_pending};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4542,
+            "seconds" : 0.000203,
+            "text" : "                $out = '' unless defined $out;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4543,
+            "seconds" : 0.000437000000000004,
+            "text" : "                $weak_self->{_resp_pending} = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4545,
+            "seconds" : 0.000447000000000004,
+            "text" : "                if ($chunked) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4546,
+            "seconds" : 0.000438000000000004,
+            "text" : "                    if (length $body) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4547,
+            "seconds" : 0.00210799999999996,
+            "text" : "                        my $len = sprintf(\"%x\", length($body));\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4548,
+            "seconds" : 0.00150099999999998,
+            "text" : "                        $out .= \"$len\\r\\n$body\\r\\n\";\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4550,
+            "seconds" : 0.000551000000000006,
+            "text" : "                    if (!$more && !$expects_trailers) {\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Stream::write" : [
+                  2203,
+                  0.083422,
+                  0.014803,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4558,
+            "seconds" : 0.00172499999999996,
+            "text" : "                $weak_self->{stream}->write($out) if length $out;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_notify_transport_write" : [
+                  2203,
+                  0.031374,
+                  0.003581,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:4639]" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 4559,
+            "seconds" : 0.00191799999999994,
+            "text" : "                $weak_self->_notify_transport_write;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 4638,
+            "seconds" : 0.00173899999999996,
+            "text" : "        return;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4639,
+            "seconds" : 0.00695100000000033,
+            "text" : "    };\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4645,
+            "seconds" : 0.000299000000000001,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4646,
+            "seconds" : 0.000421000000000004,
+            "text" : "    my $pending = $self->{_resp_pending};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4647,
+            "seconds" : 0.00196399999999994,
+            "text" : "    return unless defined $pending && length $pending;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4677,
+            "seconds" : 0.000249,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 4679,
+            "seconds" : 0.00191299999999994,
+            "text" : "    return unless $self->{access_log};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 4730,
+            "seconds" : 2e-06,
+            "text" : "my %COMPLETION_REASON = map { ($_ => 1) } qw(\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4750,
+            "seconds" : 1.4e-05,
+            "text" : "    my ($self, $reason) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4754,
+            "seconds" : 6.19999999999999e-05,
+            "text" : "    return if $self->{_disconnect_handled};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4755,
+            "seconds" : 9e-06,
+            "text" : "    $self->{_disconnect_handled} = 1;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4759,
+            "seconds" : 6e-06,
+            "text" : "    if (!$reason && $self->{server} && $self->{server}{shutting_down}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4764,
+            "seconds" : 8e-06,
+            "text" : "    $reason //= 'client_closed';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4767,
+            "seconds" : 1.5e-05,
+            "text" : "    my $is_completion = $COMPLETION_REASON{$reason};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4771,
+            "seconds" : 1.9e-05,
+            "text" : "    if ($self->{current_connection_state} && !$self->{websocket_mode} && !$self->{sse_mode}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4784,
+            "seconds" : 1.6e-05,
+            "text" : "    if ($self->{is_h2} && $self->{h2_streams} && !$is_completion) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_cancel_drain_waiters" : [
+                  52,
+                  0.000121,
+                  0.000121,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_disconnect" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4797,
+            "seconds" : 3.7e-05,
+            "text" : "    $self->_cancel_drain_waiters($reason);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4802,
+            "seconds" : 1.6e-05,
+            "text" : "    if ($self->{websocket_mode} && !$is_completion) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4807,
+            "seconds" : 4e-06,
+            "text" : "    my $disconnect_event;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4808,
+            "seconds" : 2.5e-05,
+            "text" : "    if ($self->{websocket_mode}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4819,
+            "seconds" : 2.9e-05,
+            "text" : "        $disconnect_event = { type => 'http.disconnect' };\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4823,
+            "seconds" : 2.5e-05,
+            "text" : "    push @{$self->{receive_queue}}, $disconnect_event if $disconnect_event;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4826,
+            "seconds" : 5.2e-05,
+            "text" : "    if ($disconnect_event && $self->{receive_pending} && !$self->{receive_pending}->is_ready) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4859,
+            "seconds" : 1.5e-05,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4864,
+            "seconds" : 0.000102,
+            "text" : "    return if $self->{_cleanup_done};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4865,
+            "seconds" : 8e-06,
+            "text" : "    $self->{_cleanup_done} = 1;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4866,
+            "seconds" : 7e-06,
+            "text" : "    $self->{closed} = 1;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_cancel_drain_waiters" : [
+                  52,
+                  6.9e-05,
+                  6.9e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4869,
+            "seconds" : 2.1e-05,
+            "text" : "    $self->_cancel_drain_waiters('connection closing');\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4872,
+            "seconds" : 2.4e-05,
+            "text" : "    if ($self->{h2_streams}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4873,
+            "seconds" : 4.1e-05,
+            "text" : "        for my $stream (values %{$self->{h2_streams}}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4904,
+            "seconds" : 3.5e-05,
+            "text" : "        delete $self->{h2_streams};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4906,
+            "seconds" : 6e-06,
+            "text" : "    if ($self->{h2_session}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4912,
+            "seconds" : 1.9e-05,
+            "text" : "    delete $self->{websocket_frame};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4915,
+            "seconds" : 1.3e-05,
+            "text" : "    if ($self->{server}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4916,
+            "seconds" : 8.49999999999999e-05,
+            "text" : "        delete $self->{server}{connections}{refaddr($self)};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4919,
+            "seconds" : 2.2e-05,
+            "text" : "        if ($self->{server}{shutting_down} &&\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_idle_timer" : [
+                  52,
+                  0.00273,
+                  0.000568,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4928,
+            "seconds" : 3.6e-05,
+            "text" : "    $self->_stop_idle_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_stall_timer" : [
+                  52,
+                  4.2e-05,
+                  4.2e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4931,
+            "seconds" : 4.1e-05,
+            "text" : "    $self->_stop_stall_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_ws_idle_timer" : [
+                  52,
+                  3.5e-05,
+                  3.5e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4934,
+            "seconds" : 2.8e-05,
+            "text" : "    $self->_stop_ws_idle_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_sse_idle_timer" : [
+                  52,
+                  3.1e-05,
+                  3.1e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4935,
+            "seconds" : 2.8e-05,
+            "text" : "    $self->_stop_sse_idle_timer;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_ws_keepalive" : [
+                  52,
+                  0.000162,
+                  9.4e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4938,
+            "seconds" : 4.1e-05,
+            "text" : "    $self->_stop_ws_keepalive;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_stop_sse_keepalive" : [
+                  52,
+                  3.9e-05,
+                  3.9e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4939,
+            "seconds" : 3.2e-05,
+            "text" : "    $self->_stop_sse_keepalive;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4946,
+            "seconds" : 4e-06,
+            "text" : "    my $disconnect_event;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4947,
+            "seconds" : 2.2e-05,
+            "text" : "    if ($self->{websocket_mode}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4956,
+            "seconds" : 3.2e-05,
+            "text" : "        $disconnect_event = { type => 'http.disconnect' };\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4960,
+            "seconds" : 5.49999999999999e-05,
+            "text" : "    if ($disconnect_event) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 52,
+            "line" : 4969,
+            "seconds" : 1.7e-05,
+            "text" : "    $self->{receive_futures} = [];\n"
+         },
+         {
+            "calls" : {
+               "IO::Async::Stream::close_when_empty" : [
+                  52,
+                  0.005734,
+                  0.000194,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_close" : null
+                  }
+               ]
+            },
+            "count" : 52,
+            "line" : 4971,
+            "seconds" : 0.000121,
+            "text" : "    if ($self->{stream}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4980,
+            "seconds" : 2.9e-05,
+            "text" : "    my ($self, $reason) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 104,
+            "line" : 4989,
+            "seconds" : 2.8e-05,
+            "text" : "    $self->{closed} = 1;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_handle_disconnect" : [
+                  104,
+                  0.000471,
+                  0.00035,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::_handle_disconnect_and_close" : null
+                  }
+               ]
+            },
+            "count" : 104,
+            "line" : 4991,
+            "seconds" : 7.69999999999999e-05,
+            "text" : "    $self->_handle_disconnect($reason);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::_close" : [
+                  104,
+                  0.009718,
+                  0.000921,
+                  0,
+                  0,
+                  4.5e-05,
+                  1,
+                  {
+                     "PAGI::Server::Connection::_handle_disconnect_and_close" : null
+                  }
+               ]
+            },
+            "count" : 104,
+            "line" : 4992,
+            "seconds" : 0.000168,
+            "text" : "    $self->_close;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5108,
+            "seconds" : 0.000317000000000001,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5110,
+            "seconds" : 0.00230699999999999,
+            "text" : "    return $self->{tls_enabled} ? 'https' : 'http';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5120,
+            "seconds" : 0.000345000000000001,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5122,
+            "seconds" : 0.000772000000000011,
+            "text" : "    my %extensions = %{$self->{extensions}};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5125,
+            "seconds" : 0.000940000000000015,
+            "text" : "    if ($self->{tls_enabled} && $self->{tls_info}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 5133,
+            "seconds" : 0.00186999999999995,
+            "text" : "    return \\%extensions;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@5758" : [
+                  1,
+                  4.9e-05,
+                  8e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "constant::import" : [
+                  1,
+                  4.1e-05,
+                  3.9e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@5758" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 5758,
+            "seconds" : 0.002891,
+            "text" : "use constant WS_GUID => '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::BEGIN@6434" : [
+                  1,
+                  8.8e-05,
+                  2.1e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::BEGIN@49" : null
+                  }
+               ],
+               "warnings::unimport" : [
+                  1,
+                  6.7e-05,
+                  3.2e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@6434" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 6434,
+            "seconds" : 0.003427,
+            "text" : "            no warnings 'closed';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 6475,
+            "seconds" : 1.2e-05,
+            "text" : "1;\n"
+         }
+      ]
+   },
+   {
+      "file" : "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/ConnectionState.pm",
+      "lines" : [
+         {
+            "calls" : {
+               "PAGI::Server::ConnectionState::BEGIN@3" : [
+                  1,
+                  2.9e-05,
+                  1.3e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@19" : null
+                  }
+               ],
+               "strict::import" : [
+                  1,
+                  1.6e-05,
+                  1.6e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::ConnectionState::BEGIN@3" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 3,
+            "seconds" : 3.4e-05,
+            "text" : "use strict;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::ConnectionState::BEGIN@4" : [
+                  1,
+                  1.9e-05,
+                  3e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@19" : null
+                  }
+               ],
+               "warnings::import" : [
+                  1,
+                  1.6e-05,
+                  6e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::ConnectionState::BEGIN@4" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 4,
+            "seconds" : 2.4e-05,
+            "text" : "use warnings;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 6,
+            "seconds" : 1e-06,
+            "text" : "our $VERSION = '0.002013';\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  9e-06,
+                  9e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::ConnectionState::BEGIN@8" : null
+                  }
+               ],
+               "PAGI::Server::ConnectionState::BEGIN@8" : [
+                  1,
+                  1.3e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@19" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 8,
+            "seconds" : 0.001285,
+            "text" : "use Scalar::Util qw(weaken);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 72,
+            "seconds" : 0.00147699999999997,
+            "text" : "    my ($class, %args) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 74,
+            "seconds" : 0.000224,
+            "text" : "    my $connected = 1;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 75,
+            "seconds" : 0.000420000000000004,
+            "text" : "    my $reason = undef;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 85,
+            "seconds" : 0.00516000000000006,
+            "text" : "        _connected => \\$connected,\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 106,
+            "seconds" : 0.00106100000000001,
+            "text" : "    weaken($self->{_connection}) if $self->{_connection};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 108,
+            "seconds" : 0.00272300000000004,
+            "text" : "    return $self;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 140,
+            "seconds" : 0.002423,
+            "text" : "sub _mark_response_started { $_[0]->{_response_started} = 1; return }\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 437,
+            "seconds" : 0.000251,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 440,
+            "seconds" : 0.000561000000000007,
+            "text" : "    return unless ${$self->{_connected}};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 444,
+            "seconds" : 0.000611000000000008,
+            "text" : "    ${$self->{_connected}} = 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 445,
+            "seconds" : 0.000341000000000002,
+            "text" : "    $self->{_completed}    = 1;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 448,
+            "seconds" : 0.000868000000000015,
+            "text" : "    for my $cb (@{$self->{_complete_callbacks}}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 454,
+            "seconds" : 0.000757000000000011,
+            "text" : "    $self->{_complete_callbacks} = [];\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 455,
+            "seconds" : 0.00193199999999994,
+            "text" : "    $self->{_callbacks}          = [];\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 470,
+            "seconds" : 2e-06,
+            "text" : "1;\n"
+         }
+      ]
+   },
+   {
+      "file" : "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/TransportState.pm",
+      "lines" : [
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::BEGIN@3" : [
+                  1,
+                  1.1e-05,
+                  9e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@20" : null
+                  }
+               ],
+               "strict::import" : [
+                  1,
+                  2e-06,
+                  2e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::BEGIN@3" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 3,
+            "seconds" : 1.8e-05,
+            "text" : "use strict;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::BEGIN@4" : [
+                  1,
+                  1.6e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@20" : null
+                  }
+               ],
+               "warnings::import" : [
+                  1,
+                  1.2e-05,
+                  5e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::BEGIN@4" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 4,
+            "seconds" : 2.6e-05,
+            "text" : "use warnings;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 6,
+            "seconds" : 0,
+            "text" : "our $VERSION = '0.002013';\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  2.7e-05,
+                  2.7e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::BEGIN@8" : null
+                  }
+               ],
+               "PAGI::Server::TransportState::BEGIN@8" : [
+                  1,
+                  3e-05,
+                  3e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@20" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 8,
+            "seconds" : 0.00057,
+            "text" : "use Scalar::Util qw(weaken);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 83,
+            "seconds" : 0.00187199999999994,
+            "text" : "    my ($class, %args) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 94,
+            "seconds" : 0.00479100000000001,
+            "text" : "        _high_water_callbacks => [],\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 99,
+            "seconds" : 0.002386,
+            "text" : "    return $self;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 114,
+            "seconds" : 0.000214,
+            "text" : "    my $self = shift;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 115,
+            "seconds" : 0.000393000000000003,
+            "text" : "    my $measure = $self->{_measure};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 116,
+            "seconds" : 0.000243999999999999,
+            "text" : "    return 0 unless $measure;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:3480]" : [
+                  2203,
+                  0.011777,
+                  0.003353,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::buffered_amount" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 117,
+            "seconds" : 0.00290900000000006,
+            "text" : "    return $measure->() // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 132,
+            "seconds" : 0.000253,
+            "text" : "    my $self = shift;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 133,
+            "seconds" : 0.000388000000000002,
+            "text" : "    my $high = $self->{_high};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::Connection::__ANON__[/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/Connection.pm:3481]" : [
+                  2203,
+                  0.001631,
+                  0.001631,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::high_water_mark" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 134,
+            "seconds" : 0.00381100000000018,
+            "text" : "    return ref $high eq 'CODE' ? $high->() : $high;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 213,
+            "seconds" : 0.000278,
+            "text" : "    my ($self) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 215,
+            "seconds" : 0.000361000000000002,
+            "text" : "    return if $self->{_above_high};     # already armed; waiting for drain\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::high_water_mark" : [
+                  2203,
+                  0.006015,
+                  0.004384,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::_check_watermarks" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 217,
+            "seconds" : 0.00156099999999997,
+            "text" : "    my $high = $self->high_water_mark;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 218,
+            "seconds" : 0.000221999999999999,
+            "text" : "    return unless defined $high;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::TransportState::buffered_amount" : [
+                  2203,
+                  0.015467,
+                  0.00369,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::TransportState::_check_watermarks" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 219,
+            "seconds" : 0.00309600000000007,
+            "text" : "    return unless $self->buffered_amount >= $high;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 245,
+            "seconds" : 3e-06,
+            "text" : "1;\n"
+         }
+      ]
+   },
+   {
+      "file" : "/Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/PAGI/Server/EventValidator.pm",
+      "lines" : [
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::BEGIN@3" : [
+                  1,
+                  1.1e-05,
+                  1e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@21" : null
+                  }
+               ],
+               "strict::import" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::BEGIN@3" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 3,
+            "seconds" : 1.9e-05,
+            "text" : "use strict;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::BEGIN@4" : [
+                  1,
+                  1.6e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@21" : null
+                  }
+               ],
+               "warnings::import" : [
+                  1,
+                  1.2e-05,
+                  4e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::BEGIN@4" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 4,
+            "seconds" : 2.6e-05,
+            "text" : "use warnings;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 6,
+            "seconds" : 1e-06,
+            "text" : "our $VERSION = '0.002013';\n"
+         },
+         {
+            "calls" : {
+               "Exporter::import" : [
+                  1,
+                  1.4e-05,
+                  1.4e-05,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::BEGIN@8" : null
+                  }
+               ],
+               "PAGI::Server::EventValidator::BEGIN@8" : [
+                  1,
+                  1.9e-05,
+                  5e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@21" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 8,
+            "seconds" : 1.5e-05,
+            "text" : "use Carp qw(croak);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::BEGIN@9" : [
+                  1,
+                  1e-06,
+                  1e-06,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::Connection::BEGIN@21" : null
+                  }
+               ]
+            },
+            "count" : 2,
+            "line" : 9,
+            "seconds" : 0.002777,
+            "text" : "use Encode ();\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 14,
+            "seconds" : 0.000376000000000002,
+            "text" : "    my ($v) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 15,
+            "seconds" : 0.00449899999999999,
+            "text" : "    return defined $v && !ref $v && $v =~ /\\A[0-9]+\\z/;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 19,
+            "seconds" : 0.000309000000000001,
+            "text" : "    my ($v) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 20,
+            "seconds" : 0.00344100000000001,
+            "text" : "    return defined $v && !ref $v && $v =~ /\\A[01]\\z/;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 32,
+            "seconds" : 0.000302000000000001,
+            "text" : "    my ($value) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 33,
+            "seconds" : 0.000429000000000004,
+            "text" : "    die \"Invalid header value: contains CR, LF, or null byte\\n\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 35,
+            "seconds" : 0.001292,
+            "text" : "    return $value;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 39,
+            "seconds" : 0.000300000000000001,
+            "text" : "    my ($name) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 40,
+            "seconds" : 0.000786000000000012,
+            "text" : "    die \"Invalid header name: contains CR, LF, or null byte\\n\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 42,
+            "seconds" : 0.000444000000000004,
+            "text" : "    die \"Invalid header name: contains control characters\\n\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 44,
+            "seconds" : 0.00187999999999995,
+            "text" : "    return $name;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 48,
+            "seconds" : 0.000457000000000004,
+            "text" : "    my ($headers, $event_type) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 49,
+            "seconds" : 0.000751000000000011,
+            "text" : "    croak \"$event_type 'headers' must be an array reference\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 51,
+            "seconds" : 0.000631000000000009,
+            "text" : "    for my $h (@$headers) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 52,
+            "seconds" : 0.00068300000000001,
+            "text" : "        croak \"$event_type headers: each header must be a 2-element array reference\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 54,
+            "seconds" : 0.000934000000000016,
+            "text" : "        croak \"$event_type headers: header name and value must be defined strings\"\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::check_header_name" : [
+                  2203,
+                  0.002706,
+                  0.002706,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::validate_headers" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 56,
+            "seconds" : 0.00141399999999998,
+            "text" : "        check_header_name($h->[0]);\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::check_header_value" : [
+                  2203,
+                  0.001614,
+                  0.001614,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::validate_headers" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 57,
+            "seconds" : 0.00178999999999995,
+            "text" : "        check_header_value($h->[1]);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 59,
+            "seconds" : 0.00170399999999996,
+            "text" : "    return;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 80,
+            "seconds" : 0.000627000000000009,
+            "text" : "    my ($event, $opts) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 81,
+            "seconds" : 0.000987000000000016,
+            "text" : "    my $ext = ($opts && $opts->{extensions}) || {};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 82,
+            "seconds" : 0.00070200000000001,
+            "text" : "    my $type = $event->{type} // '';\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_validate_http_response_body" : [
+                  2203,
+                  0.009639,
+                  0.006588,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::validate_http_send" : null
+                  }
+               ],
+               "PAGI::Server::EventValidator::_validate_http_response_start" : [
+                  2203,
+                  0.024557,
+                  0.006955,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::validate_http_send" : null
+                  }
+               ]
+            },
+            "count" : 4406,
+            "line" : 84,
+            "seconds" : 0.0032830000000001,
+            "text" : "    if ($type eq 'http.response.start') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 100,
+            "seconds" : 0.00378300000000017,
+            "text" : "    return;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 104,
+            "seconds" : 0.000271,
+            "text" : "    my ($event) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 108,
+            "seconds" : 0.000428000000000004,
+            "text" : "        unless exists $event->{status};\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_is_nonneg_int" : [
+                  2203,
+                  0.004224,
+                  0.004224,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::_validate_http_response_start" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 110,
+            "seconds" : 0.00179199999999995,
+            "text" : "        unless _is_nonneg_int($event->{status});\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::validate_headers" : [
+                  2203,
+                  0.013378,
+                  0.009058,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::_validate_http_response_start" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 114,
+            "seconds" : 0.00193599999999994,
+            "text" : "        if exists $event->{headers} && defined $event->{headers};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 117,
+            "seconds" : 0.00206399999999995,
+            "text" : "    if (exists $event->{trailers} && defined $event->{trailers}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 124,
+            "seconds" : 0.00028,
+            "text" : "    my ($event) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 127,
+            "seconds" : 0.000492000000000005,
+            "text" : "    my $has_body = exists $event->{body};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 128,
+            "seconds" : 0.000350000000000002,
+            "text" : "    my $has_file = exists $event->{file};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 129,
+            "seconds" : 0.000422000000000004,
+            "text" : "    my $has_fh = exists $event->{fh};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 130,
+            "seconds" : 0.000476000000000005,
+            "text" : "    my $count = $has_body + $has_file + $has_fh;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 132,
+            "seconds" : 0.000319000000000001,
+            "text" : "    croak \"http.response.body requires exactly one of body/file/fh (got $count)\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 136,
+            "seconds" : 0.000327000000000001,
+            "text" : "    if (exists $event->{offset} && defined $event->{offset}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 142,
+            "seconds" : 0.000215,
+            "text" : "    if (exists $event->{length} && defined $event->{length}) {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_is_bool01" : [
+                  2203,
+                  0.003051,
+                  0.003051,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::_validate_http_response_body" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 148,
+            "seconds" : 0.00360900000000014,
+            "text" : "    if (exists $event->{more} && defined $event->{more}) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 440,
+            "seconds" : 0.000464000000000004,
+            "text" : "    my ($event) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 441,
+            "seconds" : 0.0040120000000002,
+            "text" : "    return defined $event->{file} || defined $event->{fh};\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 445,
+            "seconds" : 0.000302,
+            "text" : "    my ($event) = @_;\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_http_body_is_opaque" : [
+                  2203,
+                  0.001113,
+                  0.001113,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::_http_body_is_terminal" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 446,
+            "seconds" : 0.000965000000000016,
+            "text" : "    return 1 if _http_body_is_opaque($event);\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 447,
+            "seconds" : 0.000335000000000002,
+            "text" : "    my $more = $event->{more} // 0;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 448,
+            "seconds" : 0.00172099999999995,
+            "text" : "    return !$more;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 452,
+            "seconds" : 0.000791000000000012,
+            "text" : "    my ($state, $event) = @_;\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 453,
+            "seconds" : 0.00068800000000001,
+            "text" : "    my $type = $event->{type} // '';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 455,
+            "seconds" : 0.000665000000000009,
+            "text" : "    croak \"cannot send '$type': response already complete\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 4406,
+            "line" : 458,
+            "seconds" : 0.00067800000000001,
+            "text" : "    if ($state eq 'initial') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 459,
+            "seconds" : 0.000292000000000001,
+            "text" : "        croak \"cannot send '$type' before http.response.start\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 461,
+            "seconds" : 0.00269300000000003,
+            "text" : "        return $event->{trailers} ? 'started_t' : 'started';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 464,
+            "seconds" : 0.000211,
+            "text" : "    croak \"cannot send duplicate http.response.start\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 467,
+            "seconds" : 0.000184,
+            "text" : "    if ($type eq 'http.response.trailers') {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 473,
+            "seconds" : 0.000213,
+            "text" : "    return $state if $type eq 'http.fullflush';\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 475,
+            "seconds" : 0.000418000000000004,
+            "text" : "    if ($type eq 'http.response.body') {\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_http_body_is_opaque" : [
+                  2203,
+                  0.001882,
+                  0.001882,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::advance_http" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 483,
+            "seconds" : 0.00139199999999998,
+            "text" : "        croak \"cannot send a file/fh body after inline body bytes\"\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 486,
+            "seconds" : 0.00185199999999995,
+            "text" : "        if ($state =~ /\\Astarted(_t)?(?:_i)?\\z/) {\n"
+         },
+         {
+            "calls" : {},
+            "count" : 2203,
+            "line" : 487,
+            "seconds" : 0.00108100000000001,
+            "text" : "            my $trailers_declared = $1 ? '_t' : '';\n"
+         },
+         {
+            "calls" : {
+               "PAGI::Server::EventValidator::_http_body_is_terminal" : [
+                  2203,
+                  0.004604,
+                  0.003491,
+                  0,
+                  0,
+                  0,
+                  0,
+                  {
+                     "PAGI::Server::EventValidator::advance_http" : null
+                  }
+               ]
+            },
+            "count" : 2203,
+            "line" : 488,
+            "seconds" : 0.00383400000000009,
+            "text" : "            return _http_body_is_terminal($event)\n"
+         },
+         {
+            "calls" : {},
+            "count" : 1,
+            "line" : 586,
+            "seconds" : 3e-06,
+            "text" : "1;\n"
+         }
+      ]
+   }
+]

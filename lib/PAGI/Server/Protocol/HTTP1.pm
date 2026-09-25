@@ -8,36 +8,8 @@ use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
 use Encode qw(decode);
 use PAGI::Server ();
+use PAGI::Server::EventValidator ();
 
-
-# =============================================================================
-# Header Validation (CRLF Injection Prevention)
-# =============================================================================
-# RFC 7230 Section 3.2.6: Field values MUST NOT contain CR or LF
-# Additionally, null bytes are rejected as they can cause truncation attacks
-
-sub _validate_header_name {
-    my ($name) = @_;
-
-    if ($name =~ /[\r\n\0]/) {
-        die "Invalid header name: contains CR, LF, or null byte\n";
-    }
-    # RFC 7230: token = 1*tchar
-    # For simplicity, we just reject control characters and delimiters
-    if ($name =~ /[[:cntrl:]]/) {
-        die "Invalid header name: contains control characters\n";
-    }
-    return $name;
-}
-
-sub _validate_header_value {
-    my ($value) = @_;
-
-    if ($value =~ /[\r\n\0]/) {
-        die "Invalid header value: contains CR, LF, or null byte\n";
-    }
-    return $value;
-}
 
 =encoding utf8
 
@@ -394,6 +366,18 @@ sub parse_request {
 
 sub serialize_response_start {
     my ($self, $status, $headers, $chunked, $http_version) = @_;
+    for my $header (@$headers) {
+        PAGI::Server::EventValidator::check_header_name($header->[0]);
+        PAGI::Server::EventValidator::check_header_value($header->[1]);
+    }
+    return $self->_encode_response_start($status, $headers, $chunked, $http_version);
+}
+
+# Internal encoding for headers already checked at the app-event boundary.
+# Public callers, including synthetic server responses, use the checked method
+# above. Both paths share this framing implementation.
+sub _encode_response_start {
+    my ($self, $status, $headers, $chunked, $http_version) = @_;
     $chunked //= 0;
     $http_version //= '1.1';
 
@@ -405,8 +389,6 @@ sub serialize_response_start {
     for my $header (@$headers) {
         my ($name, $value) = @$header;
         $has_server = 1 if lc($name) eq 'server';
-        $name = _validate_header_name($name);
-        $value = _validate_header_value($value);
         $response .= "$name: $value\r\n";
     }
 
@@ -460,12 +442,21 @@ sub serialize_continue {
 
 sub serialize_trailers {
     my ($self, $headers) = @_;
+    for my $header (@$headers) {
+        PAGI::Server::EventValidator::check_header_name($header->[0]);
+        PAGI::Server::EventValidator::check_header_value($header->[1]);
+    }
+    return $self->_encode_trailers($headers);
+}
+
+# Internal counterpart to _encode_response_start: validation belongs to the
+# app-event boundary or to the checked public serializer above.
+sub _encode_trailers {
+    my ($self, $headers) = @_;
 
     my $trailers = '';
     for my $header (@$headers) {
         my ($name, $value) = @$header;
-        $name = _validate_header_name($name);
-        $value = _validate_header_value($value);
         $trailers .= "$name: $value\r\n";
     }
     $trailers .= "\r\n";

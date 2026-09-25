@@ -7,6 +7,7 @@ They are examples, not production endpoints. Run them on loopback.
 | App | Workload | Variants |
 | --- | --- | --- |
 | `get.pl` | Tiny fixed response, no receive | `?observe=1` registers one completion callback |
+| `headers.pl` | Same tiny body with ten application response headers | Runner case: `headers` |
 | `post.pl` | Read the entire request body; respond with byte count and newline | `?observe=1` |
 | `stream.pl` | 64 KiB, sent as 64 chunks of 1 KiB | `?single=1` sends the same bytes once; either mode accepts `observe=1` |
 | `sse.pl` | 100 ordered events, each containing 128 bytes of data, then clean close | `?paced=1` waits 10 ms between events |
@@ -86,6 +87,9 @@ The runner sets `LIBEV_FLAGS=8` and `PERL_FUTURE_NO_XS=1` for both. It preserves
 perlbrew/local::lib paths and records them. It selects its own temporary ports,
 starts production EV servers, and stops only the process groups it created.
 Do not run both comparisons concurrently: they would compete for the same machine.
+
+The `headers` case checks all ten response fields during preflight and can be
+selected with `--cases headers` for a focused header-processing comparison.
 
 Select fewer cases or run a smoke check:
 

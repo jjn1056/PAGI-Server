@@ -1254,9 +1254,8 @@ sub _h2_scope_end_event {
 # Www.pod "Meaning per scope" puts the end at the server finishing its output,
 # not at the application's return, so marking here is what stops a client reset
 # arriving in between from taking the object somewhere else: "the first to
-# occur wins", and the terminal state never reopens. The marks are idempotent,
-# so _h2_on_close and the h1 request tail mark the same object again for
-# nothing. The wake comes after the mark, never before, because the object must
+# occur wins", and the terminal state never reopens. The wake comes after
+# the mark, never before, because the object must
 # be terminal before a pending receive resumes (Www.pod "State Transition
 # Order"): Future::AsyncAwait resumes an awaiting coroutine inline off ->done
 # and its first act may be to read the object. That resumption lands inside the
@@ -5547,16 +5546,6 @@ async sub _handle_request {
         # Stop stall timer - request completed successfully
         $self->_stop_stall_timer;
 
-        # Request finished cleanly: fire on_complete (not on_disconnect) on the
-        # HTTP connection-state object. Must happen on BOTH the keep-alive and
-        # close paths, and before the keep-alive branch clears the state below.
-        # Once marked complete, the non-keep-alive _handle_disconnect_and_close
-        # call below no-ops the state transition, so on_disconnect never fires for
-        # a completed request.
-        if (my $conn_state = $self->{current_connection_state}) {
-            $conn_state->_mark_complete;
-        }
-
         # A request has now completed on this connection: the idle timer's next
         # expiry (if the connection stays open awaiting another request) reports
         # keepalive_timeout rather than idle_timeout.
@@ -6205,7 +6194,9 @@ sub _create_send {
                 push @final_headers, ['connection', 'close'];
             }
 
-            my $response = $weak_self->{protocol}->serialize_response_start(
+            # App fields were checked before sequence advancement; additions
+            # above are server-generated Date and framing/connection fields.
+            my $response = $weak_self->{protocol}->_encode_response_start(
                 $status, \@final_headers, $chunked, $http_version
             );
 
@@ -6352,14 +6343,8 @@ sub _create_send {
             $weak_self->{_resp_pending} = undef;
             $trailers .= "0\r\n";
 
-            my @validated_trailers;
-            for my $header (@$trailer_headers) {
-                my ($name, $value) = @$header;
-                $name  = _validate_header_name($name);
-                $value = _validate_header_value($value);
-                push @validated_trailers, [$name, $value];
-            }
-            $trailers .= $weak_self->{protocol}->serialize_trailers(\@validated_trailers);
+            # Validation already ran before sequence advancement and stripping.
+            $trailers .= $weak_self->{protocol}->_encode_trailers($trailer_headers);
 
             $weak_self->{stream}->write($trailers);
         }

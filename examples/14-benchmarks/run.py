@@ -14,7 +14,7 @@ import subprocess
 import time
 
 HERE = Path(__file__).resolve().parent
-CASES = ['get', 'get-observe', 'post', 'post-observe', 'single', 'single-observe',
+CASES = ['get', 'get-observe', 'headers', 'post', 'post-observe', 'single', 'single-observe',
          'stream', 'stream-observe', 'sse', 'websocket']
 
 def case_config(case):
@@ -32,10 +32,23 @@ def check_response(base, response):
     body = response.read()
     if response.status != 200:
         raise RuntimeError(f'HTTP {response.status}: {body[:200]!r}')
-    expected = {'get': b'Hello from PAGI', 'post': b'1024\n',
+    expected = {'get': b'Hello from PAGI', 'headers': b'Hello from PAGI', 'post': b'1024\n',
                 'single': b'x' * 65536, 'stream': b'x' * 65536}
     if base in expected and body != expected[base]:
         raise RuntimeError(f'Incorrect {base} response ({len(body)} bytes)')
+    if base == 'headers':
+        expected_headers = {
+            'content-type': 'text/plain', 'cache-control': 'private, no-cache',
+            'vary': 'accept-encoding', 'etag': '"benchmark-v1"',
+            'content-language': 'en', 'x-content-type-options': 'nosniff',
+            'referrer-policy': 'same-origin',
+            'permissions-policy': 'camera=(), microphone=()',
+            'link': '</assets/app.css>; rel=preload; as=style',
+            'x-benchmark-case': 'ten-headers',
+        }
+        for name, value in expected_headers.items():
+            if response.getheader(name) != value:
+                raise RuntimeError(f'Incorrect benchmark header: {name}')
     if base == 'sse':
         if response.getheader('content-type', '').split(';')[0] != 'text/event-stream':
             raise RuntimeError('Incorrect SSE content type')

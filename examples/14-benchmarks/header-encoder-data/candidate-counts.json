@@ -1,0 +1,50 @@
+[
+   {
+      "app_fields" : 1,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 1,
+         "PAGI::Server::EventValidator::check_header_value" : 1
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 1,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 1,
+         "PAGI::Server::EventValidator::check_header_value" : 1
+      },
+      "event" : "trailers"
+   },
+   {
+      "app_fields" : 10,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 10,
+         "PAGI::Server::EventValidator::check_header_value" : 10
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 10,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 10,
+         "PAGI::Server::EventValidator::check_header_value" : 10
+      },
+      "event" : "trailers"
+   },
+   {
+      "app_fields" : 30,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 30,
+         "PAGI::Server::EventValidator::check_header_value" : 30
+      },
+      "event" : "start"
+   },
+   {
+      "app_fields" : 30,
+      "checks" : {
+         "PAGI::Server::EventValidator::check_header_name" : 30,
+         "PAGI::Server::EventValidator::check_header_value" : 30
+      },
+      "event" : "trailers"
+   }
+]

@@ -7,6 +7,7 @@ use FindBin;
 # Small contract check for the examples themselves; no server processes.
 for my $case (
     ['get', 'http', [], 'Hello from PAGI'],
+    ['headers', 'http', [], 'Hello from PAGI'],
     ['post', 'http', [
         {type => 'http.request', body => 'x' x 400, more => 1},
         {type => 'http.request', body => 'x' x 624, more => 0},
@@ -28,6 +29,9 @@ for my $case (
             sub { die 'unexpected receive' unless @$events; Future->done(shift @$events) },
             sub { push @sent, $_[0]; Future->done });
         $future->get;
+        if ($name eq 'headers') {
+            is(scalar @{$sent[0]{headers}}, 10, 'ten application fields');
+        }
         if (defined $expected) {
             is(join('', map { $_->{body} // '' } @sent), $expected, 'complete response bytes');
             is($sent[-1]{more} // 0, 0, 'response ends');

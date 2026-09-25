@@ -1,0 +1,53 @@
+{
+  "workloads": {
+    "stream-observe": {
+      "release": {
+        "samples": [
+          235.8738,
+          238.4696
+        ],
+        "rps": 237.1717,
+        "cpu_us": 4211.992339663013,
+        "rss_mib": 43.482421875
+      },
+      "baseline": {
+        "samples": [
+          250.6126,
+          222.1691
+        ],
+        "rps": 236.39085,
+        "cpu_us": 4273.9966050827425,
+        "rss_mib": 45.40625,
+        "vs_release_percent": -0.3292340527980331
+      },
+      "candidate": {
+        "samples": [
+          269.4695,
+          212.4357
+        ],
+        "rps": 240.9526,
+        "cpu_us": 4246.148595322885,
+        "rss_mib": 44.302734375,
+        "vs_release_percent": 1.5941615293898925,
+        "vs_baseline_percent": 1.9297489729403594
+      }
+    }
+  },
+  "total_responses": 28603,
+  "preflight_cpu_idle": [
+    91.69,
+    93.56,
+    94.95,
+    89.96,
+    69.93,
+    90.19
+  ],
+  "preflight_swapouts": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}

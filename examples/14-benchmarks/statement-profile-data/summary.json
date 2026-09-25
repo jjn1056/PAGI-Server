@@ -1,0 +1,418 @@
+{
+  "PAGI::Server::Connection::_create_scope": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 11.310485701316386,
+          "inclusive_us_per_request": 27.107126645483433
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 10.884702678166137,
+          "inclusive_us_per_request": 26.305946436677257
+        }
+      ],
+      "mean_exclusive_us_per_request": 11.097594189741262
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 11.045392646391285,
+          "inclusive_us_per_request": 26.438492964139808
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 11.079891057648661,
+          "inclusive_us_per_request": 27.118474807081252
+        }
+      ],
+      "mean_exclusive_us_per_request": 11.062641852019972
+    }
+  },
+  "PAGI::Server::ConnectionState::new": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.750340444847935,
+          "inclusive_us_per_request": 4.750340444847935
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.684521107580572,
+          "inclusive_us_per_request": 4.684521107580572
+        }
+      ],
+      "mean_exclusive_us_per_request": 4.717430776214254
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.450748978665456,
+          "inclusive_us_per_request": 4.450748978665456
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.411711302768952,
+          "inclusive_us_per_request": 4.411711302768952
+        }
+      ],
+      "mean_exclusive_us_per_request": 4.431230140717204
+    }
+  },
+  "PAGI::Server::TransportState::new": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.9723104857013163,
+          "inclusive_us_per_request": 3.9723104857013163
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.790739900136178,
+          "inclusive_us_per_request": 3.790739900136178
+        }
+      ],
+      "mean_exclusive_us_per_request": 3.881525192918747
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.047662278710849,
+          "inclusive_us_per_request": 3.047662278710849
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.6686336813436227,
+          "inclusive_us_per_request": 3.6686336813436227
+        }
+      ],
+      "mean_exclusive_us_per_request": 3.358147980027236
+    }
+  },
+  "PAGI::Server::Connection::_create_receive": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.090785292782569,
+          "inclusive_us_per_request": 3.090785292782569
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 2.928733545165683,
+          "inclusive_us_per_request": 2.928733545165683
+        }
+      ],
+      "mean_exclusive_us_per_request": 3.0097594189741264
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.213345438039037,
+          "inclusive_us_per_request": 4.213345438039037
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.729459827507943,
+          "inclusive_us_per_request": 4.729459827507943
+        }
+      ],
+      "mean_exclusive_us_per_request": 4.47140263277349
+    }
+  },
+  "PAGI::Server::Connection::_create_send": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 5.014979573309124,
+          "inclusive_us_per_request": 5.014979573309124
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 4.735814798002724,
+          "inclusive_us_per_request": 4.735814798002724
+        }
+      ],
+      "mean_exclusive_us_per_request": 4.875397185655924
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 6.336359509759419,
+          "inclusive_us_per_request": 7.155696777122106
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 6.354516568315933,
+          "inclusive_us_per_request": 7.157512482977758
+        }
+      ],
+      "mean_exclusive_us_per_request": 6.345438039037676
+    }
+  },
+  "PAGI::Server::Connection::_h1_abort_hook": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 2.1448025419881978,
+          "inclusive_us_per_request": 2.1448025419881978
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 2.17067635043123,
+          "inclusive_us_per_request": 2.17067635043123
+        }
+      ],
+      "mean_exclusive_us_per_request": 2.157739446209714
+    }
+  },
+  "PAGI::Server::ConnectionState::_mark_complete": {
+    "release": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 2.1911030413073083,
+          "inclusive_us_per_request": 2.1911030413073083
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 2.1452564684521107,
+          "inclusive_us_per_request": 2.1452564684521107
+        }
+      ],
+      "mean_exclusive_us_per_request": 2.1681797548797093
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.217430776214253,
+          "inclusive_us_per_request": 14.615524285065817
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.3527008624602814,
+          "inclusive_us_per_request": 14.69042215161144
+        }
+      ],
+      "mean_exclusive_us_per_request": 3.2850658193372673
+    }
+  },
+  "PAGI::Server::ConnectionState::_deliver_terminal": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.2392192464820697,
+          "inclusive_us_per_request": 11.398093508851566
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 3.1688606445755787,
+          "inclusive_us_per_request": 11.337721289151158
+        }
+      ],
+      "mean_exclusive_us_per_request": 3.204039945528824
+    }
+  },
+  "IO::Async::Loop::later": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 1.6595551520653653,
+          "inclusive_us_per_request": 7.458011802088062
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 1.663640490240581,
+          "inclusive_us_per_request": 7.591012256014525
+        }
+      ],
+      "mean_exclusive_us_per_request": 1.6615978211529732
+    }
+  },
+  "IO::Async::Loop::EV::watch_idle": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 5.051293690422152,
+          "inclusive_us_per_request": 5.798456650022696
+        },
+        {
+          "calls": 2203,
+          "exclusive_us_per_request": 5.16749886518384,
+          "inclusive_us_per_request": 5.927371765773945
+        }
+      ],
+      "mean_exclusive_us_per_request": 5.109396277802996
+    }
+  },
+  "PAGI::Server::EventValidator::scope_send_clean": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 4406,
+          "exclusive_us_per_request": 2.5533363595097596,
+          "inclusive_us_per_request": 2.5533363595097596
+        },
+        {
+          "calls": 4406,
+          "exclusive_us_per_request": 2.47208352246936,
+          "inclusive_us_per_request": 2.47208352246936
+        }
+      ],
+      "mean_exclusive_us_per_request": 2.5127099409895597
+    }
+  },
+  "Future::PP::new": {
+    "release": {
+      "samples": [
+        {
+          "calls": 8878,
+          "exclusive_us_per_request": 5.223785746709033,
+          "inclusive_us_per_request": 5.223785746709033
+        },
+        {
+          "calls": 8878,
+          "exclusive_us_per_request": 5.0549251021334545,
+          "inclusive_us_per_request": 5.0549251021334545
+        }
+      ],
+      "mean_exclusive_us_per_request": 5.139355424421243
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 8878,
+          "exclusive_us_per_request": 4.8211529732183385,
+          "inclusive_us_per_request": 4.8211529732183385
+        },
+        {
+          "calls": 8878,
+          "exclusive_us_per_request": 5.04630049931911,
+          "inclusive_us_per_request": 5.04630049931911
+        }
+      ],
+      "mean_exclusive_us_per_request": 4.933726736268724
+    }
+  },
+  "HTTP state publisher": {
+    "release": {
+      "samples": [
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        },
+        {
+          "calls": 0,
+          "exclusive_us_per_request": 0,
+          "inclusive_us_per_request": 0
+        }
+      ],
+      "mean_exclusive_us_per_request": 0
+    },
+    "current": {
+      "samples": [
+        {
+          "calls": 6609,
+          "exclusive_us_per_request": 2.2197004085338174,
+          "inclusive_us_per_request": 2.2197004085338174
+        },
+        {
+          "calls": 6609,
+          "exclusive_us_per_request": 2.1956423059464365,
+          "inclusive_us_per_request": 2.1956423059464365
+        }
+      ],
+      "mean_exclusive_us_per_request": 2.2076713572401268
+    }
+  }
+}
