@@ -1,0 +1,35 @@
+storm
+ release n=5 rps=151.6 p95=3109.40ms p99=3263.50ms range=3086.70..3362.80ms max=3392.10ms
+   background rps=8364.7, p99=13.30ms
+ before n=5 rps=138.3 p95=3417.20ms p99=3561.00ms range=3531.30..3626.90ms max=3665.00ms
+   background rps=7630.3, p99=14.80ms
+ listener n=5 rps=2064.7 p95=232.80ms p99=234.00ms range=212.60..243.70ms max=244.00ms
+   background rps=7833.3, p99=13.30ms
+get-500
+ release n=3 rps=6960.4 p95=74.00ms p99=74.80ms range=74.60..76.10ms max=9434.80ms
+ before n=3 rps=6190.8 p95=82.40ms p99=82.60ms range=81.70..84.00ms max=10978.00ms
+ listener n=3 rps=6686.8 p95=75.40ms p99=76.70ms range=76.70..77.30ms max=238.90ms
+churn
+ release n=3 rps=2739.9 p95=36.80ms p99=37.00ms range=36.60..37.10ms max=45.20ms
+ before n=3 rps=2618.1 p95=38.60ms p99=38.70ms range=38.60..39.50ms max=45.30ms
+ listener n=3 rps=3458.3 p95=31.50ms p99=32.20ms range=32.10..32.20ms max=44.50ms
+get
+ release n=2 rps=8646.1 p95=3.00ms p99=3.05ms range=3.00..3.10ms max=25.00ms
+ before n=2 rps=7896.8 p95=3.30ms p99=3.30ms range=3.30..3.30ms max=26.60ms
+ listener n=2 rps=7861.5 p95=3.25ms p99=3.35ms range=3.30..3.40ms max=6.50ms
+post-observe
+ release n=2 rps=7540.3 p95=3.40ms p99=3.45ms range=3.40..3.50ms max=27.40ms
+ before n=2 rps=7062.9 p95=3.60ms p99=3.70ms range=3.70..3.70ms max=29.40ms
+ listener n=2 rps=7170.4 p95=3.60ms p99=3.65ms range=3.60..3.70ms max=6.70ms
+stream-observe
+ release n=2 rps=509.8 p95=49.20ms p99=49.80ms range=49.20..50.40ms max=123.80ms
+ before n=2 rps=488.9 p95=51.30ms p99=52.80ms range=51.40..54.20ms max=130.90ms
+ listener n=2 rps=481.1 p95=52.25ms p99=52.45ms range=52.20..52.70ms max=91.50ms
+sse
+ release n=2 rps=214.7 p95=116.70ms p99=116.90ms range=116.30..117.50ms max=552.10ms
+ before n=2 rps=212.0 p95=118.15ms p99=149.35ms range=146.80..151.90ms max=584.20ms
+ listener n=2 rps=207.4 p95=121.25ms p99=121.75ms range=120.40..123.10ms max=214.10ms
+websocket
+ release n=2 messages/s=12672.9 p99=2.071ms
+ before n=2 messages/s=12142.1 p99=2.094ms
+ listener n=2 messages/s=12346.9 p99=2.072ms

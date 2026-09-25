@@ -1,0 +1,61 @@
+
+# Failed test 'first readiness event accepted a full batch (fairness bound respected)'
+# at /tmp/pagi-listener-20260925/stock-batching.t line 42.
+# +-----+----+-------+
+# | GOT | OP | CHECK |
+# +-----+----+-------+
+# | 1   | eq | 64    |
+# +-----+----+-------+
+(If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '78')
+
+
+# Failed test 'second event drained the remainder'
+# at /tmp/pagi-listener-20260925/stock-batching.t line 46.
+# +-----+----+-------+
+# | GOT | OP | CHECK |
+# +-----+----+-------+
+# | 2   | eq | 100   |
+# +-----+----+-------+
+(If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '78')
+
+
+# Failed test 'no phantom accepts once the queue is empty'
+# at /tmp/pagi-listener-20260925/stock-batching.t line 49.
+# +-----+----+-------+
+# | GOT | OP | CHECK |
+# +-----+----+-------+
+# | 3   | eq | 100   |
+# +-----+----+-------+
+(If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '78')
+
+/tmp/pagi-listener-20260925/stock-batching.t .. 
+# Seeded srand with seed '20260925' from local date.
+not ok 1 - first readiness event accepted a full batch (fairness bound respected)
+not ok 2 - second event drained the remainder
+not ok 3 - no phantom accepts once the queue is empty
+1..3
+Dubious, test returned 3 (wstat 768, 0x300)
+Failed 3/3 subtests 
+
+Test Summary Report
+-------------------
+/tmp/pagi-listener-20260925/stock-batching.t (Wstat: 768 (exited 3) Tests: 3 Failed: 3)
+  Failed tests:  1-3
+  Non-zero exit status: 3
+Files=1, Tests=3,  0 wallclock secs ( 0.02 usr  0.01 sys +  0.14 cusr  0.04 csys =  0.21 CPU)
+Result: FAIL
+Command [env PERL_FUTURE_NO_XS=1 prove -lv /tmp/pagi-listener-20260925/stock-batching.t] terminated with exit code 1 ($? = 256) under the following perl environment:
+Command terminated with non-zero status.
+Current perl:
+  Name: perl-5.42.2@default
+  Path: /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl
+  Config: -de -Dprefix=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2 -Aeval:scriptdir=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+  Compiled at: Jul 12 2026 09:24:10
+
+perlbrew:
+  version: 0.92
+  ENV:
+    PERLBREW_ROOT: /Users/jnapiorkowski/perl5/perlbrew
+    PERLBREW_HOME: /Users/jnapiorkowski/.perlbrew
+    PERLBREW_PATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin:/Users/jnapiorkowski/perl5/perlbrew/bin:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+    PERLBREW_MANPATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/man:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/man

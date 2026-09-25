@@ -5,9 +5,9 @@ work and simplifying ownership over adding caches, flags or parallel state.
 These are hypotheses, not promised improvements. Compare any candidate with
 both the saved baseline and installed release; keep individual samples.
 
-Canonical runtime checkpoint: `cdf4a7c`, accepted on 2026-09-25. It includes
-the earlier retained work and shared HTTP send coroutine. Subsequent experiments
-start here and continue to include CPAN release comparisons. The full enabled
+Shared-send runtime checkpoint: `cdf4a7c`, accepted on 2026-09-25. It includes
+the earlier retained work and shared HTTP send coroutine. The retained listener experiment below builds on it and continues to include
+CPAN release comparisons. The full enabled
 suite passed at this checkpoint (180 files / 1,273 tests); the AWS comparison
 and rejected candidates are recorded in HTTP-SEND-2026-09-25.md.
 
@@ -155,3 +155,24 @@ All 18 smoke and 48 timed runs passed. Source/dependency hashes stayed unchanged
 The rejected implementation and regression test survive as an evidence patch,
 not active runtime/test changes. See STATE-OWNERSHIP-2026-09-25.md and
 state-ownership-data/. AWS was stopped after downloading results.
+
+## Bounded listener batching — retained, 2026-09-25
+
+Adapted only PR #13's listener commit `7ce3c0b`, adding a post-callback guard
+for pause, close and removal. SSL-extension listeners retain the stock class.
+No other PR optimizations were imported. Full enabled suite: 182 files / 1,282
+tests; the independent review found no remaining blocker in its scope.
+
+AWS first-response p99 for 500 new clients under established traffic: release
+3,264 ms, saved 3,561 ms, batch 64 234 ms. Background p99 stays level. Sustained
+500-client GET gains 8.0% and connection churn 32.1% against saved; ordinary
+25-client GET is effectively flat. Streaming and SSE throughput are 1.6% and
+2.2% lower in the short control samples. Keep those limits visible.
+
+The separate sweep compares custom limits 1, 16, 64 and 256. Batch 1 retains
+the multi-second delay; 64 to 256 buys another 20 ms of burst p99 here. Retain
+64 as the tested starting default. Ledger a public tuning option for later
+design: callback cost and existing traffic may change the tradeoff, and this
+sweep does not establish a universal optimum or elapsed-time bound. No setting
+is added now. See [LISTENER-2026-09-25.md](LISTENER-2026-09-25.md) and
+`listener-data/`. AWS was stopped after downloading and checking the evidence.

@@ -1,0 +1,306 @@
+diff --git a/lib/PAGI/Server.pm b/lib/PAGI/Server.pm
+index 3e42b35..438b7f1 100644
+--- a/lib/PAGI/Server.pm
++++ b/lib/PAGI/Server.pm
+@@ -51,6 +51,7 @@ BEGIN {
+ use parent 'IO::Async::Notifier';
+ 
+ use IO::Async::Listener;
++use PAGI::Server::Listener;
+ use IO::Async::Stream;
+ use IO::Async::Loop;
+ use IO::Async::Timer::Periodic;
+@@ -3223,7 +3224,10 @@ async sub _listen_singleworker {
+ 
+             my $spec_ref = $spec;
+             weaken(my $weak_inner = $self);
+-            my $listener = IO::Async::Listener->new(
++            # Preserve the existing TLS path for inherited listeners.
++            my $listener_class = ($inh->{type} eq 'unix' || !$self->{ssl})
++                ? 'PAGI::Server::Listener' : 'IO::Async::Listener';
++            my $listener = $listener_class->new(
+                 handle    => $handle,
+                 on_stream => sub {
+                     my ($l, $stream) = @_;
+@@ -3241,7 +3245,11 @@ async sub _listen_singleworker {
+         }
+ 
+         my $spec_copy = $spec;  # capture for closure
+-        my $listener = IO::Async::Listener->new(
++        # The SSL listen extension owns its acceptor; only cleartext listeners
++        # can use our batching acceptor. Build the SSL context just once.
++        my $ssl_params = $spec->{type} eq 'tcp' ? $self->_build_ssl_config : undef;
++        my $listener_class = $ssl_params ? 'IO::Async::Listener' : 'PAGI::Server::Listener';
++        my $listener = $listener_class->new(
+             on_stream => sub {
+                 my ($listener, $stream) = @_;
+                 return unless $weak_self;
+@@ -3279,7 +3287,7 @@ async sub _listen_singleworker {
+             };
+ 
+             # Add SSL options if configured (TCP only)
+-            if (my $ssl_params = $self->_build_ssl_config) {
++            if ($ssl_params) {
+                 $listen_opts{extensions} = ['SSL'];
+                 %listen_opts = (%listen_opts, %$ssl_params);
+ 
+@@ -4266,7 +4274,8 @@ sub _run_as_worker {
+         # Build SSL config for TCP listeners if needed
+         my $use_ssl = ($ssl_params && $spec->{type} eq 'tcp');
+ 
+-        my $listener = IO::Async::Listener->new(
++        # Worker TLS is upgraded in on_stream, after ordinary socket accept.
++        my $listener = PAGI::Server::Listener->new(
+             handle => $entry->{socket},
+             on_stream => sub {
+                 my ($listener, $stream) = @_;
+diff --git a/t/00-load.t b/t/00-load.t
+index f0e3eab..1c06a80 100644
+--- a/t/00-load.t
++++ b/t/00-load.t
+@@ -7,6 +7,7 @@ my @core_modules = qw(
+     PAGI::Server
+     PAGI::Server::AppNormalizer
+     PAGI::Server::Connection
++    PAGI::Server::Listener
+     PAGI::Server::ConnectionState
+     PAGI::Server::EventValidator
+     PAGI::Server::AsyncFile
+diff --git a/lib/PAGI/Server/Listener.pm b/lib/PAGI/Server/Listener.pm
+new file mode 100644
+index 0000000..7fd20e5
+--- /dev/null
++++ b/lib/PAGI/Server/Listener.pm
+@@ -0,0 +1,88 @@
++package PAGI::Server::Listener;
++
++use strict;
++use warnings;
++
++our $VERSION = '0.002013';
++
++use parent 'IO::Async::Listener';
++
++use Errno qw(EAGAIN EWOULDBLOCK);
++use IO::Async::Stream;
++
++=encoding utf8
++
++=head1 NAME
++
++PAGI::Server::Listener - accept-batching listener for cleartext connections
++
++=head1 DESCRIPTION
++
++Internal to PAGI::Server; not a public API surface.
++
++L<IO::Async::Listener> accepts one connection per readiness event. Under
++load, a burst of incoming connections can therefore wait across many loop
++iterations before the application receives their first requests.
++
++This subclass drains up to C<ACCEPT_BATCH> pending connections per
++readiness event. The bound keeps one storm from monopolizing a loop
++iteration at the expense of established connections' I/O. This is a bound
++on the number accepted, not a bound on elapsed time; 64 is a starting value
++for measurement, not a protocol requirement.
++
++It dispatches accepted sockets directly and so bypasses the parent's
++pluggable acceptor; it must therefore never be used for listeners whose
++acceptor performs the TLS handshake (the L<IO::Async::SSL> listen
++extension). PAGI::Server selects it for cleartext listeners only.
++
++=cut
++
++# Per-event accept bound: high enough to drain a storm in a few loop
++# iterations, low enough that accepting can't monopolize an iteration.
++use constant ACCEPT_BATCH => 64;
++
++sub on_read_ready {
++    my $self = shift;
++
++    my $socket = $self->read_handle or return;
++
++    for (1 .. ACCEPT_BATCH) {
++        my $accepted = $socket->accept;
++
++        if (!defined $accepted) {
++            # Queue drained
++            last if $! == EAGAIN || $! == EWOULDBLOCK;
++            # Real accept failure (e.g. EMFILE): dispatch like the parent
++            $self->maybe_invoke_event(on_accept_error => $socket, $!)
++                or $self->invoke_error("accept() failed - $!", accept => $socket, $!);
++            last;
++        }
++
++        $accepted->blocking(0);
++        $self->invoke_event(on_stream => IO::Async::Stream->new(handle => $accepted));
++
++        # A callback may pause, close, replace or detach this listener.
++        my $current = $self->read_handle;
++        last unless $current && $current == $socket
++            && $self->want_readready && $self->loop;
++    }
++}
++
++1;
++
++__END__
++
++=head1 SEE ALSO
++
++L<IO::Async::Listener>, L<PAGI::Server>
++
++=head1 AUTHOR
++
++John Napiorkowski E<lt>jjnapiork@cpan.orgE<gt>
++
++=head1 LICENSE
++
++This library is free software; you can redistribute it and/or modify
++it under the same terms as Perl itself.
++
++=cut
+diff --git a/t/accept-batching.t b/t/accept-batching.t
+new file mode 100644
+index 0000000..6227cc9
+--- /dev/null
++++ b/t/accept-batching.t
+@@ -0,0 +1,57 @@
++use strict;
++use warnings;
++use Test2::V0;
++use IO::Async::Loop;
++use IO::Socket::INET;
++use FindBin;
++use lib "$FindBin::Bin/../lib";
++
++plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
++
++use PAGI::Server::Listener;
++
++# Contract: a storm of pending connections drains in bounded batches per
++# readiness event instead of one per event (the stock PAGI::Server::Listener
++# behavior, which caps the accept rate at the event-loop iteration rate).
++
++my $loop = IO::Async::Loop->new;
++
++my @streams;
++my $listener = PAGI::Server::Listener->new(
++    on_stream => sub { push @streams, $_[1] },
++);
++$loop->add($listener);
++$listener->listen(
++    addr => {
++        family => 'inet', socktype => 'stream', ip => '127.0.0.1', port => 0,
++    },
++    # Room for the whole storm below (the kernel clamps to somaxconn, which
++    # is >= 128 everywhere this suite runs)
++    queuesize => 128,
++)->get;
++my $port = $listener->read_handle->sockport;
++
++# Open 100 connections without running the loop: the kernel completes the
++# handshakes into the accept queue (100 < the somaxconn clamp).
++my @clients = map {
++    IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5)
++        or die "connect: $!";
++} 1 .. 100;
++
++$loop->loop_once(0.1);   # one readiness dispatch
++is(scalar @streams, 64,
++    'first readiness event accepted a full batch (fairness bound respected)');
++
++$loop->loop_once(0.1);
++is(scalar @streams, 100, 'second event drained the remainder');
++
++$loop->loop_once(0.1);
++is(scalar @streams, 100, 'no phantom accepts once the queue is empty');
++
++ok(!grep($_->read_handle->blocking, @streams), 'accepted sockets are nonblocking');
++
++$_->close_now for @streams;
++close $_ for @clients;
++$loop->remove($listener);
++$listener->close;
++done_testing;
+diff --git a/t/accept-batching-events.t b/t/accept-batching-events.t
+new file mode 100644
+index 0000000..9057ba8
+--- /dev/null
++++ b/t/accept-batching-events.t
+@@ -0,0 +1,75 @@
++use strict;
++use warnings;
++use Test2::V0;
++use IO::Async::Loop;
++use IO::Socket::INET;
++use Errno qw(EMFILE);
++use PAGI::Server::Listener;
++
++plan skip_all => 'Socket integration is not supported on Windows' if $^O eq 'MSWin32';
++
++# A callback may stop this listener. A batch must respect that before
++# attempting another accept, just as separate readiness events would.
++for my $action (qw(pause close remove)) {
++    subtest "callback can $action the listener" => sub {
++        my $loop = IO::Async::Loop->new;
++        my @streams;
++        my $listener = PAGI::Server::Listener->new(on_stream => sub {
++            my ($self, $stream) = @_;
++            push @streams, $stream;
++            $self->want_readready(0) if $action eq 'pause';
++            $self->close if $action eq 'close';
++            $loop->remove($self) if $action eq 'remove';
++        });
++        $loop->add($listener);
++        $listener->listen(addr => {
++            family => 'inet', socktype => 'stream', ip => '127.0.0.1', port => 0,
++        }, queuesize => 16)->get;
++        my @clients = map {
++            IO::Socket::INET->new(PeerAddr => '127.0.0.1',
++                PeerPort => $listener->read_handle->sockport,
++                Proto => 'tcp', Timeout => 5) or die "connect: $!";
++        } 1 .. 3;
++        my $ok = eval { $listener->on_read_ready; 1 };
++        ok($ok, 'callback ends this readiness dispatch without an accept error') or diag($@);
++        is(scalar @streams, 1, 'remaining clients are not accepted after callback stops listener');
++        $_->close_now for @streams;
++        close $_ for @clients;
++        $loop->remove($listener) if $listener->loop;
++        $listener->close;
++    };
++}
++
++{
++    package Local::ErrorListener;
++    use parent 'PAGI::Server::Listener';
++    sub on_accept_error {
++        my ($self, $socket, $errno) = @_;
++        push @{$self->{errors}}, [$socket, 0 + $errno];
++    }
++}
++subtest 'accept error and empty queue remain distinct' => sub {
++    my $loop = IO::Async::Loop->new;
++    my $listener = Local::ErrorListener->new(on_stream => sub {
++        fail('a failed accept must not deliver a stream');
++    });
++    $loop->add($listener);
++    $listener->listen(addr => {
++        family => 'inet', socktype => 'stream', ip => '127.0.0.1', port => 0,
++    })->get;
++    my $socket = $listener->read_handle;
++    $listener->on_read_ready;
++    is($listener->{errors} // [], [], 'empty nonblocking queue does not report an error');
++    {
++        no strict 'refs';
++        no warnings 'redefine';
++        local *{ref($socket) . '::accept'} = sub { $! = EMFILE; return undef };
++        $listener->on_read_ready;
++    }
++    is(scalar @{$listener->{errors}}, 1, 'descriptor exhaustion is delivered once');
++    is($listener->{errors}[0][0], $socket, 'error includes the listening socket');
++    is($listener->{errors}[0][1], 0 + EMFILE, 'error includes the original errno');
++    $loop->remove($listener);
++    $listener->close;
++};
++done_testing;

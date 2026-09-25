@@ -169,10 +169,10 @@ The follow-up [NYTProf investigation](PROFILING-2026-09-23.md) records request-p
 
 ### Canonical performance checkpoint and focused AWS profile
 
-The canonical runtime checkpoint is now `cdf4a7c` on
+The shared-send runtime checkpoint is `cdf4a7c` on
 `experiment/http-simplification`: all previously retained changes plus the
-shared HTTP send coroutine. Use this commit as the baseline for subsequent
-experiments, alongside the installed CPAN release. The header-scan and
+shared HTTP send coroutine. The listener experiment below builds on this
+checkpoint, alongside the installed CPAN release. The header-scan and
 scalar-alias ownership experiments remain rejected.
 
 The earlier checkpoint `874b120` is the subject of the
@@ -190,3 +190,10 @@ with streaming effectively flat. Shared send is retained after the full enabled
 suite passed (180 files / 1,273 tests); the header-scan candidate was discarded.
 The report compares both independent candidates with the saved checkpoint and
 CPAN release.
+
+The latest retained change is [bounded listener batching](LISTENER-2026-09-25.md).
+At 500 new connections under established traffic, first-response p99 falls from
+3,561 ms at the saved checkpoint to 234 ms (release: 3,264 ms). The full enabled
+suite passes: 182 files / 1,282 tests. A separate size sweep supports 64 as a
+starting default; a public tuning option remains deferred. The report preserves
+release comparisons, streaming/SSE tradeoffs, raw results and the isolated patch.

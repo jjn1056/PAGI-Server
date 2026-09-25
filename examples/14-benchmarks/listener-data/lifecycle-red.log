@@ -1,0 +1,83 @@
+    # Failed test 'remaining clients are not accepted after callback stops listener'
+    # at t/accept-batching-events.t line 35.
+    # +-----+----+-------+
+    # | GOT | OP | CHECK |
+    # +-----+----+-------+
+    # | 3   | eq | 1     |
+    # +-----+----+-------+
+    (If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '74')
+
+
+# Failed test 'callback can pause the listener'
+# at t/accept-batching-events.t line 40.
+    # Failed test 'callback ends this readiness dispatch without an accept error'
+    # at t/accept-batching-events.t line 34.
+    # accept() failed - Bad file descriptor
+
+# Failed test 'callback can close the listener'
+# at t/accept-batching-events.t line 40.
+    # Failed test 'callback ends this readiness dispatch without an accept error'
+    # at t/accept-batching-events.t line 34.
+    # Notifier does not exist in collection at t/accept-batching-events.t line 22.
+    # Failed test 'remaining clients are not accepted after callback stops listener'
+    # at t/accept-batching-events.t line 35.
+    # +-----+----+-------+
+    # | GOT | OP | CHECK |
+    # +-----+----+-------+
+    # | 2   | eq | 1     |
+    # +-----+----+-------+
+    (If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '74')
+
+
+# Failed test 'callback can remove the listener'
+# at t/accept-batching-events.t line 40.
+
+# Failed test 'accept error and empty queue remain distinct'
+# at t/accept-batching-events.t line 73.
+# Caught exception in subtest: Can't use an undefined value as a symbol reference at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/IO/Socket/IP.pm line 970.
+t/accept-batching-events.t .. 
+# Seeded srand with seed '20260925' from local date.
+not ok 1 - callback can pause the listener {
+    ok 1 - callback ends this readiness dispatch without an accept error
+    not ok 2 - remaining clients are not accepted after callback stops listener
+    1..2
+}
+not ok 2 - callback can close the listener {
+    not ok 1 - callback ends this readiness dispatch without an accept error
+    ok 2 - remaining clients are not accepted after callback stops listener
+    1..2
+}
+not ok 3 - callback can remove the listener {
+    not ok 1 - callback ends this readiness dispatch without an accept error
+    not ok 2 - remaining clients are not accepted after callback stops listener
+    1..2
+}
+not ok 4 - accept error and empty queue remain distinct {
+    ok 1 - empty nonblocking queue does not report an error
+}
+1..4
+Dubious, test returned 4 (wstat 1024, 0x400)
+Failed 4/4 subtests 
+
+Test Summary Report
+-------------------
+t/accept-batching-events.t (Wstat: 1024 (exited 4) Tests: 4 Failed: 4)
+  Failed tests:  1-4
+  Non-zero exit status: 4
+Files=1, Tests=4,  0 wallclock secs ( 0.02 usr  0.01 sys +  0.13 cusr  0.03 csys =  0.19 CPU)
+Result: FAIL
+Command [env PERL_FUTURE_NO_XS=1 prove -lv t/accept-batching-events.t] terminated with exit code 1 ($? = 256) under the following perl environment:
+Command terminated with non-zero status.
+Current perl:
+  Name: perl-5.42.2@default
+  Path: /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl
+  Config: -de -Dprefix=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2 -Aeval:scriptdir=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+  Compiled at: Jul 12 2026 09:24:10
+
+perlbrew:
+  version: 0.92
+  ENV:
+    PERLBREW_ROOT: /Users/jnapiorkowski/perl5/perlbrew
+    PERLBREW_HOME: /Users/jnapiorkowski/.perlbrew
+    PERLBREW_PATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin:/Users/jnapiorkowski/perl5/perlbrew/bin:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+    PERLBREW_MANPATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/man:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/man

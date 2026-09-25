@@ -1,0 +1,31 @@
+t/accept-batching.t ......... ok
+t/00-load.t ................. ok
+Cannot detect source of 't/02-server.t'! at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Parser/IteratorFactory.pm line 256.
+	TAP::Parser::IteratorFactory::detect_source(TAP::Parser::IteratorFactory=HASH(0x7fb12fa15790), TAP::Parser::Source=HASH(0x7fb12fa15430)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Parser/IteratorFactory.pm line 211
+	TAP::Parser::IteratorFactory::make_iterator(TAP::Parser::IteratorFactory=HASH(0x7fb12fa15790), TAP::Parser::Source=HASH(0x7fb12fa15430)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Parser.pm line 472
+	TAP::Parser::_initialize(TAP::Parser=HASH(0x7fb13485f9e0), HASH(0x7fb130a1a090)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Object.pm line 55
+	TAP::Object::new("TAP::Parser", HASH(0x7fb130a1a090)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Object.pm line 130
+	TAP::Object::_construct(TAP::Harness=HASH(0x7fb12f8123d8), "TAP::Parser", HASH(0x7fb130a1a090)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 870
+	TAP::Harness::make_parser(TAP::Harness=HASH(0x7fb12f8123d8), TAP::Parser::Scheduler::Job=HASH(0x7fb12f956108)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 669
+	TAP::Harness::_aggregate_single(TAP::Harness=HASH(0x7fb12f8123d8), TAP::Parser::Aggregator=HASH(0x7fb12f8ce920), TAP::Parser::Scheduler=HASH(0x7fb12f9cc6e8)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 761
+	TAP::Harness::aggregate_tests(TAP::Harness=HASH(0x7fb12f8123d8), TAP::Parser::Aggregator=HASH(0x7fb12f8ce920), "t/accept-batching.t", "t/00-load.t", "t/02-server.t", "t/08-tls.t", "t/tls-optional.t", "t/11-multiworker.t", ...) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 559
+	eval {...} called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 560
+	TAP::Harness::__ANON__() called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/TAP/Harness.pm line 578
+	TAP::Harness::runtests(TAP::Harness=HASH(0x7fb12f8123d8), "t/accept-batching.t", "t/00-load.t", "t/02-server.t", "t/08-tls.t", "t/tls-optional.t", "t/11-multiworker.t", "t/40-connection-limiting.t", ...) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/App/Prove.pm line 547
+	App::Prove::_runtests(App::Prove=HASH(0x7fb12f009760), HASH(0x7fb13098e0e0), "t/accept-batching.t", "t/00-load.t", "t/02-server.t", "t/08-tls.t", "t/tls-optional.t", "t/11-multiworker.t", ...) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/lib/5.42.2/App/Prove.pm line 505
+	App::Prove::run(App::Prove=HASH(0x7fb12f009760)) called at /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/prove line 13
+Command [env PERL_FUTURE_NO_XS=1 prove -l t/accept-batching.t t/00-load.t t/02-server.t t/08-tls.t t/tls-optional.t t/11-multiworker.t t/40-connection-limiting.t t/45-multi-listener.t t/48-fd-reuse.t t/49-systemd-activation.t] terminated with exit code 2 ($? = 512) under the following perl environment:
+Command terminated with non-zero status.
+Current perl:
+  Name: perl-5.42.2@default
+  Path: /Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin/perl
+  Config: -de -Dprefix=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2 -Aeval:scriptdir=/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+  Compiled at: Jul 12 2026 09:24:10
+
+perlbrew:
+  version: 0.92
+  ENV:
+    PERLBREW_ROOT: /Users/jnapiorkowski/perl5/perlbrew
+    PERLBREW_HOME: /Users/jnapiorkowski/.perlbrew
+    PERLBREW_PATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/bin:/Users/jnapiorkowski/perl5/perlbrew/bin:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/bin
+    PERLBREW_MANPATH: /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/man:/Users/jnapiorkowski/perl5/perlbrew/perls/perl-5.42.2/man

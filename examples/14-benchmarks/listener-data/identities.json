@@ -1,0 +1,31 @@
+{
+  "before": {
+    "bin/pagi-server": "31d7b633a2b18ceaacf1ec275bce6088273dc5a0bc7c3b60bdfb91c7eb850906",
+    "lib/PAGI/Server.pm": "55770ce354e8ec981e05927748f67c81c66097771ac8ddca7516000d75a7a844",
+    "lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+    "lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+    "lib/PAGI/Server/Compliance.pod": "acd1e7e6c98b3a139686e6739f2676c943b30760fdc6dc0b78cf7e5c3805310c",
+    "lib/PAGI/Server/Connection.pm": "3109c912319c0fd4ee3c7dad7a8293937c938566039fadbdec15a23c704aef7d",
+    "lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+    "lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+    "lib/PAGI/Server/Protocol/HTTP1.pm": "4ba8e8b5ab4032481f418857925b536a9b8f337a27f6f1c6dd81d64de872a097",
+    "lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+    "lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+    "lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17"
+  },
+  "listener": {
+    "lib/PAGI/Server/AppNormalizer.pm": "80be83a0c8c5ff923145e555b4b4d4fa649ae192ccb65d37192db67785bece8d",
+    "lib/PAGI/Server/AsyncFile.pm": "d2e16cccbb2a92633aa141555fcf31038c38b9e5d1e5c649f29f0d13fce7e4db",
+    "lib/PAGI/Server/Compliance.pod": "acd1e7e6c98b3a139686e6739f2676c943b30760fdc6dc0b78cf7e5c3805310c",
+    "lib/PAGI/Server/Connection.pm": "3109c912319c0fd4ee3c7dad7a8293937c938566039fadbdec15a23c704aef7d",
+    "lib/PAGI/Server/ConnectionState.pm": "1c5408df0c02c3fc5e2145cb8f20befa39115b2d6e081bae9ff4d8baa6e763bd",
+    "lib/PAGI/Server/EventValidator.pm": "024e22b118f11d181d2eb629a541cabe668d9186edf596fb85a13e1261b58fd1",
+    "lib/PAGI/Server/Listener.pm": "bf4ab3df4498465a91dbae8e92712b3354f7360642f05f7e1946c12cad1e5c7a",
+    "lib/PAGI/Server/Protocol/HTTP1.pm": "4ba8e8b5ab4032481f418857925b536a9b8f337a27f6f1c6dd81d64de872a097",
+    "lib/PAGI/Server/Protocol/HTTP2.pm": "2c8537bede5063f5126d57c6de1ead165af28898f38ff3384c50d9ac92d4762f",
+    "lib/PAGI/Server/Runner.pm": "66ea2832f5c2b2633b24271706bf4f9523cfb766744bd5251619d1fd1b1e7823",
+    "lib/PAGI/Server/TransportState.pm": "f0fd3055b76038200fed4d485f3898baf2a686d5dec4bd2ec174fb0a2aeb2a17",
+    "lib/PAGI/Server.pm": "ba7dbfa72c5d855df9fb9a659d1e3db474bc4b0c9653fae22958febfbb23fb99",
+    "bin/pagi-server": "31d7b633a2b18ceaacf1ec275bce6088273dc5a0bc7c3b60bdfb91c7eb850906"
+  }
+}
