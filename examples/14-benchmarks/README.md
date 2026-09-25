@@ -202,3 +202,8 @@ The subsequent [read/write chunk-size experiment](BUFFER-SIZES-2026-09-25.md)
 found substantial large-upload/download gains from 64 KiB I/O, with a measurable
 tradeoff for small requests competing against bulk downloads. Its patch remains
 an experiment; the working runtime's buffer settings are unchanged.
+
+The [read-only follow-up](READ-SIZE-2026-09-25.md) compares all four variants
+together and checks both upload and download competition. Larger reads retain
+the upload gain but also shift capacity under competing upload traffic. The
+report records the choices; the default runtime remains unchanged.

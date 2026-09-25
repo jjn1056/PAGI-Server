@@ -195,3 +195,23 @@ a possible next experiment, not a demonstrated result.
 two HTTP/2 files skipped for unavailable binding. The local runtime remains
 unchanged and AWS is stopped. See [BUFFER-SIZES-2026-09-25.md](BUFFER-SIZES-2026-09-25.md)
 and `buffer-size-data/` for the complete release comparison and evidence.
+
+## Read-only chunk size — measured, adoption deferred, 2026-09-25
+
+A fresh four-way comparison isolates read_len=65536 from write_len=65536.
+Read-only retains the isolated 1 MiB upload gain (946 vs 224 req/s saved) and
+leaves single-send downloads near saved (3,847 vs 3,867). GET500 is effectively
+flat (6,469 vs 6,513; p99 84.3 vs 84.5 ms).
+
+It does not eliminate the directional tradeoff. With competing uploads,
+read-only raises bulk rate from 25 to 157 req/s while small GET rate falls
+6.6% and p99 rises from 17.15 to 19.95 ms. With competing downloads, both64
+raises bulk rate from 362 to 1,057 while small GET rate falls 10.8%; read-only
+is closer to saved. Faster bulk clients offer more bytes under fixed
+concurrency, so these are workload tradeoffs, not fixed-byte-rate penalties.
+
+Keep default runtime sizes unchanged pending a choice about that tradeoff.
+Both patches are recorded. Follow-up correctness: 11 files / 78 tests passed,
+with two HTTP/2 files skipped. Nine smoke and 64 timed follow-up runs passed.
+AWS is stopped. See [READ-SIZE-2026-09-25.md](READ-SIZE-2026-09-25.md) for the
+complete table, memory observations and raw evidence.

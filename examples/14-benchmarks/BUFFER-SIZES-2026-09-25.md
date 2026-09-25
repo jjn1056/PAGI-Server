@@ -13,6 +13,10 @@ A useful next experiment would separate larger reads from larger writes. The
 upload benefit may be available without the mixed-download tradeoff, but that
 has not been measured. No new tuning API or additional variant was introduced.
 
+The subsequent [read-only comparison](READ-SIZE-2026-09-25.md) tests that
+separation, including competing uploads. It retains the upload gain but finds
+a mixed-upload tradeoff as well; neither candidate has been adopted.
+
 ## Exact change
 
 Source snapshots start at `5c960b2` on `experiment/http-simplification`, including

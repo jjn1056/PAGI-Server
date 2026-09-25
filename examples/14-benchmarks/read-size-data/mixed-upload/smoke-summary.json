@@ -1,0 +1,65 @@
+{
+  "mixed-upload": {
+    "read64": {
+      "n": 1,
+      "metrics": {
+        "rps": {
+          "samples": [
+            148.7489
+          ],
+          "median": 148.7489,
+          "min": 148.7489,
+          "max": 148.7489
+        },
+        "p95_s": {
+          "samples": [
+            0.1832
+          ],
+          "median": 0.1832,
+          "min": 0.1832,
+          "max": 0.1832
+        },
+        "p99_s": {
+          "samples": [
+            0.1843
+          ],
+          "median": 0.1843,
+          "min": 0.1843,
+          "max": 0.1843
+        },
+        "max_s": {
+          "samples": [
+            0.1855
+          ],
+          "median": 0.1855,
+          "min": 0.1855,
+          "max": 0.1855
+        },
+        "background_rps": {
+          "samples": [
+            6879.0516
+          ],
+          "median": 6879.0516,
+          "min": 6879.0516,
+          "max": 6879.0516
+        },
+        "background_p95_s": {
+          "samples": [
+            0.0176
+          ],
+          "median": 0.0176,
+          "min": 0.0176,
+          "max": 0.0176
+        },
+        "background_p99_s": {
+          "samples": [
+            0.0185
+          ],
+          "median": 0.0185,
+          "min": 0.0185,
+          "max": 0.0185
+        }
+      }
+    }
+  }
+}
