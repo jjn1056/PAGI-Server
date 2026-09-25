@@ -121,3 +121,19 @@ profile. The split-body POST preflight triggers an AsyncAwait panic under
 NYTProf; final POST profiles cover buffered requests only. The uninstrumented
 benchmark harness remains unchanged. No runtime edits were made. See
 AWS-FOCUSED-PROFILE-2026-09-25.md for evidence and limits. AWS is stopped.
+
+## Tried: HTTP send-state ownership — rejected, 2026-09-25
+
+The scalar-alias candidate removes ordinary HTTP's default state-publisher
+callback, while retaining existing refusal translation. Correctness checks and
+the full enabled suite passed (180 files / 1,272 tests), but it needs a new
+keep-alive scalar-detachment invariant to preserve saved sends. AWS means versus
+the saved checkpoint: GET +1.25%, headers -0.02%, POST +0.09%, streaming -1.13%,
+SSE +0.05%, WebSocket +0.04%. GET's direction was mixed across rounds; streaming
+was slightly lower in all three. No persuasive broad benefit justifies the
+lifetime tradeoff. Restore the saved runtime; do not add more mechanisms.
+
+All 18 smoke and 48 timed runs passed. Source/dependency hashes stayed unchanged.
+The rejected implementation and regression test survive as an evidence patch,
+not active runtime/test changes. See STATE-OWNERSHIP-2026-09-25.md and
+state-ownership-data/. AWS was stopped after downloading results.

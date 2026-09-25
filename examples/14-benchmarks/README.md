@@ -174,3 +174,7 @@ The retained performance work is saved at `874b120` on
 [AWS-FOCUSED-PROFILE-2026-09-25.md](AWS-FOCUSED-PROFILE-2026-09-25.md)
 for the release/current CPU profile, call counts, native benchmark reference,
 and buffered-POST profiling limitation.
+
+The subsequent [send-state ownership experiment](STATE-OWNERSHIP-2026-09-25.md)
+was tested and rejected: small mixed results did not justify its extra lifetime
+rule. The runtime remains the saved checkpoint.
