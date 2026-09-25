@@ -5,6 +5,22 @@ work and simplifying ownership over adding caches, flags or parallel state.
 These are hypotheses, not promised improvements. Compare any candidate with
 both the saved baseline and installed release; keep individual samples.
 
+## Conditional request timing — tried, no persuasive gain, 2026-09-25
+
+On top of `040731c`, collected the per-request access-log timestamp only when
+logging is enabled. The consumer audit and logging-on/off regression pass,
+but the isolated AWS comparison is essentially flat: GET +0.02%, POST +0.21%,
+GET500 +0.59%, streaming +0.27%, SSE -0.19%, WebSocket +0.96% versus saved.
+Most round directions vary; GET25 p99 is unchanged and GET500 p99 is effectively
+unchanged. Eighteen smoke and 48 timed runs completed, with release included.
+
+Restore saved runtime and keep the patch as evidence. Local candidate checks:
+6 files / 46 tests PASS; AWS access-log test: 1 file / 14 tests PASS. No full-suite
+claim for this discarded candidate. AWS confirmed stopped. See
+[REQUEST-TIMING-2026-09-25.md](REQUEST-TIMING-2026-09-25.md) for all samples,
+method, execution notes and limits. Autoflush remains a separate candidate;
+this experiment did not add it.
+
 Shared-send runtime checkpoint: `cdf4a7c`, accepted on 2026-09-25. It includes
 the earlier retained work and shared HTTP send coroutine. The retained listener experiment below builds on it and continues to include
 CPAN release comparisons. The full enabled

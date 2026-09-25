@@ -276,3 +276,9 @@ together and checks both upload and download competition. Larger reads retain
 the upload gain but also shift capacity under competing upload traffic. The
 report records the choices. The adopted defaults are now 64 KiB reads and
 8 KiB writes; see the tuning guide above for when to override them.
+
+The [conditional request-timing experiment](REQUEST-TIMING-2026-09-25.md)
+then tried skipping the access-log timestamp when logging is disabled. The
+release/saved/candidate AWS comparison found no persuasive gain; the runtime
+remains at the configurable-buffer checkpoint. The exact patch and all samples
+are preserved for reference.
