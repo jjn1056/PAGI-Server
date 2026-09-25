@@ -169,11 +169,16 @@ The follow-up [NYTProf investigation](PROFILING-2026-09-23.md) records request-p
 
 ### Canonical performance checkpoint and focused AWS profile
 
-The retained performance work is saved at `874b120` on
-`experiment/http-simplification`. See
+The canonical runtime checkpoint is now `cdf4a7c` on
+`experiment/http-simplification`: all previously retained changes plus the
+shared HTTP send coroutine. Use this commit as the baseline for subsequent
+experiments, alongside the installed CPAN release. The header-scan and
+scalar-alias ownership experiments remain rejected.
+
+The earlier checkpoint `874b120` is the subject of the
 [AWS-FOCUSED-PROFILE-2026-09-25.md](AWS-FOCUSED-PROFILE-2026-09-25.md)
-for the release/current CPU profile, call counts, native benchmark reference,
-and buffered-POST profiling limitation.
+release/current CPU profile, with call counts, native benchmark reference,
+and the buffered-POST profiling limitation.
 
 The subsequent [send-state ownership experiment](STATE-OWNERSHIP-2026-09-25.md)
 was tested and rejected: small mixed results did not justify its extra lifetime
@@ -183,5 +188,5 @@ The next [header-scan and shared-send comparison](HTTP-SEND-2026-09-25.md)
 found repeatable 4.5–5.1% ordinary HTTP gains from sharing the send coroutine,
 with streaming effectively flat. Shared send is retained after the full enabled
 suite passed (180 files / 1,273 tests); the header-scan candidate was discarded.
-The report compares
-both independent candidates with the saved checkpoint and CPAN release.
+The report compares both independent candidates with the saved checkpoint and
+CPAN release.

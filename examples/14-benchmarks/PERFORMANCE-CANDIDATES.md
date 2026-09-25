@@ -5,6 +5,12 @@ work and simplifying ownership over adding caches, flags or parallel state.
 These are hypotheses, not promised improvements. Compare any candidate with
 both the saved baseline and installed release; keep individual samples.
 
+Canonical runtime checkpoint: `cdf4a7c`, accepted on 2026-09-25. It includes
+the earlier retained work and shared HTTP send coroutine. Subsequent experiments
+start here and continue to include CPAN release comparisons. The full enabled
+suite passed at this checkpoint (180 files / 1,273 tests); the AWS comparison
+and rejected candidates are recorded in HTTP-SEND-2026-09-25.md.
+
 ## Combine response-header scans — tried and rejected
 
 HTTP response start separately scans for Content-Length, Date and Upgrade.
