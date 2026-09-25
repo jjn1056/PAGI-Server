@@ -1,0 +1,529 @@
+t/00-load.t ................................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /test/path?query=value" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /" 500 0.000s
+t/01-hello-http.t ............................. ok
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:32 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 200 0.000s
+t/02-streaming.t .............................. ok
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "POST /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "POST /" 200 0.002s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "POST /" 200 0.000s
+t/03-request-body.t ........................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 101 0.002s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 101 0.001s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 101 0.002s
+127.0.0.1 - - [25/Sep/2026:14:08:33 +0000] "GET /" 101 0.001s
+127.0.0.1 - - [25/Sep/2026:14:08:34 +0000] "GET /" 101 0.514s
+127.0.0.1 - - [25/Sep/2026:14:08:34 +0000] "GET /" 101 0.511s
+127.0.0.1 - - [25/Sep/2026:14:08:34 +0000] "GET /" 101 0.003s
+127.0.0.1 - - [25/Sep/2026:14:08:34 +0000] "GET /" 500 0.000s
+t/04-websocket.t .............................. ok
+127.0.0.1 - - [25/Sep/2026:14:08:38 +0000] "GET /" 200 3.028s
+127.0.0.1 - - [25/Sep/2026:14:08:38 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:41 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 1.956s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /after" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "POST /stream" 200 0.000s
+t/05-sse.t .................................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:43 +0000] "GET /" 200 0.000s
+t/06-lifespan.t ............................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.001s
+t/07-extensions.t ............................. ok
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:44 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:45 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:45 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:45 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:45 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:46 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:46 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:46 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:46 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:08:46 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+t/08-tls.t .................................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "HEAD /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /path%20with%20spaces" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "POST /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 200 0.000s
+PAGI application error: Intentional test error from app at t/10-http-compliance.t line 1138.
+127.0.0.1 - - [25/Sep/2026:14:08:47 +0000] "GET /" 500 0.000s
+PAGI::Server 0.002013 listening on http://127.0.0.1:63766/
+  lifespan  not supported, continuing without it (application raised: Unsupported scope type: lifespan)
+  loop      Poll, max_conn 1000, http2 available, tls available, future_xs off
+127.0.0.1 - - [25/Sep/2026:14:08:48 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:08:48 +0000] "POST /" 200 0.000s
+PAGI::Server: TLS disabled via disable_tls option, ssl config ignored
+t/10-http-compliance.t ........................ ok
+t/11-multiworker.t ............................ ok
+    # Parent loop addr: 140296851711992
+    # Worker loop addr: 140296880626728
+    # ONE_TRUE_LOOP defined in child: 1
+    # ONE_TRUE_LOOP addr in child: 140296880626728
+    # Worker PID: 43550
+t/12-fork-loop-isolation.t .................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:54 +0000] "GET /" 200 0.002s
+127.0.0.1 - - [25/Sep/2026:14:08:57 +0000] "GET /" 200 0.002s
+t/13-multiworker-signal.t ..................... ok
+127.0.0.1 - - [25/Sep/2026:14:08:58 +0000] "GET /" 101 0.001s
+127.0.0.1 - - [25/Sep/2026:14:08:58 +0000] "GET /" 101 0.111s
+127.0.0.1 - - [25/Sep/2026:14:08:58 +0000] "GET /" 101 0.108s
+127.0.0.1 - - [25/Sep/2026:14:08:58 +0000] "GET /" 101 0.110s
+t/14-websocket-invalid-utf8.t ................. ok
+PAGI application error (WebSocket): Invalid subprotocol: contains CR, LF, null, or whitespace
+127.0.0.1 - - [25/Sep/2026:14:08:59 +0000] "GET /?subprotocol=graphql%0D%0ASet-Cookie:%20evil=1" 500 0.000s
+PAGI application error (WebSocket): Invalid header value: contains CR, LF, or null byte
+127.0.0.1 - - [25/Sep/2026:14:08:59 +0000] "GET /?header=safe%0D%0ASet-Cookie:%20stolen=session" 500 0.000s
+t/15-crlf-injection.t ......................... ok
+t/16-chunked-validation.t ..................... ok
+Worker 1 (43580): startup failed: Intentional startup failure for testing
+Worker 2 (43581): startup failed: Intentional startup failure for testing
+All workers have exited and none were respawned; shutting down
+    # Worker startup attempts in 1s: 2
+t/17-worker-respawn-loop.t .................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:01 +0000] "GET /" 200 1.011s
+t/18-graceful-shutdown.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:02 +0000] "GET /" 101 0.504s
+127.0.0.1 - - [25/Sep/2026:14:09:02 +0000] "GET /" 101 0.004s
+t/19-receive-queue-limit.t .................... ok
+PAGI connection error: Payload is too big. Deny big message (9223372036854775807) or increase max_payload_size (65536) at /Users/jnapiorkowski/.perlbrew/libs/perl-5.42.2@default/lib/perl5/Protocol/WebSocket/Frame.pm line 182.
+127.0.0.1 - - [25/Sep/2026:14:09:03 +0000] "GET /" 101 0.059s
+127.0.0.1 - - [25/Sep/2026:14:09:03 +0000] "GET /" 200 0.000s
+t/20-callback-exception.t ..................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /" 200 0.000s
+t/21-quick-wins.t ............................. ok
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /" 200 0.000s
+t/22-content-length-keepalive.t ............... ok
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /" 101 0.001s
+PAGI application error: Application exception for testing! at t/23-connection-cleanup.t line 141.
+127.0.0.1 - - [25/Sep/2026:14:09:04 +0000] "GET /throw" 500 0.000s
+PAGI application error (after response started): Exception after response started! at t/23-connection-cleanup.t line 240.
+127.0.0.1 - - [25/Sep/2026:14:09:05 +0000] "GET /throw-after-start" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:05 +0000] "GET /1" 200 0.000s
+PAGI application error: Exception on request 2 at t/23-connection-cleanup.t line 328.
+127.0.0.1 - - [25/Sep/2026:14:09:07 +0000] "GET /2" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:07 +0000] "GET /3" 200 0.000s
+PAGI application error: Exception on request 4 at t/23-connection-cleanup.t line 328.
+127.0.0.1 - - [25/Sep/2026:14:09:09 +0000] "GET /4" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:09 +0000] "GET /5" 200 0.000s
+PAGI application error: Exception on request 6 at t/23-connection-cleanup.t line 328.
+127.0.0.1 - - [25/Sep/2026:14:09:11 +0000] "GET /6" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:11 +0000] "GET /7" 200 0.000s
+PAGI application error: Exception on request 8 at t/23-connection-cleanup.t line 328.
+127.0.0.1 - - [25/Sep/2026:14:09:13 +0000] "GET /8" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:13 +0000] "GET /9" 200 0.000s
+PAGI application error: Exception on request 10 at t/23-connection-cleanup.t line 328.
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /10" 500 0.000s
+t/23-connection-cleanup.t ..................... ok
+t/25-runner-production.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:15 +0000] "GET /" 101 0.001s
+t/26-max-requests.t ........................... ok
+PAGI application error: Intentional test exception for error propagation test at t/30-error-propagation.t line 154.
+127.0.0.1 - - [25/Sep/2026:14:09:16 +0000] "GET /?throw=1" 500 0.000s
+PAGI application error: Intentional Future failure for test at t/30-error-propagation.t line 271.
+127.0.0.1 - - [25/Sep/2026:14:09:16 +0000] "GET /?fail=1" 500 0.000s
+PAGI Server startup failed: Intentional startup failure for test
+Lifespan app failed after startup: Intentional shutdown failure for test at t/30-error-propagation.t line 459.
+PAGI application error: First request intentionally fails at t/30-error-propagation.t line 553.
+127.0.0.1 - - [25/Sep/2026:14:09:19 +0000] "GET /first" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:21 +0000] "GET /second" 200 0.000s
+t/30-error-propagation.t ...................... ok
+t/31-memory-leak.t ............................ skipped: Memory leak tests require RELEASE_TESTING=1
+t/32-request-timeout.t ........................ skipped: Timing-sensitive timeout tests require RELEASE_TESTING=1
+t/33-ws-sse-idle-timeout.t .................... skipped: Timing-sensitive timeout tests require RELEASE_TESTING=1
+t/37-connection-state.t ....................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:23 +0000] "GET /" 200 0.000s
+t/38-unrecognized-event-type.t ................ ok
+127.0.0.1 - - [25/Sep/2026:14:09:23 +0000] "GET /" 200 0.000s
+t/39-disconnect-reasons.t ..................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:24 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:24 +0000] "GET /" 200 0.000s
+t/40-connection-limiting.t .................... ok
+t/40-event-validation.t ....................... ok
+t/41-connection-limiting-stress.t ............. skipped: Set STRESS_TEST=1 to run stress tests
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /test.txt" 206 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "HEAD /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "HEAD /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /test.txt" 206 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /closed-fh" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:25 +0000] "GET /binary.bin" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /large.bin" 200 0.999s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /large.bin" 200 0.002s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /missing-file" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /unreadable-file" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /empty.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /test.txt" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /threshold.bin" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:26 +0000] "GET /over_threshold.bin" 200 0.002s
+t/42-file-response.t .......................... ok
+unix - - [25/Sep/2026:14:09:27 +0000] "GET /test" 200 0.001s
+t/43-unix-socket.t ............................ ok
+t/44-access-log-format.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:30 +0000] "GET /tcp" 200 0.001s
+unix - - [25/Sep/2026:14:09:31 +0000] "GET /unix" 200 0.001s
+t/45-multi-listener.t ......................... ok
+t/46-multiworker-bugs.t ....................... skipped: Timing-sensitive multiworker tests require RELEASE_TESTING=1
+t/47-worker-heartbeat.t ....................... skipped: Timing-sensitive heartbeat tests require RELEASE_TESTING=1
+127.0.0.1 - - [25/Sep/2026:14:09:33 +0000] "GET /" 200 0.000s
+t/48-fd-reuse.t ............................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /" 200 0.000s
+t/49-systemd-activation.t ..................... ok
+t/50-hot-restart.t ............................ skipped: Hot restart tests require RELEASE_TESTING
+t/51-transport-state.t ........................ ok
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /bad-status" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /body-before-start" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /unknown-type" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /duplicate-start" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /undeclared-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /ok" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /post-close" 200 0.059s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /bad-status" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /sse-send-before-start" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /sse-newline-event" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /sse-send-after-close" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /sse-send-after-decline-complete" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /sse-newline-event" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:34 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:39 +0000] "GET /" 101 4.210s
+127.0.0.1 - - [25/Sep/2026:14:09:44 +0000] "GET /" 101 5.096s
+127.0.0.1 - - [25/Sep/2026:14:09:44 +0000] "GET /" 403 0.001s
+t/52-mandatory-validation.t ................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:44 +0000] "GET /cl-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /chunked-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /empty-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /absent-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "HEAD /head-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /still-sane" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /empty-trailers" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /still-sane" 200 0.000s
+t/53-trailers-framing.t ....................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:45 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:46 +0000] "GET /" 200 0.508s
+127.0.0.1 - - [25/Sep/2026:14:09:47 +0000] "GET /" 200 0.510s
+127.0.0.1 - - [25/Sep/2026:14:09:47 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:48 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:48 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:49 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:49 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:50 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:50 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:50 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:51 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:51 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:09:52 +0000] "POST /" 200 0.424s
+127.0.0.1 - - [25/Sep/2026:14:09:52 +0000] "POST /" 200 0.108s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "POST /" 200 0.215s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:53 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:54 +0000] "GET /" 200 0.359s
+127.0.0.1 - - [25/Sep/2026:14:09:54 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /?n=1" 200 0.258s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /?n=2" 200 0.257s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /plain" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:55 +0000] "GET /" 200 0.001s
+t/55-sse-alignment.t .......................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:57 +0000] "GET /" 200 0.000s
+t/56-post-completion-exception.t .............. ok
+127.0.0.1 - - [25/Sep/2026:14:09:57 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:57 +0000] "GET /" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 401 0.000s
+t/57-date-consistency.t ....................... ok
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 401 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 101 0.060s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 426 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:58 +0000] "GET /" 200 0.000s
+t/58-h1-connection-header-ownership.t ......... ok
+127.0.0.1 - - [25/Sep/2026:14:09:59 +0000] "GET /" 101 0.002s
+t/59-ws-disconnect-exactly-once.t ............. ok
+127.0.0.1 - - [25/Sep/2026:14:09:59 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:59 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:59 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:09:59 +0000] "GET /" 200 0.000s
+t/60-multi-server-coexistence.t ............... ok
+t/61-pending-io-at-disconnect.t ............... ok
+t/62-error-log.t .............................. ok
+t/63-log-level-only.t ......................... ok
+t/64-server-log-sink.t ........................ ok
+t/65-runner-log-level.t ....................... ok
+t/66-startup-banner.t ......................... ok
+t/67-connection-log-routing.t ................. ok
+t/68-startup-summary.t ........................ ok
+127.0.0.1 - - [25/Sep/2026:14:10:02 +0000] "GET /socket" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:02 +0000] "GET /events" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:02 +0000] "GET /socket" - 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:04 +0000] "GET /socket" 101 1.125s
+127.0.0.1 - - [25/Sep/2026:14:10:07 +0000] "GET /events" - 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:08 +0000] "GET /stream" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:10:10 +0000] "GET /abandon" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:13 +0000] "GET /events" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:10:14 +0000] "GET /socket" 101 0.004s
+127.0.0.1 - - [25/Sep/2026:14:10:16 +0000] "GET /socket" 101 1.099s
+t/69-connection-state-protocol-scopes.t ....... ok
+t/69-future-xs-disabled.t ..................... ok
+t/70-protocol-disconnect-matrix.t ............. ok
+127.0.0.1 - - [25/Sep/2026:14:10:23 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:25 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:26 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:32 +0000] "GET /r" 404 1.163s
+127.0.0.1 - - [25/Sep/2026:14:10:34 +0000] "GET /r" 404 1.165s
+127.0.0.1 - - [25/Sep/2026:14:10:40 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:41 +0000] "GET /r" 404 0.001s
+127.0.0.1 - - [25/Sep/2026:14:10:45 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:46 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:10:51 +0000] "GET /r" 404 1.616s
+127.0.0.1 - - [25/Sep/2026:14:10:54 +0000] "GET /r" 404 1.634s
+127.0.0.1 - - [25/Sep/2026:14:11:03 +0000] "GET /r" 101 2.157s
+127.0.0.1 - - [25/Sep/2026:14:11:06 +0000] "GET /r" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:08 +0000] "GET /r" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:11 +0000] "GET /r" - 1.578s
+127.0.0.1 - - [25/Sep/2026:14:11:16 +0000] "GET /r" - 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:21 +0000] "GET /r" 101 2.152s
+127.0.0.1 - - [25/Sep/2026:14:11:21 +0000] "GET /r" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:25 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:27 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:33 +0000] "GET /r" 401 1.914s
+127.0.0.1 - - [25/Sep/2026:14:11:36 +0000] "GET /r" 401 1.921s
+127.0.0.1 - - [25/Sep/2026:14:11:49 +0000] "GET /r" 404 0.001s
+127.0.0.1 - - [25/Sep/2026:14:11:51 +0000] "GET /r" 404 0.001s
+127.0.0.1 - - [25/Sep/2026:14:11:55 +0000] "GET /r" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:11:57 +0000] "GET /r" 404 0.000s
+t/71-http-refusal-on-protocol-scopes.t ........ ok
+127.0.0.1 - - [25/Sep/2026:14:12:06 +0000] "GET /socket" - 1.031s
+127.0.0.1 - - [25/Sep/2026:14:12:09 +0000] "GET /socket" 101 1.267s
+127.0.0.1 - - [25/Sep/2026:14:12:12 +0000] "GET /events" 200 1.279s
+127.0.0.1 - - [25/Sep/2026:14:12:14 +0000] "GET /flood" 200 0.004s
+127.0.0.1 - - [25/Sep/2026:14:12:14 +0000] "GET /done" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:12:15 +0000] "GET /again" 200 0.000s
+t/72-abort.t .................................. ok
+127.0.0.1 - - [25/Sep/2026:14:12:17 +0000] "GET /socket" 429 0.001s
+t/73-denial-retention.t ....................... ok
+t/74-h2-ws-clean-end.t ........................ ok
+t/75-max-disconnect-receives.t ................ ok
+t/76-h1-receive-after-disconnect.t ............ ok
+t/77-receive-after-clean-end.t ................ ok
+t/78-response-before-request-body.t ........... ok
+t/79-body-limit-after-response-started.t ...... ok
+t/80-unread-body-keepalive.t .................. ok
+t/81-connection-error-boundary.t .............. ok
+t/82-ws-parked-terminal-notification.t ........ ok
+t/83-ws-close-code.t .......................... ok
+t/84-terminal-callback-deferral.t ............. ok
+t/85-terminal-callback-graceful-shutdown.t .... ok
+t/cli-watermarks.t ............................ ok
+t/connection-state-response-started.t ......... ok
+t/http-header-boundary.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:15:04 +0000] "GET /ok" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:04 +0000] "GET /none" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:04 +0000] "GET /half" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:15:04 +0000] "GET /half-cl" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "GET /throw-none" 500 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "POST /cancel-before-start" - 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "GET /gate-disconnect" - 0.001s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "GET /ok" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "GET /trailers-promised" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:05 +0000] "GET /ok" 200 0.000s
+t/http-incomplete-response.t .................. ok
+t/http-receive-ownership.t .................... ok
+127.0.0.1 - - [25/Sep/2026:14:15:06 +0000] "GET /1" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:15:06 +0000] "GET /2" 200 0.000s
+t/http-send-lifetime.t ........................ ok
+t/http-terminal-send-reentrant-cancel.t ....... ok
+t/http2-path-decoding.t ....................... ok
+t/http2/01-protocol.t ......................... ok
+t/http2/02-server-config.t .................... ok
+t/http2/03-detection.t ........................ ok
+t/http2/04-read-handler.t ..................... ok
+t/http2/05-request-lifecycle.t ................ ok
+t/http2/06-integration.t ...................... ok
+t/http2/07-websocket.t ........................ ok
+t/http2/08-websocket-edge.t ................... ok
+t/http2/09-cli.t .............................. ok
+t/http2/09-multiworker.t ...................... ok
+t/http2/10-h2c.t .............................. ok
+t/http2/11-streaming.t ........................ ok
+PAGI application returned without starting a response (HTTP/2 stream 1)
+PAGI application error (HTTP/2 stream 3): Intentional app error
+t/http2/12-error-handling.t ................... ok
+t/http2/13-sse-detection.t .................... ok
+t/http2/14-sse-events.t ....................... ok
+t/http2/15-sse-keepalive.t .................... ok
+t/http2/16-sse-cleanup.t ...................... ok
+t/http2/17-h2-ws-sse-no-connection-state.t .... ok
+t/http2/18-transport-leak.t ................... ok
+t/http2/19-transport-callbacks.t .............. ok
+t/http2/20-sse-transport.t .................... ok
+PAGI application returned without starting a response (HTTP/2 stream 1)
+t/http2/21-http-date-header.t ................. ok
+PAGI application returned without starting a response (HTTP/2 stream 1)
+t/http2/22-denial-response.t .................. ok
+t/http2/23-rst-rate-limit.t ................... ok
+PAGI application returned without starting a response (HTTP/2 stream 1)
+t/http2/24-incomplete-response.t .............. ok
+t/http2/25-sse-decline.t ...................... ok
+PAGI application returned with an incomplete response (HTTP/2 stream 1) (trailers were declared but never sent)
+t/http2/26-mandatory-validation.t ............. ok
+t/http2/27-head.t ............................. ok
+t/http2/28-file-fh.t .......................... ok
+t/http2/29-fullflush-cancel.t ................. ok
+t/http2/30-connection-state.t ................. ok
+t/http2/31-ws-keepalive-disconnect.t .......... ok
+t/http2/32-sse-detection-encoding.t ........... ok
+t/http2/33-connection-specific-headers.t ...... ok
+t/http2/34-request-trailers.t ................. ok
+t/http2/35-trailers.t ......................... ok
+t/http2/36-ws-transport.t ..................... ok
+t/http2/37-ws-frame-validation.t .............. ok
+t/http2/38-ws-queue-overflow.t ................ ok
+t/http2/39-oversized-headers.t ................ ok
+t/http2/40-pending-io-at-disconnect.t ......... ok
+t/http2/41-abort.t ............................ ok
+t/http2/42-d13-incomplete-session.t ........... ok
+t/http2/43-receive-after-stream-end.t ......... ok
+t/http2/44-flush-inside-callback.t ............ ok
+t/http2/45-nghttp2-diagnostics.t .............. ok
+t/http2/46-graceful-shutdown-in-flight.t ...... ok
+t/http2/47-ws-parked-terminal-notification.t .. ok
+t/http2/48-ws-close-code.t .................... ok
+t/http2/49-ws-close-deadline-h2.t ............. ok
+t/http2/ws-close-no-duplicate-frame-h2.t ...... ok
+t/integration/app-file.t ...................... skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/app-static-files.t .............. skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/connection-complete.t ........... skipped: Set INTEGRATION_TEST=1 to run
+t/integration/psgi-bridge.t ................... skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/request-is-disconnected.t ....... skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/request-predicates.t ............ skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/request-server.t ................ skipped: Set INTEGRATION_TEST=1 to run
+t/integration/response-integration.t .......... skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/runner-server.t ................. ok
+t/integration/security-headers.t .............. skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/sse-close-end-to-end.t .......... skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+t/integration/sse-format-helpers.t ............ ok
+t/integration/sse-wire-format.t ............... ok
+127.0.0.1 - - [25/Sep/2026:14:26:07 +0000] "GET /" 101 0.005s
+t/integration/transport-backpressure.t ........ ok
+127.0.0.1 - - [25/Sep/2026:14:26:07 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:07 +0000] "GET /" 101 0.003s
+127.0.0.1 - - [25/Sep/2026:14:26:07 +0000] "GET /sse" 200 0.001s
+t/integration/transport-flow-control.t ........ ok
+127.0.0.1 - - [25/Sep/2026:14:26:08 +0000] "GET /" 101 0.304s
+t/integration/websocket-disconnect-reason.t ... ok
+t/integration/websocket-server.t .............. skipped: Cross-distribution integration test; set INTEGRATION_TEST=1 to run
+127.0.0.1 - - [25/Sep/2026:14:26:08 +0000] "GET /" 200 0.000s
+t/lifespan-decline-clean-return.t ............. ok
+PAGI Server startup failed: lifespan_mode is 'on' but the application raised: this app does not implement lifespan at t/lifespan-mode.t line 31.
+t/lifespan-mode.t ............................. ok
+t/lifespan-post-startup-failure.t ............. ok
+t/lifespan-send-validation.t .................. ok
+t/lifespan-startup-exception-logged.t ......... ok
+Lifespan startup timed out after 0.3s
+PAGI Server startup failed: Lifespan startup timed out after 0.3s
+t/lifespan-startup-timeout.t .................. ok
+t/lifespan-worker-fields.t .................... ok
+t/multiworker-startup-failure.t ............... ok
+t/response-started-integration.t .............. ok
+t/runner.t .................................... ok
+t/server/01-async-file.t ...................... ok
+t/signal-graceful-restart.t ................... skipped: Signal tests require RELEASE_TESTING=1
+t/signal-graceful-shutdown.t .................. skipped: Signal tests require RELEASE_TESTING=1
+t/signal-worker-scaling.t ..................... skipped: Signal tests require RELEASE_TESTING=1
+127.0.0.1 - - [25/Sep/2026:14:26:17 +0000] "GET /" 200 0.001s
+127.0.0.1 - - [25/Sep/2026:14:26:18 +0000] "GET /after" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:18 +0000] "GET /" 200 0.000s
+t/sse-close.t ................................. ok
+127.0.0.1 - - [25/Sep/2026:14:26:20 +0000] "GET /" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:21 +0000] "GET /" 204 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:22 +0000] "GET /" 404 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:23 +0000] "GET /" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:29 +0000] "GET /" 404 0.305s
+t/sse-decline.t ............................... ok
+t/tls-optional.t .............................. ok
+127.0.0.1 - - [25/Sep/2026:14:26:31 +0000] "POST /utf8/%CE%BB%F0%9F%94%A5caf%C3%A9?text=%CE%BB%F0%9F%94%A5caf%C3%A9" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:31 +0000] "GET /invalid/%FF%FE/test" 200 0.000s
+127.0.0.1 - - [25/Sep/2026:14:26:31 +0000] "GET /response-utf8" 200 0.000s
+t/utf8/01-raw-utf8.t .......................... ok
+127.0.0.1 - - [25/Sep/2026:14:26:32 +0000] "GET /" 401 0.000s
+t/websocket/30-denial-response.t .............. ok
+t/ws-close-config.t ........................... ok
+t/ws-close-deadline-h1.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:26:36 +0000] "GET /" 101 0.211s
+127.0.0.1 - - [25/Sep/2026:14:26:37 +0000] "GET /" 101 0.231s
+t/ws-close-no-duplicate-frame.t ............... ok
+t/ws-close-parity.t ........................... ok
+t/ws-close-phase-entry.t ...................... ok
+127.0.0.1 - - [25/Sep/2026:14:26:40 +0000] "GET /" 101 0.162s
+127.0.0.1 - - [25/Sep/2026:14:26:45 +0000] "GET /" 101 0.163s
+t/ws-transport-parity.t ....................... ok
+All tests successful.
+Files=180, Tests=1273, 1098 wallclock secs ( 0.63 usr  0.35 sys + 59.55 cusr  9.46 csys = 69.99 CPU)
+Result: PASS

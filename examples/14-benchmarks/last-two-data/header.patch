@@ -1,0 +1,45 @@
+diff --git a/lib/PAGI/Server/Connection.pm b/lib/PAGI/Server/Connection.pm
+index 44a0048..23b25cc 100644
+--- a/lib/PAGI/Server/Connection.pm
++++ b/lib/PAGI/Server/Connection.pm
+@@ -6141,20 +6141,23 @@ sub _create_send {
+             # strip any app-supplied values before they reach the wire.
+             $headers = $weak_self->_h1_strip_connection_headers($headers);
+ 
+-            # Check if we need chunked encoding (no Content-Length)
+-            my $has_content_length = 0;
++            # Discover framing and companion fields in one pass. Keep the
++            # application fields themselves unchanged, including duplicates.
++            my ($has_content_length, $has_date, $has_upgrade) = (0, 0, 0);
+             for my $h (@$headers) {
+-                if (lc($h->[0]) eq 'content-length') {
++                my $name = lc($h->[0]);
++                if ($name eq 'content-length') {
+                     $has_content_length = 1;
+-                    last;
++                } elsif ($name eq 'date') {
++                    $has_date = 1;
++                } elsif ($name eq 'upgrade') {
++                    $has_upgrade = 1;
+                 }
+             }
+ 
+-            # Add Date header, but only if the app didn't already supply one.
+             my @final_headers = @$headers;
+-            unless (grep { lc($_->[0]) eq 'date' } @final_headers) {
+-                push @final_headers, ['date', $weak_self->{protocol}->format_date];
+-            }
++            push @final_headers, ['date', $weak_self->{protocol}->format_date]
++                unless $has_date;
+ 
+             # PAGI spec Upgrade companion rule: over HTTP/1.1, a response
+             # carrying an app-supplied Upgrade header (e.g. 426 Upgrade
+@@ -6162,7 +6165,7 @@ sub _create_send {
+             # Connection tokens -- RFC 9110 requires the pair from any
+             # Upgrade sender, and the app's own Connection header was
+             # stripped above. HTTP/1.0 has no upgrade mechanism.
+-            if (!$is_http10 && grep { lc($_->[0]) eq 'upgrade' } @final_headers) {
++            if (!$is_http10 && $has_upgrade) {
+                 push @final_headers, ['connection', 'upgrade'];
+             }
+ 

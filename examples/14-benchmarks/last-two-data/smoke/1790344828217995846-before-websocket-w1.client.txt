@@ -1,0 +1,1 @@
+{"elapsed":2.00112798999999,"close_reply_p50_ms":3.61884200003715,"messages_per_second":12263.0836821188,"connections":20,"connect_p50_ms":7.9019419999895,"p50_ms":1.62769799999296,"p99_ms":2.07395499995755,"messages":24540}

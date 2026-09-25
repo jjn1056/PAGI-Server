@@ -177,4 +177,11 @@ and buffered-POST profiling limitation.
 
 The subsequent [send-state ownership experiment](STATE-OWNERSHIP-2026-09-25.md)
 was tested and rejected: small mixed results did not justify its extra lifetime
-rule. The runtime remains the saved checkpoint.
+rule.
+
+The next [header-scan and shared-send comparison](HTTP-SEND-2026-09-25.md)
+found repeatable 4.5–5.1% ordinary HTTP gains from sharing the send coroutine,
+with streaming effectively flat. Shared send is retained after the full enabled
+suite passed (180 files / 1,273 tests); the header-scan candidate was discarded.
+The report compares
+both independent candidates with the saved checkpoint and CPAN release.

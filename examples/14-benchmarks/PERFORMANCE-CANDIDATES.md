@@ -5,16 +5,18 @@ work and simplifying ownership over adding caches, flags or parallel state.
 These are hypotheses, not promised improvements. Compare any candidate with
 both the saved baseline and installed release; keep individual samples.
 
-## Combine response-header scans — deferred
+## Combine response-header scans — tried and rejected
 
 HTTP response start separately scans for Content-Length, Date and Upgrade.
 Consider collecting these facts in one pass, without caching or changing the
 header representation. Preserve field order, duplicates, case handling,
 application header immutability, stripping warnings and framing behavior.
 Start with the existing scans; avoid making a general header framework.
-Measure a bounded candidate before claiming a gain. Not implemented.
+The bounded AWS experiment on 2026-09-25 found no persuasive benefit: GET
+-1.68%, ten-header GET +0.17%, POST +0.99%, streaming +0.06% versus saved.
+The original scans remain. See HTTP-SEND-2026-09-25.md and the evidence patch.
 
-## Share the HTTP send implementation — deferred
+## Share the HTTP send implementation — retained
 
 Consider a named shared async routine, following the saved receive change.
 PR #13's a0d11f81 is a research reference, not a patch to merge. Moving closure
@@ -22,7 +24,17 @@ variables into a state hash may introduce extra indirection, so a shorter
 factory alone is not proof of improvement. Preserve weak connection ownership,
 cancellation, backpressure, HEAD/file/fh/trailers, failure rollback, refusal
 state publication and completion before handler return. Avoid adding a
-synchronous fast path or another dispatch layer. Not implemented.
+synchronous fast path or another async wrapper.
+
+The bounded AWS candidate improves GET +4.51%, ten-header GET +4.64% and POST
++5.10% versus saved, positive in all three rounds. Streaming is -0.30%, with
+mixed round directions; SSE/WebSocket controls are effectively flat. Retain
+the shared coroutine: the full enabled suite passes (180 files / 1,273 tests),
+as do focused checks (17 files / 230 tests), including suspended-send weak
+ownership. The implementation
+keeps private per-send state and the existing publisher/rollback behavior;
+the rejected scalar-alias ownership change is not included. See
+HTTP-SEND-2026-09-25.md for release comparisons, review and raw evidence.
 
 ## Byte counter — parked
 
