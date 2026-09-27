@@ -3,6 +3,8 @@ use warnings;
 use Test2::V0;
 use Future::AsyncAwait;
 use IO::Async::Loop;
+use Errno qw(EAGAIN);
+use Time::HiRes qw(time);
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 
@@ -14,14 +16,16 @@ BEGIN {
         or plan skip_all => 'Net::Async::WebSocket::Client required';
 }
 
-# End-to-end test of the pagi.transport backpressure callbacks. A single send
-# larger than the high-water mark fires on_high_water at the synchronous
-# post-write check (before the loop flushes); once it flushes to the reading
-# client and the buffer falls below the low mark, on_drain fires.
+# Force a real backlog after the handshake, then let it drain to the client.
+# A large send alone need not engage backpressure: immediate writes may flush
+# it before watermark evaluation (PAGI transport-flow-control clarification).
 
 my $loop = IO::Async::Loop->new;
 
-my ($hit_high, $hit_drain) = (0, 0);
+my ($hit_high, $hit_drain, $second_sent) = (0, 0, 0);
+my $allow_send = $loop->new_future;
+my @frames;
+my $transport;
 
 my $app = async sub {
     my ($scope, $receive, $send) = @_;
@@ -39,13 +43,17 @@ my $app = async sub {
 
     await $send->({ type => 'websocket.accept' });
 
-    my $t = $scope->{'pagi.transport'};
-    $t->on_high_water(sub { $hit_high++ });
-    $t->on_drain(sub     { $hit_drain++ });
+    $transport = $scope->{'pagi.transport'};
+    $transport->on_high_water(sub { $hit_high++ });
+    $transport->on_drain(sub     { $hit_drain++ });
+
+    await $allow_send;
 
     # 50 KB: over the 1 KB high-water mark configured below, but under the
     # ~64 KB WebSocket frame-size limit.
     await $send->({ type => 'websocket.send', bytes => ('x' x (50 * 1024)) });
+    await $send->({ type => 'websocket.send', bytes => 'after drain' });
+    $second_sent = 1;
 
     while (1) {
         my $e = await $receive->();
@@ -63,15 +71,32 @@ $server->listen->get;
 my $port = $server->port;
 
 # A client that reads incoming frames (so the server's write buffer drains).
-my $client = Net::Async::WebSocket::Client->new(on_frame => sub { });
+my $client = Net::Async::WebSocket::Client->new(on_binary_frame => sub { push @frames, $_[1] });
 $loop->add($client);
 $client->connect(url => "ws://127.0.0.1:$port/")->get;
 
-my $deadline = time + 3;
-$loop->loop_once(0.02) while (!$hit_high || !$hit_drain) && time < $deadline;
+my ($conn) = values %{$server->{connections}};
+my $blocked = 1;
+$conn->{stream}->configure(writer => sub {
+    if ($blocked) { $! = EAGAIN; return undef; }
+    my $n = syswrite($_[1], $_[2], $_[3]);
+    substr($_[2], 0, $n) = '' if defined $n;
+    return $n;
+});
+$allow_send->done;
 
-ok($hit_high,  'on_high_water fired when a send exceeded the high-water mark');
-ok($hit_drain, 'on_drain fired once the buffer drained below the low-water mark');
+is($hit_high, 1, 'blocked output fires on_high_water once');
+is($hit_drain, 0, 'no drain while bytes remain blocked');
+ok(!$second_sent, 'next application send waits for drain');
+ok($transport->buffered_amount >= $transport->high_water_mark, 'actual output backlog exceeds high mark');
+
+$blocked = 0;
+my $deadline = time + 3;
+$loop->loop_once(0.02) while (@frames < 2 || !$hit_drain) && time < $deadline;
+
+is($hit_drain, 1, 'draining the backlog fires on_drain once');
+ok($second_sent, 'parked application send resumes');
+is(\@frames, [('x' x (50 * 1024)), 'after drain'], 'client receives both complete frames in order');
 
 eval { $client->close };
 eval { $loop->remove($client) };
