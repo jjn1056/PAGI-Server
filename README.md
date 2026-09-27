@@ -202,6 +202,25 @@ is used only when present. The specification itself lives in the
 This distribution was split out of the PAGI distribution; its git history is
 preserved from the [original repository](https://github.com/jjn1056/pagi).
 
+## Testing
+
+Run the default suite from the repository root:
+
+```sh
+prove -lr t
+```
+
+Use one opt-in flag for the additional release, integration, stress, and
+signal/timing-sensitive tests:
+
+```sh
+RELEASE_TESTING=1 prove -lr t
+```
+
+These tests can take longer and exercise subprocesses and heavier local loads.
+Dependency and platform skips still apply: cross-distribution tests need the
+relevant PAGI-Tools modules, and the connection stress test needs `hey`.
+
 ## License
 
 Copyright (C) John Napiorkowski.

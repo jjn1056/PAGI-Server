@@ -17,7 +17,7 @@ use PAGI::Server;
 # The test process *is* the server (same event loop), and on_complete fires
 # synchronously when the handler returns -- before the client finishes reading
 # the body -- so the shared @log is populated by the time ->get resolves.
-plan skip_all => 'Set INTEGRATION_TEST=1 to run' unless $ENV{INTEGRATION_TEST};
+plan skip_all => 'Set RELEASE_TESTING=1 to run' unless $ENV{RELEASE_TESTING};
 
 my $loop = IO::Async::Loop->new;
 

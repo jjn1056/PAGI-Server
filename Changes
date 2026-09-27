@@ -2,6 +2,11 @@
 
 0.002014 - UNRELEASED
 
+  Testing
+  - Use RELEASE_TESTING=1 for all optional release, cross-distribution
+    integration, and stress tests. This replaces the separate INTEGRATION_TEST
+    and STRESS_TEST flags; dependency and platform skips remain unchanged.
+
   Performance
   - Make stream I/O chunk sizes configurable with read_buffer_size and
     write_buffer_size (CLI: --read-buffer-size / --write-buffer-size).

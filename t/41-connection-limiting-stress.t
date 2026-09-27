@@ -4,9 +4,9 @@ use warnings;
 use Test2::V0;
 
 # This test requires 'hey' to be installed and is skipped by default
-# Run with: STRESS_TEST=1 prove -l t/41-connection-limiting-stress.t
+# Run with: RELEASE_TESTING=1 prove -l t/41-connection-limiting-stress.t
 
-plan skip_all => 'Set STRESS_TEST=1 to run stress tests' unless $ENV{STRESS_TEST};
+plan skip_all => 'Set RELEASE_TESTING=1 to run stress tests' unless $ENV{RELEASE_TESTING};
 plan skip_all => 'hey not installed' unless `which hey 2>/dev/null`;
 plan skip_all => 'Fork tests not supported on Windows' if $^O eq 'MSWin32';
 
