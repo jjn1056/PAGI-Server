@@ -1,1 +1,0 @@
-{"close_reply_p50_ms":3.78320400000121,"p99_ms":2.1113330000162,"p50_ms":1.66511199995512,"messages":119956,"connections":20,"elapsed":10.001173454,"connect_p50_ms":7.92078899996795,"messages_per_second":11994.1925366791}

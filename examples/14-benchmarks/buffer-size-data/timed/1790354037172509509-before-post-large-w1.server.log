@@ -1,8 +1,0 @@
-PAGI::Server 0.002014 listening on http://127.0.0.1:38035/
-  serving   /home/ubuntu/pagi-benchmark/buffers-20260925/apps/post.pl
-  mode      production (--env)
-  lifespan  not supported, continuing without it (application raised: Expected HTTP scope)
-  loop      EV, max_conn 1000, http2 not installed, tls available, future_xs off
-Using default max_connections (1000). For production, consider tuning this value based on your workload. See 'perldoc PAGI::Server' for guidance.
-Received INT, shutting down
-Shutdown complete

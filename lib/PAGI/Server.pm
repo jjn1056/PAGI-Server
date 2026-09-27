@@ -1385,9 +1385,8 @@ C<write_low_watermark>: the size controls a write chunk, while the watermarks
 control backpressure on queued output. Changing a chunk size changes neither
 the watermarks nor C<max_body_size>.
 
-See F<examples/14-benchmarks> in the source distribution for reusable workloads
-and recorded comparisons, including mixed traffic. The measured bulk-transfer
-gains are workload dependent, not a guarantee that larger sizes always win.
+Bulk-transfer gains are workload dependent, not a guarantee that larger sizes
+always win.
 
 =item write_high_watermark => $bytes
 

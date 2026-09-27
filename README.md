@@ -165,8 +165,7 @@ pagi-server --read-buffer-size 8192 --write-buffer-size 8192 app.pl
 For bulk downloads, try `--write-buffer-size 65536`; larger chunks can improve
 bulk throughput at the expense of competing small requests. These are I/O
 chunk lengths, not body limits or backpressure watermarks. See
-`perldoc PAGI::Server` (`read_buffer_size` / `write_buffer_size`) and the
-[benchmark tuning guide](examples/14-benchmarks/README.md#tuning-io-chunk-sizes)
+`perldoc PAGI::Server` (`read_buffer_size` / `write_buffer_size`)
 for examples and tradeoffs.
 
 ## Examples

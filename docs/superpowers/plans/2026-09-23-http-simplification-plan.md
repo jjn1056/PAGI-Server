@@ -1,5 +1,10 @@
 # HTTP Simplification Experiment Implementation Plan
 
+> Archive note: the former benchmark directory and measured report are stored
+> outside this repository at
+> `../archive/pagi-server-benchmarks-2026-09-26/14-benchmarks/`
+> (relative to the repository root). File paths below describe the historical plan.
+
 > **For agentic workers:** Use superpowers:subagent-driven-development or executing-plans to implement task-by-task. Keep all experiment changes on experiment/http-simplification.
 
 **Goal:** Test whether simpler HTTP implementation can recover performance without behavior changes or feature switches.
@@ -88,6 +93,6 @@ incidental Future readiness inside resumed receive code.
 All 100 measured samples completed. Longer comparisons are mixed, with the
 clearest positive result in repeated sends (+6.2%). This does not establish
 recovery of the release regression. See
-[the measured report](../../../examples/14-benchmarks/SIMPLIFICATION-2026-09-23.md)
+the measured report (archived `SIMPLIFICATION-2026-09-23.md`)
 for all samples, latency, limitations and commands. Branch remains local; no
 merge, push or tag. Root main release work remains intact.

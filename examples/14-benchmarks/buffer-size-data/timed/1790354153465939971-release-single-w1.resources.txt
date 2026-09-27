@@ -1,1 +1,0 @@
-user_s=8.25 system_s=2.89 maxrss_kib=42136 major_faults=0 minor_faults=8196

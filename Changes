@@ -18,8 +18,6 @@
     if its callback pauses, closes or removes the listener; SSL-extension
     listeners keep their existing acceptor. This reduces first-response delays
     during connection bursts.
-  - Add repeatable HTTP, streaming, SSE and WebSocket benchmark examples, with
-    release comparisons and recorded limits in examples/14-benchmarks.
 
   Specification
   - max_body_size: a request body of undeclared length that crosses the limit
