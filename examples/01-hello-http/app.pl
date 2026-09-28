@@ -5,7 +5,7 @@ use Future::AsyncAwait;
 # Return anonymous coderef directly (avoids "Subroutine redefined" warnings
 # when file is loaded multiple times via do)
 my $app = async sub  {
-        my ($scope, $receive, $send) = @_;
+    my ($scope, $receive, $send) = @_;
     die "Unsupported scope type: $scope->{type}" if $scope->{type} ne 'http';
 
     await $send->({

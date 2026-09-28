@@ -152,7 +152,21 @@ pagi-server --http2 --ssl-cert cert.pem --ssl-key key.pem ./app.pl
 ```
 
 Run `perldoc pagi-server` for the full list of options (workers, timeouts,
-limits, watermarks, TLS, listeners, and more).
+limits, I/O chunk sizes, watermarks, TLS, listeners, and more).
+
+Reads default to 64 KiB and writes to 8 KiB. For many small requests/uploads,
+or small requests competing with bulk uploads, try smaller reads and compare
+tail latency as well as throughput:
+
+```bash
+pagi-server --read-buffer-size 8192 --write-buffer-size 8192 app.pl
+```
+
+For bulk downloads, try `--write-buffer-size 65536`; larger chunks can improve
+bulk throughput at the expense of competing small requests. These are I/O
+chunk lengths, not body limits or backpressure watermarks. See
+`perldoc PAGI::Server` (`read_buffer_size` / `write_buffer_size`)
+for examples and tradeoffs.
 
 ## Examples
 
@@ -187,6 +201,25 @@ is used only when present. The specification itself lives in the
 
 This distribution was split out of the PAGI distribution; its git history is
 preserved from the [original repository](https://github.com/jjn1056/pagi).
+
+## Testing
+
+Run the default suite from the repository root:
+
+```sh
+prove -lr t
+```
+
+Use one opt-in flag for the additional release, integration, stress, and
+signal/timing-sensitive tests:
+
+```sh
+RELEASE_TESTING=1 prove -lr t
+```
+
+These tests can take longer and exercise subprocesses and heavier local loads.
+Dependency and platform skips still apply: cross-distribution tests need the
+relevant PAGI-Tools modules, and the connection stress test needs `hey`.
 
 ## License
 

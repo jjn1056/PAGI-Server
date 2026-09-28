@@ -56,8 +56,8 @@ subtest 'HTTP/2 streams get independent per-stream connection objects' => sub {
 # HTTP/1.1 integration through the real server.
 # --------------------------------------------------------------------------
 SKIP: {
-    skip 'Set INTEGRATION_TEST=1 to run HTTP/1.1 integration', 1
-        unless $ENV{INTEGRATION_TEST};
+    skip 'Set RELEASE_TESTING=1 to run HTTP/1.1 integration', 1
+        unless $ENV{RELEASE_TESTING};
 
     require IO::Async::Loop;
     require Net::Async::HTTP;

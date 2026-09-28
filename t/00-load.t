@@ -7,6 +7,7 @@ my @core_modules = qw(
     PAGI::Server
     PAGI::Server::AppNormalizer
     PAGI::Server::Connection
+    PAGI::Server::Listener
     PAGI::Server::ConnectionState
     PAGI::Server::EventValidator
     PAGI::Server::AsyncFile

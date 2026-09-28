@@ -19,7 +19,7 @@ BEGIN {
 }
 
 # Skip if not running integration tests
-plan skip_all => 'Set INTEGRATION_TEST=1 to run' unless $ENV{INTEGRATION_TEST};
+plan skip_all => 'Set RELEASE_TESTING=1 to run' unless $ENV{RELEASE_TESTING};
 
 my $loop = IO::Async::Loop->new;
 

@@ -19,8 +19,8 @@ use Future;
 # PAGI::Request is in the sibling PAGI-Tools distribution; ConnectionState is
 # PAGI-Server's own. Skip when Tools is not installed.
 BEGIN {
-    plan(skip_all => q{Cross-distribution integration test; set INTEGRATION_TEST=1 to run})
-        unless $ENV{INTEGRATION_TEST};
+    plan(skip_all => q{Cross-distribution integration test; set RELEASE_TESTING=1 to run})
+        unless $ENV{RELEASE_TESTING};
     eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::Request; 1 }
         or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::Request) not installed');
 }
@@ -84,8 +84,8 @@ subtest 'on_disconnect callbacks' => sub {
     $conn->_mark_disconnected('idle_timeout');
 
     is(scalar @called, 2, 'both callbacks invoked');
-    is($called[0], ['cb1', 'idle_timeout'], 'cb1 received reason');
-    is($called[1], ['cb2', 'idle_timeout'], 'cb2 received reason');
+    is($called[0], ['cb1', 'idle_timeout', undef], 'cb1 received reason and absent detail');
+    is($called[1], ['cb2', 'idle_timeout', undef], 'cb2 received reason and absent detail');
 };
 
 # =============================================================================
@@ -133,10 +133,10 @@ subtest 'disconnect_future resolves on disconnect' => sub {
 };
 
 # =============================================================================
-# Test: disconnect_future is lazily created
+# Test: disconnect_future observers are cancellation-isolated
 # =============================================================================
 
-subtest 'disconnect_future is lazily created' => sub {
+subtest 'disconnect_future observers are cancellation-isolated' => sub {
     my $conn = PAGI::Server::ConnectionState->new();
     my $req = PAGI::Request->new(
         { type => 'http', method => 'GET', path => '/', headers => [],
@@ -148,9 +148,18 @@ subtest 'disconnect_future is lazily created' => sub {
     ok($future, 'returns a Future');
     ok(!$future->is_ready, 'Future not ready while connected');
 
-    # Same Future returned on subsequent calls
+    # Cancelling one observer must not cancel another or the connection signal.
     my $future2 = $req->disconnect_future;
-    is($future, $future2, 'same Future returned');
+    $future->cancel;
+    ok($future->is_cancelled, 'first observer cancelled');
+    ok(!$future2->is_ready, 'second observer remains pending');
+    ok($req->is_connected, 'cancelling an observer leaves connection active');
+
+    $conn->_mark_disconnected('client_closed');
+
+    ok($future2->is_ready, 'second observer receives disconnect');
+    is($future2->get, 'client_closed', 'second observer receives reason');
+    ok($future->is_cancelled, 'first observer remains cancelled');
 };
 
 # =============================================================================
