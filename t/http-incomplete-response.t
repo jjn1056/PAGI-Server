@@ -141,7 +141,8 @@ subtest 'an app that returns without a response yields 500' => sub {
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
 
@@ -193,7 +194,8 @@ subtest '/half: chunked response left incomplete forces abnormal closure' => sub
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
     my $port = $server->port;
@@ -253,7 +255,8 @@ subtest '/half-cl: content-length response left short forces abnormal closure' =
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
     my $port = $server->port;
@@ -300,7 +303,8 @@ subtest '/throw-none: app failure before start yields 500 and server_error' => s
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
 
@@ -336,7 +340,8 @@ subtest '/cancel-before-start: client gone before start synthesizes nothing' => 
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
     my $port = $server->port;
@@ -395,7 +400,8 @@ subtest '/gate-disconnect: client gone after a complete request, app returns bar
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
     my $port = $server->port;
@@ -482,7 +488,8 @@ subtest '/trailers-promised: declared trailers never sent is an incomplete respo
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
     my $port = $server->port;
@@ -525,7 +532,8 @@ subtest '/trailers-promised: declared trailers never sent is an incomplete respo
 subtest '/ok control: unaffected -- on_complete fires, connection completes normally' => sub {
     my $loop = IO::Async::Loop->new;
 
-    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1);
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1,
+                                   access_log => undef);
     $loop->add($server);
     $server->listen->get;
 
