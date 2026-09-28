@@ -719,6 +719,15 @@ sub _mark_complete {
     $self->{_connected} = 0;
     $self->{_completed}    = 1;
 
+    # No completion observers: release unused hooks without scheduling an
+    # empty delivery. Late observers read the terminal facts above.
+    unless (@{$self->{_complete_callbacks}} || @{$self->{_end_callbacks}}
+            || $self->{_end_future}) {
+        $self->{_callbacks} = [];
+        $self->{_on_abort}  = undef;
+        return;
+    }
+
     # Deliver the signal on the event loop, never synchronously inside the
     # application's terminal $send (Www.pod "Callback invocation context").
     $self->_deliver_terminal(sub {
