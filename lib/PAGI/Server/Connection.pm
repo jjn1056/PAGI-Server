@@ -4613,6 +4613,7 @@ sub _h1_transport_state {
             push @{$w->{_drain_fires}}, $fire;
             $w->_setup_drain_detection;
         },
+        log       => $self->_transport_log_sink,
     );
 }
 
@@ -4633,7 +4634,22 @@ sub _h2_transport_state {
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub { my $fire = shift; push @{$ss->{transport_drain_fires}}, $fire },
+        log       => $self->_transport_log_sink,
     );
+}
+
+# The log both transport handles report callback errors through, attributed to
+# the transport state. The connection is held weakly like the other sources; a
+# handle that outlives it still reports rather than vanishing.
+sub _transport_log_sink {
+    my ($self) = @_;
+    weaken(my $w = $self);
+    return sub {
+        my ($level, $msg) = @_;
+        return $w->_log($level, $msg, 'PAGI::Server::TransportState') if $w;
+        warn "$msg\n";
+        return;
+    };
 }
 
 # Notify the current transport-state handle after an application write so its
@@ -8856,12 +8872,13 @@ async sub _send_fh_response {
 
 # Diagnostics go through the server so log_level governs them and a replaced
 # sink sees them. A connection can outlive its server reference during
-# shutdown, so falling back to STDERR is a real path, not a formality.
+# shutdown, so falling back to STDERR is a real path, not a formality. The
+# optional category names another emitting class the connection reports for.
 sub _log {
-    my ($self, $level, $msg) = @_;
+    my ($self, $level, $msg, $category) = @_;
 
     my $server = $self->{server};
-    return $server->_log($level, $msg, __PACKAGE__) if $server;
+    return $server->_log($level, $msg, $category // __PACKAGE__) if $server;
 
     warn "$msg\n";
     return;

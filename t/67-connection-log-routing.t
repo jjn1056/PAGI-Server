@@ -102,4 +102,53 @@ subtest 'a migrated message carries exactly one newline' => sub {
         'no doubled newline');
 };
 
+subtest 'a connection may name another emitting class' => sub {
+    my @events;
+    my $server = PAGI::Server->new(app => sub { }, logger => collector(\@events));
+    my $conn = bless { server => $server }, 'PAGI::Server::Connection';
+
+    $conn->_log(warn => 'from elsewhere', 'Some::Class');
+    $conn->_log(warn => 'from the connection');
+
+    is($events[0]{category}, 'Some::Class', 'the named class');
+    is($events[1]{category}, 'PAGI::Server::Connection', 'the connection by default');
+};
+
+subtest 'transport callback errors reach the server sink on both protocols' => sub {
+    my @events;
+    my $server = PAGI::Server->new(app => sub { }, logger => collector(\@events));
+    my $conn = bless { server => $server }, 'PAGI::Server::Connection';
+
+    my @warned;
+    local $SIG{__WARN__} = sub { push @warned, $_[0] };
+
+    my %handles = (
+        'HTTP/1.1' => $conn->_h1_transport_state,
+        'HTTP/2'   => $conn->_h2_transport_state({}),
+    );
+    for my $protocol (sort keys %handles) {
+        @events = ();
+        $handles{$protocol}->_fire([sub { die "boom\n" }]);
+        is(\@events, [{
+            level    => 'error',
+            message  => 'transport callback error: boom',
+            category => 'PAGI::Server::TransportState',
+        }], "$protocol: one error attributed to the transport state");
+    }
+    is(\@warned, [], 'nothing went to warn');
+};
+
+subtest 'a transport handle outliving its connection still reports' => sub {
+    my $server = PAGI::Server->new(app => sub { }, logger => sub { });
+    my $conn = bless { server => $server }, 'PAGI::Server::Connection';
+    my $transport = $conn->_h1_transport_state;
+    undef $conn;
+
+    my @warned;
+    local $SIG{__WARN__} = sub { push @warned, $_[0] };
+    $transport->_fire([sub { die "boom\n" }]);
+
+    is(\@warned, ["transport callback error: boom\n"], 'falls back to STDERR');
+};
+
 done_testing;

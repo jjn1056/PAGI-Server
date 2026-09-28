@@ -31,6 +31,7 @@ sub mk_ts {
         high      => ($o{high} // 65536),
         low       => ($o{low}  // 16384),
         arm_drain => sub { push @drain_fires, shift },
+        (exists $o{log} ? (log => $o{log}) : ()),
     );
 }
 
@@ -155,6 +156,30 @@ subtest 'a callback error does not break the others' => sub {
 
     is($second, 1, 'second callback still ran');
     like($warnings[0], qr/callback error/, 'warning emitted');
+    like($warnings[0], qr/[^\n]\n\z/, 'with exactly one trailing newline');
+};
+
+subtest 'a callback error goes to the injected log at error' => sub {
+    my @events;
+    my $t = mk_ts(high => 100, low => 20, buf => 0,
+                  log => sub { push @events, [@_] });
+
+    my $second = 0;
+    $t->on_high_water(sub { die "boom" });
+    $t->on_high_water(sub { $second++ });
+
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, @_ };
+
+    $buf = 150;
+    $t->_check_watermarks;
+
+    is($second, 1, 'second callback still ran');
+    is(scalar @events, 1, 'one event logged');
+    is($events[0][0], 'error', 'at error, like the other callback errors');
+    like($events[0][1], qr/\Atransport callback error: boom at /, 'naming the failure');
+    unlike($events[0][1], qr/\n\z/, 'with no trailing newline');
+    is(\@warnings, [], 'nothing went to warn');
 };
 
 done_testing;

@@ -187,6 +187,10 @@
     with a raw warn, so a replaced logger never saw it and it carried no level
     or category. It now goes through the server log at error, as it already
     did on HTTP/2, SSE and WebSocket refusal. The default output is unchanged.
+  - An exception from an on_high_water or on_drain callback on pagi.transport
+    was reported with a raw warn. It now goes through the server log at
+    error with category PAGI::Server::TransportState, like the errors from
+    on_complete and on_disconnect callbacks. The default output is unchanged.
 
   Limits
   - ws_close_timeout (constructor/configure option, default 10 seconds) bounds

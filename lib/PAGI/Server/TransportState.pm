@@ -57,6 +57,7 @@ L<PAGI::Spec::Www> for the full specification.
         high      => $bytes,        # high-water mark (value or coderef)
         low       => $bytes,        # low-water mark  (value or coderef)
         arm_drain => sub { my $fire = shift; ... },
+        log       => sub { my ($level, $message) = @_; ... },
     );
 
 Creates a transport-state handle. B<This is built by the server, not the
@@ -75,6 +76,11 @@ a coderef returning the current mark; C<undef> means unavailable.
 receives a single C<$fire> callback and must invoke it exactly once when the
 buffer next falls below the low mark, so C<on_drain> fires and the cycle re-arms.
 
+=item * C<log> -- optional coderef called as C<< $log->($level, $message) >> to
+report an exception raised by an C<on_high_water> or C<on_drain> callback, at
+level C<error>. The message carries no trailing newline. Without it, the
+handle falls back to C<warn>.
+
 =back
 
 =cut
@@ -87,6 +93,7 @@ sub new {
         _high      => $args{high},        # value or coderef -> high mark (undef ok)
         _low       => $args{low},         # value or coderef -> low mark  (undef ok)
         _arm_drain => $args{arm_drain},   # coderef: (fire) -> call fire once when below low
+        _log       => $args{log},         # coderef: ($level, $message) -> server log
 
         # Backpressure callbacks + hysteresis state. _above_high is true once
         # the buffer has crossed the high mark and not yet drained below the low
@@ -238,8 +245,22 @@ sub _check_watermarks {
 sub _fire {
     my ($self, $cbs) = @_;
     for my $cb (@$cbs) {
-        eval { $cb->(); 1 } or warn "transport callback error: $@";
+        next if eval { $cb->(); 1 };
+        chomp(my $error = $@);
+        $self->_log(error => "transport callback error: $error");
     }
+}
+
+# Report through the log the server injected; a handle built without one
+# still reports rather than vanishing.
+sub _log {
+    my ($self, $level, $msg) = @_;
+
+    my $log = $self->{_log};
+    return $log->($level, $msg) if $log;
+
+    warn "$msg\n";
+    return;
 }
 
 1;
