@@ -451,9 +451,9 @@ sub start {
             };
             if (my $error = $@) {
                 # Log the error and close the connection gracefully
-                $self->_log(error => "PAGI connection error: $error");
-                return 0 unless $weak_self;
-                $weak_self->_handle_disconnect_and_close('server_error',
+                my $conn = $weak_self or return 0;
+                $conn->_log(error => "PAGI connection error: $error");
+                $conn->_handle_disconnect_and_close('server_error',
                     detail => _detail_from_error($error));
             }
             return 0;
