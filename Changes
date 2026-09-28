@@ -183,6 +183,10 @@
     installed, while the banner read "available". Now the banner reports what
     is in use, a Future loaded before the server draws one warn-level line at
     startup, and --future-xs / PAGI_FUTURE_XS=1 answer "currently unavailable".
+  - h1: "PAGI application returned with an incomplete response" was written
+    with a raw warn, so a replaced logger never saw it and it carried no level
+    or category. It now goes through the server log at error, as it already
+    did on HTTP/2, SSE and WebSocket refusal. The default output is unchanged.
 
   Limits
   - ws_close_timeout (constructor/configure option, default 10 seconds) bounds

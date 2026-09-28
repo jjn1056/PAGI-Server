@@ -5526,9 +5526,9 @@ async sub _handle_request {
         if ($self->{response_started} && ($self->{h1_seq} // 'complete') ne 'complete') {
             $self->_flush_pending_headers;   # headers may still be buffered; no terminator follows
             unless ($self->{closed}) {
-                warn(($self->{h1_seq} // '') eq 'awaiting_trailers'
-                    ? "PAGI application returned with an incomplete response (trailers were declared but never sent)\n"
-                    : "PAGI application returned with an incomplete response\n");
+                $self->_log(error => ($self->{h1_seq} // '') eq 'awaiting_trailers'
+                    ? "PAGI application returned with an incomplete response (trailers were declared but never sent)"
+                    : "PAGI application returned with an incomplete response");
             }
             $self->_end_scope('server_error',
                 detail => (($self->{h1_seq} // '') eq 'awaiting_trailers')
