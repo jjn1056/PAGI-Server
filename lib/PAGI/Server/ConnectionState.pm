@@ -644,6 +644,15 @@ sub _mark_disconnected {
     $self->{_reason} = $reason // 'unknown';
     $self->{_detail} = $detail;
 
+    # No abnormal-end observers: release unused hooks without scheduling an
+    # empty delivery. Late observers read the terminal facts above.
+    unless (@{$self->{_callbacks}} || @{$self->{_end_callbacks}}
+            || $self->{_future} || $self->{_end_future}) {
+        $self->{_complete_callbacks} = [];
+        $self->{_on_abort} = undef;
+        return;
+    }
+
     # 2. Deliver the signal on the event loop, never synchronously inside the
     # application's call into $send/$receive (Www.pod "Callback invocation
     # context"). A callback registered AFTER this transition still fires
