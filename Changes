@@ -8,6 +8,9 @@
     and STRESS_TEST flags; dependency and platform skips remain unchanged.
 
   Performance
+  - Skip queued terminal-notification work when no callbacks or Future
+    observers exist, for both clean completion and abnormal disconnection.
+    Registered observers retain their delivery and ordering guarantees.
   - Make stream I/O chunk sizes configurable with read_buffer_size and
     write_buffer_size (CLI: --read-buffer-size / --write-buffer-size).
     Increase the read default from 8192 to 65536 bytes for bulk uploads;
@@ -111,6 +114,9 @@
     including streamed responses and trailers.
 
   Bug fixes (measured against 0.002013)
+  - Release closed connections retained by a strong reference in the stream
+    read callback. Error logging now acquires the connection through the
+    existing weak reference, avoiding a connection/stream callback cycle.
   - h2: a connection nghttp2 tore down for a peer protocol violation reported
     client_closed with no detail and logged nothing. It now ends as
     protocol_error, logs one error line, and carries nghttp2's own account of
