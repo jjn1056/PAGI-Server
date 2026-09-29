@@ -95,19 +95,25 @@ sub create_h2_connection {
     return ($conn, $stream, $sock_b, $server);
 }
 
+our (%STATUS_SEEN, %CLOSED_SEEN, %DATA_SEEN);
 sub create_client {
     my (%overrides) = @_;
     require Net::HTTP2::nghttp2::Session;
+    (%STATUS_SEEN, %CLOSED_SEEN, %DATA_SEEN) = ();
+    my $oh = $overrides{on_header}          // sub { 0 };
+    my $od = $overrides{on_data_chunk_recv} // sub { 0 };
+    my $oc = $overrides{on_stream_close}    // sub { 0 };
     return Net::HTTP2::nghttp2::Session->new_client(
         callbacks => {
             on_begin_headers   => $overrides{on_begin_headers}   // sub { 0 },
-            on_header          => $overrides{on_header}          // sub { 0 },
+            on_header          => sub { $STATUS_SEEN{$_[0]} = $_[2] if $_[1] eq ':status'; $oh->(@_) },
             on_frame_recv      => $overrides{on_frame_recv}      // sub { 0 },
-            on_data_chunk_recv => $overrides{on_data_chunk_recv} // sub { 0 },
-            on_stream_close    => $overrides{on_stream_close}    // sub { 0 },
+            on_data_chunk_recv => sub { $DATA_SEEN{$_[0]} .= $_[1]; $od->(@_) },
+            on_stream_close    => sub { $CLOSED_SEEN{$_[0]} = 1; $oc->(@_) },
         },
     );
 }
+sub close_frame_seen { my ($sid) = @_; return scalar grep { $_->{opcode} == 8 } extract_ws_frames($DATA_SEEN{$sid} // '') }
 
 sub complete_h2_handshake {
     my ($client, $client_sock) = @_;
@@ -146,9 +152,10 @@ sub send_stream_data {
 }
 
 sub exchange_frames {
-    my ($client, $client_sock, $rounds) = @_;
+    my ($client, $client_sock, $rounds, $done) = @_;
     $rounds //= 10;
     for (1..$rounds) {
+        last if $done && $done->();
         $loop->loop_once(0.1);
         my $buf = '';
         $client_sock->sysread($buf, 16384);
@@ -174,7 +181,7 @@ sub open_ws_stream {
         body      => sub { return undef },   # streaming: keep open
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock);
+    exchange_frames($client, $client_sock, 10, sub { defined $STATUS_SEEN{$ws_stream_id} });
 
     return $ws_stream_id;
 }
@@ -334,7 +341,7 @@ sub open_ws_stream_tracked {
         body      => sub { return undef },   # streaming: keep open
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock);
+    exchange_frames($client, $client_sock, 10, sub { defined $STATUS_SEEN{$$id_ref} });
 
     return $$id_ref;
 }
@@ -350,7 +357,7 @@ sub open_get_stream_tracked {
         authority => 'localhost',
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock);
+    exchange_frames($client, $client_sock, 10, sub { $CLOSED_SEEN{$$id_ref} });
 
     return $$id_ref;
 }
@@ -596,7 +603,7 @@ subtest 'keepalive ping arrives as h2 DATA; answered pong survives >= 2 interval
     # down the raw transport, rather than yanking it out from under a still
     # -healthy app.
     send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($ws_stream_id) });
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -677,7 +684,7 @@ subtest 'withheld pong times out exactly one disconnect; sibling GET still serve
     # connection -- proves the connection (and other streams on it) are
     # unaffected by one stream's keepalive-timeout close.
     open_get_stream_tracked($client, $client_sock, '/get', \$get_stream_id);
-    exchange_frames($client, $client_sock, 5);
+    exchange_frames($client, $client_sock, 5, sub { $CLOSED_SEEN{$get_stream_id} });
 
     is($get_headers{':status'}, '200', 'sibling GET stream still gets a response');
     is($get_body, 'sibling-ok', 'sibling GET stream still gets its body');
@@ -741,7 +748,7 @@ subtest 'keepalive on one stream does not leak pings to a sibling WS stream' => 
     # down the raw transport.
     send_ws_text($client, $client_sock, $a_stream_id, 'close:1000,done');
     send_ws_text($client, $client_sock, $b_stream_id, 'close:1000,done');
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($a_stream_id) && close_frame_seen($b_stream_id) });
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -805,7 +812,7 @@ subtest 'interval => 0 stops further pings' => sub {
     # End the scope cleanly (Www.pod "Meaning per scope") before tearing
     # down the raw transport.
     send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($ws_stream_id) });
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -871,7 +878,7 @@ subtest 'a second keepalive event supersedes the first: the ping cadence changes
     # End the scope cleanly (Www.pod "Meaning per scope") before tearing
     # down the raw transport.
     send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($ws_stream_id) });
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -920,7 +927,7 @@ subtest 'an inbound ws ping frame is answered with a pong carrying its payload' 
     # End the scope cleanly (Www.pod "Meaning per scope") before tearing
     # down the raw transport.
     send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,done');
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($ws_stream_id) });
 
     $stream_io->close_now;
     $loop->remove($server);
@@ -1066,7 +1073,7 @@ subtest 'app-initiated websocket.close releases the keepalive timer' => sub {
     send_ws_text($client, $client_sock, $ws_stream_id, 'close:1000,bye');
     # 10 rounds (1s) is a 5x margin over the 0.2s interval -- a still-armed
     # timer would have ticked several times by here.
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { close_frame_seen($ws_stream_id) });
 
     ok(!$ss->{ws_ka_timer}, 'stream keepalive timer released after websocket.close');
     ok($timer && !$timer->is_running, 'the armed timer itself is stopped');
@@ -1408,7 +1415,7 @@ subtest 'max_body_size 413 overrun on a pre-accept ws stream wakes pending recei
     # 413 observed client-side if still observable pre-RST: give a few more
     # settle rounds for the response headers nghttp2 already submitted to
     # reach the client before asserting on them.
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10, sub { defined $response_headers{':status'} });
     is($response_headers{':status'}, '413', 'client still sees the 413');
 
     $stream_io->close_now;
