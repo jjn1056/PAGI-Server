@@ -98,8 +98,10 @@ sub create_client {
     );
 }
 
+# $settled, when given, is what the handshake is waiting for: the server's
+# SETTINGS received and ours acknowledged. The loop stops once it holds.
 sub h2c_handshake {
-    my ($client, $client_sock) = @_;
+    my ($client, $client_sock, $settled) = @_;
     $client->send_connection_preface;
     my $data = $client->mem_send;
     $client_sock->syswrite($data);
@@ -110,11 +112,14 @@ sub h2c_handshake {
         $client->mem_recv($buf) if length($buf);
         my $out = $client->mem_send;
         $client_sock->syswrite($out) if length($out);
+        last if $settled && $settled->();
     }
 }
 
+# A trailing coderef is what the exchange is waiting for; the loop stops
+# once it holds rather than spending its whole round count.
 sub exchange_frames {
-    my ($client, $client_sock, $rounds) = @_;
+    my ($client, $client_sock, $rounds, $done) = @_;
     $rounds //= 10;
     for (1..$rounds) {
         $loop->loop_once(0.1);
@@ -123,6 +128,7 @@ sub exchange_frames {
         $client->mem_recv($buf) if length($buf);
         my $out = $client->mem_send;
         $client_sock->syswrite($out) if length($out);
+        last if $done && $done->();
     }
 }
 
@@ -132,16 +138,37 @@ sub exchange_frames {
 
 sub h2_request {
     my ($method, $path, %opts) = @_;
+
+    # The exchange is over when the client has seen the stream close and the
+    # application has returned -- some cases assert on what the application
+    # does after its last send resolves.
+    my ($app_returned, $stream_closed, $settings_seen, $settings_acked);
+    my $inner = $opts{app};
+    my $app = async sub {
+        my @r = eval { await $inner->(@_) };
+        my $err = $@;
+        $app_returned = 1;
+        die $err if $err;
+        return @r;
+    };
     my ($conn, $stream_io, $client_sock, $server) =
-        create_h2c_connection(app => $opts{app});
+        create_h2c_connection(app => $app);
 
     my %headers;
     my $body = '';
     my $client = create_client(
         on_header          => sub { my ($sid, $n, $v) = @_; $headers{$n} = $v; return 0 },
         on_data_chunk_recv => sub { my ($sid, $d)    = @_; $body .= $d;         return 0 },
+        on_stream_close    => sub { $stream_closed = 1; return 0 },
+        on_frame_recv      => sub {
+            my ($f) = @_;
+            if ($f->{type} == 4) {    # SETTINGS
+                if ($f->{flags} & 1) { $settings_acked = 1 } else { $settings_seen = 1 }
+            }
+            return 0;
+        },
     );
-    h2c_handshake($client, $client_sock);
+    h2c_handshake($client, $client_sock, sub { $settings_seen && $settings_acked });
     $client->submit_request(
         method    => $method,
         path      => $path,
@@ -152,7 +179,8 @@ sub h2_request {
     $client_sock->syswrite($client->mem_send);
     # File streaming crosses IO::Async::Function worker-process round trips,
     # so give it more ticks than the plain in-memory h2 tests need.
-    exchange_frames($client, $client_sock, $opts{rounds} // 100);
+    exchange_frames($client, $client_sock, $opts{rounds} // 100,
+                    sub { $stream_closed && $app_returned });
 
     $stream_io->close_now;
     $loop->remove($server);

@@ -80,14 +80,25 @@ sub create_h2c_connection {
     return ($conn, $stream, $sock_b, $server);
 }
 
+# What h2c_handshake waits for: the server's SETTINGS received and ours
+# acknowledged. Every client records it; each handshake resets it.
+my ($settings_seen, $settings_acked);
+
 sub create_client {
     my (%overrides) = @_;
     require Net::HTTP2::nghttp2::Session;
+    my $on_frame_recv = $overrides{on_frame_recv} // sub { 0 };
     return Net::HTTP2::nghttp2::Session->new_client(
         callbacks => {
             on_begin_headers   => $overrides{on_begin_headers}   // sub { 0 },
             on_header          => $overrides{on_header}          // sub { 0 },
-            on_frame_recv      => $overrides{on_frame_recv}      // sub { 0 },
+            on_frame_recv      => sub {
+                my ($f) = @_;
+                if ($f->{type} == 4) {    # SETTINGS
+                    if ($f->{flags} & 1) { $settings_acked = 1 } else { $settings_seen = 1 }
+                }
+                return $on_frame_recv->(@_);
+            },
             on_data_chunk_recv => $overrides{on_data_chunk_recv} // sub { 0 },
             on_stream_close    => $overrides{on_stream_close}    // sub { 0 },
         },
@@ -96,6 +107,7 @@ sub create_client {
 
 sub h2c_handshake {
     my ($client, $client_sock) = @_;
+    ($settings_seen, $settings_acked) = (0, 0);
     $client->send_connection_preface;
     my $data = $client->mem_send;
     $client_sock->syswrite($data);
@@ -106,11 +118,15 @@ sub h2c_handshake {
         $client->mem_recv($buf) if length($buf);
         my $out = $client->mem_send;
         $client_sock->syswrite($out) if length($out);
+        last if $settings_seen && $settings_acked;
     }
 }
 
+# A trailing coderef is what the exchange is waiting for; the loop stops
+# once it holds rather than spending its whole round count. Calls without
+# one are observation windows for something that must not happen.
 sub exchange_frames {
-    my ($client, $client_sock, $rounds) = @_;
+    my ($client, $client_sock, $rounds, $done) = @_;
     $rounds //= 10;
     for (1..$rounds) {
         $loop->loop_once(0.1);
@@ -119,7 +135,19 @@ sub exchange_frames {
         $client->mem_recv($buf) if length($buf);
         my $out = $client->mem_send;
         $client_sock->syswrite($out) if length($out);
+        last if $done && $done->();
     }
+}
+
+# True once $data holds one complete WebSocket frame -- the close frame the
+# WebSocket cases below parse.
+sub close_frame_arrived {
+    my ($data) = @_;
+    return 0 unless defined $data && length $data;
+    require Protocol::WebSocket::Frame;
+    my $frame = Protocol::WebSocket::Frame->new;
+    $frame->append($data);
+    return defined $frame->next_bytes;
 }
 
 # ============================================================
@@ -146,7 +174,10 @@ subtest 'h2_streams and h2_session cleaned up on connection close' => sub {
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
-    my $client = create_client();
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     $client->submit_request(
@@ -157,7 +188,8 @@ subtest 'h2_streams and h2_session cleaned up on connection close' => sub {
     );
     $client_sock->syswrite($client->mem_send);
 
-    exchange_frames($client, $client_sock, 15);
+    exchange_frames($client, $client_sock, 15,
+                    sub { $stream_closed });
 
     ok($request_received, 'Request was received by app');
 
@@ -208,7 +240,10 @@ subtest 'pending body Futures resolved on connection close' => sub {
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
-    my $client = create_client();
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     # Send a POST with body (has_body=true) but don't send the body data
@@ -223,7 +258,8 @@ subtest 'pending body Futures resolved on connection close' => sub {
     $client_sock->syswrite($client->mem_send);
 
     # Let the request reach the app
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10,
+                    sub { $stream_closed });
 
     ok($app_started, 'App started processing request');
 
@@ -307,7 +343,8 @@ subtest 'plain CONNECT method rejected with 501' => sub {
         authority => 'localhost',
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10,
+                    sub { $stream_closed });
 
     # Now simulate a plain CONNECT arriving at _h2_on_request.
     # Use a fake stream_id that's valid for the h2 session.
@@ -902,7 +939,8 @@ subtest 'POST with empty body (END_STREAM on HEADERS)' => sub {
     );
     $client_sock->syswrite($client->mem_send);
 
-    exchange_frames($client, $client_sock, 20);
+    exchange_frames($client, $client_sock, 20,
+                    sub { $stream_closed });
 
     is($response_headers{':status'}, '200', 'Got 200 response');
     is($response_body, 'received', 'Response body received');
@@ -1006,7 +1044,8 @@ subtest 'mixed success/error concurrent streams' => sub {
     );
     $client_sock->syswrite($client->mem_send);
 
-    exchange_frames($client, $client_sock, 30);
+    exchange_frames($client, $client_sock, 30,
+                    sub { exists $stream_closed{$sid1} && exists $stream_closed{$sid2} && exists $stream_closed{$sid3} });
 
     # Stream 1: should be 200 with 'success'
     is($stream_status{$sid1}, '200', 'Stream 1 (/ok) got 200');
@@ -1125,7 +1164,8 @@ subtest 'invalid UTF-8 in WebSocket text frame triggers close 1007' => sub {
         $client_sock->syswrite($client->mem_send);
 
         # Exchange frames to process the invalid frame
-        exchange_frames($client, $client_sock, 20);
+        exchange_frames($client, $client_sock, 20,
+                        sub { close_frame_arrived($stream_data{$ws_stream_id}) });
 
         # The response data should contain a WebSocket close frame with code 1007
         my $response_data = $stream_data{$ws_stream_id} // '';
@@ -1218,7 +1258,8 @@ subtest 'invalid WS close frame (1-byte payload) triggers 1002' => sub {
         $client->submit_data($ws_stream_id, $close_frame, 0);
         $client_sock->syswrite($client->mem_send);
 
-        exchange_frames($client, $client_sock, 20);
+        exchange_frames($client, $client_sock, 20,
+                        sub { close_frame_arrived($stream_data{$ws_stream_id}) });
 
         my $response_data = $stream_data{$ws_stream_id} // '';
         if (length($response_data) > 0) {
@@ -1306,7 +1347,8 @@ subtest 'invalid WS close code triggers 1002' => sub {
         $client->submit_data($ws_stream_id, $close_frame->to_bytes, 0);
         $client_sock->syswrite($client->mem_send);
 
-        exchange_frames($client, $client_sock, 20);
+        exchange_frames($client, $client_sock, 20,
+                        sub { close_frame_arrived($stream_data{$ws_stream_id}) });
 
         my $response_data = $stream_data{$ws_stream_id} // '';
         if (length($response_data) > 0) {
@@ -1394,7 +1436,8 @@ subtest 'invalid UTF-8 in WS close reason triggers 1007' => sub {
         $client->submit_data($ws_stream_id, $close_frame->to_bytes, 0);
         $client_sock->syswrite($client->mem_send);
 
-        exchange_frames($client, $client_sock, 20);
+        exchange_frames($client, $client_sock, 20,
+                        sub { close_frame_arrived($stream_data{$ws_stream_id}) });
 
         my $response_data = $stream_data{$ws_stream_id} // '';
         if (length($response_data) > 0) {
@@ -1475,13 +1518,15 @@ subtest 'GOAWAY terminates session cleanly' => sub {
     $client_sock->syswrite($client->mem_send);
 
     # Let requests be processed
-    exchange_frames($client, $client_sock, 15);
+    exchange_frames($client, $client_sock, 15,
+                    sub { exists $stream_closed{$sid1} && exists $stream_closed{$sid2} });
 
     # Terminate the session
     $conn->{h2_session}->terminate(0);
     $conn->_h2_write_pending;
 
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10,
+                    sub { $goaway_received });
 
     ok($goaway_received, 'Client received GOAWAY frame');
 
@@ -1535,7 +1580,8 @@ subtest '_h2_write_pending flushes all pending output' => sub {
     );
     $client_sock->syswrite($client->mem_send);
 
-    exchange_frames($client, $client_sock, 30);
+    exchange_frames($client, $client_sock, 30,
+                    sub { $response_body =~ /chunk5/ });
 
     like($response_body, qr/chunk1/, 'Got chunk1');
     like($response_body, qr/chunk5/, 'Got chunk5 (all chunks flushed)');
@@ -1570,7 +1616,10 @@ subtest 'client GOAWAY causes server to close connection' => sub {
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
-    my $client = create_client();
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     # Send a request and get a response first
@@ -1581,7 +1630,8 @@ subtest 'client GOAWAY causes server to close connection' => sub {
         authority => 'localhost',
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock, 15);
+    exchange_frames($client, $client_sock, 15,
+                    sub { $stream_closed });
 
     ok($request_received, 'Request was processed before GOAWAY');
 
@@ -1599,7 +1649,8 @@ subtest 'client GOAWAY causes server to close connection' => sub {
     $client_sock->syswrite($goaway_frame);
 
     # Let the server process the GOAWAY
-    exchange_frames($client, $client_sock, 10);
+    exchange_frames($client, $client_sock, 10,
+                    sub { $conn->{closed} });
 
     # The connection should be closed now
     ok($conn->{closed}, 'Server closed connection after receiving client GOAWAY');
@@ -1632,7 +1683,10 @@ subtest 'server closes TCP after sending GOAWAY' => sub {
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
-    my $client = create_client();
+    my $stream_closed = 0;
+    my $client = create_client(
+        on_stream_close => sub { $stream_closed = 1; return 0 },
+    );
     h2c_handshake($client, $client_sock);
 
     # Send a request
@@ -1643,7 +1697,8 @@ subtest 'server closes TCP after sending GOAWAY' => sub {
         authority => 'localhost',
     );
     $client_sock->syswrite($client->mem_send);
-    exchange_frames($client, $client_sock, 15);
+    exchange_frames($client, $client_sock, 15,
+                    sub { $stream_closed });
 
     ok($request_received, 'Request processed');
 
@@ -1688,7 +1743,9 @@ subtest 'DATA after END_STREAM gets RST_STREAM' => sub {
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
 
     my %rst_streams;
+    my $stream_closed = 0;
     my $client = create_client(
+        on_stream_close => sub { $stream_closed = 1; return 0 },
         on_data_chunk_recv => sub {
             my ($sid, $data) = @_;
             $response_body .= $data;
@@ -1716,7 +1773,8 @@ subtest 'DATA after END_STREAM gets RST_STREAM' => sub {
     $client_sock->syswrite($client->mem_send);
 
     # Let response complete
-    exchange_frames($client, $client_sock, 15);
+    exchange_frames($client, $client_sock, 15,
+                    sub { $stream_closed });
 
     is($response_body, 'ok', 'Normal response received');
 
