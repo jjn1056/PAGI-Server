@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002014 - UNRELEASED
+0.002014 - 2026-09-30
 
   Testing
   - Use RELEASE_TESTING=1 for all optional release, cross-distribution
