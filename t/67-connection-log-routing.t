@@ -133,6 +133,7 @@ subtest 'transport callback errors reach the server sink on both protocols' => s
             level    => 'error',
             message  => 'transport callback error: boom',
             category => 'PAGI::Server::TransportState',
+            pid      => $$,
         }], "$protocol: one error attributed to the transport state");
     }
     is(\@warned, [], 'nothing went to warn');

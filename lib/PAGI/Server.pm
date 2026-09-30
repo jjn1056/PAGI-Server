@@ -66,6 +66,7 @@ use POSIX ();
 use PAGI::Server::AppNormalizer ();
 use PAGI::Server::Connection;
 use PAGI::Server::EventValidator;
+use PAGI::Server::JSONLog ();
 use PAGI::Server::Protocol::HTTP1;
 
 
@@ -940,6 +941,37 @@ Custom format strings use Apache-style atoms. See L</ACCESS LOG FORMAT>.
         access_log_format => 'combined',
     );
 
+=item log_format => 'text' | 'json'
+
+The shape of the server's diagnostics. Default: C<'text'>. C<pagi-server>
+chooses by mode instead: C<json> in production, C<text> in development (see
+L<PAGI::Server::Runner>).
+
+C<text> writes each message as a bare line on C<STDERR>, as the server always
+has. C<json> writes one JSON object per line on C<STDERR>, keys in this order:
+C<time> (RFC 3339 UTC with milliseconds), C<level>, C<category>, C<message>,
+C<pid>, C<worker> (only in a multi-worker child), C<notes> (only on the startup
+banner):
+
+    {"time":"2026-09-29T23:41:07.123Z","level":"error","category":"PAGI::Server::Connection","message":"PAGI application error: the database is on fire","pid":48211}
+
+In C<json>, a worker's messages are bare and carry C<worker>; in C<text> they
+carry the C<Worker N (pid):> prefix. C<log_format> decides what events look
+like; C<logger> decides where they go, so a custom C<logger> receives events in
+this shape and replaces the built-in writer.
+
+It also sets the default C<access_log_format>: C<json> under C<json>, C<clf>
+otherwise.
+
+Not everything on C<STDERR> is the server's: the compile-time Future::XS
+notices, the runner's argument warnings, Perl's own C<die> output when startup
+fails, and C<warn>s from application code stay plain text. A JSON stream may
+therefore hold an occasional text line, most likely at startup.
+
+Cannot be changed with C<configure>.
+
+B<CLI:> C<--log-format json>
+
 =item log_level => $level
 
 Controls the verbosity of server log messages. Default: 'info'
@@ -977,7 +1009,7 @@ Where the server's own diagnostics go. Receives one hashref per message:
     PAGI::Server->new(
         app    => $app,
         logger => sub {
-            my ($event) = @_;   # { level, message, category }
+            my ($event) = @_;   # { level, message, category, pid, ... }
             $log_dispatch->log(
                 level   => $event->{level} eq 'fatal' ? 'critical' : $event->{level},
                 message => "[$event->{category}] $event->{message}",
@@ -987,7 +1019,14 @@ Where the server's own diagnostics go. Receives one hashref per message:
 
 C<level> is one of C<debug>, C<info>, C<warn>, C<error>, C<fatal> -- the five
 L<PSGI> and Rack settled on. C<message> carries no trailing newline.
-C<category> is C<PAGI::Server>.
+C<category> names the emitting class: C<PAGI::Server> for lifecycle events,
+C<PAGI::Server::Connection>, C<PAGI::Server::ConnectionState> and
+C<PAGI::Server::TransportState> for per-connection diagnostics. C<pid> is the
+emitting process. C<worker> is the worker number, present only in a
+multi-worker child. C<notes> is present only on the startup banner under
+C<< log_format => 'json' >>: an arrayref of C<[label, text]> pairs in banner
+order. Under C<< log_format => 'text' >> a worker's C<message> carries the
+C<Worker N (pid):> prefix; under C<json> it does not.
 
 A coderef rather than a logging object on purpose: frameworks disagree about
 level names -- Log::Dispatch has no C<fatal> and silently discards a message
@@ -1020,13 +1059,14 @@ below it, nothing reaches the sink at all. C<min_level> on each output is the
 operator's: the screen takes everything, the file takes problems only. The
 server's threshold is a floor, not a policy.
 
-C<< examples/13-custom-logging >> is a runnable version of this, along with a
-structured-JSON variant. If you only want the diagnostics in a file rather than
+C<< examples/13-custom-logging >> is a runnable version of this. For JSON
+lines no sink is needed: see L</log_format>. If you only want the diagnostics in a file rather than
 reshaped, C<< pagi-server --error-log FILE >> does that without a runner script.
 
-Default: emit C<< $event->{message} >> to C<STDERR> with a trailing newline,
-which is what the server did before the destination was replaceable. Messages
-below C<log_level> never reach the sink at all.
+Default: under C<< log_format => 'text' >>, emit C<< $event->{message} >> to
+C<STDERR> with a trailing newline, which is what the server did before the
+destination was replaceable; under C<json>, the JSON line described in
+L</log_format>. Messages below C<log_level> never reach the sink at all.
 
 B<This logger is deliberately not published into the request scope.> It is
 the operator's channel, filtered by the operator's C<log_level>; an
@@ -2563,6 +2603,11 @@ sub _init {
     $self->{logger}           = delete $params->{logger};
     die "Invalid logger - must be a coderef taking one hashref\n"
         if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
+    # The shape of every event and of the built-in sink. Fixed for the process
+    # lifetime: the startup banner is emitted in it before configure can run.
+    $self->{log_format} = delete $params->{log_format} // 'text';
+    die "Invalid log_format '$self->{log_format}' - must be 'text' or 'json'\n"
+        unless $self->{log_format} eq 'text' || $self->{log_format} eq 'json';
     # quiet is a deprecated spelling of log_level => 'error'. An explicit
     # log_level wins: a threshold must not be overridden by a second control.
     my $quiet = delete $params->{quiet};
@@ -2929,10 +2974,14 @@ sub configure {
 my %_LOG_LEVELS = (debug => 1, info => 2, warn => 3, error => 4, fatal => 5);
 
 # Emits exactly what the server emitted before the destination was replaceable.
-my $_DEFAULT_LOGGER = sub { warn "$_[0]{message}\n" };
+my $_TEXT_SINK = sub { warn "$_[0]{message}\n" };
+
+# One JSON object per line, through warn like the text sink, so --error-log and
+# a $SIG{__WARN__} capture see it the same way.
+my $_JSON_SINK = sub { warn PAGI::Server::JSONLog::diagnostic($_[0]) . "\n" };
 
 sub _log {
-    my ($self, $level, $msg, $category) = @_;
+    my ($self, $level, $msg, $category, $notes) = @_;
 
     my $level_num = $_LOG_LEVELS{$level} // 2;
     return if $level_num < $self->{_log_level_num};
@@ -2942,16 +2991,22 @@ sub _log {
     # true here rather than asking every sink author to chomp.
     $msg =~ s/\n+\z//;
 
-    # Workers and the master share one destination, so a worker's messages say
-    # which process they came from. An unprefixed line is the master's.
-    $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker};
+    my $json = ($self->{log_format} // 'text') eq 'json';
 
-    ($self->{logger} // $_DEFAULT_LOGGER)->({
+    # Workers and the master share one destination, so a worker's messages say
+    # which process they came from. In text that is a prefix (an unprefixed
+    # line is the master's); in JSON it is the worker field instead.
+    $msg = "Worker $self->{worker_num} ($$): $msg" if $self->{is_worker} && !$json;
+
+    ($self->{logger} // ($json ? $_JSON_SINK : $_TEXT_SINK))->({
         level    => $level,
         message  => $msg,
         # Classes that log through the server name themselves, so a sink can
         # separate connection noise from lifecycle events.
         category => $category // 'PAGI::Server',
+        pid      => $$,
+        ($self->{is_worker} ? (worker => $self->{worker_num}) : ()),
+        ($notes ? (notes => $notes) : ()),
     });
 }
 
@@ -4245,6 +4300,7 @@ sub _run_as_worker {
         log_level       => $self->{log_level},
         logger            => $self->{logger},             # a coderef survives fork
         access_log_format => $self->{access_log_format},
+        log_format        => $self->{log_format},
         timeout         => $self->{timeout},
         max_header_size  => $self->{max_header_size},
         max_header_count => $self->{max_header_count},

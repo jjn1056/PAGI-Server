@@ -46,6 +46,22 @@ sub object {
     return '{' . join(',', @members) . '}';
 }
 
+# A server diagnostic event as one line. Keys are the event's own, plus time.
+sub diagnostic {
+    my ($event) = @_;
+    return object(
+        time     => timestamp(),
+        level    => $event->{level},
+        category => $event->{category},
+        message  => text($event->{message}),
+        pid      => $event->{pid},
+        (defined $event->{worker} ? (worker => $event->{worker}) : ()),
+        ($event->{notes}
+            ? (notes => [map { ($_->[0], text($_->[1])) } @{ $event->{notes} }])
+            : ()),
+    );
+}
+
 1;
 
 __END__

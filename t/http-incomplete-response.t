@@ -595,6 +595,7 @@ subtest 'the incomplete response reaches a replaced logger, not STDERR' => sub {
             level    => 'error',
             message  => $expected{$path},
             category => 'PAGI::Server::Connection',
+            pid      => $$,
         }], "$path: one error event in the logger");
     }
 

@@ -86,4 +86,19 @@ subtest 'a worker identifies itself to the sink too' => sub {
         'the prefix reaches a custom sink, not just STDERR');
 };
 
+subtest 'every event says which process sent it' => sub {
+    my @events;
+    my $server = server_with(log_level => 'info', logger => sub { push @events, $_[0] });
+    $server->_log(info => 'master line');
+    is($events[0]{pid}, $$, 'pid is the emitting process');
+    ok(!exists $events[0]{worker}, 'the master has no worker number');
+
+    $server->{is_worker}  = 1;
+    $server->{worker_num} = 3;
+    $server->_log(info => 'serving');
+    is($events[1]{worker}, 3, 'a worker adds its number');
+    like($events[1]{message}, qr/\AWorker 3 \(\Q$$\E\): serving\z/,
+        'and text format keeps the prefix in the message');
+};
+
 done_testing;
