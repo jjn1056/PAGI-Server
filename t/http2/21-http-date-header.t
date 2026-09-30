@@ -60,14 +60,19 @@ sub create_h2c_connection {
     return ($conn, $stream, $sock_b, $server);
 }
 
+# Set once the server has acknowledged the client's SETTINGS: the point at
+# which the connection preface exchange is complete.
+my $settings_acked;
+
 sub create_client {
     my (%overrides) = @_;
     require Net::HTTP2::nghttp2::Session;
+    $settings_acked = 0;
     return Net::HTTP2::nghttp2::Session->new_client(
         callbacks => {
             on_begin_headers   => sub { 0 },
             on_header          => $overrides{on_header}       // sub { 0 },
-            on_frame_recv      => sub { 0 },
+            on_frame_recv      => sub { $settings_acked = 1 if $_[0]{type} == 4 && $_[0]{flags} & 0x1; 0 },
             on_data_chunk_recv => sub { 0 },
             on_stream_close    => $overrides{on_stream_close} // sub { 0 },
         },
@@ -109,7 +114,7 @@ subtest 'HTTP/2 response includes a server-supplied Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -145,7 +150,7 @@ subtest 'HTTP/2 SSE response also includes a Date header (same as HTTP/1.1)' => 
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
@@ -191,7 +196,7 @@ subtest 'HTTP/2 413 (content-length precheck) includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'POST', path => '/upload', scheme => 'http', authority => 'localhost',
@@ -232,7 +237,7 @@ subtest 'HTTP/2 413 (body overrun) includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'POST', path => '/upload', scheme => 'http', authority => 'localhost',
@@ -269,7 +274,7 @@ subtest 'HTTP/2 synthesized 500 includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -305,7 +310,7 @@ subtest 'HTTP/2 WebSocket denial response includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'CONNECT', path => '/ws/test', scheme => 'https', authority => 'localhost',
@@ -342,7 +347,7 @@ subtest 'HTTP/2 WebSocket no-response backstop includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'CONNECT', path => '/ws/reject', scheme => 'https', authority => 'localhost',
@@ -378,7 +383,7 @@ subtest 'HTTP/2 SSE refusal response includes a Date header' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
