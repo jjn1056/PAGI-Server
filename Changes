@@ -7,6 +7,12 @@
     integration, and stress tests. This replaces the separate INTEGRATION_TEST
     and STRESS_TEST flags; dependency and platform skips remain unchanged.
 
+  Logging
+  - Multi-worker workers now use the configured logger and
+    access_log_format. Since 0.002013 each worker was built without them,
+    so a custom logger received only the master's messages and workers wrote
+    clf access lines whatever format was configured.
+
   Performance
   - Skip queued terminal-notification work when no callbacks or Future
     observers exist, for both clean completion and abnormal disconnection.

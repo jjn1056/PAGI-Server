@@ -4243,6 +4243,8 @@ sub _run_as_worker {
         extensions      => $self->{extensions},
         access_log      => $self->{access_log},
         log_level       => $self->{log_level},
+        logger            => $self->{logger},             # a coderef survives fork
+        access_log_format => $self->{access_log_format},
         timeout         => $self->{timeout},
         max_header_size  => $self->{max_header_size},
         max_header_count => $self->{max_header_count},
