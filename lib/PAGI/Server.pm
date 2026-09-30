@@ -912,6 +912,11 @@ Extensions to advertise (e.g., { fullflush => {} })
 
 Access log filehandle. Default: STDERR
 
+One line per request: each HTTP/1.1 request, and each HTTP/2 stream, written
+when the stream closes. The server's own refusals are logged too. An HTTP/2
+stream the client resets before any response logs no status (C<->, or
+C<null> in C<json>).
+
 Set to C<undef> to disable access logging entirely. This eliminates
 per-request I/O overhead, improving throughput by 5-15% depending on
 workload. Useful for benchmarking or when access logs are handled
@@ -938,7 +943,7 @@ Named presets:
 
 C<json> writes these keys in order: C<time> (RFC 3339 UTC with
 milliseconds), C<client>, C<method>, C<path>, C<query> (C<""> when absent),
-C<protocol> (e.g. C<HTTP/1.1>), C<status> (C<null> when no response
+C<protocol> (C<HTTP/1.1>, C<HTTP/2>), C<status> (C<null> when no response
 started), C<size> (bytes), C<duration> (seconds), C<referer> and
 C<user_agent> (C<null> when absent), C<pid>, and C<worker> in a multi-worker
 child. Path, query and header values are raw request bytes: a value that is

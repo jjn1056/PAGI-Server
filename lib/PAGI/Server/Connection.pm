@@ -788,15 +788,19 @@ sub _h2_on_request {
             $is_websocket = 1;
         } else {
             # Plain CONNECT not supported.
+            my $body = "CONNECT method not supported\n";
             $self->{h2_session}->submit_response($stream_id,
                 status  => 501,
                 headers => [
                     ['content-type', 'text/plain'],
                     ['date', $self->{protocol}->format_date],
                 ],
-                body    => "CONNECT method not supported\n",
+                body    => $body,
             );
             $self->_h2_write_pending;
+            $self->_h2_write_access_log($pseudo, $headers,
+                { start => [gettimeofday], status => 501, size => length $body })
+                if $self->{access_log};
             return;
         }
     }
@@ -826,6 +830,11 @@ sub _h2_on_request {
         ws_closing              => 0,   # True once this stream is waiting for the peer to complete an app-initiated closing handshake
     };
 
+    # Access-log facts for this stream, gathered only when there is an access
+    # log to write, and written once when the stream closes.
+    $self->{h2_streams}{$stream_id}{access} = { start => [gettimeofday], size => 0 }
+        if $self->{access_log};
+
     # Check Content-Length against max_body_size limit before dispatching
     # (after stream init so _h2_on_body/_h2_on_close can find the stream)
     if ($self->{max_body_size} && $has_body) {
@@ -840,6 +849,9 @@ sub _h2_on_request {
                         ],
                         body    => "Payload Too Large\n",
                     );
+                    @{ $self->{h2_streams}{$stream_id}{access} }{qw(status size)}
+                        = (413, length "Payload Too Large\n")
+                        if $self->{h2_streams}{$stream_id}{access};
                     $self->_h2_write_pending;
                     return;
                 }
@@ -934,6 +946,8 @@ sub _h2_on_body {
                     ],
                     body    => 'Payload Too Large',
                 );
+                @{ $stream->{access} }{qw(status size)} = (413, length 'Payload Too Large')
+                    if $stream->{access};
             }
             # Mark death BEFORE the two releases below and the wake further
             # down: each can resume an awaiting async sub synchronously, and a
@@ -1301,6 +1315,24 @@ sub _wake_receive_pending {
     return;
 }
 
+# One access record for an HTTP/2 stream, from its request pseudo-headers and
+# the facts gathered while it ran. A stream that never sent a status logs '-'
+# (null in JSON): the client reset it, or the connection ended, first.
+sub _h2_write_access_log {
+    my ($self, $pseudo, $headers, $access) = @_;
+    my ($path, $query) = split /\?/, ($pseudo->{':path'} // '/'), 2;
+    $self->_emit_access_record(
+        method          => $pseudo->{':method'} // '-',
+        path            => $path,
+        query           => $query,
+        http_version    => '2',
+        status          => $access->{status} // '-',
+        size            => $access->{size} // 0,
+        duration        => tv_interval($access->{start}),
+        request_headers => $headers // [],
+    );
+}
+
 sub _h2_on_close {
     my ($self, $stream_id, $error_code) = @_;
 
@@ -1317,6 +1349,10 @@ sub _h2_on_close {
     # app's async sub synchronously), so it needs a fact that flips true
     # HERE, not one that only becomes true once the deferred delete runs.
     $stream->{h2_closed} = 1;
+
+    # The stream's one access record; deleting the facts makes it once only.
+    $self->_h2_write_access_log($stream->{pseudo}, $stream->{headers}, delete $stream->{access})
+        if $stream->{access};
 
     # This stream is going away one way or another -- stop its keepalive
     # (and, for SSE, idle) timers so they don't fire (or leak) after the
@@ -1624,6 +1660,9 @@ sub _h2_dispatch_stream {
                                 ],
                                 body    => "Internal Server Error\n",
                             );
+                            @{ $stream_state->{access} }{qw(status size)}
+                                = (500, length "Internal Server Error\n")
+                                if $stream_state->{access};
                             $weak_self->_h2_write_pending;
                         } if $stream_alive;
                     }
@@ -2231,6 +2270,7 @@ sub _h2_create_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
             # low watermark, release any producer blocked in
@@ -2656,6 +2696,7 @@ sub _h2_create_send {
             $trailers_declared = 1 if $event->{trailers};
 
             $status = $event->{status} // 200;
+            $ss->{access}{status} = $status if $ss->{access};
             @response_headers = map {
                 [_validate_header_name($_->[0]), _validate_header_value($_->[1])]
             } @{$event->{headers} // []};
@@ -2760,6 +2801,7 @@ sub _h2_create_send {
                     $weak_self->_h2_write_pending;
                 } else {
                     # Non-streaming: single response (unchanged one-shot path)
+                    $ss->{access}{size} += length $body if $ss->{access};
                     $weak_self->{h2_session}->submit_response($stream_id,
                         status  => $status,
                         headers => \@response_headers,
@@ -3061,6 +3103,7 @@ sub _h2_create_websocket_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
             # low watermark, release any producer blocked in
@@ -3192,6 +3235,7 @@ sub _h2_create_websocket_send {
             # per-stream flow-control window allows.
             $ss->{send_queue}       //= [];
             $ss->{send_queue_bytes} //= 0;
+            $ss->{access}{status} = 200 if $ss->{access};
             $weak_self->{h2_session}->submit_response_streaming($stream_id,
                 status        => 200,
                 headers       => \@headers,
@@ -3579,6 +3623,7 @@ sub _h2_create_sse_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
             # low watermark, release any producer blocked in
@@ -3676,6 +3721,7 @@ sub _h2_create_sse_send {
             return if $ss->{response_started};
             $ss->{response_started} = 1;
             my $status = $event->{status} // 200;
+            $ss->{access}{status} = $status if $ss->{access};
             my $headers = $event->{headers} // [];
 
             # Ensure Content-Type is text/event-stream
@@ -6452,11 +6498,22 @@ sub _write_access_log {
 
     my $request = $self->{current_request};
 
-    # Calculate request duration
-    my $duration = 0;
-    if ($self->{request_start}) {
-        $duration = tv_interval($self->{request_start});
-    }
+    $self->_emit_access_record(
+        method          => $request->{method} // '-',
+        path            => $request->{raw_path} // '/',
+        query           => $request->{query_string},
+        http_version    => $request->{http_version} // '1.1',
+        status          => $self->{response_status} // '-',
+        size            => $self->{_response_size} // 0,
+        duration        => $self->{request_start} ? tv_interval($self->{request_start}) : 0,
+        request_headers => $request->{headers} // [],
+    );
+}
+
+# One access-log line from the request's own facts plus what the connection
+# knows (client, time, worker). HTTP/1.1 and HTTP/2 both write through here.
+sub _emit_access_record {
+    my ($self, %request) = @_;
 
     # Per-second cached CLF timestamp
     my $now = time();
@@ -6470,16 +6527,9 @@ sub _write_access_log {
     }
 
     my $info = {
+        %request,
         client_ip       => $self->{client_host} // ($self->{transport_type} eq 'unix' ? 'unix' : '-'),
         timestamp       => $_cached_log_timestamp,
-        method          => $request->{method} // '-',
-        path            => $request->{raw_path} // '/',
-        query           => $request->{query_string},
-        http_version    => $request->{http_version} // '1.1',
-        status          => $self->{response_status} // '-',
-        size            => $self->{_response_size} // 0,
-        duration        => $duration,
-        request_headers => $request->{headers} // [],
         worker          => ($self->{server} && $self->{server}{is_worker})
                                ? $self->{server}{worker_num} : undef,
     };

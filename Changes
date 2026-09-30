@@ -30,6 +30,11 @@
     fields.
   - logger events gain pid, and worker in a multi-worker child. Text-format
     messages are unchanged.
+  - HTTP/2 requests are now access-logged: one line per stream, written
+    when the stream closes, with protocol HTTP/2, the status sent (none
+    for a stream reset before a response) and the body bytes sent. The
+    server's own 413 and 501 refusals are logged too. They were never
+    logged before. With access logging disabled nothing is recorded.
   - --access-log FILE is written a line at a time. It was buffered, so with
     several workers lines tore into each other at each worker's 8 KB flush,
     and nothing reached the file until a buffer filled.
