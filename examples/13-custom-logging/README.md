@@ -30,12 +30,14 @@ curl localhost:5000/silent    # the app never starts a response
 
 ## What you should see
 
-On the terminal, everything from `debug` up:
+On the terminal, everything from `debug` up (your `loop` line will differ).
+The access log also defaults to `STDERR`, so a line per request is
+interleaved with these; they are left out here:
 
 ```
-[PAGI::Server] Lifespan not supported, continuing without it
-[PAGI::Server] PAGI::Server 0.002012 (PAGI 0.002008) listening on http://127.0.0.1:5000/
-[PAGI::Server]   loop Poll, max_conn 1000, http2 available, tls available, future_xs not installed
+[PAGI::Server] PAGI::Server 0.002014 listening on http://127.0.0.1:5000/
+[PAGI::Server]   lifespan  not supported, continuing without it
+[PAGI::Server]   loop      Poll, max_conn 1000, http2 available, tls available, future_xs off
 [PAGI::Server::Connection] PAGI application error: the database is on fire
 [PAGI::Server::Connection] PAGI application returned without starting a response
 ```
@@ -69,28 +71,42 @@ problems only. The server's threshold is a floor, not a policy.
 
 ## Other shapes
 
-Structured output is the same seam with a different body — no other change:
+**JSON lines need no code.** `pagi-server --log-format json app.pl` writes one
+JSON object per line to `STDERR`, and it is already the default when
+`pagi-server` runs in production mode (no terminal, or `--env production`):
+
+```
+{"time":"2026-09-29T23:41:07.123Z","level":"error","category":"PAGI::Server::Connection","message":"PAGI application error: the database is on fire","pid":48211}
+```
+
+**A different schema is the reason to write a sink.** If your log pipeline
+expects, say, Elastic Common Schema names, reshape the event yourself. Every
+event carries `level`, `message`, `category` and `pid`, plus `worker` in a
+multi-worker child:
 
 ```perl
 use JSON::PP ();
+use POSIX qw(strftime);
 my $json = JSON::PP->new->canonical;
 
 logger => sub {
     my ($event) = @_;
     print STDOUT $json->encode({
-        ts    => scalar(gmtime),
-        level => $event->{level},
-        src   => $event->{category},
-        msg   => $event->{message},
+        '@timestamp'  => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime),
+        'log.level'   => $event->{level},
+        'log.logger'  => $event->{category},
+        'message'     => $event->{message},
+        'process.pid' => $event->{pid},
     }), "\n";
 },
 ```
 
 If you only want the diagnostics in a **file** rather than reshaped, you do not
 need a runner script at all — `pagi-server --error-log /var/log/pagi/error.log`
-does that from the command line, and the destination survives `--daemonize`.
+does that from the command line, in either format, and the destination
+survives `--daemonize`.
 
 ## See also
 
-- `PAGI::Server` — the `logger` and `log_level` options
+- `PAGI::Server` — the `logger`, `log_level` and `log_format` options
 - `PAGI::Server::Runner` — `--error-log`, and how it differs from `--access-log`

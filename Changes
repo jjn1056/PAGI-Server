@@ -12,6 +12,19 @@
     access_log_format. Since 0.002013 each worker was built without them,
     so a custom logger received only the master's messages and workers wrote
     clf access lines whatever format was configured.
+  - BREAKING: pagi-server in production mode (--env production, PAGI_ENV,
+    or no terminal on STDIN) writes diagnostics as JSON lines on STDERR:
+    one object per line with time, level, category, message, pid and, in a
+    worker, worker. Development is unchanged. --log-format text restores
+    text output. PAGI::Server->new still defaults to text.
+  - log_format => 'text' | 'json' and --log-format.
+  - Access log: a json preset, the default when log_format is json. An
+    enabled production access log (--access-log FILE) is therefore JSON by
+    default; --access-log-format overrides.
+  - Startup banner under log_format json: one info event with the notes as
+    fields.
+  - logger events gain pid, and worker in a multi-worker child. Text-format
+    messages are unchanged.
 
   Performance
   - Skip queued terminal-notification work when no callbacks or Future
