@@ -586,6 +586,9 @@ sub load_server {
         # Explicit --access-log FILE
         open $access_log, '>>', $self->{access_log}
             or die "Cannot open access log $self->{access_log}: $!\n";
+        # Workers share this file: one write per line keeps their lines whole
+        # instead of tearing at each worker's buffer boundary.
+        $access_log->autoflush(1);
     }
     elsif ($self->mode eq 'production') {
         # Production mode: disable logging by default

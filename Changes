@@ -25,6 +25,9 @@
     fields.
   - logger events gain pid, and worker in a multi-worker child. Text-format
     messages are unchanged.
+  - --access-log FILE is written a line at a time. It was buffered, so with
+    several workers lines tore into each other at each worker's 8 KB flush,
+    and nothing reached the file until a buffer filled.
 
   Performance
   - Skip queued terminal-notification work when no callbacks or Future
