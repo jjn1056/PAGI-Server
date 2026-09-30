@@ -2,6 +2,7 @@ package PAGI::Server::JSONLog;
 use strict;
 use warnings;
 
+use Encode ();
 use JSON::PP ();
 use POSIX ();
 use Time::HiRes ();
@@ -23,14 +24,23 @@ sub timestamp {
 }
 
 # Log values arrive as characters, UTF-8 bytes, or raw wire bytes that are
-# neither. Characters pass through; bytes that decode as UTF-8 are decoded;
-# anything else keeps one code point per byte, so nothing is lost or refused.
+# neither. Bytes that are strict UTF-8 are decoded; any other bytes keep one
+# code point per byte, so nothing is lost or refused. Strict matters: Perl's
+# own decoder also accepts surrogates, code points above U+10FFFF and its
+# extended sequences, which JSON::PP would write back out as bytes a log
+# shipper rejects -- and a client can put them in a request path.
 sub text {
     my ($value) = @_;
     return undef unless defined $value;
-    return $value if utf8::is_utf8($value);
-    my $chars = "$value";
-    utf8::decode($chars);    # leaves $chars unchanged when not valid UTF-8
+    return "$value" if $value =~ /\A[\x00-\x7f]*\z/;    # the common case
+
+    unless (utf8::is_utf8($value)) {
+        my $chars = eval { Encode::decode('UTF-8', my $bytes = "$value", Encode::FB_CROAK()) };
+        return defined $chars ? $chars : "$value";
+    }
+
+    # A character string can still hold what UTF-8 cannot encode.
+    (my $chars = $value) =~ s/[^\x{0}-\x{D7FF}\x{E000}-\x{10FFFF}]/\x{FFFD}/g;
     return $chars;
 }
 

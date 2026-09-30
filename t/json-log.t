@@ -2,6 +2,7 @@ use strict;
 use warnings;
 use Test2::V0;
 use JSON::MaybeXS ();
+use Encode ();
 
 use PAGI::Server::JSONLog;
 
@@ -48,6 +49,28 @@ subtest 'every line is valid JSON on one line' => sub {
         is($decoded->{message}, PAGI::Server::JSONLog::text($message),
             'round-trips through a JSON parser');
     }
+};
+
+subtest 'bytes Perl accepts but UTF-8 forbids still give strict UTF-8 lines' => sub {
+    # Perl's own utf8::decode accepts all of these; a strict decoder, and so a
+    # log shipper, rejects them. A client can put any of them in a request path.
+    my %input = (
+        'encoded surrogate'        => "/a\xed\xa0\x80b",
+        'above U+10FFFF'           => "/q\xf4\x90\x80\x80",
+        'Perl-extended sequence'   => "/x\xf8\x88\x80\x80\x80",
+        'surrogate character'      => "/c\x{d800}d",
+    );
+    for my $name (sort keys %input) {
+        my $line = PAGI::Server::JSONLog::object(
+            path => PAGI::Server::JSONLog::text($input{$name}));
+        ok(eval { Encode::decode('UTF-8', my $copy = $line, Encode::FB_CROAK()); 1 },
+            "$name: the line is strict UTF-8") or diag($@);
+        ok(eval { $decoder->decode($line); 1 }, "$name: a JSON parser accepts it")
+            or diag($@);
+    }
+
+    is(PAGI::Server::JSONLog::text("/a\xed\xa0\x80b"), "/a\x{ed}\x{a0}\x{80}b",
+        'invalid bytes keep one code point per byte, so they can be recovered');
 };
 
 done_testing;
