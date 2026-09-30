@@ -65,14 +65,19 @@ sub create_h2c_connection {
     return ($conn, $stream, $sock_b, $server);
 }
 
+# Set once the server has acknowledged the client's SETTINGS: the point at
+# which the connection preface exchange is complete.
+my $settings_acked;
+
 sub create_client {
     my (%overrides) = @_;
     require Net::HTTP2::nghttp2::Session;
+    $settings_acked = 0;
     return Net::HTTP2::nghttp2::Session->new_client(
         callbacks => {
             on_begin_headers   => sub { 0 },
             on_header          => $overrides{on_header}          // sub { 0 },
-            on_frame_recv      => sub { 0 },
+            on_frame_recv      => sub { $settings_acked = 1 if $_[0]{type} == 4 && $_[0]{flags} & 0x1; 0 },
             on_data_chunk_recv => $overrides{on_data_chunk_recv} // sub { 0 },
             on_stream_close    => $overrides{on_stream_close}    // sub { 0 },
         },
@@ -131,7 +136,7 @@ subtest 'HTTP/2 http.response.start strips connection-specific headers' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -186,7 +191,7 @@ subtest "te: 'trailers' is preserved, not stripped" => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -230,7 +235,7 @@ subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => s
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -306,7 +311,7 @@ subtest "request direction: a padded header value never reaches the app's scope-
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     # Stream 1 is the first client-initiated stream id available on a fresh
     # connection. Hand-crafted directly rather than via submit_request,
@@ -362,7 +367,7 @@ subtest "te: a compound value ('trailers, gzip') is still stripped" => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/', scheme => 'http', authority => 'localhost',
@@ -403,7 +408,7 @@ subtest 'HTTP/2 sse.start strips connection-specific headers' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
@@ -446,7 +451,7 @@ subtest 'HTTP/2 websocket.accept strips connection-specific headers' => sub {
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'CONNECT', path => '/ws/accept-test', scheme => 'https', authority => 'localhost',
@@ -493,7 +498,7 @@ subtest 'HTTP/2 WebSocket denial response strips connection-specific headers' =>
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'CONNECT', path => '/ws/test', scheme => 'https', authority => 'localhost',
@@ -539,7 +544,7 @@ subtest 'HTTP/2 SSE decline response strips connection-specific headers' => sub 
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
@@ -586,7 +591,7 @@ subtest 'HTTP/2 HEAD response strips connection-specific headers (shares the GET
 
     $client->send_connection_preface;
     $client_sock->syswrite($client->mem_send);
-    pump($client, $client_sock);
+    pump($client, $client_sock, sub { $settings_acked });
 
     $client->submit_request(
         method => 'HEAD', path => '/', scheme => 'http', authority => 'localhost',
