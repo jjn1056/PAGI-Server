@@ -62,6 +62,34 @@ sub diagnostic {
     );
 }
 
+# One access-log record as a line. Wire values (path, query, headers) are raw
+# bytes, so each goes through text(); status is null when none was sent.
+sub access {
+    my ($info) = @_;
+
+    my %header;
+    for my $pair (@{ $info->{request_headers} || [] }) {
+        $header{ lc $pair->[0] } //= $pair->[1];    # first occurrence, as %{Name}i
+    }
+    my $status = $info->{status};
+
+    return object(
+        time       => timestamp(),
+        client     => text($info->{client_ip}),
+        method     => text($info->{method}),
+        path       => text($info->{path}),
+        query      => text($info->{query} // ''),
+        protocol   => 'HTTP/' . ($info->{http_version} // '1.1'),
+        status     => (defined $status && $status =~ /\A\d+\z/ ? 0 + $status : undef),
+        size       => 0 + ($info->{size} // 0),
+        duration   => 0 + ($info->{duration} // 0),
+        referer    => text($header{referer}),
+        user_agent => text($header{'user-agent'}),
+        pid        => $$,
+        (defined $info->{worker} ? (worker => 0 + $info->{worker}) : ()),
+    );
+}
+
 1;
 
 __END__

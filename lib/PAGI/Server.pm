@@ -925,7 +925,8 @@ externally (e.g., by a reverse proxy).
 
 =item access_log_format => $format_or_preset
 
-Access log format string or preset name. Default: C<'clf'>
+Access log format string or preset name. Default: C<'json'> when
+C<log_format> is C<json>, otherwise C<'clf'>.
 
 Named presets:
 
@@ -933,6 +934,18 @@ Named presets:
     combined - Apache combined: adds Referer and User-Agent
     common   - Apache common: adds response size
     tiny     - Minimal: method, path, status, duration
+    json     - One JSON object per request (see below)
+
+C<json> writes these keys in order: C<time> (RFC 3339 UTC with
+milliseconds), C<client>, C<method>, C<path>, C<query> (C<""> when absent),
+C<protocol> (C<HTTP/1.1>, C<HTTP/2>), C<status> (C<null> when no response
+started), C<size> (bytes), C<duration> (seconds), C<referer> and
+C<user_agent> (C<null> when absent), C<pid>, and C<worker> in a multi-worker
+child. Path, query and header values are raw request bytes: a value that is
+valid UTF-8 is decoded; any other value keeps each byte as one code point, so
+the original bytes can be recovered.
+
+    {"time":"2026-09-29T23:41:07.129Z","client":"127.0.0.1","method":"GET","path":"/boom","query":"","protocol":"HTTP/1.1","status":500,"size":21,"duration":0.001234,"referer":null,"user_agent":"curl/8.7.1","pid":48213,"worker":2}
 
 Custom format strings use Apache-style atoms. See L</ACCESS LOG FORMAT>.
 
@@ -2728,7 +2741,10 @@ sub _init {
 
     $self->{extensions}       = delete $params->{extensions} // {};
     $self->{access_log}       = exists $params->{access_log} ? delete $params->{access_log} : \*STDERR;
-    $self->{access_log_format} = delete $params->{access_log_format} // 'clf';
+    # JSON diagnostics mean a log pipeline is reading; give it JSON access
+    # lines too unless a format was chosen.
+    $self->{access_log_format} = delete $params->{access_log_format}
+        // ($self->{log_format} eq 'json' ? 'json' : 'clf');
     $self->{_access_log_formatter} = $self->_compile_access_log_format(
         $self->{access_log_format}
     );
@@ -5025,6 +5041,9 @@ my %ACCESS_LOG_PRESETS = (
 sub _compile_access_log_format {
     my ($class_or_self, $format) = @_;
 
+    # json is a record, not a format string: no atoms to compile.
+    return \&PAGI::Server::JSONLog::access if $format eq 'json';
+
     # Resolve preset names
     if (exists $ACCESS_LOG_PRESETS{$format}) {
         $format = $ACCESS_LOG_PRESETS{$format};
@@ -5328,7 +5347,8 @@ and find what works best.   Your notes and updates appreciated.
 
 The C<access_log_format> option accepts Apache-style format strings or preset
 names. Format strings are pre-compiled into closures at server startup for
-fast per-request formatting.
+fast per-request formatting. The C<json> preset is not a format string and
+takes no atoms; see L</access_log_format>.
 
 =head2 Format Atoms
 

@@ -6480,6 +6480,8 @@ sub _write_access_log {
         size            => $self->{_response_size} // 0,
         duration        => $duration,
         request_headers => $request->{headers} // [],
+        worker          => ($self->{server} && $self->{server}{is_worker})
+                               ? $self->{server}{worker_num} : undef,
     };
 
     my $formatter = $self->{_access_log_formatter};

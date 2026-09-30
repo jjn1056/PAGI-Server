@@ -475,4 +475,53 @@ subtest 'Format compiler: unknown atom dies' => sub {
     );
 };
 
+subtest 'json preset: one ordered object per request' => sub {
+    require JSON::MaybeXS;
+    my $decoder = JSON::MaybeXS->new(utf8 => 1);
+
+    my $line = compile_and_format('json');
+    like($line, qr/\A\{"time":"[^"]+","client":"192\.168\.1\.1","method":"GET","path":"\/test\/path","query":"foo=bar","protocol":"HTTP\/1\.1","status":200,"size":1234,"duration":0\.123456,"referer":"http:\/\/example\.com\/","user_agent":"TestBot\/1\.0","pid":\d+\}\z/,
+        'every field, in order, with numbers as numbers');
+
+    my $event = $decoder->decode(compile_and_format('json',
+        query => undef, request_headers => [], worker => 3));
+    is($event->{query}, '', 'no query is an empty string');
+    is([@$event{qw(referer user_agent)}], [undef, undef], 'missing headers are null');
+    is($event->{worker}, 3, 'a worker adds its number');
+
+    is($decoder->decode(compile_and_format('json', status => '-'))->{status}, undef,
+        'no status sent is null, not "-"');
+    is($decoder->decode(compile_and_format('json', http_version => '2'))->{protocol},
+        'HTTP/2', 'HTTP/2 is named as such');
+
+    my $utf8 = $decoder->decode(compile_and_format('json', path => "/caf\xc3\xa9"));
+    is($utf8->{path}, "/caf\x{e9}", 'a path that is valid UTF-8 is decoded');
+
+    # A value is decoded only when all of it is valid UTF-8. Otherwise every
+    # byte is kept as one code point, so the original bytes can be recovered
+    # exactly; decoding part of it would make that ambiguous.
+    my $raw = $decoder->decode(compile_and_format('json',
+        path => "/caf\xc3\xa9/\xff", request_headers => [['user-agent', "bot \xfe"]]));
+    is($raw->{path}, "/caf\x{c3}\x{a9}/\x{ff}",
+        'a path with an invalid byte keeps every byte, one per code point');
+    is($raw->{user_agent}, "bot \x{fe}", 'header bytes too');
+};
+
+subtest 'json preset: default follows log_format; configure can select it' => sub {
+    my $app = sub { };
+    is(PAGI::Server->new(app => $app, log_format => 'json')->{access_log_format}, 'json',
+        'json diagnostics default the access log to json');
+    is(PAGI::Server->new(app => $app)->{access_log_format}, 'clf', 'otherwise clf');
+    is(PAGI::Server->new(app => $app, log_format => 'json', access_log_format => 'tiny')
+        ->{access_log_format}, 'tiny', 'an explicit format wins');
+
+    my $server = PAGI::Server->new(app => $app);
+    $server->configure(access_log_format => 'json');
+    like($server->{_access_log_formatter}->({
+        client_ip => '1.2.3.4', method => 'GET', path => '/', query => '',
+        http_version => '1.1', status => 200, size => 0, duration => 0,
+        request_headers => [],
+    }), qr/\A\{"time":/, 'configure(access_log_format => "json") switches to JSON');
+};
+
 done_testing;
