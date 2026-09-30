@@ -968,6 +968,12 @@ notices, the runner's argument warnings, Perl's own C<die> output when startup
 fails, and C<warn>s from application code stay plain text. A JSON stream may
 therefore hold an occasional text line, most likely at startup.
 
+The startup banner follows the format: in C<text> it is the aligned block, one
+line per event; in C<json> it is one C<info> event whose C<message> is the
+first line and whose C<notes> hold the rest:
+
+    {"time":"...","level":"info","category":"PAGI::Server","message":"PAGI::Server 0.002014 listening on http://0.0.0.0:5000/ with 4 workers (shared-socket)","pid":48211,"notes":{"serving":"./app.pl","mode":"production (no tty)","loop":"Poll, max_conn 1000/worker, http2 available, tls available, future_xs off"}}
+
 Cannot be changed with C<configure>.
 
 B<CLI:> C<--log-format json>
@@ -3025,10 +3031,10 @@ sub _startup_note {
     return;
 }
 
-# The startup block: what is running and where, then everything worth knowing
-# about it, aligned. One builder for all four listen shapes, which is what stops
-# them drifting apart.
-sub _startup_banner {
+# The startup facts, once: what is running and where, then the notes in the
+# order they are shown. Both banner shapes are built from this, so they cannot
+# disagree.
+sub _startup_banner_facts {
     my ($self, $where, $per_worker) = @_;
 
     my $identity = 'PAGI::Server ' . (__PACKAGE__->VERSION // 'unknown');
@@ -3051,13 +3057,31 @@ sub _startup_banner {
         )],
     );
 
-    my $width = 0;
-    for (@notes) { $width = length $_->[0] if length $_->[0] > $width }
+    return ("$identity listening on $where", \@notes);
+}
 
-    return (
-        "$identity listening on $where",
-        map { sprintf('  %-*s  %s', $width, $_->[0], $_->[1]) } @notes,
-    );
+# The startup block as text lines: the headline, then every note, aligned. One
+# builder for all four listen shapes, which is what stops them drifting apart.
+sub _startup_banner {
+    my ($self, $where, $per_worker) = @_;
+    my ($headline, $notes) = $self->_startup_banner_facts($where, $per_worker);
+
+    my $width = 0;
+    for (@$notes) { $width = length $_->[0] if length $_->[0] > $width }
+
+    return ($headline, map { sprintf('  %-*s  %s', $width, $_->[0], $_->[1]) } @$notes);
+}
+
+# Text shows the block line by line; JSON sends it as one event whose notes are
+# fields, because a log pipeline reads records, not aligned columns.
+sub _log_startup_banner {
+    my ($self, $where, $per_worker) = @_;
+    if (($self->{log_format} // 'text') eq 'json') {
+        my ($headline, $notes) = $self->_startup_banner_facts($where, $per_worker);
+        return $self->_log(info => $headline, undef, $notes);
+    }
+    $self->_log(info => $_) for $self->_startup_banner($where, $per_worker);
+    return;
 }
 
 # Returns a human-readable TLS status string for the startup banner
@@ -3567,7 +3591,7 @@ async sub _listen_singleworker {
             ? "unix:$s->{path}"
             : "$scheme://$s->{host}:$s->{port}/";
     }
-    $self->_log(info => $_) for $self->_startup_banner(join(', ', @addrs));
+    $self->_log_startup_banner(join(', ', @addrs));
     $self->_warn_if_future_xs;
 
     # Warn in production if using default max_connections
@@ -3752,7 +3776,7 @@ sub _listen_multiworker {
         }
     }
     my $where = join(', ', @addrs) . " with $workers workers ($mode)";
-    $self->_log(info => $_) for $self->_startup_banner($where, 'per worker');
+    $self->_log_startup_banner($where, 'per worker');
     $self->_warn_if_future_xs;
 
     # Warn in production if using default max_connections

@@ -112,4 +112,33 @@ subtest 'every listen shape shares one capability line' => sub {
         'the four listen paths cannot drift apart, because there is one builder');
 };
 
+subtest 'in JSON the banner is one event carrying the same facts' => sub {
+    my @events;
+    my $server = PAGI::Server->new(
+        app           => $app,
+        log_format    => 'json',
+        logger        => sub { push @events, $_[0] },
+        startup_notes => [[serving => './app.pl'], [mode => 'production (no tty)']],
+    );
+    $server->_log_startup_banner('http://127.0.0.1:5000/');
+
+    is(scalar @events, 1, 'one event, not one per line');
+    is($events[0]{level}, 'info', 'at info');
+    is($events[0]{message},
+        "PAGI::Server $PAGI::Server::VERSION listening on http://127.0.0.1:5000/",
+        'the message is the first banner line');
+    is([map { $_->[0] } @{ $events[0]{notes} }], [qw(serving mode loop)],
+        'notes keep banner order: runner notes, then loop');
+    is($events[0]{notes}[0], [serving => './app.pl'], 'as label/text pairs');
+};
+
+subtest 'in text the banner is still one event per line' => sub {
+    my @events;
+    my $server = PAGI::Server->new(app => $app, logger => sub { push @events, $_[0] });
+    $server->_log_startup_banner('http://127.0.0.1:5000/');
+    is([map { $_->{message} } @events], [$server->_startup_banner('http://127.0.0.1:5000/')],
+        'exactly the lines _startup_banner returns');
+    ok(!grep({ exists $_->{notes} } @events), 'and no notes key');
+};
+
 done_testing;
