@@ -475,6 +475,58 @@ subtest 'Format compiler: unknown atom dies' => sub {
     );
 };
 
+subtest 'Integration: log_format json through a real server' => sub {
+    require JSON::MaybeXS;
+    my $decoder = JSON::MaybeXS->new(utf8 => 1);
+
+    my $log_output = '';
+    open(my $log_fh, '>', \$log_output) or die "Cannot create in-memory log: $!";
+    my @events;
+    my $server = PAGI::Server->new(
+        app        => $echo_app,
+        host       => '127.0.0.1',
+        port       => 0,
+        access_log => $log_fh,
+        log_format => 'json',
+        logger     => sub { push @events, $_[0] },
+    );
+
+    $loop->add($server);
+    $server->listen->get;
+
+    my @banner = grep { $_->{message} =~ /listening on/ } @events;
+    is(scalar @banner, 1, 'the listen path logs the banner as one event');
+    ok(ref $banner[0]{notes} eq 'ARRAY' && @{ $banner[0]{notes} },
+        'with its notes as fields');
+    is([grep { $_->{message} =~ /\A\s+loop\s/ } @events], [],
+        'and no aligned banner lines');
+
+    my $port = $server->port;
+    my $http = Net::Async::HTTP->new;
+    $loop->add($http);
+    my $response = $http->do_request(
+        method  => 'GET',
+        uri     => URI->new("http://127.0.0.1:$port/json?x=1"),
+        headers => { 'User-Agent' => 'TestBot/3.0' },
+    )->get;
+    is($response->code, 200, 'Response is 200');
+
+    close($log_fh);
+    $loop->delay_future(after => 0.1)->get;
+
+    my @lines = split /\n/, $log_output;
+    is(scalar @lines, 1, 'one access line');
+    my $record = $decoder->decode($lines[0]);
+    is([@$record{qw(method path query protocol status user_agent)}],
+        ['GET', '/json', 'x=1', 'HTTP/1.1', 200, 'TestBot/3.0'],
+        'the access log defaults to json and records the real request');
+    ok(!exists $record->{worker}, 'a single process writes no worker field');
+
+    $loop->remove($http);
+    $server->shutdown->get;
+    $loop->remove($server);
+};
+
 subtest 'json preset: one ordered object per request' => sub {
     require JSON::MaybeXS;
     my $decoder = JSON::MaybeXS->new(utf8 => 1);
