@@ -68,6 +68,11 @@ Explicit opt-out of all auto-middleware, regardless of TTY detection.
 
 =back
 
+Production mode also defaults the server's C<log_format> to C<json>, so its
+diagnostics are one JSON object per line on STDERR; C<development> and C<none>
+default it to C<text>. C<--log-format> overrides either. See
+L<PAGI::Server/log_format>.
+
 Mode is determined by (in order of precedence):
 
     1. -E / --env command line flag
@@ -563,6 +568,9 @@ sub load_server {
 
     # Hand over what only the runner knows, for the startup block.
     $server_opts{startup_notes} = $self->{_startup_notes} || [];
+
+    # Production output is read by log pipelines, development output by people.
+    $server_opts{log_format} //= $self->mode eq 'production' ? 'json' : 'text';
 
     # Handle access log
     # Production mode disables logging by default for performance
