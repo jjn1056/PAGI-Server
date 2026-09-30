@@ -32,6 +32,10 @@ recommends 'Net::HTTP2::nghttp2', '0.011';
 # Utilities
 requires 'URI::Escape', '5.09';
 
+# JSON log lines (core Perl, but some distributions package them separately)
+requires 'JSON::PP';
+requires 'Encode';
+
 # Testing
 on 'test' => sub {
     requires 'Test2::V0', '0.000159';

@@ -495,9 +495,11 @@ Sync file read threshold in bytes (default: 65536)
 
 =item B<--access-log-format> FORMAT
 
-Access log format string or preset name (default: C<clf>).
+Access log format string or preset name (default: C<json> when the
+diagnostics are JSON -- production, or C<--log-format json> -- otherwise
+C<clf>).
 
-Preset names: C<clf>, C<combined>, C<common>, C<tiny>.
+Preset names: C<clf>, C<combined>, C<common>, C<tiny>, C<json>.
 
 Custom format strings use Apache-style atoms:
 

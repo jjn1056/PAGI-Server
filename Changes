@@ -9,9 +9,11 @@
 
   Logging
   - Multi-worker workers now use the configured logger and
-    access_log_format. Since 0.002013 each worker was built without them,
-    so a custom logger received only the master's messages and workers wrote
-    clf access lines whatever format was configured.
+    access_log_format. Each worker was built without them -- without logger
+    since it was added in 0.002013, and without access_log_format since that
+    option was added -- so a custom logger received only the master's
+    messages and workers wrote clf access lines whatever format was
+    configured.
   - BREAKING: pagi-server in production mode (--env production, PAGI_ENV,
     or no terminal on STDIN) writes diagnostics as JSON lines on STDERR:
     one object per line with time, level, category, message, pid and, in a

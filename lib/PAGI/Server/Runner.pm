@@ -843,7 +843,7 @@ Common Options (handled by Runner):
 
 Environment Modes:
     development    Auto-enable Lint middleware if PAGI-Tools installed (default if TTY)
-    production     No auto-middleware (default if no TTY)
+    production     No auto-middleware; JSON log lines (default if no TTY)
     none           Explicit opt-out of all auto-middleware
 
 App can be:

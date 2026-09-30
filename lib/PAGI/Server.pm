@@ -938,7 +938,7 @@ Named presets:
 
 C<json> writes these keys in order: C<time> (RFC 3339 UTC with
 milliseconds), C<client>, C<method>, C<path>, C<query> (C<""> when absent),
-C<protocol> (C<HTTP/1.1>, C<HTTP/2>), C<status> (C<null> when no response
+C<protocol> (e.g. C<HTTP/1.1>), C<status> (C<null> when no response
 started), C<size> (bytes), C<duration> (seconds), C<referer> and
 C<user_agent> (C<null> when absent), C<pid>, and C<worker> in a multi-worker
 child. Path, query and header values are raw request bytes: a value that is
