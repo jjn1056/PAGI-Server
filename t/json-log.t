@@ -14,6 +14,19 @@ subtest 'timestamp is RFC 3339 UTC with milliseconds' => sub {
         '2026-09-21T14:13:20.123Z', 'milliseconds truncated, not rounded');
     like(PAGI::Server::JSONLog::timestamp(),
         qr/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\z/, 'defaults to now');
+
+    # Every access line takes a timestamp, so consecutive calls in one second
+    # and calls that go back and forth between seconds must both stay right.
+    is([map { PAGI::Server::JSONLog::timestamp($_) } 1790000000.5, 1790000000.25, 0.75, 1790000000.125],
+        ['2026-09-21T14:13:20.500Z', '2026-09-21T14:13:20.250Z',
+         '1970-01-01T00:00:00.750Z', '2026-09-21T14:13:20.125Z'],
+        'the same second twice, a different second, then back');
+};
+
+subtest 'object encodes a repeated key the same way every time' => sub {
+    is([map { PAGI::Server::JSONLog::object(status => $_, 'q"k' => 'v') } 200, 404],
+        ['{"status":200,"q\"k":"v"}', '{"status":404,"q\"k":"v"}'],
+        'keys, including ones needing escapes, are stable across calls');
 };
 
 subtest 'object keeps key order and value types' => sub {

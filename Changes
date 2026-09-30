@@ -19,6 +19,9 @@
     one object per line with time, level, category, message, pid and, in a
     worker, worker. Development is unchanged. --log-format text restores
     text output. PAGI::Server->new still defaults to text.
+  - JSON logging requires Cpanel::JSON::XS (recommended, not required):
+    log_format json or the json access preset dies without it, and
+    production falls back to text with a startup-banner note.
   - log_format => 'text' | 'json' and --log-format.
   - Access log: a json preset, the default when log_format is json. An
     enabled production access log (--access-log FILE) is therefore JSON by

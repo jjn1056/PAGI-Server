@@ -3,31 +3,40 @@ use strict;
 use warnings;
 
 use Encode ();
-use JSON::PP ();
 use POSIX ();
 use Time::HiRes ();
 
 our $VERSION = '0.002014';
 
-# Encodes single values; objects are assembled here so key order is ours.
-my $JSON = JSON::PP->new->utf8->allow_nonref;
+# A JSON line is written for every request, so the encoder must be the XS one:
+# the pure-Perl encoder costs about thirty times a clf line. Without it, JSON
+# logging is unavailable rather than slow.
+my $JSON = eval { require Cpanel::JSON::XS; Cpanel::JSON::XS->new->utf8->allow_nonref };
+
+# True when JSON lines can be written.
+sub available { return $JSON ? 1 : 0 }
 
 # RFC 3339, UTC, milliseconds: readable, sortable as text, and the shape ECS
-# expects in @timestamp.
+# expects in @timestamp. Formatting the date is most of a line's cost, so the
+# seconds part is kept for as long as the second lasts.
+my ($_stamped_second, $_stamped_prefix) = (-1, '');
+
 sub timestamp {
     my ($epoch) = @_;
     $epoch //= Time::HiRes::time();
     my $seconds = int $epoch;
-    my $millis  = int(($epoch - $seconds) * 1000);
-    return POSIX::strftime('%Y-%m-%dT%H:%M:%S', gmtime $seconds)
-        . sprintf('.%03dZ', $millis);
+    if ($seconds != $_stamped_second) {
+        $_stamped_second = $seconds;
+        $_stamped_prefix = POSIX::strftime('%Y-%m-%dT%H:%M:%S', gmtime $seconds);
+    }
+    return $_stamped_prefix . sprintf('.%03dZ', int(($epoch - $seconds) * 1000));
 }
 
 # Log values arrive as characters, UTF-8 bytes, or raw wire bytes that are
 # neither. Bytes that are strict UTF-8 are decoded; any other bytes keep one
 # code point per byte, so nothing is lost or refused. Strict matters: Perl's
 # own decoder also accepts surrogates, code points above U+10FFFF and its
-# extended sequences, which JSON::PP would write back out as bytes a log
+# extended sequences, which the encoder would write back out as bytes a log
 # shipper rejects -- and a client can put them in a request path.
 sub text {
     my ($value) = @_;
@@ -44,13 +53,17 @@ sub text {
     return $chars;
 }
 
+# Encoded '"key":' prefixes. The keys are the fixed field names and banner
+# labels, so this stays small, and each is encoded once rather than per line.
+my %_KEY;
+
 # One JSON object with keys in the order given. An arrayref value is a list of
 # pairs and becomes a nested object, also in order.
 sub object {
-    my @pairs = @_;
     my @members;
-    while (my ($key, $value) = splice @pairs, 0, 2) {
-        push @members, $JSON->encode($key) . ':'
+    for (my $i = 0; $i < @_; $i += 2) {
+        my ($key, $value) = @_[$i, $i + 1];
+        push @members, ($_KEY{$key} //= $JSON->encode($key) . ':')
             . (ref $value eq 'ARRAY' ? object(@$value) : $JSON->encode($value));
     }
     return '{' . join(',', @members) . '}';
@@ -112,6 +125,7 @@ PAGI::Server::JSONLog - JSON log line encoding for PAGI::Server (internal)
 
 Internal to PAGI::Server; not a public API. Builds the one-object-per-line
 records written when C<log_format> is C<json> and for the C<json> access-log
-preset. See L<PAGI::Server/log_format>.
+preset, using L<Cpanel::JSON::XS>; C<available> says whether it is installed.
+See L<PAGI::Server/log_format>.
 
 =cut

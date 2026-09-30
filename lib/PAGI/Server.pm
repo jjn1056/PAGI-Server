@@ -943,7 +943,8 @@ started), C<size> (bytes), C<duration> (seconds), C<referer> and
 C<user_agent> (C<null> when absent), C<pid>, and C<worker> in a multi-worker
 child. Path, query and header values are raw request bytes: a value that is
 valid UTF-8 is decoded; any other value keeps each byte as one code point, so
-the original bytes can be recovered.
+the original bytes can be recovered. Like C<< log_format => 'json' >>, the
+C<json> preset requires L<Cpanel::JSON::XS> and dies without it.
 
     {"time":"2026-09-29T23:41:07.129Z","client":"127.0.0.1","method":"GET","path":"/boom","query":"","protocol":"HTTP/1.1","status":500,"size":21,"duration":0.001234,"referer":null,"user_agent":"curl/8.7.1","pid":48213,"worker":2}
 
@@ -959,6 +960,15 @@ Custom format strings use Apache-style atoms. See L</ACCESS LOG FORMAT>.
 The shape of the server's diagnostics. Default: C<'text'>. C<pagi-server>
 chooses by mode instead: C<json> in production, C<text> in development (see
 L<PAGI::Server::Runner>).
+
+B<C<json> requires L<Cpanel::JSON::XS>.> A JSON line is written for every
+event and every request, and the pure-Perl encoders cost about thirty times a
+text line, so JSON is not offered without the XS encoder. Without it,
+C<< log_format => 'json' >> (or C<--log-format json>) dies at construction
+with C<log_format 'json' requires Cpanel::JSON::XS, which is not installed>,
+and C<pagi-server> in production mode falls back to C<text> and says so in
+the startup banner (C<log_format  text (install Cpanel::JSON::XS for JSON
+lines)>). Install it with C<cpanm Cpanel::JSON::XS>.
 
 C<text> writes each message as a bare line on C<STDERR>, as the server always
 has. C<json> writes one JSON object per line on C<STDERR>, keys in this order:
@@ -2627,6 +2637,8 @@ sub _init {
     $self->{log_format} = delete $params->{log_format} // 'text';
     die "Invalid log_format '$self->{log_format}' - must be 'text' or 'json'\n"
         unless $self->{log_format} eq 'text' || $self->{log_format} eq 'json';
+    die "log_format 'json' requires Cpanel::JSON::XS, which is not installed\n"
+        if $self->{log_format} eq 'json' && !PAGI::Server::JSONLog::available();
     # quiet is a deprecated spelling of log_level => 'error'. An explicit
     # log_level wins: a threshold must not be overridden by a second control.
     my $quiet = delete $params->{quiet};
@@ -5042,7 +5054,11 @@ sub _compile_access_log_format {
     my ($class_or_self, $format) = @_;
 
     # json is a record, not a format string: no atoms to compile.
-    return \&PAGI::Server::JSONLog::access if $format eq 'json';
+    if ($format eq 'json') {
+        die "access_log_format 'json' requires Cpanel::JSON::XS, which is not installed\n"
+            unless PAGI::Server::JSONLog::available();
+        return \&PAGI::Server::JSONLog::access;
+    }
 
     # Resolve preset names
     if (exists $ACCESS_LOG_PRESETS{$format}) {

@@ -13,6 +13,7 @@ use FindBin ();
 use IO::Handle ();
 
 use PAGI::Server::AppNormalizer ();
+use PAGI::Server::JSONLog ();
 
 =head1 NAME
 
@@ -70,8 +71,9 @@ Explicit opt-out of all auto-middleware, regardless of TTY detection.
 
 Production mode also defaults the server's C<log_format> to C<json>, so its
 diagnostics are one JSON object per line on STDERR; C<development> and C<none>
-default it to C<text>. C<--log-format> overrides either. See
-L<PAGI::Server/log_format>.
+default it to C<text>. JSON requires L<Cpanel::JSON::XS>; when it is not
+installed, production falls back to C<text> and the startup banner says so.
+C<--log-format> overrides either. See L<PAGI::Server/log_format>.
 
 Mode is determined by (in order of precedence):
 
@@ -566,11 +568,20 @@ sub load_server {
     # Get server-specific options (passed from bin/pagi-server or similar)
     my %server_opts = %{$self->{server_options} // {}};
 
+    # Production output is read by log pipelines, development output by people.
+    # JSON needs Cpanel::JSON::XS; without it production stays text and says
+    # so, where an explicit --log-format json is left for the server to refuse.
+    if (!defined $server_opts{log_format}) {
+        my $json = $self->mode eq 'production';
+        if ($json && !PAGI::Server::JSONLog::available()) {
+            $json = 0;
+            $self->_startup_note(log_format => 'text (install Cpanel::JSON::XS for JSON lines)');
+        }
+        $server_opts{log_format} = $json ? 'json' : 'text';
+    }
+
     # Hand over what only the runner knows, for the startup block.
     $server_opts{startup_notes} = $self->{_startup_notes} || [];
-
-    # Production output is read by log pipelines, development output by people.
-    $server_opts{log_format} //= $self->mode eq 'production' ? 'json' : 'text';
 
     # Handle access log
     # Production mode disables logging by default for performance

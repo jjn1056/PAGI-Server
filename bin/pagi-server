@@ -415,7 +415,9 @@ Log verbosity: debug, info, warn, error (default: info)
 
 Diagnostic format: C<text> or C<json> (default: C<json> in production,
 C<text> in development). C<json> writes one JSON object per line on STDERR,
-and also makes C<json> the default access-log format. See
+and also makes C<json> the default access-log format. C<json> requires
+L<Cpanel::JSON::XS>: without it, C<--log-format json> refuses to start, and
+production mode falls back to C<text> with a note in the startup banner. See
 L<PAGI::Server/log_format>.
 
 =item B<-b>, B<--listener-backlog> NUM

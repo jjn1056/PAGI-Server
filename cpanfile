@@ -32,8 +32,10 @@ recommends 'Net::HTTP2::nghttp2', '0.011';
 # Utilities
 requires 'URI::Escape', '5.09';
 
-# JSON log lines (core Perl, but some distributions package them separately)
-requires 'JSON::PP';
+# JSON log lines (--log-format json, the production default) need the XS
+# encoder; without it production logs stay text. Encode is core, but some
+# distributions package it separately.
+recommends 'Cpanel::JSON::XS';
 requires 'Encode';
 
 # Testing
