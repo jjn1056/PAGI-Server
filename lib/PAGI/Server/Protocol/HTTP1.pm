@@ -187,6 +187,17 @@ sub new {
     return $self;
 }
 
+# Whether an absolute-form target's authority names the same host as the
+# Host header, ignoring case and the scheme's default port. No Host header
+# (HTTP/1.0) is no conflict.
+sub _same_authority {
+    my ($scheme, $authority, $host) = @_;
+    return 1 unless defined $host;
+    my $default_port = $scheme eq 'https' ? 443 : 80;
+    my $normal = sub { my $value = lc shift; $value =~ s/:\Q$default_port\E\z//; $value };
+    return $normal->($authority) eq $normal->($host);
+}
+
 sub parse_request {
     my ($self, $buffer_ref) = @_;
 
@@ -225,6 +236,24 @@ sub parse_request {
     # Extract method and path
     my $method = $env{REQUEST_METHOD};
     my $raw_uri = $env{REQUEST_URI} // '/';
+
+    # RFC 9112 3.2: an origin server accepts origin-form, absolute-form --
+    # reduced here to its path and query, and refused when its authority
+    # differs from Host -- and asterisk-form for OPTIONS. Anything else is
+    # 400, so path and raw_path always begin with "/" (or are "*").
+    if ($raw_uri =~ m{\A(https?)://([^/?#]*)(.*)\z}si) {
+        my ($scheme, $authority, $rest) = (lc $1, $2, $3);
+        return ({ error => 400, message => 'Bad Request' }, $header_end + 4)
+            unless _same_authority($scheme, $authority, $env{HTTP_HOST});
+        $raw_uri = '/' . ($rest =~ s{\A/}{}r);
+    }
+    elsif ($raw_uri eq '*') {
+        return ({ error => 400, message => 'Bad Request' }, $header_end + 4)
+            unless $method eq 'OPTIONS';
+    }
+    elsif (substr($raw_uri, 0, 1) ne '/') {
+        return ({ error => 400, message => 'Bad Request' }, $header_end + 4);
+    }
 
     # Split path and query string
     my ($raw_path, $query_string) = split(/\?/, $raw_uri, 2);

@@ -2,6 +2,15 @@
 
 0.002014 - 2026-09-30
 
+  Request targets
+  - Absolute-form request targets (GET http://host/path) are reduced to
+    their path and query, as RFC 9112 3.2.2 requires, instead of being
+    delivered whole as path and raw_path; one whose authority differs from
+    the Host header is answered 400. A target that is not origin-form,
+    absolute-form or OPTIONS * (HTTP::Parser::XS lets "a/b" and "GET *"
+    through) is answered 400. path and raw_path now always begin with "/"
+    (or are "*"), as PAGI::Spec::Www promises.
+
   Testing
   - Use RELEASE_TESTING=1 for all optional release, cross-distribution
     integration, and stress tests. This replaces the separate INTEGRATION_TEST
