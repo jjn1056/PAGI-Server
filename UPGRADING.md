@@ -1,5 +1,66 @@
 # Upgrading PAGI-Server
 
+## 0.002014
+
+### Production logs are JSON
+
+In production mode (`--env production`, `PAGI_ENV=production`, or no
+terminal on STDIN) `pagi-server` writes its diagnostics to STDERR as JSON
+lines instead of text. Development mode, and `PAGI::Server->new` used
+directly, still default to text.
+
+Before (text):
+
+```
+Worker 2 started
+```
+
+After (one JSON object per line; a worker's lines also carry `worker`):
+
+```
+{"time":"2026-10-01T22:25:20.892Z","level":"info","category":"PAGI::Server","message":"Worker 2 started","pid":74739}
+```
+
+**To keep text:** pass `--log-format text`. JSON needs Cpanel::JSON::XS
+(recommended, not required); without it production falls back to text and
+the startup banner says so. An enabled access log (`--access-log FILE`) in
+production is JSON too; `--access-log-format` overrides it.
+
+### PAGI Www 0.6: refusals, SSE endings, WebSocket closes
+
+The server implements sub-spec 0.6. The changes an application can feel:
+
+- A WebSocket or SSE refusal is an ordinary `http.response.*` sent before
+  `websocket.accept` or `sse.start`. `websocket.http.response.*` and
+  `sse.http.response.*` are gone, and `websocket.close` before accept fails.
+- A started SSE stream ends cleanly only with `sse.close`; returning without
+  it is an incomplete response.
+- A WebSocket close is clean only once the transport (or HTTP/2 stream)
+  closes, not when the Close frame is sent.
+
+`PAGI::Upgrading` in the PAGI distribution has before/after code for each.
+
+### HTTP/2 needs Net::HTTP2::nghttp2 0.011
+
+Upgrade it (`cpanm Net::HTTP2::nghttp2`) to keep `--http2` working.
+
+### Request targets that are not paths are refused
+
+`GET http://example.com/a` is now delivered as `path` `/a` (as RFC 9112
+requires), and answered 400 if its host differs from the `Host` header. A
+target that is not a path (`GET a/b`), or `*` with a method other than
+`OPTIONS`, is answered 400. `path` and `raw_path` now always start with `/`
+(or are `*`). Ordinary clients never send these; check any tooling that
+does.
+
+### Receives after a scope has ended are bounded
+
+Every `receive` after a scope's end reports that end. An application that
+never checks for it used to loop on resolved Futures forever, starving
+other connections; after `max_disconnect_receives` (default 100) such
+receives now fail. Check for the end event, or set
+`--max-disconnect-receives 0` to restore unbounded re-delivery.
+
 ## 0.002007
 
 ### Outgoing-event validation is now mandatory, in every environment
