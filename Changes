@@ -54,9 +54,11 @@
     LF line endings is refused with 400 instead of waiting for the idle
     timeout with no response.
   - The idle timeout no longer cuts off a request in progress: it is paused
-    while a request is handled (over HTTP/2, while any stream is open), so
-    a handler slower than timeout (60s by default) gets its response
-    instead of a closed connection.
+    while the application has the turn (over HTTP/2, while any stream is
+    open), so a handler slower than timeout (60s by default) gets its
+    response instead of a closed connection. It still runs while the
+    application waits for request body bytes, so a client that goes silent
+    partway through its body is closed at timeout, as before.
   - The idle timeout is now a deadline for a request head: bytes of an
     unfinished head no longer extend it, so a client trickling its headers
     (slowloris) is closed after timeout instead of holding the connection.

@@ -1678,14 +1678,15 @@ restart is 40,000 requests. Workers restart individually without downtime.
 =item timeout => $seconds
 
 Connection idle timeout in seconds: how long an HTTP/1.x connection may wait
-for a request. It runs from the moment the connection opens or a response
+on the client. It runs from the moment the connection opens or a response
 completes until the next request head has fully arrived, and bytes of an
 unfinished head do not extend it, so a client trickling its headers cannot
-hold the connection. It is paused while a request is being handled: a
-handler may take as long as it needs (see C<request_timeout> for stalled
-I/O). Over HTTP/2 it is paused while any stream is open and starts over
-when the last one closes; between streams, any read from the client counts
-as activity.
+hold the connection. While a request is handled it runs only when the
+application is waiting for request body bytes the client has not sent yet,
+and each body read restarts it; otherwise it is paused, so a handler may take
+as long as it needs (see C<request_timeout> for stalled I/O). Over HTTP/2 it
+is paused while any stream is open and starts over when the last one closes;
+between streams, any read from the client counts as activity.
 The internal disconnect reason recorded for this expiry follows
 L<PAGI::Spec::Www/"Standard Disconnect Reasons">: C<idle_timeout> when no
 request has ever completed on this connection (the client connected but
