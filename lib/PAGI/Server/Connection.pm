@@ -323,6 +323,7 @@ sub new {
         is_h2             => 0,                        # Set during start() if HTTP/2 detected
         h2_session        => undef,                    # PAGI::Server::Protocol::HTTP2::Session
         h2_streams        => {},                       # Per-stream state for HTTP/2
+        h2_open_streams   => 0,                        # Streams not yet closed; the idle timer is paused while any are
         h2_peer_goaway    => 0,                        # The peer announced GOAWAY on this connection
         # Transport info (tcp or unix)
         transport_type    => $args{transport_type} // 'tcp',
@@ -395,8 +396,10 @@ sub start {
             # HTTP/1.x: the idle timer covers waiting for a request, so bytes of
             # an unfinished head do not extend it (a trickled head cannot hold
             # the connection) and it is paused while a request is handled.
-            # HTTP/2 interleaves streams, so any read still counts as activity.
-            $weak_self->_reset_idle_timer if $weak_self->{is_h2};
+            # HTTP/2 interleaves streams: it is paused while any stream is
+            # open, and otherwise any read counts as activity.
+            $weak_self->_reset_idle_timer
+                if $weak_self->{is_h2} && !$weak_self->{h2_open_streams};
 
             # Reset stall timer on read activity (if handling a request)
             $weak_self->_reset_stall_timer if $weak_self->{handling_request};
@@ -831,6 +834,9 @@ sub _h2_on_request {
         $is_sse = _accept_signals_sse($headers);
     }
 
+    # The connection is no longer idle while this stream is open.
+    $self->_pause_idle_timer unless $self->{h2_open_streams}++;
+
     # Initialize per-stream state
     $self->{h2_streams}{$stream_id} = {
         pseudo    => $pseudo,
@@ -976,7 +982,7 @@ sub _h2_on_body {
             # lets every send closure treat a doomed-but-still-present entry as
             # an absent one, per the post-close contract (design §6.2 / §21
             # item 1), mirroring _h2_on_close's own marker.
-            $stream->{h2_closed} = 1;
+            $self->_h2_mark_stream_closed($stream);
             # No flush here — _h2_process_data flushes after feed() returns
             $self->_h2_resolve_stream_drain_waiters($stream);
             $self->_h2_resolve_stream_trailer_wait($stream);
@@ -1353,6 +1359,16 @@ sub _h2_write_access_log {
     );
 }
 
+# Marks an HTTP/2 stream closed, once. When it was the last open stream the
+# connection is back to waiting, and its idle timer starts over in full.
+sub _h2_mark_stream_closed {
+    my ($self, $stream) = @_;
+    return if $stream->{h2_closed};
+    $stream->{h2_closed} = 1;
+    $self->_restart_idle_timer
+        if $self->{h2_open_streams} > 0 && --$self->{h2_open_streams} == 0;
+}
+
 sub _h2_on_close {
     my ($self, $stream_id, $error_code) = @_;
 
@@ -1368,7 +1384,7 @@ sub _h2_on_close {
     # inside this very call (a woken receive() future can resume an
     # app's async sub synchronously), so it needs a fact that flips true
     # HERE, not one that only becomes true once the deferred delete runs.
-    $stream->{h2_closed} = 1;
+    $self->_h2_mark_stream_closed($stream);
 
     # The stream's one access record; deleting the facts makes it once only.
     $self->_h2_write_access_log($stream->{pseudo}, $stream->{headers}, delete $stream->{access})
