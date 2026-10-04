@@ -4,7 +4,6 @@ use warnings;
 
 our $VERSION = '0.002014';
 
-use HTTP::Parser::XS qw(parse_http_request);
 use URI::Escape qw(uri_unescape);
 use Encode qw(decode);
 use PAGI::Server ();
@@ -241,10 +240,22 @@ sub _same_authority {
     return $normal->($authority) eq $normal->($host);
 }
 
+# request-line = method SP request-target SP HTTP-version (RFC 9112 3), for
+# HTTP/1.0 and HTTP/1.1. A method is a token; a target has no whitespace or
+# control characters.
+my $TOKEN = qr{[!#\$%&'*+.^_`|~0-9A-Za-z-]+};
+my $REQUEST_LINE = qr{\A($TOKEN) ([^\x00-\x20\x7f]+) HTTP/1\.([01])\z};
+
+# The value of the single Host field, or undef.
+sub _host_of {
+    my ($fields) = @_;
+    for my $field (@$fields) { return $field->[1] if $field->[0] eq 'host' }
+    return undef;
+}
+
 sub parse_request {
     my ($self, $buffer_ref) = @_;
 
-    # HTTP::Parser::XS expects a scalar, not a reference
     my $buffer = ref $buffer_ref ? $$buffer_ref : $buffer_ref;
 
     # Check for complete headers (look for \r\n\r\n)
@@ -262,23 +273,49 @@ sub parse_request {
         return ({ error => 431, message => 'Request Header Fields Too Large' }, $header_end + 4);
     }
 
-    # Parse using HTTP::Parser::XS
-    my %env;
-    my $ret = parse_http_request($buffer, \%env);
+    my $ret = $header_end + 4;
+    my $bad = { error => 400, message => 'Bad Request' };
 
-    # Return error for malformed request (-1)
-    if ($ret == -1) {
-        # Find end of malformed request line/headers
-        my $consumed = $header_end + 4;
-        return ({ error => 400, message => 'Bad Request' }, $consumed);
+    # The head as sent: the request line, then one field per line.
+    my @lines = split /\r\n/, substr($buffer, 0, $header_end);
+    my ($method, $raw_uri, $minor) = (shift(@lines) // '') =~ $REQUEST_LINE
+        or return ($bad, $ret);
+    my $http_version = "1.$minor";
+
+    # Field lines in order, names lowercased and otherwise as sent: a name
+    # that is not a token (whitespace before the colon, say) is refused, not
+    # repaired (RFC 9112 5.1). An obs-fold continuation joins the previous
+    # value with a space (RFC 9112 5.2).
+    # (String operations rather than one regex per line: this loop runs for
+    # every header of every request.)
+    my @fields;
+    for my $line (@lines) {
+        # A field value holds no control character but HTAB (RFC 9110 5.5).
+        return ($bad, $ret) if $line =~ tr/\x00-\x08\x0a-\x1f\x7f//;
+        my $first = substr($line, 0, 1);
+        if ($first eq ' ' || $first eq "\t") {
+            return ($bad, $ret) unless @fields;
+            $line =~ s/\A[ \t]+//;
+            $line =~ s/[ \t]+\z//;
+            $fields[-1][1] .= " $line";
+            next;
+        }
+        my $colon = index($line, ':');
+        return ($bad, $ret) if $colon < 1;
+        my $name = substr($line, 0, $colon);
+        return ($bad, $ret) if $name =~ tr/!#$%&'*+.^_`|~0-9A-Za-z-//c;
+        $name = lc $name;
+        # The value without the optional whitespace around it.
+        my ($start, $end) = ($colon + 1, length $line);
+        $start++ while $start < $end && (substr($line, $start, 1) eq ' ' || substr($line, $start, 1) eq "\t");
+        if ($end > $start && (substr($line, $end - 1, 1) eq ' ' || substr($line, $end - 1, 1) eq "\t")) {
+            # Content-Length is 1*DIGIT with nothing after it, as this server
+            # has always required, even trailing whitespace.
+            return ($bad, $ret) if $name eq 'content-length';
+            $end-- while $end > $start && (substr($line, $end - 1, 1) eq ' ' || substr($line, $end - 1, 1) eq "\t");
+        }
+        push @fields, [$name, substr($line, $start, $end - $start)];
     }
-
-    # Return undef if incomplete (-2)
-    return (undef, 0) if $ret < 0;
-
-    # Extract method and path
-    my $method = $env{REQUEST_METHOD};
-    my $raw_uri = $env{REQUEST_URI} // '/';
 
     # RFC 9112 3.2: an origin server accepts origin-form, absolute-form --
     # reduced here to its path and query, and refused when its authority
@@ -287,7 +324,7 @@ sub parse_request {
     if ($raw_uri =~ m{\A(https?)://([^/?#]*)(.*)\z}si) {
         my ($scheme, $authority, $rest) = (lc $1, $2, $3);
         return ({ error => 400, message => 'Bad Request' }, $header_end + 4)
-            unless _same_authority($scheme, $authority, $env{HTTP_HOST});
+            unless _same_authority($scheme, $authority, _host_of(\@fields));
         $raw_uri = '/' . ($rest =~ s{\A/}{}r);
     }
     elsif ($raw_uri eq '*') {
@@ -317,108 +354,65 @@ sub parse_request {
         $path = eval { decode('UTF-8', $unescaped, Encode::FB_CROAK) } // $unescaped;
     }
 
-    # Build headers array with lowercase names
-    my @headers;
-    my $content_length;
-    my $chunked = 0;
-    my $te_bad_order = 0;
-    my $te_unsupported = 0;
+    # The scope's headers: the fields as parsed, with every Cookie joined into
+    # one at the first one's place (PAGI::Spec::Www). Framing and Host are
+    # read from the same fields.
+    if (@fields > $self->{max_header_count}) {
+        return ({ error => 431, message => 'Request Header Fields Too Large' }, $ret);
+    }
+    my (@headers, $cookie, @host, @content_length, @transfer_encoding);
     my $expect_continue = 0;
-    my @cookie_values;
-
-    for my $key (keys %env) {
-        # Optimized: use index() + substr() instead of regex (faster per NYTProf)
-        if (index($key, 'HTTP_') == 0) {
-            my $header_name = lc(substr($key, 5));
-            $header_name =~ tr/_/-/;  # Optimized: tr/// is faster than s///g
-            my $value = $env{$key};
-
-            # Handle Cookie header normalization
-            if ($header_name eq 'cookie') {
-                push @cookie_values, $value;
-                next;
-            }
-
-            # RFC 9112 Section 6.1: chunked must be the final transfer coding
-            if ($header_name eq 'transfer-encoding') {
-                my @codings = map { s/^\s+|\s+$//gr } split /,/, lc($value);
-                if (@codings && $codings[-1] eq 'chunked') {
-                    $chunked = 1;
-                } elsif (grep { $_ eq 'chunked' } @codings) {
-                    # chunked present but not final — protocol error
-                    $te_bad_order = 1;
-                } else {
-                    $te_unsupported = 1;
-                }
-            }
-
-            # Check for Expect: 100-continue
-            if ($header_name eq 'expect' && lc($value) eq '100-continue') {
-                $expect_continue = 1;
-            }
-
-            push @headers, [$header_name, $value];
+    for my $field (@fields) {
+        my ($name, $value) = @$field;
+        if ($name eq 'cookie') {
+            if ($cookie) { $cookie->[1] .= "; $value" }
+            else         { push @headers, $cookie = ['cookie', $value] }
+            next;
         }
+        if    ($name eq 'host')              { push @host, $value }
+        elsif ($name eq 'content-length')    { push @content_length, $value }
+        elsif ($name eq 'transfer-encoding') { push @transfer_encoding, $value }
+        elsif ($name eq 'expect')            { $expect_continue = 1 if lc($value) eq '100-continue' }
+        push @headers, $field;
     }
 
-    # Add normalized cookie header if present
-    if (@cookie_values) {
-        push @headers, ['cookie', join('; ', @cookie_values)];
-    }
+    # RFC 9112 3.2: exactly one Host on HTTP/1.1, and never two.
+    return ($bad, $ret) if @host > 1 || ($http_version eq '1.1' && !@host);
 
-    # Check header count limit (DoS protection)
-    if (@headers > $self->{max_header_count}) {
-        return ({ error => 431, message => 'Request Header Fields Too Large' }, $header_end + 4);
-    }
-
-    # Add content-type and content-length from env
-    if (defined $env{CONTENT_TYPE}) {
-        push @headers, ['content-type', $env{CONTENT_TYPE}];
-    }
-    if (defined $env{CONTENT_LENGTH}) {
-        my $cl_value = $env{CONTENT_LENGTH};
-
-        # RFC 7230 Section 3.3.2: Content-Length = 1*DIGIT
-        # Must be only digits, no whitespace, no negative sign
-        if ($cl_value !~ /^\d+$/) {
-            return ({ error => 400, message => 'Bad Request' }, $header_end + 4);
-        }
+    # RFC 9112 6.3: one Content-Length, 1*DIGIT.
+    my $content_length;
+    if (@content_length) {
+        my $cl_value = $content_length[0];
+        return ($bad, $ret) if @content_length > 1 || $cl_value !~ /\A[0-9]+\z/;
 
         # Check for unreasonably large values (>2GB indicates potential DoS)
         # Using string length check to avoid Perl's numeric conversion issues
         if (length($cl_value) > 10 || $cl_value > 2_147_483_647) {
-            return ({ error => 413, message => 'Payload Too Large' }, $header_end + 4);
+            return ({ error => 413, message => 'Payload Too Large' }, $ret);
         }
-
-        push @headers, ['content-length', $cl_value];
         $content_length = $cl_value + 0;
     }
 
-    # Reject unsupported Transfer-Encoding before checking CL/TE conflict
-    if ($te_bad_order) {
-        return ({ error => 400, message => 'chunked must be the final Transfer-Encoding' }, $header_end + 4);
-    }
-    if ($te_unsupported) {
-        return ({ error => 501, message => 'Unsupported Transfer-Encoding' }, $header_end + 4);
+    # RFC 9112 6.1: the codings of every Transfer-Encoding field, in order;
+    # chunked must be the final one.
+    my $chunked = 0;
+    if (@transfer_encoding) {
+        my @codings = map { s/^\s+|\s+$//gr } split /,/, lc join(',', @transfer_encoding);
+        if (@codings && $codings[-1] eq 'chunked') {
+            $chunked = 1;
+        }
+        elsif (grep { $_ eq 'chunked' } @codings) {
+            return ({ error => 400, message => 'chunked must be the final Transfer-Encoding' }, $ret);
+        }
+        else {
+            return ({ error => 501, message => 'Unsupported Transfer-Encoding' }, $ret);
+        }
     }
 
     # RFC 9112 Section 6.3.3: reject requests with both Transfer-Encoding
     # and Content-Length to prevent request smuggling (CL/TE desync)
     if ($chunked && defined $content_length) {
-        return ({ error => 400, message => 'Transfer-Encoding and Content-Length are mutually exclusive' }, $header_end + 4);
-    }
-
-    # Determine HTTP version (optimized: substr instead of regex)
-    my $http_version = '1.1';
-    if ($env{SERVER_PROTOCOL} && index($env{SERVER_PROTOCOL}, 'HTTP/') == 0) {
-        $http_version = substr($env{SERVER_PROTOCOL}, 5);
-    }
-
-    # RFC 7230 Section 5.4: A client MUST send a Host header field in all
-    # HTTP/1.1 request messages. A server MUST respond with a 400 (Bad Request)
-    # status code to any HTTP/1.1 request message that lacks a Host header field.
-    if ($http_version eq '1.1' && !defined $env{HTTP_HOST}) {
-        return ({ error => 400, message => 'Bad Request' }, $header_end + 4);
+        return ({ error => 400, message => 'Transfer-Encoding and Content-Length are mutually exclusive' }, $ret);
     }
 
     my $request = {
@@ -653,7 +647,7 @@ __END__
 
 =head1 SEE ALSO
 
-L<PAGI::Server::Connection>, L<HTTP::Parser::XS>
+L<PAGI::Server::Connection>
 
 =head1 AUTHOR
 
