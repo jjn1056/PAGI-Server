@@ -1687,6 +1687,16 @@ and each body read restarts it; otherwise it is paused, so a handler may take
 as long as it needs (see C<request_timeout> for stalled I/O). Over HTTP/2 it
 is paused while any stream is open and starts over when the last one closes;
 between streams, any read from the client counts as activity.
+
+B<A slow request body is bounded only between reads.> Because each body read
+restarts the timer, a client that keeps sending a few body bytes at a time,
+each within C<timeout> of the last, holds its connection for as long as it
+keeps doing so -- the same as nginx's C<client_body_timeout>. The server does
+not enforce a minimum upload rate. When the server faces untrusted clients
+directly, put a reverse proxy in front that does (for example Apache
+C<mod_reqtimeout>'s C<MinRate>), or limit concurrent connections per client
+there; C<max_connections> bounds the total either way.
+
 The internal disconnect reason recorded for this expiry follows
 L<PAGI::Spec::Www/"Standard Disconnect Reasons">: C<idle_timeout> when no
 request has ever completed on this connection (the client connected but
