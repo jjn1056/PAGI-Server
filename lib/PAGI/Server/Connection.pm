@@ -244,6 +244,8 @@ sub new {
         tls_enabled   => $args{tls_enabled} // 0,
         timeout       => $args{timeout} // 60,  # Idle timeout in seconds
         request_timeout => $args{request_timeout} // 0,  # Request stall timeout in seconds (0 = disabled, default for performance)
+        body_min_rate   => $args{body_min_rate} // 500,  # Request body bytes/s a client must average while the app waits (0 = off)
+        body_rate_grace => $args{body_rate_grace} // 20, # Seconds of waiting before body_min_rate applies
         ws_idle_timeout => $args{ws_idle_timeout} // 0,   # WebSocket idle timeout (0 = disabled)
         sse_idle_timeout => $args{sse_idle_timeout} // 0,  # SSE idle timeout (0 = disabled)
         ws_close_timeout => $args{ws_close_timeout} // 10,  # Finite bound on the WebSocket closing-handshake wait (validated in PAGI::Server)
@@ -399,6 +401,11 @@ sub start {
             # for, which do. It is paused while the application has the turn.
             # HTTP/2 interleaves streams: it is paused while any stream is
             # open, and otherwise any read counts as activity.
+            # A request body arriving slower than body_min_rate, counting only
+            # time the application spent waiting for it, ends the request.
+            return 0 if $weak_self->{_client_turn} && $weak_self->{body_min_rate}
+                && $weak_self->_body_too_slow(length $$buffref);
+
             $weak_self->_reset_idle_timer
                 if $weak_self->{is_h2} ? !$weak_self->{h2_open_streams} : $weak_self->{_client_turn};
 
@@ -574,6 +581,7 @@ sub _restart_idle_timer {
 sub _client_turn {
     my ($self) = @_;
     $self->{_client_turn} = 1;
+    $self->{_turn_at} = Time::HiRes::time() if $self->{body_min_rate};
     $self->_restart_idle_timer;
 }
 
@@ -581,6 +589,27 @@ sub _app_turn {
     my ($self) = @_;
     $self->{_client_turn} = 0;
     $self->_pause_idle_timer;
+}
+
+# True, after ending the request, when the body has arrived slower than
+# body_min_rate: after body_rate_grace seconds of waiting, each further byte
+# buys 1/body_min_rate seconds (Apache mod_reqtimeout's MinRate).
+sub _body_too_slow {
+    my ($self, $bytes) = @_;
+    # Fold this wait into the total here, with the one clock read per body
+    # read: the application's turn starts on this same read.
+    my $now = Time::HiRes::time();
+    $self->{_body_wait} += $now - $self->{_turn_at};
+    $self->{_turn_at} = $now;
+    $self->{_body_bytes} += $bytes;
+    return 0 if $self->{_body_wait} <= $self->{body_rate_grace} + $self->{_body_bytes} / $self->{body_min_rate};
+    # A 408 if no response has started; then the connection is marked closed
+    # before the application hears of the disconnect, so nothing it sends
+    # after that reaches the client.
+    $self->_send_error_response(408, 'Request Timeout');
+    $self->_handle_disconnect_and_close('client_timeout',
+        detail => "request body slower than $self->{body_min_rate} bytes/s");
+    return 1;
 }
 
 sub _stop_idle_timer {
@@ -5500,6 +5529,7 @@ sub _try_handle_request {
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
     $self->_pause_idle_timer;
+    @$self{qw(_body_wait _body_bytes)} = (0, 0);
     $self->{request_start} = [gettimeofday];
     $self->{current_request} = $request;  # Store for access logging
 

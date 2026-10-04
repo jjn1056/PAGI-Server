@@ -1823,6 +1823,31 @@ B<Note:> This differs from C<timeout> (idle connection timeout). The
 C<timeout> applies between requests on keep-alive connections. The
 C<request_timeout> applies during active request processing.
 
+=item body_min_rate => $bytes_per_second
+
+The average rate, in bytes per second, at which a client must send an HTTP/1.x
+request body while the application is waiting for it. Only time the
+application spends waiting for body bytes counts, and only once
+C<body_rate_grace> seconds of it have passed; after that, each byte received
+buys C<1/body_min_rate> more seconds, as Apache's C<mod_reqtimeout> C<MinRate>
+does. A body arriving slower ends the request: a C<408 Request Timeout> if no
+response has started, then the connection is closed (disconnect reason
+C<client_timeout>). This stops a client from holding a connection by
+trickling a body, which C<timeout> alone cannot (each body read restarts it).
+C<0> turns the check off.
+
+B<Default:> 500 (about 4 kbit/s)
+
+B<CLI:> C<--body-min-rate 1000>
+
+=item body_rate_grace => $seconds
+
+Seconds of waiting for a request body before C<body_min_rate> applies.
+
+B<Default:> 20
+
+B<CLI:> C<--body-rate-grace 30>
+
 =item ws_idle_timeout => $seconds
 
 Maximum time in seconds a WebSocket connection can be idle without any
@@ -2617,6 +2642,21 @@ B<Graceful shutdown for maintenance:>
 # True only for a finite, strictly positive number. Rejects 0, negatives,
 # non-numbers, NaN (never > 0), and +/-Inf (isinf). Used to validate bounds
 # that must always be finite, such as ws_close_timeout.
+# body_min_rate and body_rate_grace are finite numbers, zero or more.
+sub _check_body_rate_options {
+    my ($self) = @_;
+    die "Invalid body_min_rate '$self->{body_min_rate}' - must be a non-negative number of bytes per second (0 turns it off)\n"
+        unless _is_finite_non_negative($self->{body_min_rate});
+    die "Invalid body_rate_grace '$self->{body_rate_grace}' - must be a non-negative number of seconds\n"
+        unless _is_finite_non_negative($self->{body_rate_grace});
+}
+
+sub _is_finite_non_negative {
+    my ($val) = @_;
+    return defined($val) && !ref($val) && Scalar::Util::looks_like_number($val)
+        && $val >= 0 && !POSIX::isinf($val) ? 1 : 0;
+}
+
 sub _is_finite_positive {
     my ($val) = @_;
     return 0 unless defined $val;
@@ -2792,6 +2832,9 @@ sub _init {
     $self->{max_connections}     = delete $params->{max_connections} // 0;  # 0 = use default (1000)
     $self->{sync_file_threshold} = delete $params->{sync_file_threshold} // 65536;  # Threshold for sync file reads (0=always async)
     $self->{request_timeout}     = delete $params->{request_timeout} // 0;  # Request stall timeout in seconds (0 = disabled, default for performance)
+    $self->{body_min_rate}       = delete $params->{body_min_rate} // 500;   # Request body bytes/s while the app waits (0 = off)
+    $self->{body_rate_grace}     = delete $params->{body_rate_grace} // 20;  # Seconds of waiting before body_min_rate applies
+    _check_body_rate_options($self);
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
     $self->{ws_close_timeout}    = delete $params->{ws_close_timeout} // 10;  # Bound on the WebSocket closing-handshake wait (finite, positive; no "zero disables")
@@ -2996,6 +3039,11 @@ sub configure {
     }
     if (exists $params{request_timeout}) {
         $self->{request_timeout} = delete $params{request_timeout};
+    }
+    if (exists $params{body_min_rate} || exists $params{body_rate_grace}) {
+        $self->{body_min_rate}   = delete $params{body_min_rate}   if exists $params{body_min_rate};
+        $self->{body_rate_grace} = delete $params{body_rate_grace} if exists $params{body_rate_grace};
+        _check_body_rate_options($self);
     }
     if (exists $params{ws_idle_timeout}) {
         $self->{ws_idle_timeout} = delete $params{ws_idle_timeout};
@@ -4375,6 +4423,8 @@ sub _run_as_worker {
         max_requests     => $self->{max_requests},
         shutdown_timeout    => $self->{shutdown_timeout},
         request_timeout     => $self->{request_timeout},
+        body_min_rate       => $self->{body_min_rate},
+        body_rate_grace     => $self->{body_rate_grace},
         ws_idle_timeout     => $self->{ws_idle_timeout},
         sse_idle_timeout    => $self->{sse_idle_timeout},
         ws_close_timeout    => $self->{ws_close_timeout},
@@ -4575,6 +4625,8 @@ sub _on_connection {
         tls_enabled       => $self->{tls_enabled} // 0,
         timeout           => $self->{timeout},
         request_timeout   => $self->{request_timeout},
+        body_min_rate     => $self->{body_min_rate},
+        body_rate_grace   => $self->{body_rate_grace},
         ws_idle_timeout   => $self->{ws_idle_timeout},
         sse_idle_timeout  => $self->{sse_idle_timeout},
         ws_close_timeout  => $self->{ws_close_timeout},

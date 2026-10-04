@@ -53,6 +53,8 @@ GetOptionsFromArray(
     'timeout=i'             => \$server_opts{timeout},
     'shutdown-timeout=i'    => \$server_opts{shutdown_timeout},
     'request-timeout=i'     => \$server_opts{request_timeout},
+    'body-min-rate=f'       => \$server_opts{body_min_rate},
+    'body-rate-grace=f'     => \$server_opts{body_rate_grace},
     'ws-idle-timeout=i'     => \$server_opts{ws_idle_timeout},
     'sse-idle-timeout=i'    => \$server_opts{sse_idle_timeout},
     'heartbeat-timeout=i'   => \$server_opts{heartbeat_timeout},
@@ -470,6 +472,17 @@ many bytes (default: 16384). See L<PAGI::Server/"write_low_watermark">.
 =item B<--request-timeout> NUM
 
 Request stall timeout in seconds (default: 0, disabled)
+
+=item B<--body-min-rate> NUM
+
+Request body bytes per second a client must average while the application
+waits for the body, once the grace period has passed; slower gets 408
+(default: 500; 0 turns it off). See L<PAGI::Server/"body_min_rate">.
+
+=item B<--body-rate-grace> NUM
+
+Seconds of waiting for a request body before B<--body-min-rate> applies
+(default: 20).
 
 =item B<--ws-idle-timeout> NUM
 

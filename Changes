@@ -17,6 +17,11 @@
     after it has ended; further receives fail.
 
   [New]
+  - body_min_rate (default 500 bytes/s) and body_rate_grace (default 20s):
+    once a request has waited body_rate_grace seconds for its body, the
+    client must keep up body_min_rate on average or get 408 and a closed
+    connection, so a trickled body cannot hold a connection
+    (--body-min-rate, --body-rate-grace; 0 turns it off).
   - log_format text|json (--log-format), a json access-log preset, and pid
     and worker in every log event.
   - pagi.connection on websocket and sse scopes; on_end, end_future,
