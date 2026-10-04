@@ -40,6 +40,19 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - The HTTP/1.x request head is parsed directly instead of through
+    HTTP::Parser::XS's PSGI %env, so the scope's headers are the request's
+    own: in order, repeated headers kept apart, and names as sent (an
+    underscore no longer turns into a hyphen, so X_Forwarded_For can no
+    longer pose as X-Forwarded-For). A field name with whitespace before
+    the colon, or any other non-token name, is now refused with 400; two
+    Host headers with 400; more than max_header_count headers with 431
+    rather than 400. HTTP::Parser::XS is no longer a dependency.
+  - A request head still arriving is held to max_header_size and the
+    request-line limit (431 / 414 as soon as either is exceeded) instead of
+    being buffered without bound until it completes, and a head using bare
+    LF line endings is refused with 400 instead of waiting for the idle
+    timeout with no response.
   - The idle timeout no longer cuts off a request in progress: it is paused
     while a request is handled (over HTTP/2, while any stream is open), so
     a handler slower than timeout (60s by default) gets its response

@@ -13,7 +13,6 @@ requires 'Future::AsyncAwait', '0.66';
 recommends 'Future::IO', '0.23';  # Provides sleep, read, write without loop coupling
 
 # HTTP parsing
-requires 'HTTP::Parser::XS', '0.17';
 
 # WebSocket support
 requires 'Protocol::WebSocket', '0.26';
