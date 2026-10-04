@@ -393,13 +393,14 @@ sub start {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
 
-            # HTTP/1.x: the idle timer covers waiting for a request, so bytes of
-            # an unfinished head do not extend it (a trickled head cannot hold
-            # the connection) and it is paused while a request is handled.
+            # HTTP/1.x: the idle timer covers waiting on the client -- for a
+            # request, whose head bytes do not extend it (a trickled head cannot
+            # hold the connection), or for body bytes the application is waiting
+            # for, which do. It is paused while the application has the turn.
             # HTTP/2 interleaves streams: it is paused while any stream is
             # open, and otherwise any read counts as activity.
             $weak_self->_reset_idle_timer
-                if $weak_self->{is_h2} && !$weak_self->{h2_open_streams};
+                if $weak_self->{is_h2} ? !$weak_self->{h2_open_streams} : $weak_self->{_client_turn};
 
             # Reset stall timer on read activity (if handling a request)
             $weak_self->_reset_stall_timer if $weak_self->{handling_request};
@@ -565,6 +566,21 @@ sub _restart_idle_timer {
     $self->{_idle_reset_at} = undef;
     $self->{idle_timer}->stop if $self->{idle_timer}->is_running;
     $self->{idle_timer}->start;
+}
+
+# HTTP/1.x request body: while the application waits for body bytes the client
+# has not sent yet, it is the client's turn -- the idle timer runs, and body
+# bytes reset it -- and once they arrive the application has the turn again.
+sub _client_turn {
+    my ($self) = @_;
+    $self->{_client_turn} = 1;
+    $self->_restart_idle_timer;
+}
+
+sub _app_turn {
+    my ($self) = @_;
+    $self->{_client_turn} = 0;
+    $self->_pause_idle_timer;
 }
 
 sub _stop_idle_timer {
@@ -5660,6 +5676,7 @@ async sub _handle_request {
         if ($keep_alive) {
             # Reset for next request
             $self->{handling_request} = 0;
+            $self->{_client_turn} = 0;
             $self->_restart_idle_timer;
             $self->{response_started} = 0;
             $self->{h1_seq} = 'initial';
@@ -5890,7 +5907,9 @@ async sub _read_chunked_body {
             $self->{receive_pending} = Future->new;
         }
         $parked = 1;
+        $self->_client_turn;
         await $self->{receive_pending};
+        $self->_app_turn;
         $self->{receive_pending} = undef;
 
         # Check queue after waiting
@@ -5967,7 +5986,9 @@ async sub _read_chunked_body {
         $self->{receive_pending} = Future->new;
     }
     $parked = 1;
+    $self->_client_turn;
     await $self->{receive_pending};
+    $self->_app_turn;
     $self->{receive_pending} = undef;
 
     # Recursive call to re-process - but we can't use __SUB__ in nested async
@@ -6138,7 +6159,9 @@ async sub _receive_http_body {
             $weak_self->{receive_pending} = Future->new;
         }
         $parked = 1;
+        $weak_self->_client_turn;
         await $weak_self->{receive_pending};
+        $weak_self->_app_turn;
         $weak_self->{receive_pending} = undef;
 
         # Check queue after waiting

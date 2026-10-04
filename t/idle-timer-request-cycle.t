@@ -38,6 +38,7 @@ my $app = async sub {
         return;
     }
     push @handled, $scope->{path};
+    await $loop->delay_future(after => 0.8) if $scope->{path} eq '/late-read';
     my $body = '';
     while (1) {
         my $event = await $receive->();
@@ -46,6 +47,10 @@ my $app = async sub {
         last unless $event->{more};
     }
     await $loop->delay_future(after => 0.8) if $scope->{path} eq '/slow';
+    if ($scope->{path} eq '/after-body') {
+        # The body is in; waiting on receive now waits for a disconnect.
+        await Future->wait_any($receive->(), $loop->delay_future(after => 0.8));
+    }
     my $out = $scope->{path} . ':' . length($body);
     await $send->({ type => 'http.response.start', status => 200,
         headers => [['content-length', length $out]] });
@@ -135,6 +140,32 @@ subtest 'a request body trickled in is still read' => sub {
     }
     $got .= (pump($s, 2, sub { $got . $_[0] =~ m{/upload:12\z} }))[0];
     like($got, qr{/upload:12\z}, 'the whole body arrives, past the idle timeout');
+    close $s;
+};
+
+subtest 'a client silent partway through its body is closed at the timeout' => sub {
+    my $s = client();
+    print $s "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" . ('b' x 10);
+    my $t0 = time;
+    my (undef, $closed) = pump($s, 3);
+    ok($closed, 'the server closed the connection');
+    cmp_ok(time - $t0, '<', 1.5, 'about one timeout after the client went quiet');
+    close $s;
+};
+
+subtest 'a handler that reads its body late still answers' => sub {
+    my $s = client();
+    print $s "POST /late-read HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nbody";
+    my ($got) = pump($s, 3, sub { $_[0] =~ m{/late-read:4\z} });
+    like($got, qr{/late-read:4\z}, 'the response arrives');
+    close $s;
+};
+
+subtest 'an application waiting after the body is complete is not cut off' => sub {
+    my $s = client();
+    print $s "POST /after-body HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nbody";
+    my ($got) = pump($s, 3, sub { $_[0] =~ m{/after-body:4\z} });
+    like($got, qr{/after-body:4\z}, 'the response arrives');
     close $s;
 };
 
