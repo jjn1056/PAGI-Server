@@ -104,4 +104,33 @@ subtest 'the request line' => sub {
     is(error_of(parse(head('G(T / HTTP/1.1', 'Host: x'))), 400, 'method not a token');
 };
 
+# A head still arriving is held to the same limits as a complete one, and a
+# bare LF line ending is refused at once rather than waited on forever.
+sub parse_raw {
+    my ($buffer, %limits) = @_;
+    my ($request, $consumed) = PAGI::Server::Protocol::HTTP1->new(%limits)->parse_request(\$buffer);
+    return $request;
+}
+
+subtest 'a bare LF line ending is refused' => sub {
+    is(error_of(parse_raw("GET / HTTP/1.1\nHost: x\n\n")), 400, 'all bare LF');
+    is(error_of(parse_raw("GET / HTTP/1.1\r\nHost: x\n\n")), 400, 'bare LF after a CRLF line');
+    is(error_of(parse_raw("GET / HTTP/1.1\nHost: x")), 400, 'before the head is complete');
+};
+
+subtest 'an incomplete head within the limits is waited for' => sub {
+    is(parse_raw("GET / HTTP/1.1\r\nHost: x\r\nX-A: 1"), undef, 'mid-header');
+    is(parse_raw("GET / HTTP/1.1\r"), undef, 'a CR waiting for its LF');
+    is(parse_raw("GET / HTTP/1.1\r\nHost: x\r\n\r"), undef, 'the last CR of the head');
+};
+
+subtest 'an incomplete head past the limits is refused' => sub {
+    is(error_of(parse_raw('GET /' . ('a' x 100), max_request_line_size => 50)), 414,
+        'a request line already past max_request_line_size');
+    is(error_of(parse_raw("GET / HTTP/1.1\r\nHost: x\r\nX-Big: " . ('a' x 200), max_header_size => 100)), 431,
+        'headers already past max_header_size');
+    is(parse_raw("GET / HTTP/1.1\r\nHost: x\r\nX-A: " . ('a' x 40), max_header_size => 100), undef,
+        'still within max_header_size');
+};
+
 done_testing;

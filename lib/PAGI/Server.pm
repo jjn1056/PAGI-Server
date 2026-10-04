@@ -1607,7 +1607,9 @@ listening socket with nothing serving -- so a process supervisor can restart it.
 Maximum size in bytes of the request line and of the combined header block
 for an HTTP/1.x request. Default: 8192 (8KB). A request line exceeding this
 limit receives HTTP 414 (URI Too Long); a header block exceeding it receives
-HTTP 431 (Request Header Fields Too Large).
+HTTP 431 (Request Header Fields Too Large). Both apply while the head is
+still arriving, so a connection never buffers more than this for a head.
+A head using bare LF line endings is refused with 400.
 
 B<CLI:> C<--max-header-size 16384>
 

@@ -48,10 +48,12 @@ bound resource use while parsing untrusted input:
 =over 4
 
 =item * C<max_header_size> - maximum size in bytes of the combined header
-block. Default: 8192 (8KB). Exceeding it yields a 431 error result.
+block. Default: 8192 (8KB). Exceeding it yields a 431 error result, as soon
+as the bytes held already exceed it, before the head is complete.
 
 =item * C<max_request_line_size> - maximum size in bytes of the request line.
-Default: 8192 (8KB). Exceeding it yields a 414 error result.
+Default: 8192 (8KB). Exceeding it yields a 414 error result, likewise as
+soon as it is exceeded.
 
 =item * C<max_header_count> - maximum number of header fields. Default: 100.
 Exceeding it yields a 431 error result.
@@ -253,6 +255,30 @@ sub _host_of {
     return undef;
 }
 
+# A head still arriving: refused as soon as it is already past a size limit
+# -- the limits bound what a connection buffers, not only what it parses --
+# or uses a bare LF line ending, which this server does not accept (RFC 9112
+# 2.2 allows refusing it; leniency in finding the end of a head is what
+# request smuggling feeds on). Otherwise (undef, 0): wait for more bytes.
+# Only an incomplete head pays for these checks.
+sub _incomplete_head {
+    my ($self, $buffer) = @_;
+    my $length = length $buffer;
+    my $line_end = index($buffer, "\r\n");
+    if (($line_end < 0 ? $length : $line_end) > $self->{max_request_line_size}) {
+        return ({ error => 414, message => 'URI Too Long' }, $length);
+    }
+    # The end of the head cannot start before the last three bytes held.
+    if ($length - 3 > $self->{max_header_size}) {
+        return ({ error => 431, message => 'Request Header Fields Too Large' }, $length);
+    }
+    for (my $lf = index($buffer, "\n"); $lf >= 0; $lf = index($buffer, "\n", $lf + 1)) {
+        return ({ error => 400, message => 'Bad Request' }, $length)
+            if $lf == 0 || substr($buffer, $lf - 1, 1) ne "\r";
+    }
+    return (undef, 0);
+}
+
 sub parse_request {
     my ($self, $buffer_ref) = @_;
 
@@ -260,7 +286,7 @@ sub parse_request {
 
     # Check for complete headers (look for \r\n\r\n)
     my $header_end = index($buffer, "\r\n\r\n");
-    return (undef, 0) if $header_end < 0;
+    return $self->_incomplete_head($buffer) if $header_end < 0;
 
     # Check request line length (first line before \r\n)
     my $first_line_end = index($buffer, "\r\n");
