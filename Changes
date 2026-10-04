@@ -40,6 +40,12 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - The idle timeout no longer cuts off a request in progress: it is paused
+    while a request is handled, so a handler slower than timeout (60s by
+    default) gets its response instead of a closed connection.
+  - The idle timeout is now a deadline for a request head: bytes of an
+    unfinished head no longer extend it, so a client trickling its headers
+    (slowloris) is closed after timeout instead of holding the connection.
   - The HTTP/1.1 status line carries the registered reason phrase for
     every IANA status code (422 Unprocessable Content, 429 Too Many
     Requests, 307/308 redirects, ...) instead of "Unknown"; it knew 19.

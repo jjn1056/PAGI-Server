@@ -392,8 +392,11 @@ sub start {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
 
-            # Reset idle timer on any read activity
-            $weak_self->_reset_idle_timer;
+            # HTTP/1.x: the idle timer covers waiting for a request, so bytes of
+            # an unfinished head do not extend it (a trickled head cannot hold
+            # the connection) and it is paused while a request is handled.
+            # HTTP/2 interleaves streams, so any read still counts as activity.
+            $weak_self->_reset_idle_timer if $weak_self->{is_h2};
 
             # Reset stall timer on read activity (if handling a request)
             $weak_self->_reset_stall_timer if $weak_self->{handling_request};
@@ -542,6 +545,23 @@ sub _reset_idle_timer {
 
     $self->{idle_timer}->reset;
     $self->{idle_timer}->start unless $self->{idle_timer}->is_running;
+}
+
+# HTTP/1.x request cycle: no idle expiry while a request is handled -- the
+# handler may take as long as it needs -- and a full timeout for the next
+# request once the response is done.
+sub _pause_idle_timer {
+    my ($self) = @_;
+    return unless $self->{idle_timer};
+    $self->{idle_timer}->stop if $self->{idle_timer}->is_running;
+}
+
+sub _restart_idle_timer {
+    my ($self) = @_;
+    return unless $self->{idle_timer};
+    $self->{_idle_reset_at} = undef;
+    $self->{idle_timer}->stop if $self->{idle_timer}->is_running;
+    $self->{idle_timer}->start;
 }
 
 sub _stop_idle_timer {
@@ -5447,6 +5467,7 @@ sub _try_handle_request {
 
     # Handle the request - store the Future to prevent "lost future" warning
     $self->{handling_request} = 1;
+    $self->_pause_idle_timer;
     $self->{request_start} = [gettimeofday];
     $self->{current_request} = $request;  # Store for access logging
 
@@ -5623,6 +5644,7 @@ async sub _handle_request {
         if ($keep_alive) {
             # Reset for next request
             $self->{handling_request} = 0;
+            $self->_restart_idle_timer;
             $self->{response_started} = 0;
             $self->{h1_seq} = 'initial';
             $self->{_resp_pending} = undef;
