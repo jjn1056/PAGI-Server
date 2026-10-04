@@ -40,6 +40,9 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - The HTTP/1.1 status line carries the registered reason phrase for
+    every IANA status code (422 Unprocessable Content, 429 Too Many
+    Requests, 307/308 redirects, ...) instead of "Unknown"; it knew 19.
   - h1: a request body the application did not read could be parsed as the
     next request; it is now discarded, or the connection closed.
   - Workers ignored the configured logger and access_log_format.
