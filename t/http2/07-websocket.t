@@ -465,7 +465,12 @@ subtest 'WebSocket close handshake over HTTP/2' => sub {
         masked => 1,
     );
     send_stream_data($client, $client_sock, $ws_stream_id, $close_frame->to_bytes);
+    exchange_frames($client, $client_sock);
 
+    # The client then ends its stream, the orderly close RFC 8441 5 maps to
+    # RFC 6455's TCP closure; the scope ends there, and the application
+    # receives its websocket.disconnect.
+    send_stream_data($client, $client_sock, $ws_stream_id, '', 1);
     exchange_frames($client, $client_sock);
 
     # Server should have received the disconnect event

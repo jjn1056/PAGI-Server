@@ -296,6 +296,8 @@ sub draining_ws_app {
             my $event = await $receive->();
             if ($event->{type} eq 'websocket.disconnect') {
                 $obs->{$path}{saw_disconnect_event} = 1;
+                $obs->{$path}{event_connected} = $c->is_connected ? 1 : 0;
+                $obs->{$path}{event_complete}  = $c->response_complete ? 1 : 0;
                 await $loop->delay_future(after => 0);  # one turn of async work
                 last;
             }
@@ -465,26 +467,54 @@ subtest 'peer-initiated staged: clean only at full stream closure, not at the Cl
     ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{accepted} }),
         'app accepted and entered its receive loop');
 
-    # STAGE (a): the peer's valid Close frame, but NOT END_STREAM. The app drains
-    # the websocket.disconnect, does one turn of async work, and returns.
+    # STAGE (a): the peer's valid Close frame, but NOT END_STREAM. The scope has
+    # not ended, so the app has not been told; it is still waiting.
     send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'bye'), 0);
-    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} }),
-        'the app drained the disconnect and returned');
-    ok($obs{'/ws'}{saw_disconnect_event},
-        'the app saw the peer Close as a websocket.disconnect');
+    exchange_frames($client, $client_sock, 10);
+    ok(!$obs{'/ws'}{saw_disconnect_event},
+        'no websocket.disconnect yet -- the client has not sent its END_STREAM (RFC 8441 5)');
+    ok(!$obs{'/ws'}{returned}, 'the app is still waiting');
     ok(!$obs{'/ws'}{complete},
         'NOT clean yet -- the client has not sent its END_STREAM (RFC 8441 5)');
     ok(!$obs{'/ws'}{disconnect},
         'and not abnormal either -- the handshake frame was valid (scope PENDING)');
 
-    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN.
+    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN,
+    # and the app receives the disconnect with the scope already ended.
     send_stream_data($client, $client_sock, $sid, '', 1);
-    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{complete} }),
-        'on_complete fired once the stream fully closed');
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} && $obs{'/ws'}{complete} }),
+        'the app received the disconnect and on_complete fired once the stream fully closed');
+    ok($obs{'/ws'}{saw_disconnect_event}, 'the app saw the peer Close as a websocket.disconnect');
+    is($obs{'/ws'}{event_connected}, 0, 'is_connected false when the event arrived');
+    is($obs{'/ws'}{event_complete},  1, 'response_complete true when the event arrived');
     is($obs{'/ws'}{complete}, 1, 'on_complete fired exactly once');
     is($obs{'/ws'}{complete_reason}, undef,
         'disconnect_reason() undef -- a completed handshake is a clean end');
     ok(!$obs{'/ws'}{disconnect}, 'on_disconnect did NOT fire (clean end, not abnormal)');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+subtest 'peer Close, END_STREAM withheld: the disconnect arrives at the finish bound' => sub {
+    my %obs;
+    my $app    = draining_ws_app(\%obs);
+    my $server = create_test_server(app => $app, ws_close_timeout => 0.3);
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{accepted} }), 'app accepted');
+
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1001, 'peerbye'), 0);
+    exchange_frames($client, $client_sock, 5);
+    ok(!$obs{'/ws'}{saw_disconnect_event}, 'no event while END_STREAM is withheld');
+
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} && $obs{'/ws'}{disconnect} }, 200),
+        'the event arrived when the finish bound ended the scope');
+    is($obs{'/ws'}{event_connected}, 0, 'is_connected false when it arrived');
+    is($obs{'/ws'}{disconnect_reason}, 'close_incomplete', 'the object reports close_incomplete');
 
     eval { $stream_io->close_now };
     $loop->remove($server);

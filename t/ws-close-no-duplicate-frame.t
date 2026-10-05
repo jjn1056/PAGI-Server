@@ -180,7 +180,8 @@ sub build_race_app {
             # our own Close when the test releases the gate after the server
             # processed the peer's (close_received is true -- the send handler's
             # arm under test; the parser already sent the reciprocal).
-            my $recv = $receive->();
+            # Held by the test: a dropped Future is never resolved.
+            my $recv = $obs->{recv_future} = $receive->();
             $recv->on_done(sub {
                 $obs->{recv_type}      = $_[0]{type};
                 $obs->{recv_connected} = $conn->is_connected ? 1 : 0;

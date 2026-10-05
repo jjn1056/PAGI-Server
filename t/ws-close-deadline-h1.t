@@ -292,7 +292,9 @@ sub peer_first_app {
             }
         }
 
-        my $recv = $receive->();                         # the peer's websocket.disconnect
+        # The peer's websocket.disconnect; held by the test, since a dropped
+        # Future is never resolved.
+        my $recv = $obs{recv_future} = $receive->();
         $recv->on_done(sub {
             my ($d) = @_;
             $obs{recv_type}      = $d->{type};

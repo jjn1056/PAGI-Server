@@ -1176,7 +1176,10 @@ sub _h2_ws_enqueue_disconnect {
     # fallback re-delivers this event itself. A copy is queued, so an
     # application that edits the event it received cannot alter what a later
     # reader sees.
-    $stream->{ws_disconnect_event} = {
+    # A peer's Close kept by _h2_process_ws_frames is this scope's event: it
+    # names the peer's own code and reason text, so it stands over the ending
+    # record's ($code, $reason).
+    $stream->{ws_disconnect_event} //= {
         type   => 'websocket.disconnect',
         code   => $code,
         reason => $reason,
@@ -3337,6 +3340,12 @@ sub _h2_create_websocket_send {
         elsif ($type eq 'websocket.send') {
             return unless _ws_handshake_accepted($ss->{seq_state});
 
+            # The server's Close is queued (its reply to the peer's Close): RFC
+            # 6455 5.5.1 allows no data after it, and an application racing the
+            # peer's close through no fault of its own gets a no-op (Www.pod
+            # "Disconnected Client - sending after disconnect").
+            return if $ss->{ws_eof_pending};
+
             my $frame;
             if (defined $event->{text}) {
                 $frame = Protocol::WebSocket::Frame->new(
@@ -4140,12 +4149,8 @@ sub _h2_process_ws_frames {
 
             # A completed closing handshake is a clean end regardless of the
             # peer's close code (Www.pod "Meaning per scope"). Receive-side,
-            # so the send state machine never sees it. Marked BEFORE
-            # _h2_ws_enqueue_disconnect: that call can wake a parked receive()
-            # and resume the app synchronously (Future::AsyncAwait resumes
-            # inline off ->done), and the resumed app may return and reach
-            # _h2_dispatch_stream's post-await check before this line would
-            # otherwise have run.
+            # so the send state machine never sees it. The dispatch tail and
+            # _h2_on_close read it to settle the end.
             $stream->{ws_peer_closed} = 1;
 
             # App-initiated only: a close deadline was armed waiting for exactly
@@ -4159,9 +4164,16 @@ sub _h2_process_ws_frames {
             $self->_dispose_ws_close_deadline($stream)
                 if $stream->{ws_closing} && $stream->{ws_close_deadline};
 
-            # Peer's Close frame: its own code (1005 default when the frame
-            # carried none) and reason text (Www.pod "Disconnect - receive event").
-            $self->_h2_ws_enqueue_disconnect($stream, $code, $reason);
+            # Peer's Close frame: its own code (1005 when the frame carried
+            # none) and reason text (Www.pod "Disconnect - receive event").
+            # Kept, not delivered: the event is sent when the scope ENDS -- at
+            # full stream closure (_h2_on_close -> _h2_end_ws_stream) or at the
+            # finish bound -- after the connection object is terminal.
+            $stream->{ws_disconnect_event} = {
+                type   => 'websocket.disconnect',
+                code   => $code,
+                reason => $reason,
+            };
 
             # The closing handshake is now complete on this stream -- the peer's
             # Close is in, the server's reciprocal Close + END_STREAM is queued --
