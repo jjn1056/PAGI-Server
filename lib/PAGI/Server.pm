@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 # Future::XS is kept out for now. Future::XS 0.15 warns "lost a sequence
 # Future" whenever a without_cancel observer is dropped before its original
@@ -1000,7 +1000,7 @@ The startup banner follows the format: in C<text> it is the aligned block, one
 line per event; in C<json> it is one C<info> event whose C<message> is the
 first line and whose C<notes> hold the rest:
 
-    {"time":"...","level":"info","category":"PAGI::Server","message":"PAGI::Server 0.002014 listening on http://0.0.0.0:5000/ with 4 workers (shared-socket)","pid":48211,"notes":{"serving":"./app.pl","mode":"production (no tty)","loop":"Poll, max_conn 1000/worker, http2 available, tls available, future_xs off"}}
+    {"time":"...","level":"info","category":"PAGI::Server","message":"PAGI::Server 0.003000 listening on http://0.0.0.0:5000/ with 4 workers (shared-socket)","pid":48211,"notes":{"serving":"./app.pl","mode":"production (no tty)","loop":"Poll, max_conn 1000/worker, http2 available, tls available, future_xs off"}}
 
 Cannot be changed with C<configure>.
 

@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.002014 - 2026-09-30
+0.003000 - 2026-09-30
 
   [Breaking -- see UPGRADING.md]
   - In production mode pagi-server logs diagnostics as JSON lines on

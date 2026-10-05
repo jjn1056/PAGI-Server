@@ -3,7 +3,7 @@ package PAGI::Server::Listener;
 use strict;
 use warnings;
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 use parent 'IO::Async::Listener';
 

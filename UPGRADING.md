@@ -1,6 +1,6 @@
 # Upgrading PAGI-Server
 
-## 0.002014
+## 0.003000
 
 ### Production logs are JSON
 

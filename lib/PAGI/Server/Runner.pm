@@ -3,7 +3,7 @@ package PAGI::Server::Runner;
 use strict;
 use warnings;
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 use Getopt::Long qw(GetOptionsFromArray :config pass_through no_auto_abbrev no_ignore_case);
 use Pod::Usage;

@@ -6,7 +6,7 @@ use Encode ();
 use POSIX ();
 use Time::HiRes ();
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 # A JSON line is written for every request, so the encoder must be the XS one:
 # the pure-Perl encoder costs about thirty times a clf line. Without it, JSON
