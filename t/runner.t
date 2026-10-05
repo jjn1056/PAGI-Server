@@ -380,11 +380,9 @@ subtest 'load_server creates server' => sub {
         'ssl config passed through unchanged');
 };
 
-# Tests 16-19 (load_server dies without app, integration: server responds to
-# requests, integration: module-based app serves files, SSL options validation)
-# have been relocated to the PAGI-Server distribution because they exercise
-# PAGI::Server internals or require a real socket.  Saved verbatim to
-# /tmp/pagi-moved-subtests.pl for that relocation task.
+# load_server against a real server (dies without an app, serves requests,
+# serves a module app, SSL option validation) is in
+# t/integration/runner-server.t, because it needs a real socket.
 
 # Test 20: help flag
 subtest 'help flag sets show_help' => sub {

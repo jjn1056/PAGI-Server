@@ -49,8 +49,9 @@ on 'test' => sub {
     # No test here loads PAGI-Tools: the toolkit's behavior on a real server is
     # tested in PAGI-Tools' t/integration/. PAGI::Server::Runner's defaults
     # still name PAGI-Tools modules at run time (PAGI::App::Directory as the
-    # default app, PAGI::Middleware::Lint in development); its tests use
-    # stand-ins (t/lib/PAGITest/RunnerApp.pm).
+    # default app, PAGI::Middleware::Lint in development), so its tests load a
+    # fixture app (t/lib/PAGITest/RunnerApp.pm) or an inline stand-in, and
+    # disable the default middleware.
 };
 
 # Development

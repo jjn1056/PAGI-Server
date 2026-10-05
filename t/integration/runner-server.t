@@ -85,7 +85,7 @@ subtest 'integration: server responds to requests' => sub {
 
 # ---------------------------------------------------------------------------
 # SOURCE: t/runner.t
-# SUBTEST: 'integration: module-based app serves files'
+# SUBTEST: 'integration: module-based app serves requests'
 # ---------------------------------------------------------------------------
 subtest 'integration: module-based app serves requests' => sub {
     my $loop = IO::Async::Loop->new;
