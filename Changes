@@ -82,6 +82,10 @@
   - Closed connections leaked through a reference cycle.
   - Two diagnostics bypassed the server log (raw warn).
   - Two tests depended on the tester's environment.
+  - pagi.connection's response_started turns true when a WebSocket handshake
+    is accepted or an SSE stream starts, as PAGI Www 0.6 requires; it was set
+    only for HTTP responses, so frameworks treated an accepted socket or a
+    running stream as having no response.
 
 0.002013 - 2026-09-03
 

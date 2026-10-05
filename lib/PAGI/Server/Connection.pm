@@ -7902,6 +7902,8 @@ sub _create_sse_send {
 
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
+            $weak_self->{current_connection_state}->_mark_response_started
+                if $weak_self->{current_connection_state};
 
             my $status = $event->{status} // 200;
             $weak_self->{response_status} = $status;  # Track for access logging
@@ -8514,6 +8516,12 @@ sub _create_websocket_send {
                 $weak_self->{h1_seq} = $seq;
                 die $error;
             }
+
+            # The handshake is written: this scope's response has started
+            # (Www.pod "Meaning per scope"). After the rollback above, so a
+            # rejected accept leaves it unstarted.
+            $weak_self->{current_connection_state}->_mark_response_started
+                if $weak_self->{current_connection_state};
 
             # Switch to WebSocket mode. h1_seq is already 'accepted' -- the
             # mirror above runs before this arm, so _ws_handshake_accepted is
