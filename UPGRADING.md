@@ -37,6 +37,12 @@ The server implements sub-spec 0.6. The changes an application can feel:
   it is an incomplete response.
 - A WebSocket close is clean only once the transport (or HTTP/2 stream)
   closes, not when the Close frame is sent.
+- The application receives `websocket.disconnect` when the scope has ended:
+  after the transport closes, or on HTTP/2 after the client ends its stream
+  (bounded by `ws_close_timeout`). It used to arrive at the peer's Close,
+  while `pagi.connection` still said connected.
+- `pagi.connection`'s `response_started` turns true when `websocket.accept`
+  or `sse.start` is accepted, as it does for `http.response.start`.
 
 `PAGI::Upgrading` in the PAGI distribution has before/after code for each.
 

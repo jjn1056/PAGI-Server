@@ -1890,6 +1890,12 @@ with its own Close and the transport then to close. A peer that never answers
 would otherwise leave the scope waiting forever; this option is the finite
 bound on that wait that L<PAGI::Spec::Www> requires the server to enforce.
 
+The same bound covers a closing handshake the peer starts. The server answers
+the peer's Close at once, but the scope ends -- and the application receives
+its C<websocket.disconnect> -- only when the transport then closes (HTTP/1.1)
+or the client ends its stream (HTTP/2). A peer that never lets that happen is
+ended C<close_incomplete> at this bound, with its own close code.
+
 B<Default:> 10
 
 This bound is B<finite and positive>. Unlike C<ws_idle_timeout> and
