@@ -222,6 +222,46 @@ subtest 'file response with offset and length (Range request simulation)' => sub
     );
 };
 
+subtest 'file response with offset and length over the sync threshold' => sub {
+    # The effective length (not the file size) decides the read path, so a
+    # range must itself exceed sync_file_threshold (64KB) to take the async
+    # one. Patterned content and an odd offset make misplaced bytes visible.
+    my $unit = join('', map { chr(32 + ($_ % 95)) } 0 .. 96);
+    my $pattern = substr($unit x 2200, 0, 200_000);
+    my $file = "$tempdir/patterned.bin";
+    open my $pfh, '>:raw', $file or die "Cannot write $file: $!";
+    print $pfh $pattern;
+    close $pfh;
+    my ($offset, $length) = (1001, 150_000);
+
+    with_server(
+        async sub  {
+        my ($scope, $receive, $send) = @_;
+            await $send->({
+                type => 'http.response.start',
+                status => 206,
+                headers => [
+                    ['content-type', 'application/octet-stream'],
+                    ['content-length', $length],
+                ],
+            });
+            await $send->({
+                type => 'http.response.body',
+                file => $file,
+                offset => $offset,
+                length => $length,
+            });
+        },
+        sub  {
+        my ($port, $server) = @_;
+            my $response = $http->GET("http://127.0.0.1:$port/patterned.bin")->get;
+            is($response->code, 206, 'got 206 Partial Content');
+            is(length($response->content), $length, 'partial content length correct');
+            ok($response->content eq substr($pattern, $offset, $length), 'partial content matches byte for byte');
+        }
+    );
+};
+
 subtest 'HEAD request suppresses file body without opening the file' => sub {
     with_server(
         async sub  {
