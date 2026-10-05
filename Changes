@@ -45,6 +45,10 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - pagi-server with no application, on an install without PAGI-Tools,
+    failed with Perl's "Can't locate PAGI/App/Directory.pm"; it now says
+    the default (serving the current directory) needs PAGI-Tools and how
+    to name an application.
   - The HTTP/1.x request head is parsed directly instead of through
     HTTP::Parser::XS's PSGI %env, so the scope's headers are the request's
     own: in order, repeated headers kept apart, and names as sent (an

@@ -566,7 +566,8 @@ object. A provider's C<to_app()> method is called exactly once while loading.
 
 =head2 Default
 
-If no app is specified, serves the current directory:
+If no app is specified, serves the current directory with
+L<PAGI::App::Directory>, from PAGI-Tools (not installed with PAGI-Server):
 
     pagi-server
     # equivalent to: pagi-server PAGI::App::Directory root=.

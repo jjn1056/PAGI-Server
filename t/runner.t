@@ -314,6 +314,27 @@ MOD
     Symbol::delete_package('PAGI::App::Directory');
 };
 
+# Test 11b: no app given and PAGI-Tools missing. The default app lives in
+# PAGI-Tools, which PAGI-Server does not depend on, so the error must say so
+# plainly rather than surface Perl's "Can't locate" message.
+subtest 'default app without PAGI-Tools explains what is missing' => sub {
+    local @INC = (sub {
+        my (undef, $file) = @_;
+        die "Can't locate $file in \@INC (you may need to install the PAGI::App::Directory module)\n"
+            if $file eq 'PAGI/App/Directory.pm';
+        return;
+    }, @INC);
+    local $INC{'PAGI/App/Directory.pm'};
+    delete $INC{'PAGI/App/Directory.pm'};
+
+    my $runner = PAGI::Server::Runner->new;
+    my $error = dies { $runner->load_app };
+    like($error, qr/no application given/i, 'says no application was given');
+    like($error, qr/PAGI-Tools/, 'names PAGI-Tools as what the default needs');
+    like($error, qr/--app/, 'says how to give an application');
+    unlike($error, qr/Can't locate/, "does not surface Perl's Can't locate message");
+};
+
 # Test 12: Error on missing file
 subtest 'error on missing file' => sub {
     my $runner = PAGI::Server::Runner->new;
