@@ -32,6 +32,7 @@ subtest 'PID file creation and cleanup' => sub {
         my $runner = PAGI::Server::Runner->new(
             port => 0,  # Random port
             quiet => 1,
+            default_middleware => 0,  # no PAGI-Tools Lint in development mode
         );
         $runner->{app_spec} = $app_file;  # Use file app, not default module
         $runner->prepare_app;  # Load app (no PAGI-Tools needed)

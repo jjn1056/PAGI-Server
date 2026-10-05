@@ -38,7 +38,8 @@ subtest 'master exits non-zero when all workers fail startup (does not hang)' =>
     my $exitcode;
     my $proc = IO::Async::Process->new(
         command => [ $^X, "-I$lib", $server,
-                     '--app', $appfile, '--port', 0, '--workers', 2 ],
+                     '--app', $appfile, '--port', 0, '--workers', 2,
+                     '--no-default-middleware' ],   # no PAGI-Tools Lint under a tty
         setup => [
             stdout => [ 'open', '>', '/dev/null' ],
             stderr => [ 'open', '>', '/dev/null' ],
