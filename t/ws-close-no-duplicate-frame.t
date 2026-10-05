@@ -174,11 +174,18 @@ sub build_race_app {
         $conn->on_end(sub { $obs->{end}++ });
 
         if ($order eq 'peer_first') {
-            # The peer closed first: drain its disconnect, THEN send our own
-            # Close (close_received is now true -- the send handler's arm under
-            # test). The parser already sent the reciprocal.
-            my $d = await $receive->();
-            $obs->{recv_type} = $d->{type};
+            # The peer closes first. The application hears of it only when the
+            # scope ends, so a Close that races it comes from a second activity
+            # on the socket: wait for the disconnect in the background, and send
+            # our own Close when the test releases the gate after the server
+            # processed the peer's (close_received is true -- the send handler's
+            # arm under test; the parser already sent the reciprocal).
+            my $recv = $receive->();
+            $recv->on_done(sub {
+                $obs->{recv_type}      = $_[0]{type};
+                $obs->{recv_connected} = $conn->is_connected ? 1 : 0;
+            });
+            await $obs->{gate};
         }
 
         my $close_f = $send->({ type => 'websocket.close', code => 1000, reason => 'appbye' });
@@ -203,7 +210,7 @@ sub build_race_app {
 # websocket.close. RED on base (two Close frames on the wire).
 # =============================================================================
 subtest 'peer-first: app websocket.close does not duplicate the reciprocal Close' => sub {
-    my %obs;
+    my %obs = (gate => $loop->new_future);
     my $park   = $loop->new_future;
     my $app    = build_race_app(\%obs, $park, 'peer_first');
     my $server = start_server($app);
@@ -224,15 +231,17 @@ subtest 'peer-first: app websocket.close does not duplicate the reciprocal Close
         my $held = 0;
         local *IO::Async::Stream::close_when_empty = sub { $held++ };
 
-        # The peer closes first (1001/'peerbye'): the parser sends the reciprocal
-        # and delivers the disconnect, which resumes the app to send its own.
+        # The peer closes first (1001/'peerbye'): the parser sends the reciprocal;
+        # the disconnect waits for the end of the scope.
         syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+        ok(pump_until(sub { $read->(); $conn->{close_received} }, 5),
+            'the server processed the peer Close');
+        ok(!$obs{recv_type}, 'no websocket.disconnect while the transport close is held');
+        $obs{gate}->done;
         ok(pump_until(sub { $read->(); $obs{after_done} }, 5),
-            'app drained the peer Close, sent its own close, and tried a later send');
+            'app sent its racing close and tried a later send');
         # Pump so the server's queued writes flush to the socket, then read.
         $loop->loop_once(0.02), $read->() for 1 .. 10;
-
-        is($obs{recv_type}, 'websocket.disconnect', 'app received the peer Close');
         ok($held, 'the server-owned transport close was requested but held open');
         ok(!$obs{complete} && !$obs{disconnect},
             'PENDING: no terminal while the transport is held open');
@@ -253,6 +262,8 @@ subtest 'peer-first: app websocket.close does not duplicate the reciprocal Close
     is($obs{end}, 1, 'on_end fired exactly once');
     is($obs{code},   1001,      'close_code is the PEER code, preserved (not the app 1000)');
     is($obs{reason}, 'peerbye', 'close_reason is the peer text, preserved');
+    is($obs{recv_type}, 'websocket.disconnect', 'the app received the disconnect once the scope ended');
+    is($obs{recv_connected}, 0, 'with is_connected already false');
 
     $park->done unless $park->is_ready;
     close($sock);

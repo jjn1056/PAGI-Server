@@ -180,15 +180,13 @@ subtest 'clean peer close delivers exactly one websocket.disconnect' => sub {
             is($seen[0]{reason}, 'bye', "peer reason 'bye' passed through unchanged");
         }
 
-        # Direct check on the root cause: processing the peer's Close frame
-        # must have marked the scope's single disconnect delivered, so the
-        # later transport-close teardown does not re-queue a ghost copy. Under
-        # server-owned closure (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3) the CLEAN end
-        # is marked at the server-driven transport closure, not here, and the
-        # coarse _disconnect_handled guard is deliberately NOT set by this path;
-        # ws_disconnect_delivered is the marker that guards against the ghost.
-        ok($conn->{ws_disconnect_delivered},
-            'the scope marked its single disconnect delivered (guards the ghost re-queue)');
+        # Direct check on the root cause: the scope's single disconnect is
+        # delivered only by the terminal path, when the server-owned transport
+        # closure ends the scope (RFC 6455 7.1.1, WS-CLOSE-TRUTH-3), and that
+        # path runs once (_disconnect_handled), so no later teardown can queue
+        # a ghost copy.
+        ok($conn->{_disconnect_handled},
+            'the scope delivered its single disconnect from the terminal path (guards the ghost re-queue)');
 
         # Step 2: the client also closes its end ~50ms later (a separate event
         # on the wire). The server already owns the transport close, so this is
