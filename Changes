@@ -86,6 +86,15 @@
     is accepted or an SSE stream starts, as PAGI Www 0.6 requires; it was set
     only for HTTP responses, so frameworks treated an accepted socket or a
     running stream as having no response.
+  - A clean WebSocket close delivered websocket.disconnect while the scope
+    was still open (pagi.connection still connected and incomplete). The
+    event now arrives when the scope ends: on HTTP/1.1 once the server has
+    closed the transport, and on HTTP/2 once the client has ended its
+    stream, which a client that never does holds back until
+    ws_close_timeout (the scope then ends close_incomplete).
+  - After the server's reply to a peer's Close, a websocket.send put a data
+    frame on the wire after the Close, which RFC 6455 forbids; it is now a
+    no-op.
 
 0.002013 - 2026-09-03
 
