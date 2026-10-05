@@ -307,6 +307,11 @@ MOD
     is($runner->{app_args}{root}, '.', 'default root is current dir');
     no warnings 'once';
     is($PAGI::App::Directory::ARGS{root}, '.', 'Directory constructed with root => .');
+
+    # The stand-in must not outlive this subtest, or a later load of the real
+    # module would find the package already defined.
+    require Symbol;
+    Symbol::delete_package('PAGI::App::Directory');
 };
 
 # Test 12: Error on missing file
