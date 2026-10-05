@@ -4,6 +4,7 @@ use Test2::V0;
 use FindBin;
 use File::Temp qw(tempdir tempfile);
 use File::Spec;
+use File::Path ();
 use Cwd qw(abs_path);
 
 our $test_bin;
@@ -220,24 +221,6 @@ APP
     is(abs_path($App::FindBinTest::BIN), abs_path($tmpdir), 'FindBin::Bin matches app directory');
 };
 
-# Test 10: Load app from module (requires PAGI-Tools for PAGI::App::Directory)
-subtest 'load app from module' => sub {
-    SKIP: {
-        skip 'PAGI::App::Directory not available (install PAGI-Tools >= 0.002000)', 4
-            unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::Directory; 1 };
-
-        my $runner = PAGI::Server::Runner->new;
-        $runner->{argv} = ['PAGI::App::Directory', 'root=.'];
-
-        my $app = $runner->load_app;
-
-        ok(ref $app eq 'CODE', 'loaded app is coderef');
-        is($runner->{app}, $app, 'app stored in runner');
-        is($runner->{app_spec}, 'PAGI::App::Directory', 'app_spec stored');
-        is($runner->{app_args}{root}, '.', 'app_args stored');
-    }
-};
-
 # Test 10b: _load_module success path with a self-contained conforming module.
 # Exercises the loader seam (require -> new/to_app check -> instantiate -> coderef)
 # without depending on any PAGI-Tools app, so it runs on a bare PAGI-Server install.
@@ -294,19 +277,36 @@ MOD
     is($MyConstructedProvider::TO_APP_CALLS, 1, 'constructed provider to_app called exactly once');
 };
 
-# Test 11: Default app (requires PAGI-Tools for PAGI::App::Directory)
-subtest 'default app loads Directory' => sub {
-    SKIP: {
-        skip 'PAGI::App::Directory not available (install PAGI-Tools >= 0.002000)', 3
-            unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::Directory; 1 };
+# Test 11: Default app. With no app given, Runner serves the current
+# directory with PAGI::App::Directory (from PAGI-Tools). A stand-in module of
+# that name stands in for it here, so the test checks Runner's choice and its
+# arguments without depending on PAGI-Tools.
+subtest 'default app is Directory on the current directory' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $dir = File::Spec->catdir($tmpdir, 'PAGI', 'App');
+    File::Path::make_path($dir);
+    my $pm = File::Spec->catfile($dir, 'Directory.pm');
+    open my $fh, '>', $pm or die "Cannot write $pm: $!";
+    print $fh <<'MOD';
+package PAGI::App::Directory;
+our %ARGS;
+sub new { my ($class, %args) = @_; %ARGS = %args; bless {}, $class }
+sub to_app { return sub { } }
+1;
+MOD
+    close $fh;
 
-        my $runner = PAGI::Server::Runner->new;
-        my $app = $runner->load_app;
+    local @INC = ($tmpdir, @INC);
+    local $INC{'PAGI/App/Directory.pm'};
+    delete $INC{'PAGI/App/Directory.pm'};
+    my $runner = PAGI::Server::Runner->new;
+    my $app = $runner->load_app;
 
-        ok(ref $app eq 'CODE', 'default app is coderef');
-        is($runner->{app_spec}, 'PAGI::App::Directory', 'default is Directory');
-        is($runner->{app_args}{root}, '.', 'default root is current dir');
-    }
+    ok(ref $app eq 'CODE', 'default app is coderef');
+    is($runner->{app_spec}, 'PAGI::App::Directory', 'default is Directory');
+    is($runner->{app_args}{root}, '.', 'default root is current dir');
+    no warnings 'once';
+    is($PAGI::App::Directory::ARGS{root}, '.', 'Directory constructed with root => .');
 };
 
 # Test 12: Error on missing file
@@ -561,25 +561,19 @@ subtest '-e may return an instantiated provider object' => sub {
     is($PAGITest::EvalProvider::TO_APP_CALLS, 1, '-e provider to_app called exactly once');
 };
 
-# Test 29: -M module loading (requires PAGI-Tools for PAGI::App::File)
+# Test 29: -M module loading, with the fixture module app from t/lib
 subtest '-M module loading' => sub {
     my $runner = PAGI::Server::Runner->new;
-    $runner->parse_options('-M', 'PAGI::App::File', '-e', 'PAGI::App::File->new(root => ".")');
+    $runner->parse_options('-M', 'PAGITest::RunnerApp', '-e', 'PAGITest::RunnerApp->new(greeting => "hi")');
 
-    # Option parsing is pure string handling — no module load required.
     is(scalar @{$runner->{modules}}, 1, 'one module stored');
-    is($runner->{modules}[0], 'PAGI::App::File', 'correct module');
+    is($runner->{modules}[0], 'PAGITest::RunnerApp', 'correct module');
 
-    # Actually loading the -M module + running the -e code needs the app present.
-    SKIP: {
-        skip 'PAGI::App::File not available (install PAGI-Tools >= 0.002000)', 1
-            unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::File; 1 };
-        my $app = $runner->load_app;
-        ok(ref $app eq 'CODE', '-M/-e returns coderef');
-    }
+    my $app = $runner->load_app;
+    ok(ref $app eq 'CODE', '-M/-e returns coderef');
 };
 
-# Test 30: cuddled -M option (requires PAGI-Tools for PAGI::App::File)
+# Test 30: cuddled -M option (option parsing only; the module is not loaded)
 subtest 'cuddled -M option' => sub {
     # Pure option parsing of the cuddled -MFoo form; no module load required.
     my $runner = PAGI::Server::Runner->new;
