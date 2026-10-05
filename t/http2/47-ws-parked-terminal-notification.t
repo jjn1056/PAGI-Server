@@ -520,4 +520,49 @@ subtest 'peer Close, END_STREAM withheld: the disconnect arrives at the finish b
     $loop->remove($server);
 };
 
+subtest 'server-initiated close: the peer echoing a Close does not change the delivered event' => sub {
+    # The server ends the scope itself (here a frame with a reserved opcode,
+    # 1002/protocol_error). A conforming client then answers with its own Close
+    # (RFC 6455 5.5.1). The scope already delivered its websocket.disconnect, so
+    # a later receive() must get that same event again (Www.pod "Disconnect -
+    # receive event"), not one built from the client's reply.
+    my %obs;
+    my $gate = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        my $first = await $receive->();
+        $obs{first} = { %$first };
+        await $gate;
+        my $again = await $receive->();
+        $obs{again} = { %$again };
+        $obs{done} = 1;
+        return;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{accepted} }), 'accepted');
+
+    my $bad = Protocol::WebSocket::Frame->new(type => 'text', buffer => 'x', masked => 1)->to_bytes;
+    substr($bad, 0, 1) = chr(0x83);   # FIN + reserved opcode 3
+    send_stream_data($client, $client_sock, $sid, $bad, 0);
+    ok(pump_until($client, $client_sock, sub { $obs{first} }), 'the scope delivered its disconnect');
+    is($obs{first}{code},   1002,             'it is 1002');
+    is($obs{first}{reason}, 'protocol_error', 'with reason protocol_error');
+
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1002, ''), 0);
+    exchange_frames($client, $client_sock, 5);
+    $gate->done;
+    ok(pump_until($client, $client_sock, sub { $obs{done} }), 'a later receive returned');
+    is($obs{again}, $obs{first}, 'a later receive returns the same event');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
 done_testing;

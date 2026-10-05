@@ -4168,12 +4168,16 @@ sub _h2_process_ws_frames {
             # none) and reason text (Www.pod "Disconnect - receive event").
             # Kept, not delivered: the event is sent when the scope ENDS -- at
             # full stream closure (_h2_on_close -> _h2_end_ws_stream) or at the
-            # finish bound -- after the connection object is terminal.
+            # finish bound -- after the connection object is terminal. A scope
+            # the server already ended (a protocol error, an overflow, a
+            # keepalive timeout) has delivered its event; the client's Close
+            # answering it must not replace the event a later receive() gets
+            # again.
             $stream->{ws_disconnect_event} = {
                 type   => 'websocket.disconnect',
                 code   => $code,
                 reason => $reason,
-            };
+            } unless $stream->{ws_disconnect_delivered};
 
             # The closing handshake is now complete on this stream -- the peer's
             # Close is in, the server's reciprocal Close + END_STREAM is queued --
