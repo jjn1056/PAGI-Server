@@ -3306,6 +3306,7 @@ sub _h2_create_websocket_send {
             }
 
             $ss->{response_started} = 1;
+            $ss->{connection_state}->_mark_response_started if $ss->{connection_state};
             $ss->{ws_frame} = Protocol::WebSocket::Frame->new(
                 max_payload_size => $weak_self->{max_ws_frame_size},
             );
@@ -3801,6 +3802,7 @@ sub _h2_create_sse_send {
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
             $ss->{response_started} = 1;
+            $ss->{connection_state}->_mark_response_started if $ss->{connection_state};
             my $status = $event->{status} // 200;
             $ss->{access}{status} = $status if $ss->{access};
             my $headers = $event->{headers} // [];

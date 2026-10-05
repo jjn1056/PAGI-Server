@@ -828,4 +828,69 @@ subtest 'h2: sse ended with sse.close is a clean end (D12 counterpart)' => sub {
     $loop->remove($server);
 };
 
+subtest 'h2: an accepted websocket.accept marks response_started; a rejected one does not' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $c = $scope->{'pagi.connection'};
+        await $receive->();                           # websocket.connect
+        $r{before} = $c->response_started;
+        $r{bad_accept} = eval {
+            await $send->({ type => 'websocket.accept', headers => [['x-bad', "a\r\nb"]] });
+            1;
+        } ? 'sent' : 'rejected';
+        $r{after_bad} = $c->response_started;
+        await $send->({ type => 'websocket.accept' });
+        $r{after} = $c->response_started;
+        await $receive->();                           # ends with the client's RST
+        $r{done} = 1;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = $client->submit_request(method => 'CONNECT', path => '/ws', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']], body => sub { undef });
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+    $client->submit_rst_stream($sid, 8);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 10);
+
+    is($r{before},     0,          'false before accept');
+    is($r{bad_accept}, 'rejected', 'the invalid accept was rejected');
+    is($r{after_bad},  0,          'a rejected accept does not start the response');
+    is($r{after},      1,          'true once websocket.accept is accepted');
+    ok($r{done},                   'the app saw the stream end');
+    $stream_io->close_now; $loop->remove($server);
+};
+
+subtest 'h2: an accepted sse.start marks response_started' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'sse';
+        my $c = $scope->{'pagi.connection'};
+        await $receive->();                           # sse.request
+        $r{before} = $c->response_started;
+        await $send->({ type => 'sse.start', status => 200 });
+        $r{after} = $c->response_started;
+        await $send->({ type => 'sse.close' });
+        $r{returned} = 1;
+        return;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    $client->submit_request(method => 'GET', path => '/events', scheme => 'http', authority => 'localhost',
+        headers => [['accept', 'text/event-stream']]);
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock, 20);
+
+    ok($r{returned},   'app returned after sse.close');
+    is($r{before}, 0,  'false before sse.start');
+    is($r{after},  1,  'true once sse.start is accepted');
+    $stream_io->close_now; $loop->remove($server);
+};
+
 done_testing;
