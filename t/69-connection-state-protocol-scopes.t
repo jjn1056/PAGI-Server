@@ -390,10 +390,11 @@ subtest 'h1: an accepted websocket.accept and sse.start mark response_started (W
         if ($scope->{type} eq 'websocket') {
             await $receive->();                       # websocket.connect
             $r{ws_before} = $c->response_started;
-            # A rejected accept (invalid header value) is rolled back and does
-            # not start the response, so a corrected accept can follow.
+            # A rejected accept is rolled back and does not start the response,
+            # so a corrected accept can follow. An invalid subprotocol is
+            # refused inside the accept's own rollback, the path under test.
             $r{ws_bad_accept} = eval {
-                await $send->({ type => 'websocket.accept', headers => [['x-bad', "a\r\nb"]] });
+                await $send->({ type => 'websocket.accept', subprotocol => 'bad proto' });
                 1;
             } ? 'sent' : 'rejected';
             $r{ws_after_bad} = $c->response_started;

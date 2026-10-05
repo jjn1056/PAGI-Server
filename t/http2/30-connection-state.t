@@ -836,8 +836,9 @@ subtest 'h2: an accepted websocket.accept marks response_started; a rejected one
         my $c = $scope->{'pagi.connection'};
         await $receive->();                           # websocket.connect
         $r{before} = $c->response_started;
+        # An invalid subprotocol is refused inside the accept's own rollback.
         $r{bad_accept} = eval {
-            await $send->({ type => 'websocket.accept', headers => [['x-bad', "a\r\nb"]] });
+            await $send->({ type => 'websocket.accept', subprotocol => 'bad proto' });
             1;
         } ? 'sent' : 'rejected';
         $r{after_bad} = $c->response_started;
