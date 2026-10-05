@@ -8570,6 +8570,12 @@ sub _create_websocket_send {
                 await $weak_self->_wait_for_drain;
                 return Future->done unless $weak_self;
                 return Future->done if $weak_self->{closed};
+                # The peer's Close can arrive while this send waits: the
+                # server's reply Close is then on the wire, and draining the
+                # buffer for the transport close is what woke this send. Same
+                # no-op as the check above (the h2 twin rechecks
+                # ws_eof_pending the same way).
+                return Future->done if $weak_self->{close_sent};
             }
             # --- END BACKPRESSURE CHECK ---
 

@@ -1028,4 +1028,51 @@ subtest 'a data send after the server Close, before the transport closes, writes
     shutdown_server($server);
 };
 
+subtest 'a send parked on backpressure when the peer closes does not write after the server Close' => sub {
+    # The application is parked in a backpressured websocket.send when the
+    # peer's Close arrives. The server writes its reply Close and closes the
+    # transport once the buffer drains; draining wakes the parked send, which
+    # must then write nothing (Www.pod "Disconnected Client - sending after
+    # disconnect"; RFC 6455 5.5.1). IO::Async refuses a write to a closing
+    # stream with a warning, so a warning here means the send tried.
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my %obs;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        my $recv = $obs{recv} = $receive->();
+        $recv->on_done(sub { $obs{event} = $_[0] });
+        my $chunk = 'x' x 60000;
+        for my $i (1 .. 400) {
+            await $send->({ type => 'websocket.send', bytes => $chunk });
+            last if $obs{event};
+        }
+        $obs{sends_done} = 1;
+        await $recv;
+        $obs{returned} = 1;
+        return;
+    };
+    my $server = start_server($app, write_high_watermark => 256 * 1024, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    my ($conn) = values %{$server->{connections}};
+    ok(pump_until(sub { scalar @{ $conn->{_drain_waiters} || [] } }, 5),
+        'a websocket.send is parked on backpressure');
+
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+    ok(pump_until(sub { $conn->{close_sent} }, 3), 'the server sent its reply Close');
+    # The client drains everything the server wrote, letting the close finish.
+    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 1 << 20); defined $n && $n == 0 }, 10);
+    ok($obs{returned}, 'the parked send resolved and the app returned');
+    is([grep { /Cannot write data to a Stream that is closing/ } @warnings], [],
+        'the parked send wrote nothing after the server Close')
+        or diag(join '', @warnings);
+    close($sock);
+    shutdown_server($server);
+};
+
 done_testing;
