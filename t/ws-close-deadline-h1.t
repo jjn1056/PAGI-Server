@@ -314,9 +314,9 @@ sub peer_first_app {
 }
 
 # =============================================================================
-# 0. THE FIX-1 REGRESSION (reciprocal-Close-after-peer). The app receives the
-#    peer's Close, THEN sends its own -- so `close_received` is true at the send
-#    (the 8429 branch). On base that branch ended the scope EAGERLY
+# 0. THE FIX-1 REGRESSION (reciprocal-Close-after-peer). The app sends its own
+#    Close after the server processed the peer's -- so `close_received` is true
+#    at the send (the send handler's close_received branch). On base that branch ended the scope EAGERLY
 #    (_handle_disconnect_and_close 'client_closed'): terminal marked with the
 #    transport still OPEN and NO finish bound. Now it routes through the SAME
 #    bounded server-owned closure the parser peer-Close path uses: the scope is

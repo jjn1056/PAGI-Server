@@ -315,7 +315,7 @@ sub new {
         # _enter_ws_closing_phase.
         ws_closing          => 0,      # True once the scope is waiting for the peer to complete the closing handshake
         ws_close_deadline   => undef,  # The single finite deadline governing that wait
-        _ws_close_transport_pending => 0,  # Set in the Close parser when a completed handshake needs the server-owned transport close; acted on after the disconnect is delivered to a parked receive()
+        _ws_close_transport_pending => 0,  # Set in the Close parser when a completed handshake needs the server-owned transport close; acted on at the end of that parser pass
         _ws_closing_finished => 0,     # True once the closing-phase resolution has run the deferred access log + request accounting (runs them exactly once)
         # HTTP/2 state
         alpn_protocol     => $args{alpn_protocol},    # ALPN-negotiated protocol (e.g. 'h2', 'http/1.1')
@@ -1555,10 +1555,11 @@ sub _h2_on_close {
     # none on either protocol (_h2_refusal_complete): it ended cleanly, and
     # the stream closing afterwards does not un-end it.
     if ($stream->{is_websocket}) {
-        # Close without a WebSocket close handshake (RST_STREAM, timeout, ...):
-        # abnormal closure per RFC 6455. Deduped -- a no-op if the close-frame
-        # or bare-END_STREAM path already delivered the scope's one disconnect,
-        # and the mark above already drove the object terminal.
+        # The WebSocket scope ends here: _h2_end_ws_stream delivers its one
+        # websocket.disconnect -- the peer's kept Close for a completed
+        # handshake, otherwise one built from the ending record -- after the
+        # mark above drove the object terminal. A scope that already
+        # delivered its event (a server-decided end) gets nothing more.
         $self->_h2_end_ws_stream($stream) unless _h2_refusal_complete($stream);
     } elsif ($stream->{is_sse}) {
         $self->_h2_end_sse_stream($stream) unless _h2_refusal_complete($stream);
@@ -3013,10 +3014,11 @@ sub _h2_create_websocket_receive {
     # close, ...) records its reason there before tearing the stream down, so
     # a receive() racing that teardown still reports why.
     my $fallback_disconnect = sub {
-        # This scope already delivered its disconnect: a further receive()
-        # resolves with that same event, not with a fresh reading of the
-        # ending record, which cannot spell a peer's close code and reason
-        # text (see _h2_ws_enqueue_disconnect). Read from the stream state
+        # The scope's kept event -- the one it delivered, or a peer's Close
+        # kept for delivery when the scope ends -- answers this receive() with
+        # that same event, not with a fresh reading of the ending record,
+        # which cannot spell a peer's close code and reason text (see
+        # _h2_ws_enqueue_disconnect). Read from the stream state
         # this closure captured -- the same hash _h2_dispatch_stream took out
         # of h2_streams -- so the event is still reachable after the deferred
         # delete drops the h2_streams entry a turn past the close.
@@ -6671,9 +6673,11 @@ my %COMPLETION_REASON = map { ($_ => 1) } qw(
 sub _ws_disconnect_event {
     my ($self) = @_;
 
-    # This scope has already delivered its disconnect, so a further receive()
-    # resolves with that same event rather than with a fresh reading of the
-    # ending record (Www.pod "Disconnect - receive event"). The record cannot
+    # The scope's kept event -- the one it delivered, or the peer's Close the
+    # parser kept for delivery when the scope ends -- is the scope's one
+    # disconnect: a further receive() resolves with that same event rather
+    # than with a fresh reading of the ending record (Www.pod "Disconnect -
+    # receive event"). The record cannot
     # stand in for it: a peer's Close frame names its own RFC code and its own
     # reason TEXT, while the record's vocabulary is the standard reason tokens
     # the connection object reports. A copy goes out, so an application that
@@ -8899,9 +8903,10 @@ sub _process_websocket_frames {
     }
 
     # Server-owned WebSocket transport close (RFC 6455 7.1.1): a completed
-    # closing handshake this pass flagged now closes the transport, AFTER the
-    # disconnect event has been delivered to any parked receive() above. The
-    # clean end is marked at that closure (on_closed -> _h1_transport_closed).
+    # closing handshake this pass flagged now closes the transport, once the
+    # pass has processed every frame it read. The clean end is marked at that
+    # closure (on_closed -> _h1_transport_closed), which then delivers the
+    # scope's websocket.disconnect (_handle_disconnect).
     if (delete $self->{_ws_close_transport_pending} && !$self->{closed}) {
         $self->_initiate_ws_h1_transport_close;
     }
