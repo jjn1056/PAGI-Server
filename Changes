@@ -45,6 +45,10 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - pagi-server with no application, on an install without PAGI-Tools,
+    failed with Perl's "Can't locate PAGI/App/Directory.pm"; it now says
+    the default (serving the current directory) needs PAGI-Tools and how
+    to name an application.
   - The HTTP/1.x request head is parsed directly instead of through
     HTTP::Parser::XS's PSGI %env, so the scope's headers are the request's
     own: in order, repeated headers kept apart, and names as sent (an
@@ -53,6 +57,11 @@
     the colon, or any other non-token name, is now refused with 400; two
     Host headers with 400; more than max_header_count headers with 431
     rather than 400. HTTP::Parser::XS is no longer a dependency.
+  - An HTTP/1.1 204 or 304 response without a content-length was sent with
+    Transfer-Encoding: chunked and a chunked terminator, which RFC 9112
+    forbids and which a keep-alive client reads as the start of the next
+    response; it now ends at its headers, and any body the application
+    sends is dropped, as for HEAD.
   - A request head still arriving is held to max_header_size and the
     request-line limit (431 / 414 as soon as either is exceeded) instead of
     being buffered without bound until it completes, and a head using bare

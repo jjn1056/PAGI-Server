@@ -28,13 +28,6 @@ use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
 use Net::HTTP2::nghttp2::Session;
 
-# PAGI::Test::Client lives in the sibling PAGI-Tools distribution. Skip when it
-# is not installed (the raw HTTP/2 paths are covered Tools-free in t/http2/*).
-BEGIN {
-    eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::Test::Client; 1 }
-        or plan(skip_all => 'PAGI-Tools 0.002000+ (PAGI::Test::Client) not installed');
-}
-
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
 
@@ -389,36 +382,6 @@ subtest 'App error returns 500' => sub {
 
     $stream->close_now;
     $loop->remove($server);
-};
-
-# ============================================================
-# Test with PAGI::Test::Client for app-level HTTP/2 scope
-# ============================================================
-subtest 'PAGI::Test::Client validates app logic' => sub {
-    my $app = async sub {
-        my ($scope, $receive, $send) = @_;
-
-        if ($scope->{type} eq 'http') {
-            await $receive->();
-
-            await $send->({
-                type    => 'http.response.start',
-                status  => 200,
-                headers => [['content-type', 'application/json']],
-            });
-            await $send->({
-                type => 'http.response.body',
-                body => '{"message":"hello"}',
-            });
-        }
-    };
-
-    my $client = PAGI::Test::Client->new(app => $app);
-
-    my $res = $client->get('/api');
-    is($res->status, 200, 'Test client: 200 status');
-    is($res->json->{message}, 'hello', 'Test client: JSON body');
-    is($res->content_type, 'application/json', 'Test client: content type');
 };
 
 # ============================================================

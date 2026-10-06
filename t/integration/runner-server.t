@@ -11,10 +11,10 @@
 #   - Subtests 1-6: PAGI-Tools t/runner.t
 #   - Subtest 7:    PAGI-Tools t/25-runner-production.t
 #
-# PAGI::Server::Runner ships in this distribution. The integration tests
-# exercise toolkit modules (PAGI::App::*, PAGI::Test::Client) that live in
-# PAGI-Tools. Run with PAGI-Tools lib bridged for those modules:
-#   PERL5LIB=/path/to/PAGI-Tools/lib:$PERL5LIB prove -lv t/integration/runner-server.t
+# PAGI::Server::Runner ships in this distribution. The module application
+# these tests load is the fixture PAGITest::RunnerApp (t/lib), so they need
+# nothing from PAGI-Tools; default_middleware => 0 keeps development mode from
+# reaching for PAGI-Tools' Lint.
 # =============================================================================
 
 use strict;
@@ -22,6 +22,7 @@ use warnings;
 use Test2::V0;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
+use lib "$FindBin::Bin/../lib";
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -84,24 +85,13 @@ subtest 'integration: server responds to requests' => sub {
 
 # ---------------------------------------------------------------------------
 # SOURCE: t/runner.t
-# SUBTEST: 'integration: module-based app serves files'
+# SUBTEST: 'integration: module-based app serves requests'
 # ---------------------------------------------------------------------------
-subtest 'integration: module-based app serves files' => sub {
-    skip_all 'Cross-distribution subtest; set RELEASE_TESTING=1 to run'
-        unless $ENV{RELEASE_TESTING};
-    skip_all 'PAGI::App::File not available (install PAGI-Tools >= 0.002000)'
-        unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::File; 1 };
+subtest 'integration: module-based app serves requests' => sub {
     my $loop = IO::Async::Loop->new;
 
-    # Create a temp directory with a file
-    my $tmpdir = tempdir(CLEANUP => 1);
-    open my $fh, '>', "$tmpdir/test.txt" or die $!;
-    print $fh "Hello from test file";
-    close $fh;
-
-    my $runner = PAGI::Server::Runner->new(port => 0, quiet => 1);
-    $runner->{argv} = ['PAGI::App::File', "root=$tmpdir"];
-    $runner->{default_middleware} = 0;  # Disable Lint for test
+    my $runner = PAGI::Server::Runner->new(port => 0, quiet => 1, default_middleware => 0);
+    $runner->{argv} = ['PAGITest::RunnerApp', 'greeting=Hello from a module app'];
     $runner->prepare_app;
     my $server = $runner->load_server;
 
@@ -113,10 +103,11 @@ subtest 'integration: module-based app serves files' => sub {
     my $http = Net::Async::HTTP->new;
     $loop->add($http);
 
-    my $response = $http->GET("http://127.0.0.1:$port/test.txt")->get;
+    my $response = $http->GET("http://127.0.0.1:$port/")->get;
 
-    is($response->code, 200, 'file served with 200');
-    is($response->decoded_content, 'Hello from test file', 'correct file content');
+    is($response->code, 200, 'module app answered with 200');
+    is($response->decoded_content, 'Hello from a module app',
+        'the key=value argument reached the module app');
 
     $server->shutdown->get;
     $loop->remove($server);
@@ -131,14 +122,14 @@ subtest 'integration: module-based app serves files' => sub {
 #       covered in Tools by the rewritten 'load_server creates server' subtest.
 # ---------------------------------------------------------------------------
 subtest 'SSL options validation' => sub {
-    skip_all 'PAGI::App::Directory not available (install PAGI-Tools >= 0.002000)'
-        unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::Directory; 1 };
     my $runner = PAGI::Server::Runner->new(
-        quiet          => 1,
-        server_options => {
+        quiet              => 1,
+        default_middleware => 0,
+        server_options     => {
             ssl => { cert_file => '/nonexistent/cert.pem', key_file => '/nonexistent/key.pem' },
         },
     );
+    $runner->{argv} = ['PAGITest::RunnerApp'];
     $runner->prepare_app;
 
     like(
@@ -156,13 +147,13 @@ subtest 'SSL options validation' => sub {
 #       and host/port omission) is now covered in Tools via FakeServer.
 # ---------------------------------------------------------------------------
 subtest 'load_server with socket option omits host/port (PAGI::Server introspection)' => sub {
-    skip_all 'PAGI::App::Directory not available (install PAGI-Tools >= 0.002000)'
-        unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::Directory; 1 };
     my $socket_path = File::Temp::tmpnam() . '.sock';
     my $runner = PAGI::Server::Runner->new(
-        quiet          => 1,
-        server_options => { socket => $socket_path },
+        quiet              => 1,
+        default_middleware => 0,
+        server_options     => { socket => $socket_path },
     );
+    $runner->{argv} = ['PAGITest::RunnerApp'];
     $runner->prepare_app;
     my $server = $runner->load_server;
 
@@ -178,18 +169,18 @@ subtest 'load_server with socket option omits host/port (PAGI::Server introspect
 #       accessors (listeners, listener type). The agnostic half is now in Tools.
 # ---------------------------------------------------------------------------
 subtest 'load_server with listen option omits host/port (PAGI::Server introspection)' => sub {
-    skip_all 'PAGI::App::Directory not available (install PAGI-Tools >= 0.002000)'
-        unless eval { require PAGI::Tools; PAGI::Tools->VERSION(0.002000); require PAGI::App::Directory; 1 };
     my $socket_path = File::Temp::tmpnam() . '.sock';
     my $runner = PAGI::Server::Runner->new(
-        quiet          => 1,
-        server_options => {
+        quiet              => 1,
+        default_middleware => 0,
+        server_options     => {
             listen => [
                 { host => '127.0.0.1', port => 0 },
                 { socket => $socket_path },
             ],
         },
     );
+    $runner->{argv} = ['PAGITest::RunnerApp'];
     $runner->prepare_app;
     my $server = $runner->load_server;
 

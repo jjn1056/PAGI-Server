@@ -246,6 +246,15 @@ $File::app = async sub {
                          offset => 1000, length => 1000 });
         return;
     }
+    if ($path eq '/file-range-large') {
+        # Effective length over sync_file_threshold: the async read path,
+        # starting at an offset that is not chunk-aligned.
+        await $send->({ type => 'http.response.start', status => 200,
+                         headers => [['content-type','application/octet-stream']] });
+        await $send->({ type => 'http.response.body', file => $File::BIG,
+                         offset => 1001, length => 200_000 });
+        return;
+    }
     if ($path eq '/file-past-eof') {
         await $send->({ type => 'http.response.start', status => 200,
                          headers => [['content-type','application/octet-stream']] });
@@ -376,6 +385,8 @@ $File::app = async sub {
 is( length get_h2('/file-full')->{body}, 300_000, 'full file streamed' );
 is( get_h2('/file-full')->{body}, $pattern, 'byte-exact content' );
 is( get_h2('/file-range')->{body}, substr($pattern,1000,1000), 'offset+length honored' );
+is( get_h2('/file-range-large')->{body}, substr($pattern,1001,200_000),
+    'offset+length over the sync threshold honored (async read path)' );
 is( get_h2('/file-past-eof')->{body}, '', 'offset past EOF sends zero bytes, stream ends cleanly' );
 is( get_h2('/file-small')->{body}, $small_content,
     'small file (<= sync_file_threshold) reads correctly via the h2 sync fast path (I3)' );

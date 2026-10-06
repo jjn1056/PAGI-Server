@@ -218,8 +218,9 @@ RELEASE_TESTING=1 prove -lr t
 ```
 
 These tests can take longer and exercise subprocesses and heavier local loads.
-Dependency and platform skips still apply: cross-distribution tests need the
-relevant PAGI-Tools modules, and the connection stress test needs `hey`.
+Dependency and platform skips still apply: the connection stress test needs
+`hey`. No test needs PAGI-Tools; its behavior on a real server is tested in
+PAGI-Tools.
 
 ## License
 

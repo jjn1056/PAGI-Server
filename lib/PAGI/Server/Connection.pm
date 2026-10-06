@@ -6359,9 +6359,14 @@ async sub _send_http_event {
             push @final_headers, ['connection', 'upgrade'];
         }
 
-        # For HEAD requests, don't use chunked encoding (no body will be sent)
+        # A HEAD response, and a 204 or 304 one, ends at its header section
+        # (RFC 9112 6.3; RFC 9112 6.1 forbids Transfer-Encoding in a 204):
+        # no chunked framing, and the body events that follow write nothing.
+        $state->{no_body} = $state->{is_head_request} || $status == 204 || $status == 304;
+
+        # For a response with no body, don't use chunked encoding.
         # For HTTP/1.0, don't use chunked encoding - use Connection: close instead
-        if ($state->{is_head_request} || $state->{is_http10}) {
+        if ($state->{no_body} || $state->{is_http10}) {
             $state->{chunked} = 0;
             if ($state->{is_http10}) {
                 if (!$has_content_length) {
@@ -6399,8 +6404,9 @@ async sub _send_http_event {
         # stream write instead of one per headers/chunk/terminator.
         $weak_self->{_resp_pending} = $response;
     }
-    elsif ($type eq 'http.response.body' && $state->{is_head_request}) {
-        # HEAD has headers but no body; still reach scope completion below.
+    elsif ($type eq 'http.response.body' && $state->{no_body}) {
+        # HEAD, 204 and 304 have headers but no body; still reach scope
+        # completion below.
         $weak_self->_flush_pending_headers;
     }
     elsif ($type eq 'http.response.body') {
@@ -6498,8 +6504,9 @@ async sub _send_http_event {
             $weak_self->_notify_transport_write;
         }
     }
-    # HEAD accepts and discards trailers after advancing the machine.
-    elsif ($type eq 'http.response.trailers' && !$state->{is_head_request}) {
+    # A response with no body accepts and discards trailers after advancing
+    # the machine.
+    elsif ($type eq 'http.response.trailers' && !$state->{no_body}) {
         # No "return unless $state->{expects_trailers}" guard here: advance_http
         # (called unconditionally above, line ~2886) already croaks for
         # undeclared trailers -- "cannot send http.response.trailers:
