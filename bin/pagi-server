@@ -1,15 +1,13 @@
 #!/usr/bin/env perl
 
-# Handle compile-time options before loading any modules
-# Future::XS must be loaded before Future, so check early
+# Handle compile-time options before loading any modules. --future-xs must
+# be seen before Future compiles: PAGI::Server decides from PAGI_FUTURE_XS
+# when it compiles, and PAGI::Server::Runner, below, loads it first.
 BEGIN {
     my @to_splice;
     for my $i (0 .. $#ARGV) {
         if ($ARGV[$i] eq '--future-xs') {
-            # Future::XS support is disabled for now; see "Future::XS" under
-            # PERFORMANCE in PAGI::Server. The flag is accepted and answered
-            # so an existing invocation keeps working.
-            warn "pagi-server: --future-xs is currently unavailable (Future::XS support is disabled for now); continuing without it\n";
+            $ENV{PAGI_FUTURE_XS} = 1;
             push @to_splice, $i;
         }
     }
@@ -525,10 +523,9 @@ See L<PAGI::Server/ACCESS LOG FORMAT> for the full atoms table.
 
 =item B<--future-xs>
 
-Currently unavailable. Future::XS support is disabled for now (see
-"Future::XS" under PERFORMANCE in L<PAGI::Server>); the flag, and the
-C<PAGI_FUTURE_XS=1> environment variable, are answered with a notice and
-otherwise ignored.
+Run Future on L<Future::XS>, which must be installed separately
+(C<cpanm Future::XS>). Off by default. The same as setting
+C<PAGI_FUTURE_XS=1>. See "Future::XS" under PERFORMANCE in L<PAGI::Server>.
 
 =item B<--http2>
 

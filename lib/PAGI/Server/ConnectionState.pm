@@ -353,8 +353,8 @@ later one.
 
 Under Future::XS 0.15 a losing observer that the combinator has released
 makes the original warn C<lost a sequence Future> when the connection ends;
-Future::PP does not. PAGI::Server keeps Future pure-perl for that reason (see
-"Future::XS" under PERFORMANCE in L<PAGI::Server>).
+Future::PP does not. Future::XS is opt-in for PAGI::Server (see "Future::XS"
+under PERFORMANCE in L<PAGI::Server>).
 
 This is useful for racing against other async operations:
 

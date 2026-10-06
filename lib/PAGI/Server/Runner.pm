@@ -5,6 +5,11 @@ use warnings;
 
 our $VERSION = '0.003000';
 
+# First, before anything that loads Future (the Future::IO binding below
+# does): PAGI::Server decides when it compiles whether Future may use XS
+# (PAGI_FUTURE_XS), and Future reads that only when it compiles.
+use PAGI::Server ();
+
 use Getopt::Long qw(GetOptionsFromArray :config pass_through no_auto_abbrev no_ignore_case);
 use Pod::Usage;
 use File::Spec;

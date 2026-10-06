@@ -39,8 +39,10 @@
   - The terminal response event ends an http scope whether or not the body
     was read; terminal notifications are delivered outside the
     application's call stack.
-  - Future::XS is not used (PERL_FUTURE_NO_XS=1) until an upstream warning
-    is fixed; --future-xs reports it unavailable.
+  - Future::XS is opt-in, and the opt-in now works: --future-xs or
+    PAGI_FUTURE_XS=1 runs Future on Future::XS (startup dies if it is not
+    installed); otherwise Future stays pure-perl. Before, Future used
+    Future::XS whenever it was installed, whatever was asked.
   - The startup banner no longer shows the PAGI spec version.
   - Faster under connection bursts (accepts are batched).
 
