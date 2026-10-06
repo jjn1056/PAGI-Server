@@ -1026,12 +1026,35 @@ subtest 'a data send after the server Close, before the transport closes, writes
     }
     is(scalar @written, 0, 'the server did not try to write after its Close');
     is([grep { /Cannot write data/ } @warnings], [], 'and IO::Async had no write to refuse');
+    close($sock);
+    shutdown_server($server);
+};
 
-    # What reached the client: drain to EOF. The server's Close must be the
-    # last frame (its length runs exactly to the end of the data), and the
-    # late message must be nowhere in it.
+subtest "a data send after the server Close never reaches the wire" => sub {
+    # The transport close is held open here, so the stream is not closing and
+    # IO::Async would put a late write on the wire: only the server's
+    # close_sent guard keeps it off. Nothing is primed, so the client reads
+    # exactly what followed the upgrade.
+    my ($app, $obs, $park) = build_app(send_close => 0, recv_after => 1);
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{sent_close} }, 5), 'the app waits on receive');
+    my ($conn) = values %{$server->{connections}};
+    {
+        no warnings 'redefine';
+        local *IO::Async::Stream::close_when_empty = sub { $obs->{close_requested}++ };
+        syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+        ok(pump_until(sub { $conn->{close_sent} && $obs->{close_requested} }, 3),
+            'the server sent its Close; its transport close is held');
+        my $f = $obs->{send}->({ type => 'websocket.send', text => 'too late' });
+        pump_turns(5);
+        ok($f->is_ready && !$f->is_failed, 'the late send resolved without failing');
+    }
+    # Stub restored: the server finishes its transport close.
+    $conn->{stream}->close_when_empty if $conn->{stream};
     my $rx = '';
-    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 1 << 20); $rx .= $buf if $n; defined $n && $n == 0 }, 15);
+    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 65536); $rx .= $buf if $n; defined $n && $n == 0 }, 5);
     unlike($rx, qr/too late/, 'the late message never reached the wire');
     my $close_last = 0;
     for (my $at = rindex($rx, "\x88"); $at >= 0; $at = rindex($rx, "\x88", $at - 1)) {
