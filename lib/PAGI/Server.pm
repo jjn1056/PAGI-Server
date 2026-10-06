@@ -2537,7 +2537,10 @@ differs between single-worker and multi-worker modes.
 
 Initiates graceful shutdown. The server stops accepting new connections,
 waits for active requests to complete (up to C<shutdown_timeout> seconds),
-then exits. In multi-worker mode, SIGTERM is forwarded to all workers.
+then exits. Each open WebSocket is sent a Close with code C<1012> ("Service
+Restart") first, on HTTP/1.1 and HTTP/2, and its application's
+C<websocket.disconnect> reports C<1012> with reason C<server_shutdown>. In
+multi-worker mode, SIGTERM is forwarded to all workers.
 
     kill -TERM <pid>
 
@@ -5023,6 +5026,11 @@ async sub _drain_connections {
     my $timeout = $self->{shutdown_timeout} // 30;
     my $loop = $self->loop;
 
+    # Every accepted WebSocket is told first, on either transport: a Close 1012
+    # ("Service Restart"), so its client sees a planned restart rather than a
+    # dropped connection, and its application gets the same code.
+    $_->_close_websockets_for_shutdown for values %{$self->{connections}};
+
     # First, close all idle connections immediately (not processing a request)
     # Keep-alive connections waiting for next request should be closed
     my @idle = grep { !$_->has_requests_in_flight } values %{$self->{connections}};
@@ -5064,6 +5072,8 @@ async sub _drain_connections {
         $self->_log(warn => "Shutdown timeout: force-closing $remaining active connections");
 
         for my $conn (values %{$self->{connections}}) {
+            # A WebSocket accepted while the drain ran gets its Close too.
+            $conn->_close_websockets_for_shutdown if $conn;
             # The same ending the two passes above give, so a scope cut short
             # by the timeout still names why it ended (Www.pod: a scope the
             # server ends reports the reason) instead of being torn out from
