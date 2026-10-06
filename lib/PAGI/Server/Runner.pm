@@ -24,7 +24,7 @@ PAGI::Server::Runner - PAGI application loader and server runner
     # Command line usage via pagi-server
     pagi-server PAGI::App::Directory root=/var/www
     pagi-server ./app.pl -p 8080
-    pagi-server                        # serves current directory
+    pagi-server                        # serves current directory (needs PAGI-Tools)
 
     # With environment modes
     pagi-server -E development app.pl  # enable Lint middleware
@@ -124,7 +124,7 @@ also calls C<FindBin::again()> to refresh its cached path.
 
 If no app is specified, defaults to serving the current directory:
 
-    pagi-server                        # same as: PAGI::App::Directory root=.
+    pagi-server                        # same as: PAGI::App::Directory root=. (PAGI-Tools)
 
 =head1 METHODS
 
@@ -462,11 +462,21 @@ sub load_app {
 
     my $app_spec = $self->{app_spec};
 
-    # Default: serve current directory
+    # Default: serve the current directory with PAGI::App::Directory. It
+    # lives in PAGI-Tools, which PAGI-Server does not depend on, so when it is
+    # not installed say what is missing instead of Perl's "Can't locate".
     my %app_args;
     if (!defined $app_spec) {
         $app_spec = 'PAGI::App::Directory';
         %app_args = (root => '.');
+        unless (eval { require PAGI::App::Directory; 1 }) {
+            my $error = $@;
+            die "No application given. Serving the current directory by default"
+              . " needs PAGI-Tools, which is not installed; install it, or name"
+              . " an application (an app file, a module, or --app).\n"
+                if $error =~ m{^Can't locate PAGI/App/Directory\.pm};
+            die $error;
+        }
     } else {
         # Parse constructor args (key=value pairs) from remaining argv
         %app_args = $self->_parse_app_args(@{$self->{argv}});
@@ -860,7 +870,7 @@ Environment Modes:
 App can be:
     Module name:    pagi-server PAGI::App::Directory root=/var/www
     File path:      pagi-server ./app.pl
-    Default:        pagi-server                (serves current directory)
+    Default:        pagi-server                (serves current directory; needs PAGI-Tools)
 
 Server-specific options are handled by the server CLI (e.g., pagi-server).
 See: perldoc pagi-server
