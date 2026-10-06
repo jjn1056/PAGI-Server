@@ -234,8 +234,17 @@ sub build_race_app {
         $c->on_end(sub { $obs->{end}++ });
 
         if ($order eq 'peer_first') {
-            my $d = await $receive->();              # the peer's websocket.disconnect
-            $obs->{recv_type} = $d->{type};
+            # The application hears of the peer's Close only when the scope
+            # ends, so a racing Close comes from a second activity: wait for the
+            # disconnect in the background and send our own Close when the test
+            # releases the gate after the server processed the peer's.
+            # Held by the test: a dropped Future is never resolved.
+            my $recv = $obs->{recv_future} = $receive->();
+            $recv->on_done(sub {
+                $obs->{recv_type}      = $_[0]{type};
+                $obs->{recv_connected} = $c->is_connected ? 1 : 0;
+            });
+            await $obs->{gate};
         }
 
         my $close_f = $send->({ type => 'websocket.close', code => 1000, reason => 'appbye' });
@@ -318,7 +327,7 @@ subtest 'app-first: peer Close does not duplicate the app close (pending output)
 # =============================================================================
 subtest 'peer-first: app close does not duplicate the reciprocal (h2_ws_close guard held)' => sub {
     %DATA = (); @FRAMES = ();
-    my %obs;
+    my %obs = (gate => $loop->new_future);
     my $park = $loop->new_future;
     my $app  = build_race_app(\%obs, $park, 'peer_first');
     my ($conn, $stream_io, $cs, $server) = create_h2_connection(app => $app);
@@ -328,13 +337,14 @@ subtest 'peer-first: app close does not duplicate the reciprocal (h2_ws_close gu
     my $sid = open_ws_stream($client, $cs);
 
     # The peer closes first (no END_STREAM): the peer-inbound arm enqueues the
-    # server's reciprocal Close and delivers the disconnect that resumes the app.
+    # server's reciprocal Close; the disconnect waits for the end of the scope.
     send_stream_data($client, $cs, $sid, client_close_frame(1001, 'peerbye'), 0);
-    ok(pump_until($client, $cs, sub { $obs{after_done} }),
-        'peer closed first; app drained the disconnect, sent its own close, tried a later send');
-
     my $ss = $conn->{h2_streams}{$sid};
-    is($obs{recv_type}, 'websocket.disconnect', 'app received the peer Close');
+    ok(pump_until($client, $cs, sub { $ss->{ws_peer_closed} }), 'the server processed the peer Close');
+    ok(!$obs{recv_type}, 'no websocket.disconnect before the stream has closed');
+    $obs{gate}->done;
+    ok(pump_until($client, $cs, sub { $obs{after_done} }),
+        'app sent its racing close and tried a later send');
     is(scalar @{ $ss->{send_queue} || [] }, 1,
         'only the reciprocal is queued -- the app close added no second frame');
     ok(!$obs{complete} && !$obs{disconnect}, 'PENDING: no terminal yet (stream not complete)');
@@ -357,8 +367,43 @@ subtest 'peer-first: app close does not duplicate the reciprocal (h2_ws_close gu
     is($obs{end}, 1, 'on_end fired exactly once');
     is($obs{code},   1001,      'close_code is the PEER code, preserved');
     is($obs{reason}, 'peerbye', 'close_reason is the peer text, preserved');
+    is($obs{recv_type}, 'websocket.disconnect', 'the app received the disconnect once the stream closed');
+    is($obs{recv_connected}, 0, 'with is_connected already false');
 
     $park->done unless $park->is_ready;
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+subtest 'a data send after the server Close is queued, before END_STREAM, writes nothing' => sub {
+    %DATA = (); @FRAMES = ();
+    my %obs;
+    my $park = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();                          # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        $obs{send} = $send;
+        await $park;
+        return;
+    };
+    my ($conn, $stream_io, $cs, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $cs, initial_window_size => 0);
+    my $sid = open_ws_stream($client, $cs);
+    ok(pump_until($client, $cs, sub { $obs{send} }), 'app accepted');
+
+    send_stream_data($client, $cs, $sid, client_close_frame(1000, 'bye'), 0);
+    my $ss = $conn->{h2_streams}{$sid};
+    ok(pump_until($client, $cs, sub { $ss->{ws_eof_pending} }), 'the server queued its reciprocal Close');
+    my $queued = scalar @{ $ss->{send_queue} || [] };
+    my $f = $obs{send}->({ type => 'websocket.send', text => 'too late' });
+    exchange($client, $cs, 3);
+    ok($f->is_ready && !$f->is_failed, 'the send resolved without failing');
+    is(scalar @{ $ss->{send_queue} || [] }, $queued, 'nothing was queued after the server Close');
+
+    $park->done;
     eval { $stream_io->close_now };
     $loop->remove($server);
 };

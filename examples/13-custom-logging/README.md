@@ -35,7 +35,7 @@ The access log also defaults to `STDERR`, so a line per request is
 interleaved with these; they are left out here:
 
 ```
-[PAGI::Server] PAGI::Server 0.002014 listening on http://127.0.0.1:5000/
+[PAGI::Server] PAGI::Server 0.003000 listening on http://127.0.0.1:5000/
 [PAGI::Server]   lifespan  not supported, continuing without it
 [PAGI::Server]   loop      Poll, max_conn 1000, http2 available, tls available, future_xs off
 [PAGI::Server::Connection] PAGI application error: the database is on fire

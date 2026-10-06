@@ -1054,7 +1054,11 @@ subtest 'SSE refusal that starts but never sends its terminal body: closes, does
         my ($wire, $eof) = read_until($sock, undef, 3);
         ok($eof, 'an unfinished refusal closes the connection rather than hanging');
         like($wire, qr{^HTTP/1\.1 204}, 'the committed status reached the client');
-        unlike($wire, qr/0\r\n\r\n\z/, 'no chunked terminator was synthesized');
+        # Nothing may follow the header section. (A pattern for a trailing
+        # "0\r\n\r\n" also matches a last header whose value ends in 0, such
+        # as Server: PAGI::Server/0.003000.)
+        my (undef, $after_head) = split /\r\n\r\n/, $wire, 2;
+        is($after_head // '', '', 'no chunked terminator was synthesized');
         ok((scalar grep { /incomplete response/i } @warnings),
             'the incomplete response was logged') or diag("warnings: @warnings");
         close $sock;

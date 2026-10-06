@@ -296,6 +296,8 @@ sub draining_ws_app {
             my $event = await $receive->();
             if ($event->{type} eq 'websocket.disconnect') {
                 $obs->{$path}{saw_disconnect_event} = 1;
+                $obs->{$path}{event_connected} = $c->is_connected ? 1 : 0;
+                $obs->{$path}{event_complete}  = $c->response_complete ? 1 : 0;
                 await $loop->delay_future(after => 0);  # one turn of async work
                 last;
             }
@@ -465,26 +467,135 @@ subtest 'peer-initiated staged: clean only at full stream closure, not at the Cl
     ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{accepted} }),
         'app accepted and entered its receive loop');
 
-    # STAGE (a): the peer's valid Close frame, but NOT END_STREAM. The app drains
-    # the websocket.disconnect, does one turn of async work, and returns.
+    # STAGE (a): the peer's valid Close frame, but NOT END_STREAM. The scope has
+    # not ended, so the app has not been told; it is still waiting.
     send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'bye'), 0);
-    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} }),
-        'the app drained the disconnect and returned');
-    ok($obs{'/ws'}{saw_disconnect_event},
-        'the app saw the peer Close as a websocket.disconnect');
+    exchange_frames($client, $client_sock, 10);
+    ok(!$obs{'/ws'}{saw_disconnect_event},
+        'no websocket.disconnect yet -- the client has not sent its END_STREAM (RFC 8441 5)');
+    ok(!$obs{'/ws'}{returned}, 'the app is still waiting');
     ok(!$obs{'/ws'}{complete},
         'NOT clean yet -- the client has not sent its END_STREAM (RFC 8441 5)');
     ok(!$obs{'/ws'}{disconnect},
         'and not abnormal either -- the handshake frame was valid (scope PENDING)');
 
-    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN.
+    # STAGE (b): the client sends its END_STREAM -> full stream closure -> CLEAN,
+    # and the app receives the disconnect with the scope already ended.
     send_stream_data($client, $client_sock, $sid, '', 1);
-    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{complete} }),
-        'on_complete fired once the stream fully closed');
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} && $obs{'/ws'}{complete} }),
+        'the app received the disconnect and on_complete fired once the stream fully closed');
+    ok($obs{'/ws'}{saw_disconnect_event}, 'the app saw the peer Close as a websocket.disconnect');
+    is($obs{'/ws'}{event_connected}, 0, 'is_connected false when the event arrived');
+    is($obs{'/ws'}{event_complete},  1, 'response_complete true when the event arrived');
     is($obs{'/ws'}{complete}, 1, 'on_complete fired exactly once');
     is($obs{'/ws'}{complete_reason}, undef,
         'disconnect_reason() undef -- a completed handshake is a clean end');
     ok(!$obs{'/ws'}{disconnect}, 'on_disconnect did NOT fire (clean end, not abnormal)');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+subtest 'peer Close, END_STREAM withheld: the disconnect arrives at the finish bound' => sub {
+    my %obs;
+    my $app    = draining_ws_app(\%obs);
+    my $server = create_test_server(app => $app, ws_close_timeout => 0.3);
+    my ($conn, $stream_io, $client_sock) = create_h2_connection(app => $app, server => $server);
+    my $client = create_client();
+
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{accepted} }), 'app accepted');
+
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1001, 'peerbye'), 0);
+    exchange_frames($client, $client_sock, 5);
+    ok(!$obs{'/ws'}{saw_disconnect_event}, 'no event while END_STREAM is withheld');
+
+    ok(pump_until($client, $client_sock, sub { $obs{'/ws'}{returned} && $obs{'/ws'}{disconnect} }, 200),
+        'the event arrived when the finish bound ended the scope');
+    is($obs{'/ws'}{event_connected}, 0, 'is_connected false when it arrived');
+    is($obs{'/ws'}{disconnect_reason}, 'close_incomplete', 'the object reports close_incomplete');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+subtest 'server-initiated close: the peer echoing a Close does not change the delivered event' => sub {
+    # The server ends the scope itself (here a frame with a reserved opcode,
+    # 1002/protocol_error). A conforming client then answers with its own Close
+    # (RFC 6455 5.5.1). The scope already delivered its websocket.disconnect, so
+    # a later receive() must get that same event again (Www.pod "Disconnect -
+    # receive event"), not one built from the client's reply.
+    my %obs;
+    my $gate = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        my $first = await $receive->();
+        $obs{first} = { %$first };
+        await $gate;
+        my $again = await $receive->();
+        $obs{again} = { %$again };
+        $obs{done} = 1;
+        return;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{accepted} }), 'accepted');
+
+    my $bad = Protocol::WebSocket::Frame->new(type => 'text', buffer => 'x', masked => 1)->to_bytes;
+    substr($bad, 0, 1) = chr(0x83);   # FIN + reserved opcode 3
+    send_stream_data($client, $client_sock, $sid, $bad, 0);
+    ok(pump_until($client, $client_sock, sub { $obs{first} }), 'the scope delivered its disconnect');
+    is($obs{first}{code},   1002,             'it is 1002');
+    is($obs{first}{reason}, 'protocol_error', 'with reason protocol_error');
+
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1002, ''), 0);
+    exchange_frames($client, $client_sock, 5);
+    $gate->done;
+    ok(pump_until($client, $client_sock, sub { $obs{done} }), 'a later receive returned');
+    is($obs{again}, $obs{first}, 'a later receive returns the same event');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
+subtest 'data frames the peer sends after its Close never reach the app' => sub {
+    # A peer sends no data after its Close (RFC 6455 5.5.1). One that does --
+    # here in the same DATA frame -- has its frames discarded.
+    my (@events, %obs);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        for my $attempt (1 .. 2) {
+            my $event = await $receive->();
+            push @events, $event->{type} eq 'websocket.receive'
+                ? "receive:" . ($event->{text} // '')
+                : "$event->{type}:" . ($event->{code} // '');
+        }
+        $obs{returned} = 1;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{accepted} }), 'accepted');
+
+    my $text = Protocol::WebSocket::Frame->new(type => 'text', buffer => 'after-close', masked => 1)->to_bytes;
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'bye') . $text, 0);
+    exchange_frames($client, $client_sock, 5);
+    send_stream_data($client, $client_sock, $sid, '', 1);
+    ok(pump_until($client, $client_sock, sub { $obs{returned} }), 'the app returned');
+    is(\@events, ['websocket.disconnect:1000', 'websocket.disconnect:1000'],
+        'both receives gave the disconnect; the stray message was discarded');
 
     eval { $stream_io->close_now };
     $loop->remove($server);

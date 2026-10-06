@@ -382,4 +382,50 @@ subtest 'h1 websocket: accepted socket returns without a closing handshake is an
         if @errors;
 };
 
+subtest 'h1: an accepted websocket.accept and sse.start mark response_started (Www.pod "Meaning per scope")' => sub {
+    my %r;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $c = $scope->{'pagi.connection'};
+        if ($scope->{type} eq 'websocket') {
+            await $receive->();                       # websocket.connect
+            $r{ws_before} = $c->response_started;
+            # A rejected accept is rolled back and does not start the response,
+            # so a corrected accept can follow. An invalid subprotocol is
+            # refused inside the accept's own rollback, the path under test.
+            $r{ws_bad_accept} = eval {
+                await $send->({ type => 'websocket.accept', subprotocol => 'bad proto' });
+                1;
+            } ? 'sent' : 'rejected';
+            $r{ws_after_bad} = $c->response_started;
+            await $send->({ type => 'websocket.accept' });
+            $r{ws_after} = $c->response_started;
+            await $receive->();                       # ends when the client drops
+            $r{ws_done} = 1;
+        }
+        elsif ($scope->{type} eq 'sse') {
+            await $receive->();                       # sse.request
+            $r{sse_before} = $c->response_started;
+            await $send->({ type => 'sse.start', status => 200 });
+            $r{sse_after} = $c->response_started;
+            await $send->({ type => 'sse.close' });
+            $r{sse_done} = 1;
+        }
+        return;
+    };
+    my $server = create_server($app);
+    drive(port => $server->port, request => ws_request($server->port), until => sub { $r{ws_after} }, close => 1);
+    $loop->loop_once(0.05) for 1 .. 20;
+    drive(port => $server->port, request => sse_request($server->port), until => sub { $r{sse_done} }, close => 1);
+    $server->shutdown->get;
+
+    is($r{ws_before},     0,          'websocket: false before accept');
+    is($r{ws_bad_accept}, 'rejected', 'websocket: the invalid accept was rejected');
+    is($r{ws_after_bad},  0,          'websocket: a rejected accept does not start the response');
+    is($r{ws_after},      1,          'websocket: true once websocket.accept is accepted');
+    ok($r{ws_done},                   'websocket: the app saw the scope end');
+    is($r{sse_before},    0,          'sse: false before sse.start');
+    is($r{sse_after},     1,          'sse: true once sse.start is accepted');
+};
+
 done_testing;

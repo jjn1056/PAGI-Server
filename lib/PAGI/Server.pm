@@ -2,7 +2,7 @@ package PAGI::Server;
 use strict;
 use warnings;
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 # Future::XS is kept out for now. Future::XS 0.15 warns "lost a sequence
 # Future" whenever a without_cancel observer is dropped before its original
@@ -1000,7 +1000,7 @@ The startup banner follows the format: in C<text> it is the aligned block, one
 line per event; in C<json> it is one C<info> event whose C<message> is the
 first line and whose C<notes> hold the rest:
 
-    {"time":"...","level":"info","category":"PAGI::Server","message":"PAGI::Server 0.002014 listening on http://0.0.0.0:5000/ with 4 workers (shared-socket)","pid":48211,"notes":{"serving":"./app.pl","mode":"production (no tty)","loop":"Poll, max_conn 1000/worker, http2 available, tls available, future_xs off"}}
+    {"time":"...","level":"info","category":"PAGI::Server","message":"PAGI::Server 0.003000 listening on http://0.0.0.0:5000/ with 4 workers (shared-socket)","pid":48211,"notes":{"serving":"./app.pl","mode":"production (no tty)","loop":"Poll, max_conn 1000/worker, http2 available, tls available, future_xs off"}}
 
 Cannot be changed with C<configure>.
 
@@ -1889,6 +1889,12 @@ A completed closing handshake requires the peer to answer the server's Close
 with its own Close and the transport then to close. A peer that never answers
 would otherwise leave the scope waiting forever; this option is the finite
 bound on that wait that L<PAGI::Spec::Www> requires the server to enforce.
+
+The same bound covers a closing handshake the peer starts. The server answers
+the peer's Close at once, but the scope ends -- and the application receives
+its C<websocket.disconnect> -- only when the transport then closes (HTTP/1.1)
+or the client ends its stream (HTTP/2). A peer that never lets that happen is
+ended C<close_incomplete> at this bound, with its own close code.
 
 B<Default:> 10
 

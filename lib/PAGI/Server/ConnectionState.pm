@@ -3,7 +3,7 @@ package PAGI::Server::ConnectionState;
 use strict;
 use warnings;
 
-our $VERSION = '0.002014';
+our $VERSION = '0.003000';
 
 use Scalar::Util qw(weaken);
 
@@ -136,15 +136,18 @@ sub is_connected {
 
     my $started = $conn->response_started;  # 0 or 1
 
-True once the server has started this request's response (C<http.response.start>
-emitted -- by the application, a framework, a middleware, or a server-synthesized
-error/backstop response). Server-owned; read-only to applications.
+True once the server has started this request's response: an accepted
+C<http.response.start> (from the application, a framework, a middleware, or a
+server-synthesized error/backstop response), an accepted C<websocket.accept>, or
+an accepted C<sse.start> (L<PAGI::Spec::Www/"Meaning per scope">).
+Server-owned; read-only to applications.
 
 =cut
 
 sub response_started { return $_[0]->{_response_started} ? 1 : 0 }
 
-# Server-internal: called from the send path when http.response.start is emitted.
+# Server-internal: called from the send path when this scope's response starts:
+# http.response.start, websocket.accept or sse.start.
 sub _mark_response_started { $_[0]->{_response_started} = 1; return }
 
 =head2 response_complete

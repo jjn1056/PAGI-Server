@@ -175,6 +175,7 @@ sub build_app {
 
         await $receive->();                              # websocket.connect
         await $send->({ type => 'websocket.accept' });
+        $obs{send} = $send;   # lets a test send as a second activity on the socket would
 
         $conn->on_complete(sub {
             $obs{complete}++;
@@ -214,13 +215,22 @@ sub build_app {
         $obs{sent_close} = 1;
 
         if ($o{recv_after}) {
-            # Snapshot the scope's state the instant the peer's Close is
-            # observed: the disconnect event is delivered, but the scope is not
-            # yet clean (still connected, on_complete not fired).
+            # Snapshot the scope's state the instant the application receives
+            # the scope's websocket.disconnect. The event is sent when the scope
+            # ends (Www.pod "Disconnect - receive event"), so the connection
+            # object is already terminal here.
             my $d = await $receive->();
-            $obs{recv_type}      = $d->{type};
-            $obs{recv_connected} = $conn->is_connected ? 1 : 0;
-            $obs{recv_complete}  = $obs{complete} // 0;
+            $obs{recv_type}              = $d->{type};
+            $obs{recv_code}              = $d->{code};
+            $obs{recv_reason}            = $d->{reason};
+            $obs{recv_connected}         = $conn->is_connected ? 1 : 0;
+            $obs{recv_complete}          = $obs{complete} // 0;
+            $obs{recv_response_complete} = $conn->response_complete ? 1 : 0;
+            $obs{recv_dreason}           = $conn->disconnect_reason;
+            # A later receive gets the same event: one disconnect per scope.
+            my $again = await $receive->();
+            $obs{again_code}   = $again->{code};
+            $obs{again_reason} = $again->{reason};
         }
         if ($o{park}) {
             $obs{parked} = 1;
@@ -232,18 +242,21 @@ sub build_app {
     return ($app, \%obs, $park);
 }
 
-# The Fix-1 (reciprocal-Close-after-peer) app: it does NOT send its own Close
-# until AFTER it has received the peer's disconnect, so `close_received` is
-# already true when websocket.close is sent -- the 8429 send-handler branch under
-# test. Its own Close code (1000/'srvbye') is DISTINCT from the peer's
-# (1001/'peerbye'), so any assertion that the peer's code is preserved cannot
-# pass on the app's own intent. Options: prime_bytes (an undrainable message, to
-# stall the finish); park (never return, so the send path -- not app-return --
-# is what governs the close).
+# The Fix-1 (reciprocal-Close-after-peer) app. The application hears of the
+# peer's Close only when the scope ends, so a reciprocal Close that races it
+# comes from a second activity on the socket: the app waits for the peer's
+# disconnect in the background and sends its own Close when the test releases
+# the gate, after the server processed the peer's Close (close_received is
+# true -- the send handler's close_received branch under test). Its own Close
+# code (1000/'srvbye') is DISTINCT from the peer's (1001/'peerbye'), so an
+# assertion that the peer's code is preserved cannot pass on the app's intent.
+# Options: prime_bytes (an undrainable message, to stall the finish); park
+# (never return).
 sub peer_first_app {
     my (%o) = @_;
     my %obs;
     my $park = $loop->new_future;
+    my $gate = $loop->new_future;
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         return unless $scope->{type} eq 'websocket';
@@ -279,10 +292,17 @@ sub peer_first_app {
             }
         }
 
-        my $d = await $receive->();                      # the peer's websocket.disconnect
-        $obs{recv_type}      = $d->{type};
-        $obs{recv_connected} = $conn->is_connected ? 1 : 0;
-        # close_received is now true: this reciprocal Close hits the 8429 branch.
+        # The peer's websocket.disconnect; held by the test, since a dropped
+        # Future is never resolved.
+        my $recv = $obs{recv_future} = $receive->();
+        $recv->on_done(sub {
+            my ($d) = @_;
+            $obs{recv_type}      = $d->{type};
+            $obs{recv_connected} = $conn->is_connected ? 1 : 0;
+        });
+        $obs{waiting} = 1;
+
+        await $gate;
         await $send->({ type => 'websocket.close', code => 1000, reason => 'srvbye' });
         $obs{sent_close} = 1;
 
@@ -290,13 +310,13 @@ sub peer_first_app {
         $obs{app_returned} = 1;
         return;
     };
-    return (\%obs, $park, $app);
+    return (\%obs, $park, $app, $gate);
 }
 
 # =============================================================================
-# 0. THE FIX-1 REGRESSION (reciprocal-Close-after-peer). The app receives the
-#    peer's Close, THEN sends its own -- so `close_received` is true at the send
-#    (the 8429 branch). On base that branch ended the scope EAGERLY
+# 0. THE FIX-1 REGRESSION (reciprocal-Close-after-peer). The app sends its own
+#    Close after the server processed the peer's -- so `close_received` is true
+#    at the send (the send handler's close_received branch). On base that branch ended the scope EAGERLY
 #    (_handle_disconnect_and_close 'client_closed'): terminal marked with the
 #    transport still OPEN and NO finish bound. Now it routes through the SAME
 #    bounded server-owned closure the parser peer-Close path uses: the scope is
@@ -306,10 +326,11 @@ sub peer_first_app {
 #    close_incomplete with the peer's code. RED on base (eager terminal, no bound).
 # =============================================================================
 subtest 'Fix 1: reciprocal Close held open -> not clean, finish bound armed' => sub {
-    my ($obs, $park, $app) = peer_first_app(park => 1);
+    my ($obs, $park, $app, $gate) = peer_first_app(park => 1);
     my $server = start_server($app, ws_close_timeout => 5);
     my $sock   = connect_client($server->port);
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{waiting} }, 3), 'app accepted and waits for the peer in the background');
 
     my ($conn) = values %{$server->{connections}};
     my $cs     = $conn->{current_connection_state};
@@ -321,9 +342,11 @@ subtest 'Fix 1: reciprocal Close held open -> not clean, finish bound armed' => 
         no warnings 'redefine';
         local *IO::Async::Stream::close_when_empty = sub { $obs->{close_requested}++ };
         syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
-        ok(pump_until(sub { $obs->{sent_close} && $obs->{close_requested} }, 3),
-            'app received the peer Close and sent its reciprocal Close');
-        is($obs->{recv_type}, 'websocket.disconnect', 'app received the peer Close');
+        ok(pump_until(sub { $conn->{close_received} && $obs->{close_requested} }, 3),
+            'the server processed the peer Close and requested its transport close (held)');
+        ok(!$obs->{recv_type}, 'no websocket.disconnect while the transport is still open');
+        $gate->done;
+        ok(pump_until(sub { $obs->{sent_close} }, 3), 'the racing reciprocal Close was sent');
         ok($stream->write_handle, 'the actual transport remains open (close deliberately held)');
         ok(!$cs->response_complete,
             'NOT clean: no eager terminal while the transport is still open');
@@ -338,14 +361,25 @@ subtest 'Fix 1: reciprocal Close held open -> not clean, finish bound armed' => 
 };
 
 subtest 'Fix 1: reciprocal Close, transport closes -> clean with the peer code' => sub {
-    my ($obs, $park, $app) = peer_first_app(park => 1);
+    my ($obs, $park, $app, $gate) = peer_first_app(park => 1);
     my $server = start_server($app, ws_close_timeout => 5);
     my $sock   = connect_client($server->port);
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
-
-    # Peer answers, then only reads and waits for the server's EOF (RFC 6455
-    # 7.1.1). The server owns and finishes the transport close -> clean.
-    syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+    ok(pump_until(sub { $obs->{waiting} }, 3), 'app accepted and waits for the peer in the background');
+    my ($conn) = values %{$server->{connections}};
+    {
+        # Hold the close just long enough for the racing reciprocal Close to be
+        # sent after the peer's was processed.
+        no warnings 'redefine';
+        local *IO::Async::Stream::close_when_empty = sub { $obs->{close_requested}++ };
+        syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+        ok(pump_until(sub { $conn->{close_received} && $obs->{close_requested} }, 3),
+            'the server processed the peer Close');
+        $gate->done;
+        ok(pump_until(sub { $obs->{sent_close} }, 3), 'the racing reciprocal Close was sent');
+    }
+    # Stub restored: the server finishes its transport close; the client only reads.
+    $conn->{stream}->close_when_empty if $conn->{stream};
     ok(pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5), 'a terminal fired');
     ok($obs->{complete}, 'on_complete fired -- clean at the server-owned transport closure');
     is($obs->{complete}, 1, 'on_complete fired exactly once');
@@ -354,6 +388,8 @@ subtest 'Fix 1: reciprocal Close, transport closes -> clean with the peer code' 
     is($obs->{complete_code}, 1001, 'close_code is the peer code (not the app intent 1000)');
     is($obs->{complete_creason}, 'peerbye', 'close_reason is the peer text');
     ok(!$obs->{disconnect}, 'on_disconnect did NOT fire (no eager client_closed)');
+    is($obs->{recv_type}, 'websocket.disconnect', 'the app received the disconnect at the end');
+    is($obs->{recv_connected}, 0, 'with is_connected already false');
     ok(pump_until(sub { server_closed_transport($sock) }, 3),
         'the SERVER closed the transport -- the client saw EOF without closing TCP');
     $park->done unless $park->is_ready;
@@ -363,7 +399,7 @@ subtest 'Fix 1: reciprocal Close, transport closes -> clean with the peer code' 
 
 subtest 'Fix 1: reciprocal Close, transport stalls -> close_incomplete, peer code' => sub {
     my @logs;
-    my ($obs, $park, $app) = peer_first_app(park => 1, prime_bytes => 4 * 1024 * 1024);
+    my ($obs, $park, $app, $gate) = peer_first_app(park => 1, prime_bytes => 4 * 1024 * 1024);
     my $server = start_server($app,
         ws_close_timeout     => 0.5,
         write_high_watermark => 64 * 1024 * 1024,
@@ -374,12 +410,17 @@ subtest 'Fix 1: reciprocal Close, transport stalls -> close_incomplete, peer cod
     like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
 
     my ($conn) = values %{$server->{connections}};
-    ok(pump_until(sub { $conn->_get_write_buffer_size > 0 }, 5),
+    ok(pump_until(sub { $obs->{waiting} && $conn->_get_write_buffer_size > 0 }, 5),
         'the primed message is stuck in the write queue (the peer is not reading)');
     # Peer answers but never reads: the server-owned close cannot finish draining.
     syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
-    ok(pump_until(sub { $obs->{sent_close} }, 5), 'app sent its reciprocal Close');
+    ok(pump_until(sub { $conn->{close_received} }, 3), 'the server processed the peer Close');
+    ok(!$obs->{recv_type}, 'no websocket.disconnect while the transport close is pending');
+    $gate->done;
+    ok(pump_until(sub { $obs->{sent_close} }, 5), 'app sent its racing reciprocal Close');
     assert_bounded_close_incomplete($obs, $conn, \@logs, 'Fix1-stall');
+    is($obs->{recv_type}, 'websocket.disconnect', 'the app received the disconnect at the bound');
+    is($obs->{recv_connected}, 0, 'with is_connected already false');
     $park->done unless $park->is_ready;
     close($sock);
     shutdown_server($server);
@@ -408,6 +449,10 @@ subtest 'app close, peer answers, client waits for server EOF -> clean (server-o
     ok(pump_until(sub { $obs->{complete} || $obs->{disconnect} }, 5), 'a terminal fired');
 
     ok($obs->{complete}, 'on_complete fired -- the server closed the transport and marked clean');
+    is($obs->{recv_type},              'websocket.disconnect', 'the app received the disconnect');
+    is($obs->{recv_connected},         0, 'the scope had ended when it arrived (is_connected false)');
+    is($obs->{recv_response_complete}, 1, 'and was complete (response_complete true)');
+    is($obs->{recv_code},              1000, 'the event carries the peer code');
     is($obs->{complete}, 1, 'on_complete fired exactly once');
     is($obs->{complete_connected}, 0, 'is_connected() false at the clean end');
     is($obs->{complete_reason}, undef, 'disconnect_reason() undef -- a clean end');
@@ -894,6 +939,207 @@ subtest 'peer close (no code), transport never finishes -> close_incomplete pres
     assert_bounded_close_incomplete($obs, $conn, $logs, 'empty-peer-Close',
         code => 1005, reason => undef);
     $park->done unless $park->is_ready;
+    close($sock);
+    shutdown_server($server);
+};
+
+# =============================================================================
+# The disconnect is delivered when the scope ENDS (Www.pod "Disconnect -
+# receive event"): after the transport closed and the object is terminal.
+# =============================================================================
+subtest 'peer-initiated clean close: the app receives the disconnect with the scope already ended' => sub {
+    my ($app, $obs, $park) = build_app(send_close => 0, recv_after => 1);
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock   = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{sent_close} }, 5), 'app accepted and waits on receive');
+
+    # The peer closes, then only reads and waits for the server's EOF.
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+    ok(pump_until(sub { $obs->{app_returned} }, 5), 'the app received the disconnect and returned');
+    is($obs->{recv_type},              'websocket.disconnect', 'event type');
+    is($obs->{recv_code},              1000,  'the peer code');
+    is($obs->{recv_reason},            'bye', 'the peer reason text');
+    is($obs->{recv_connected},         0,     'is_connected false when the event arrives');
+    is($obs->{recv_response_complete}, 1,     'response_complete true when the event arrives');
+    is($obs->{recv_dreason},           undef, 'a clean end: no disconnect_reason');
+    is($obs->{again_code},             1000,  'a later receive gets the same event (code)');
+    is($obs->{again_reason},           'bye', 'a later receive gets the same event (reason)');
+    ok(pump_until(sub { $obs->{complete} }, 3), 'on_complete fired');
+    ok(!$obs->{disconnect}, 'on_disconnect did not fire');
+    ok(pump_until(sub { server_closed_transport($sock) }, 3), 'the server closed the transport');
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'peer-initiated close, transport stalls: the disconnect arrives at the finish bound' => sub {
+    my @logs;
+    my ($app, $obs, $park) = build_app(send_close => 0, prime_bytes => 4 * 1024 * 1024, recv_after => 1);
+    my $server = start_server($app,
+        ws_close_timeout     => 0.5,
+        write_high_watermark => 64 * 1024 * 1024,
+        log_level            => 'info',
+        logger               => sub { push @logs, $_[0]->{message} // '' });
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);   # pin the client's window tiny: nothing drains
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    my ($conn) = values %{$server->{connections}};
+    ok(pump_until(sub { $obs->{sent_close} && $conn->_get_write_buffer_size > 0 }, 5),
+        'the primed message is stuck in the write queue; the app waits on receive');
+
+    syswrite($sock, make_websocket_frame(8, pack('n', 1001) . 'peerbye'));
+    pump_turns(20);
+    ok(!$obs->{recv_type}, 'no event while the transport close is still pending');
+
+    ok(pump_until(sub { $obs->{recv_type} }, 5), 'the event arrived when the finish bound ended the scope');
+    is($obs->{recv_code},      1001,               'it carries the peer code');
+    is($obs->{recv_reason},    'peerbye',          'and the peer reason text');
+    is($obs->{recv_connected}, 0,                  'is_connected false when it arrives');
+    is($obs->{recv_dreason},   'close_incomplete', 'the object reports close_incomplete');
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'a data send after the server Close, before the transport closes, writes nothing' => sub {
+    my ($app, $obs, $park) = build_app(send_close => 0, prime_bytes => 4 * 1024 * 1024, recv_after => 1);
+    my $server = start_server($app,
+        ws_close_timeout     => 5,
+        write_high_watermark => 64 * 1024 * 1024);
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    my ($conn) = values %{$server->{connections}};
+    ok(pump_until(sub { $obs->{sent_close} && $conn->_get_write_buffer_size > 0 }, 5),
+        'primed; the app waits on receive');
+
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+    ok(pump_until(sub { $conn->{close_sent} }, 3), 'the server sent its reciprocal Close');
+    my (@written, @warnings);
+    {
+        no warnings 'redefine';
+        my $orig = \&IO::Async::Stream::write;
+        local *IO::Async::Stream::write = sub { push @written, $_[1]; goto &$orig };
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        my $f = $obs->{send}->({ type => 'websocket.send', text => 'too late' });
+        pump_turns(5);
+        ok($f->is_ready && !$f->is_failed, 'the send resolved without failing (the app may race the peer)');
+    }
+    is(scalar @written, 0, 'the server did not try to write after its Close');
+    is([grep { /Cannot write data/ } @warnings], [], 'and IO::Async had no write to refuse');
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest "a data send after the server Close never reaches the wire" => sub {
+    # The transport close is held open here, so the stream is not closing and
+    # IO::Async would put a late write on the wire: only the server's
+    # close_sent guard keeps it off. Nothing is primed, so the client reads
+    # exactly what followed the upgrade.
+    my ($app, $obs, $park) = build_app(send_close => 0, recv_after => 1);
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs->{sent_close} }, 5), 'the app waits on receive');
+    my ($conn) = values %{$server->{connections}};
+    {
+        no warnings 'redefine';
+        local *IO::Async::Stream::close_when_empty = sub { $obs->{close_requested}++ };
+        syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+        ok(pump_until(sub { $conn->{close_sent} && $obs->{close_requested} }, 3),
+            'the server sent its Close; its transport close is held');
+        my $f = $obs->{send}->({ type => 'websocket.send', text => 'too late' });
+        pump_turns(5);
+        ok($f->is_ready && !$f->is_failed, 'the late send resolved without failing');
+    }
+    # Stub restored: the server finishes its transport close.
+    $conn->{stream}->close_when_empty if $conn->{stream};
+    my $rx = '';
+    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 65536); $rx .= $buf if $n; defined $n && $n == 0 }, 5);
+    unlike($rx, qr/too late/, 'the late message never reached the wire');
+    my $close_last = 0;
+    for (my $at = rindex($rx, "\x88"); $at >= 0; $at = rindex($rx, "\x88", $at - 1)) {
+        my $len = ord(substr($rx, $at + 1, 1) // "\xff");
+        if ($len <= 125 && $at + 2 + $len == length $rx) { $close_last = 1; last }
+    }
+    ok($close_last, "the server's Close is the last frame on the wire");
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'a send parked on backpressure when the peer closes does not write after the server Close' => sub {
+    # The application is parked in a backpressured websocket.send when the
+    # peer's Close arrives. The server writes its reply Close and closes the
+    # transport once the buffer drains; draining wakes the parked send, which
+    # must then write nothing (Www.pod "Disconnected Client - sending after
+    # disconnect"; RFC 6455 5.5.1). IO::Async refuses a write to a closing
+    # stream with a warning, so a warning here means the send tried.
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my %obs;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        my $recv = $obs{recv} = $receive->();
+        $recv->on_done(sub { $obs{event} = $_[0] });
+        my $chunk = 'x' x 60000;
+        for my $i (1 .. 400) {
+            await $send->({ type => 'websocket.send', bytes => $chunk });
+            last if $obs{event};
+        }
+        $obs{sends_done} = 1;
+        await $recv;
+        $obs{returned} = 1;
+        return;
+    };
+    my $server = start_server($app, write_high_watermark => 256 * 1024, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    $sock->sockopt(SO_RCVBUF, 4096);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    my ($conn) = values %{$server->{connections}};
+    ok(pump_until(sub { scalar @{ $conn->{_drain_waiters} || [] } }, 5),
+        'a websocket.send is parked on backpressure');
+
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
+    ok(pump_until(sub { $conn->{close_sent} }, 3), 'the server sent its reply Close');
+    # The client drains everything the server wrote, letting the close finish.
+    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 1 << 20); defined $n && $n == 0 }, 10);
+    ok($obs{returned}, 'the parked send resolved and the app returned');
+    is([grep { /Cannot write data to a Stream that is closing/ } @warnings], [],
+        'the parked send wrote nothing after the server Close')
+        or diag(join '', @warnings);
+    close($sock);
+    shutdown_server($server);
+};
+
+subtest 'data frames the peer sends after its Close never reach the app' => sub {
+    # A peer sends no data after its Close (RFC 6455 5.5.1). One that does --
+    # here in the same write -- has its frames discarded: the app's receives
+    # give the disconnect, never the stray message.
+    my (@events, %obs);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        for my $attempt (1 .. 2) {
+            my $event = await $receive->();
+            push @events, $event->{type} eq 'websocket.receive'
+                ? "receive:" . ($event->{text} // '')
+                : "$event->{type}:" . ($event->{code} // '');
+        }
+        $obs{returned} = 1;
+    };
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs{accepted} }, 3), 'accepted');
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye') . make_websocket_frame(1, 'after-close'));
+    ok(pump_until(sub { $obs{returned} }, 5), 'the app returned');
+    is(\@events, ['websocket.disconnect:1000', 'websocket.disconnect:1000'],
+        'both receives gave the disconnect; the stray message was discarded');
     close($sock);
     shutdown_server($server);
 };
