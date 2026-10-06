@@ -1014,16 +1014,31 @@ subtest 'a data send after the server Close, before the transport closes, writes
 
     syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye'));
     ok(pump_until(sub { $conn->{close_sent} }, 3), 'the server sent its reciprocal Close');
-    my @written;
+    my (@written, @warnings);
     {
         no warnings 'redefine';
         my $orig = \&IO::Async::Stream::write;
         local *IO::Async::Stream::write = sub { push @written, $_[1]; goto &$orig };
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
         my $f = $obs->{send}->({ type => 'websocket.send', text => 'too late' });
         pump_turns(5);
         ok($f->is_ready && !$f->is_failed, 'the send resolved without failing (the app may race the peer)');
     }
-    is(scalar @written, 0, 'nothing was written after the server Close');
+    is(scalar @written, 0, 'the server did not try to write after its Close');
+    is([grep { /Cannot write data/ } @warnings], [], 'and IO::Async had no write to refuse');
+
+    # What reached the client: drain to EOF. The server's Close must be the
+    # last frame (its length runs exactly to the end of the data), and the
+    # late message must be nowhere in it.
+    my $rx = '';
+    pump_until(sub { my $buf; my $n = sysread($sock, $buf, 1 << 20); $rx .= $buf if $n; defined $n && $n == 0 }, 15);
+    unlike($rx, qr/too late/, 'the late message never reached the wire');
+    my $close_last = 0;
+    for (my $at = rindex($rx, "\x88"); $at >= 0; $at = rindex($rx, "\x88", $at - 1)) {
+        my $len = ord(substr($rx, $at + 1, 1) // "\xff");
+        if ($len <= 125 && $at + 2 + $len == length $rx) { $close_last = 1; last }
+    }
+    ok($close_last, "the server's Close is the last frame on the wire");
     close($sock);
     shutdown_server($server);
 };
