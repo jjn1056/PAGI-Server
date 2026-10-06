@@ -3986,6 +3986,11 @@ sub _h2_process_ws_frames {
     while (defined(my $bytes = $frame->next_bytes)) {
         my $opcode = $frame->opcode;
 
+        # The peer sends nothing after its Close (RFC 6455 5.5.1). A frame
+        # that follows it anyway is discarded: never queued for the
+        # application, never answered.
+        next if $stream->{ws_peer_closed};
+
         # RFC 6455 Section 5.2: RSV1-3 MUST be 0 unless extension defines
         # meaning. PAGI doesn't support compression extensions, so RSV must
         # always be 0. Same enforcement as h1's _process_websocket_frames
@@ -8699,6 +8704,11 @@ sub _process_websocket_frames {
     # Protocol::WebSocket::Frame->next() decodes as UTF-8, which corrupts binary data
     while (defined(my $bytes = $frame->next_bytes)) {
         my $opcode = $frame->opcode;
+
+        # The peer sends nothing after its Close (RFC 6455 5.5.1). A frame
+        # that follows it anyway is discarded: never queued for the
+        # application, never answered.
+        next if $self->{ws_peer_closed};
 
         # RFC 6455 Section 5.2: RSV1-3 MUST be 0 unless extension defines meaning
         # PAGI doesn't support compression extensions, so RSV must always be 0

@@ -565,4 +565,40 @@ subtest 'server-initiated close: the peer echoing a Close does not change the de
     $loop->remove($server);
 };
 
+subtest 'data frames the peer sends after its Close never reach the app' => sub {
+    # A peer sends no data after its Close (RFC 6455 5.5.1). One that does --
+    # here in the same DATA frame -- has its frames discarded.
+    my (@events, %obs);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        for my $attempt (1 .. 2) {
+            my $event = await $receive->();
+            push @events, $event->{type} eq 'websocket.receive'
+                ? "receive:" . ($event->{text} // '')
+                : "$event->{type}:" . ($event->{code} // '');
+        }
+        $obs{returned} = 1;
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $client = create_client();
+    complete_h2_handshake($client, $client_sock);
+    my $sid = open_ws_stream($client, $client_sock);
+    ok(pump_until($client, $client_sock, sub { $obs{accepted} }), 'accepted');
+
+    my $text = Protocol::WebSocket::Frame->new(type => 'text', buffer => 'after-close', masked => 1)->to_bytes;
+    send_stream_data($client, $client_sock, $sid, client_close_frame(1000, 'bye') . $text, 0);
+    exchange_frames($client, $client_sock, 5);
+    send_stream_data($client, $client_sock, $sid, '', 1);
+    ok(pump_until($client, $client_sock, sub { $obs{returned} }), 'the app returned');
+    is(\@events, ['websocket.disconnect:1000', 'websocket.disconnect:1000'],
+        'both receives gave the disconnect; the stray message was discarded');
+
+    eval { $stream_io->close_now };
+    $loop->remove($server);
+};
+
 done_testing;

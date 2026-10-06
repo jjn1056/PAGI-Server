@@ -1075,4 +1075,35 @@ subtest 'a send parked on backpressure when the peer closes does not write after
     shutdown_server($server);
 };
 
+subtest 'data frames the peer sends after its Close never reach the app' => sub {
+    # A peer sends no data after its Close (RFC 6455 5.5.1). One that does --
+    # here in the same write -- has its frames discarded: the app's receives
+    # give the disconnect, never the stray message.
+    my (@events, %obs);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        $obs{accepted} = 1;
+        for my $attempt (1 .. 2) {
+            my $event = await $receive->();
+            push @events, $event->{type} eq 'websocket.receive'
+                ? "receive:" . ($event->{text} // '')
+                : "$event->{type}:" . ($event->{code} // '');
+        }
+        $obs{returned} = 1;
+    };
+    my $server = start_server($app, ws_close_timeout => 5);
+    my $sock = connect_client($server->port);
+    like(ws_upgrade($sock), qr/HTTP\/1\.1 101/, 'upgrade');
+    ok(pump_until(sub { $obs{accepted} }, 3), 'accepted');
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . 'bye') . make_websocket_frame(1, 'after-close'));
+    ok(pump_until(sub { $obs{returned} }, 5), 'the app returned');
+    is(\@events, ['websocket.disconnect:1000', 'websocket.disconnect:1000'],
+        'both receives gave the disconnect; the stray message was discarded');
+    close($sock);
+    shutdown_server($server);
+};
+
 done_testing;
