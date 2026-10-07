@@ -1987,9 +1987,16 @@ forcing remaining connections closed. Within the same bound it then waits
 for each connection's application to return -- the cleanup a
 C<server_shutdown> disconnect starts, such as saving state -- before sending
 C<lifespan.shutdown>; an application still running at the deadline is left,
-with a warn line. In multi-worker mode it also bounds
-how long the master waits for a worker to exit after SIGTERM before
-escalating to SIGKILL.
+with a warn line. C<lifespan.shutdown> then has up to this many seconds again
+to complete.
+
+In multi-worker mode the master sends each worker SIGTERM and escalates to
+SIGKILL this many seconds later, so a worker's B<whole> shutdown -- finishing
+requests, its applications returning, and C<lifespan.shutdown> -- must fit
+within one C<shutdown_timeout>. A worker still busy then is killed, and its
+C<lifespan.shutdown> does not complete. Keep application cleanup bounded,
+return promptly after a C<server_shutdown> disconnect, and keep
+C<lifespan.shutdown> short. A single-process server has no such limit.
 
 B<CLI:> C<--shutdown-timeout 30>
 

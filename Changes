@@ -53,6 +53,10 @@
     lifespan.shutdown ran first. The server now waits, within
     shutdown_timeout, for each connection's application to return before
     lifespan.shutdown; one still running then is left, with a warn line.
+    In multi-worker mode the master's SIGKILL still comes shutdown_timeout
+    after its SIGTERM, so a worker's whole shutdown, lifespan.shutdown
+    included, must fit in that one bound (documented under
+    shutdown_timeout).
   - A server shutting down dropped each open WebSocket without a Close, so
     clients saw an abnormal closure (1006). It now sends Close 1012
     ("Service Restart") first, on HTTP/1.1 and HTTP/2, and the
