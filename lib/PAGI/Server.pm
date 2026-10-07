@@ -38,6 +38,7 @@ use Future;
 use Future::AsyncAwait;
 
 use Scalar::Util qw(weaken refaddr);
+use Time::HiRes ();
 use Socket qw(sockaddr_family unpack_sockaddr_in unpack_sockaddr_un AF_UNIX AF_INET);
 use POSIX ();
 
@@ -1982,7 +1983,11 @@ B<CLI:> C<--heartbeat-timeout 20>
 Maximum time in seconds to wait for graceful shutdown to complete.
 Default: 30. On SIGTERM/SIGINT the server stops accepting new connections
 and waits up to this many seconds for in-flight requests to finish before
-forcing remaining connections closed. In multi-worker mode it also bounds
+forcing remaining connections closed. Within the same bound it then waits
+for each connection's application to return -- the cleanup a
+C<server_shutdown> disconnect starts, such as saving state -- before sending
+C<lifespan.shutdown>; an application still running at the deadline is left,
+with a warn line. In multi-worker mode it also bounds
 how long the master waits for a worker to exit after SIGTERM before
 escalating to SIGKILL.
 
@@ -2539,8 +2544,11 @@ Initiates graceful shutdown. The server stops accepting new connections,
 waits for active requests to complete (up to C<shutdown_timeout> seconds),
 then exits. Each open WebSocket is sent a Close with code C<1012> ("Service
 Restart") first, on HTTP/1.1 and HTTP/2, and its application's
-C<websocket.disconnect> reports C<1012> with reason C<server_shutdown>. In
-multi-worker mode, SIGTERM is forwarded to all workers.
+C<websocket.disconnect> reports C<1012> with reason C<server_shutdown>. The
+server then waits, within C<shutdown_timeout>, for each connection's
+application to return, so cleanup started by that disconnect can finish,
+before C<lifespan.shutdown>. In multi-worker mode, SIGTERM is forwarded to all
+workers.
 
     kill -TERM <pid>
 
@@ -5004,8 +5012,11 @@ async sub shutdown {
     }
     $self->{_listen_entries} = [];
 
-    # Wait for active connections to drain (graceful shutdown)
+    # Wait for active connections to drain, then for their applications to
+    # return -- both within the one shutdown_timeout (graceful shutdown)
+    my $deadline = Time::HiRes::time() + ($self->{shutdown_timeout} // 30);
     await $self->_drain_connections;
+    await $self->_wait_for_applications($deadline);
 
     # Run lifespan shutdown
     my $shutdown_result = await $self->_run_lifespan_shutdown;
@@ -5016,6 +5027,39 @@ async sub shutdown {
     }
 
     return $self;
+}
+
+# A scope's application Future, adopted for error handling and remembered
+# until it completes, so a shutdown can give each application until its
+# deadline to return (see _drain_connections).
+sub _adopt_scope_future {
+    my ($self, $future) = @_;
+    $self->adopt_future($future);
+    my $key = refaddr($future);
+    $self->{_scope_futures}{$key} = $future;
+    $future->on_ready(sub { delete $self->{_scope_futures}{$key} if $self });
+    return $future;
+}
+
+# The connections are closed; their applications may still be running the
+# cleanup their disconnect started (saving state, telling another service).
+# They get until the shutdown deadline to return, so that lifespan.shutdown
+# comes after them; one still running then is left, with a warn line. Waited
+# on through without_cancel copies, so the deadline never cancels an
+# application.
+async sub _wait_for_applications {
+    my ($self, $deadline) = @_;
+    my @running = grep { !$_->is_ready } values %{ $self->{_scope_futures} || {} };
+    return unless @running;
+    my $left = $deadline - Time::HiRes::time();
+    await Future->wait_any(
+        Future->wait_all(map { $_->without_cancel } @running),
+        $self->loop->delay_future(after => $left > 0 ? $left : 0),
+    );
+    my $still = grep { !$_->is_ready } @running;
+    $self->_log(warn => "Shutdown timeout: $still application"
+        . ($still == 1 ? '' : 's') . " still running after shutdown_timeout") if $still;
+    return;
 }
 
 # Wait for active connections to complete, with timeout
@@ -5083,6 +5127,7 @@ async sub _drain_connections {
     }
 
     delete $self->{drain_complete};
+
     return;
 }
 

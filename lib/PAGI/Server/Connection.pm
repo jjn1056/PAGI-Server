@@ -1861,7 +1861,7 @@ sub _h2_dispatch_stream {
         };
     })->();
 
-    $self->{server}->adopt_future($future);
+    $self->{server}->_adopt_scope_future($future);
 }
 
 # What every connection-handler boundary does with what it caught -- the two
@@ -5571,9 +5571,9 @@ sub _try_handle_request {
         $self->{request_future} = $self->_handle_request($request);
     }
 
-    # Use adopt_future for proper error tracking instead of retain
-    # This ensures errors are propagated to the server's error handling
-    $self->{server}->adopt_future($self->{request_future});
+    # Adopted for the server's error handling, and remembered so a shutdown
+    # can wait for the application to return (_adopt_scope_future).
+    $self->{server}->_adopt_scope_future($self->{request_future});
 }
 
 sub _is_websocket_upgrade {
