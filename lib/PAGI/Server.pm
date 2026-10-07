@@ -5044,16 +5044,22 @@ sub _adopt_scope_future {
 # The connections are closed; their applications may still be running the
 # cleanup their disconnect started (saving state, telling another service).
 # They get until the shutdown deadline to return, so that lifespan.shutdown
-# comes after them; one still running then is left, with a warn line. Waited
-# on through without_cancel copies, so the deadline never cancels an
-# application.
+# comes after them; one still running then is left, with a warn line. The
+# wait is a Future the applications' own on_ready callbacks count down, so
+# the deadline never cancels an application, and no without_cancel copy is
+# left behind (Future::XS 0.15 warns "lost a sequence Future" when one is
+# dropped before its original resolves).
 async sub _wait_for_applications {
     my ($self, $deadline) = @_;
     my @running = grep { !$_->is_ready } values %{ $self->{_scope_futures} || {} };
     return unless @running;
+    my $all_returned = $self->loop->new_future;
+    my $pending = @running;
+    $_->on_ready(sub { $all_returned->done if !--$pending && !$all_returned->is_ready })
+        for @running;
     my $left = $deadline - Time::HiRes::time();
     await Future->wait_any(
-        Future->wait_all(map { $_->without_cancel } @running),
+        $all_returned,
         $self->loop->delay_future(after => $left > 0 ? $left : 0),
     );
     my $still = grep { !$_->is_ready } @running;
