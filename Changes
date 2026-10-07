@@ -47,6 +47,11 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - A server shutting down dropped each open WebSocket without a Close, so
+    clients saw an abnormal closure (1006). It now sends Close 1012
+    ("Service Restart") first, on HTTP/1.1 and HTTP/2, and the
+    application's websocket.disconnect reports 1012 with reason
+    server_shutdown, as uvicorn does.
   - pagi-server with no application, on an install without PAGI-Tools,
     failed with Perl's "Can't locate PAGI/App/Directory.pm"; it now says
     the default (serving the current directory) needs PAGI-Tools and how

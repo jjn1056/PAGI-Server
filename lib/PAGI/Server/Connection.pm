@@ -6973,6 +6973,31 @@ sub _h2_announce_shutdown {
     } ? 1 : 0;
 }
 
+# Server shutdown: end each accepted WebSocket on this connection with a Close
+# 1012 ("Service Restart", IANA WebSocket close code registry) before the
+# connection goes, so the client sees a planned restart rather than an abnormal
+# closure on either transport, and the application's websocket.disconnect
+# carries the same code with reason server_shutdown. A WebSocket whose Close is
+# already sent or queued (its own, or the reply to its peer's) is left alone.
+sub _close_websockets_for_shutdown {
+    my ($self) = @_;
+    if ($self->{h2_session}) {
+        for my $stream_id (sort { $a <=> $b } keys %{ $self->{h2_streams} || {} }) {
+            my $ss = $self->{h2_streams}{$stream_id};
+            next unless $ss->{is_websocket} && _ws_handshake_accepted($ss->{seq_state});
+            next if $ss->{ws_eof_pending};
+            $self->_h2_ws_close($stream_id, code => 1012, reason => 'server_shutdown');
+        }
+        $self->_h2_write_pending;
+        return;
+    }
+    $self->_send_close_frame(1012, '')
+        if ($self->{scope_kind} // '') eq 'websocket'
+        && _ws_handshake_accepted($self->{h1_seq})
+        && !$self->{closed};
+    return;
+}
+
 sub _close {
     my ($self, %opt) = @_;
 
