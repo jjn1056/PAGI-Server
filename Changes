@@ -47,6 +47,12 @@
   - Faster under connection bursts (accepts are batched).
 
   [Fixed]
+  - On shutdown the server stopped waiting once connections were closed,
+    so an application's cleanup after its server_shutdown disconnect
+    (saving state, telling another service) was cut off mid-await and
+    lifespan.shutdown ran first. The server now waits, within
+    shutdown_timeout, for each connection's application to return before
+    lifespan.shutdown; one still running then is left, with a warn line.
   - A server shutting down dropped each open WebSocket without a Close, so
     clients saw an abnormal closure (1006). It now sends Close 1012
     ("Service Restart") first, on HTTP/1.1 and HTTP/2, and the
