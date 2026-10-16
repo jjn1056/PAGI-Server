@@ -5,7 +5,7 @@ requires 'perl', '5.018';
 
 # Core async framework
 requires 'IO::Socket::IP', '0.43'; # Without this IO::Async doesn't work as well
-requires 'IO::Async', '0.802';  # Includes IO::Async::Function for worker pools
+requires 'IO::Async', '0.805';  # Future::IO's poll (0.21+ needs it); IO::Async::Function for worker pools
 requires 'Future', '0.50';
 requires 'Future::AsyncAwait', '0.66';
 

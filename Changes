@@ -45,6 +45,10 @@
     Future::XS whenever it was installed, whatever was asked.
   - The startup banner no longer shows the PAGI spec version.
   - Faster under connection bursts (accepts are batched).
+  - Requires IO::Async 0.805, the first whose Future::IO implementation has
+    poll: Future::IO 0.21 and later build sysread and syswrite on it, so an
+    application reading or writing through Future::IO under an older
+    IO::Async died with "Can't locate object method poll".
 
   [Fixed]
   - On shutdown the server stopped waiting once connections were closed,
