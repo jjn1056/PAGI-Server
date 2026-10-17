@@ -23,8 +23,9 @@ recommends 'IO::Socket::SSL', '2.074';
 # To enable TLS/HTTPS support, install with:
 #   cpanm IO::Async::SSL IO::Socket::SSL
 
-# HTTP/2 support (optional - only needed for --http2)
-recommends 'Net::HTTP2::nghttp2', '0.011';
+# HTTP/2 support (optional - only needed for --http2). The server needs 0.011;
+# 0.012 is recommended because 0.011's own tests fail on libnghttp2 1.69+.
+recommends 'Net::HTTP2::nghttp2', '0.012';
 # To enable HTTP/2 support, install with:
 #   cpanm Net::HTTP2::nghttp2
 

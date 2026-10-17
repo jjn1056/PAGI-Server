@@ -9,7 +9,8 @@
     before websocket.accept or sse.start; websocket.http.response.* and
     sse.http.response.* are removed; sse.close is the only clean end of an
     SSE stream.
-  - HTTP/2 requires Net::HTTP2::nghttp2 0.011.
+  - HTTP/2 requires Net::HTTP2::nghttp2 0.011, and 0.012 is recommended:
+    0.011's own tests fail to install on libnghttp2 1.69 and newer.
   - Request targets: absolute-form is reduced to its path and query (400
     when its host differs from Host); a target that is not a path, or *
     outside OPTIONS, is answered 400.
