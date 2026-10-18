@@ -243,6 +243,51 @@ subtest 'peer Close(1000, "bye") -> close_code 1000, close_reason "bye"' => sub 
     shutdown_server($server);
 };
 
+# The peer's reason is UTF-8 on the wire (RFC 6455) and a String to the
+# application (Www.pod websocket.disconnect): decoded once, on receipt. The
+# server's reciprocal Close echoes the peer's own bytes unchanged.
+subtest 'peer Close(1000, "caf\xC3\xA9") -> the application gets "caf\x{e9}"' => sub {
+    require Protocol::WebSocket::Frame;
+    my %obs;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_complete(sub { $obs{close_reason} = $conn->close_reason });
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        while (1) {
+            my $e = await $receive->();
+            next unless $e->{type} eq 'websocket.disconnect';
+            $obs{event_reason} = $e->{reason};
+            last;
+        }
+        $obs{done} = 1;
+    };
+    my $server = start_server($app);
+    my $sock   = connect_client($server->port);
+    my $got = ws_upgrade($sock);
+    like($got, qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . "caf\xC3\xA9"));
+    my $echo;
+    pump_until(sub {
+        my $n = sysread($sock, my $buf, 4096);
+        $got .= $buf if defined $n && $n > 0;
+        my ($frames) = $got =~ /\r\n\r\n(.*)\z/s or return 0;
+        my $frame = Protocol::WebSocket::Frame->new;
+        $frame->append($frames);
+        $echo = $frame->next_bytes;
+        return defined $echo;
+    }, 5);
+    is(unpack('H*', $echo // ''), unpack('H*', pack('n', 1000) . "caf\xC3\xA9"),
+        "the server's reciprocal Close echoes the peer's bytes");
+    close($sock);
+    ok(pump_until(sub { $obs{done} && exists $obs{close_reason} }, 5), 'the scope ended');
+    is($obs{event_reason}, "caf\x{e9}", 'websocket.disconnect reason is the decoded text');
+    is($obs{close_reason}, "caf\x{e9}", 'close_reason is the decoded text');
+    shutdown_server($server);
+};
+
 # =============================================================================
 # 2. Peer Close with no code (empty payload) -> 1005 / undef.
 # =============================================================================

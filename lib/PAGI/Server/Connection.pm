@@ -4082,6 +4082,10 @@ sub _h2_process_ws_frames {
             $self->_h2_stop_ws_keepalive($stream);
 
             my ($code, $reason) = (1005, '');
+            # $reason is the peer's bytes, echoed in the reciprocal Close;
+            # $reason_text is the String the application gets (Www.pod
+            # websocket.disconnect), decoded once below.
+            my $reason_text = '';
 
             # RFC 6455 Section 5.5.1: Close frame payload is 0 or >=2 bytes
             if (length($bytes) == 1) {
@@ -4127,6 +4131,7 @@ sub _h2_process_ws_frames {
                             reason => 'protocol_error');
                         return;
                     }
+                    $reason_text = $decoded;
                 }
             }
 
@@ -4185,7 +4190,7 @@ sub _h2_process_ws_frames {
             $stream->{ws_disconnect_event} = {
                 type   => 'websocket.disconnect',
                 code   => $code,
-                reason => $reason,
+                reason => $reason_text,
             } unless $stream->{ws_disconnect_delivered};
 
             # The closing handshake is now complete on this stream -- the peer's
@@ -8813,6 +8818,10 @@ sub _process_websocket_frames {
             # Close frame
             $self->{close_received} = 1;
             my ($code, $reason) = (1005, '');
+            # $reason is the peer's bytes, echoed in the reciprocal Close;
+            # $reason_text is the String the application gets (Www.pod
+            # websocket.disconnect), decoded once below.
+            my $reason_text = '';
 
             # RFC 6455 Section 5.5.1: Close frame payload is 0 or >=2 bytes
             # 1 byte is invalid
@@ -8854,6 +8863,7 @@ sub _process_websocket_frames {
                         $self->_handle_disconnect_and_close('protocol_error', detail => 'Invalid UTF-8 in close reason');
                         return;
                     }
+                    $reason_text = $decoded;
                 }
             }
 
@@ -8877,7 +8887,7 @@ sub _process_websocket_frames {
             $self->{ws_disconnect_event} = {
                 type   => 'websocket.disconnect',
                 code   => $code,
-                reason => $reason,
+                reason => $reason_text,
             };
 
             # A completed closing handshake is a clean end regardless of the
@@ -8898,7 +8908,7 @@ sub _process_websocket_frames {
             if ($self->{current_connection_state}
                 && _ws_handshake_accepted($self->{h1_seq})) {
                 $self->{current_connection_state}->_set_ws_close(
-                    $code, (length($reason) ? $reason : undef));
+                    $code, (length($reason_text) ? $reason_text : undef));
             }
 
             # A completed closing handshake (this valid peer Close plus this

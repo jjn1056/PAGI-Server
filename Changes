@@ -34,6 +34,12 @@
     GOAWAY.
 
   [Changed]
+  - A peer's WebSocket close reason reaches the application as text,
+    decoded from the UTF-8 its Close frame carries, in websocket.disconnect's
+    reason and close_reason (PAGI::Spec::Www: a String). It was the raw
+    bytes, so a reason such as "caf\x{e9}" arrived as "caf\x{c3}\x{a9}".
+    PAGI::Test::Client already delivered text. The server's reciprocal Close
+    still echoes the peer's bytes unchanged.
   - The read buffer default is 64 KB (was 8 KB).
   - A body that crosses max_body_size after the response has started ends
     the scope with body_too_large instead of sending a second 413.
