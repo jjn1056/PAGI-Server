@@ -345,6 +345,7 @@ sub new {
 }
 
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
+use Errno qw(EIO);
 
 sub start {
     my ($self) = @_;
@@ -386,10 +387,33 @@ sub start {
     # Set up idle timeout timer
     $self->_start_idle_timer;
 
+    # The stream writes from the event loop, after a send has returned, so a
+    # die inside its writer (Perl's "Wide character in syswrite", or
+    # IO::Async::SSL's utf8::downgrade) is outside every send and would unwind
+    # the loop, ending the process. Wrap whatever writer the stream has --
+    # IO::Async's own syswrite, or IO::Async::SSL's on a TLS stream, which is
+    # installed before this Connection is built -- so a die ends this
+    # connection as a write error (on_write_error, below) instead.
+    my $inner_writer = $stream->{writer};   # IO::Async::Stream's writer slot
+    # Shared by the writer and on_write_error rather than kept on this
+    # Connection: a close-after-response scope ends, and drops its
+    # Connection, before the loop flushes the response, so the guard and
+    # its log must not need the Connection to still exist.
+    my $write_exception;
+    weaken(my $weak_server = $self->{server});
+
     # Configure I/O chunk lengths and the read handler.
     $stream->configure(
         read_len  => $self->{read_buffer_size},
         write_len => $self->{write_buffer_size},
+        writer    => sub {
+            my $s = shift;
+            my $written;
+            return $written if eval { $written = $s->$inner_writer(@_); 1 };
+            $write_exception = $@;
+            $! = EIO;
+            return undef;
+        },
         on_read => sub  {
         my ($s, $buffref, $eof) = @_;
             return 0 unless $weak_self;
@@ -499,9 +523,36 @@ sub start {
         },
         on_write_error => sub {
             my ($s, $errno) = @_;
-            return unless $weak_self;
             local $! = $errno;
-            $weak_self->_h1_transport_closed('write_error', detail => "$!");
+            my $died = $write_exception;
+            undef $write_exception;
+
+            # A writer that died (see the writer above) is a server or library
+            # defect, not a network event: the operator's to see, at error,
+            # with its own message rather than the EIO standing in for it. A
+            # response whose last send was accepted has already ended cleanly
+            # (Www.pod: the server finished its output processing), so only
+            # this log can say so; one still streaming ends as write_error.
+            my $detail = defined $died ? (_detail_from_error("$died") // 'unknown error') : undef;
+            if (defined $detail and my $log = $weak_self // $weak_server) {
+                $log->_log(error => "socket write died: $detail; the connection was closed", __PACKAGE__);
+            }
+
+            # No Connection left to end: close the stream here, as IO::Async
+            # would itself were no handler set, or its queued write would be
+            # retried for as long as the peer stays connected.
+            unless ($weak_self) {
+                $s->close_now;
+                return;
+            }
+            return $weak_self->_h1_transport_closed('write_error', detail => "$!")
+                unless defined $detail;
+            $weak_self->_h1_transport_closed('write_error', detail => $detail);
+            # Whatever closes the connection next -- ending the scope may
+            # resume the application, whose return closes with
+            # close_when_empty -- must find nothing to flush: the write that
+            # died would only die again, for as long as it stayed queued.
+            $s->close_now;
         },
     );
 }

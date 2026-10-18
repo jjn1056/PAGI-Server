@@ -70,6 +70,13 @@
     HTTP/1.1 and HTTP/2: a character above 0xFF re-encoded the close code's
     own bytes (1000 sent as 03 C3 A8), and a Latin-1 character was sent
     unencoded. The reason is a String; the server now sends it as UTF-8.
+  - An exception thrown inside a socket write (a write runs from the event
+    loop, after the application's send returned) unwound the loop and ended
+    the server process, dropping every connection. It now ends only its own
+    connection, at once and without retrying the write, and is logged at
+    error ("socket write died: ...; the connection was closed"); a response
+    still streaming also ends as write_error. TLS streams are covered: the
+    guard wraps IO::Async::SSL's writer.
   - On shutdown the server stopped waiting once connections were closed,
     so an application's cleanup after its server_shutdown disconnect
     (saving state, telling another service) was cut off mid-await and
