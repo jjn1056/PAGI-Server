@@ -58,6 +58,20 @@ my $app = async sub {
         await $send->({ type => 'http.response.body', body => "trailers:$err", more => 0 });
         return;
     }
+    # A character above 0xFF in a byte field: before validation refused it,
+    # it reached syswrite and killed the server.
+    if ($path eq '/wide-header') {
+        my $err = do { local $@; eval { await $send->({ type => 'http.response.start', status => 200,
+            headers => [['x-wide', "v\x{263a}"]] }) }; $@ };
+        return await $report->($err);
+    }
+    if ($path eq '/wide-body') {
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
+        my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => "wide \x{263a}", more => 0 }) }; $@ };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.body', body => "body:$err", more => 0 });
+        return;
+    }
     if ($path eq '/post-close') {
         # Post-close no-op: complete the response, wait for the client to go
         # away, then send a malformed event. Spec order: closed-check runs
@@ -113,6 +127,10 @@ like( $get->('/duplicate-start')->content, qr/dup:.*duplicate http\.response\.st
     'duplicate start fails without disturbing the real response' );
 like( $get->('/undeclared-trailers')->content, qr/trailers:.*not declared/,
     'undeclared trailers fail' );
+like( $get->('/wide-header')->content, qr/Invalid header value: contains a character above 0xFF/,
+    'a wide header value fails the send Future' );
+like( $get->('/wide-body')->content, qr/body:.*'body' contains a character above 0xFF/,
+    'a wide body fails the send Future without disturbing the response' );
 is( $get->('/ok')->content, 'NO-ERROR', 'a conforming app is unaffected' );
 
 # Post-close: malformed send after client disconnect resolves as a no-op.
