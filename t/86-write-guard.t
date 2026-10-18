@@ -60,7 +60,7 @@ my $app = async sub {
     my $conn = $scope->{'pagi.connection'};
     $conn->on_disconnect(sub { $ended{$path} = [ $conn->disconnect_reason, $conn->disconnect_detail ] });
     $ARMED  = 1 if $path eq '/boom' || $path eq '/stream';
-    $ALWAYS = 1 if $path eq '/stuck' || $path eq '/stream-stuck';
+    $ALWAYS = 1 if $path eq '/stuck' || $path eq '/stream-stuck' || $path =~ m{\A/close};
     await $send->({ type => 'http.response.start', status => 200,
                     headers => [['content-type', 'text/plain']] });
     if ($path =~ m{\A/stream}) {
@@ -86,8 +86,8 @@ my $port = $server->port;
 sub client { IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 5)
     or die "connect: $!" }
 sub request {
-    my ($sock, $path) = @_;
-    syswrite($sock, "GET $path HTTP/1.1\r\nHost: x\r\n\r\n");
+    my ($sock, $path, $head) = @_;
+    syswrite($sock, $head // "GET $path HTTP/1.1\r\nHost: x\r\n\r\n");
     $sock->blocking(0);
     my ($wire, $eof) = ('', 0);
     for (1 .. 100) {
@@ -113,15 +113,21 @@ like($first, qr/\A HTTP\/1\.1\ 200 .* ok\ \/before/xs, 'a keep-alive connection 
 for my $case (['/boom', qr/armed write failure/, 'once'],
               ['/stuck', qr/persistent write failure/, 'on every attempt'],
               ['/stream', qr/armed write failure/, 'while the response streams'],
-              ['/stream-stuck', qr/persistent write failure/, 'on every attempt while it streams']) {
-    my ($path, $message, $how) = @$case;
+              ['/stream-stuck', qr/persistent write failure/, 'on every attempt while it streams'],
+              # A close-after-response request ends its scope, and frees its
+              # Connection, before the loop flushes: the guard must not need it.
+              ['/close-stuck', qr/persistent write failure/, 'on a Connection: close request',
+               "GET /close-stuck HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"],
+              ['/close-http10', qr/persistent write failure/, 'on an HTTP/1.0 request',
+               "GET /close-http10 HTTP/1.0\r\n\r\n"]) {
+    my ($path, $message, $how, $head) = @$case;
     ($DIES, @log) = (0);
-    my ($wire, $eof) = request(client(), $path);
+    my ($wire, $eof) = request(client(), $path, $head);
     $ALWAYS = 0;
     ok(1, "the server process survived a write that died $how");
     unlike($wire, qr/\Q$path\E/, "$path: nothing of the response is sent");
     ok($eof, "$path: the connection whose write died is closed");
-    cmp_ok($DIES, '<=', 2, "$path: the dying write is not retried ($DIES attempts)");
+    is($DIES, 1, "$path: the dying write is not retried");
     for (1 .. 20) { last if exists $ended{$path}; $loop->loop_once(0.02) }
     my @died = grep { $_->{message} =~ /socket write died/ } @log;
     is(scalar @died, 1, "$path: the server logs it once");

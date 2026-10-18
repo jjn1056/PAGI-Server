@@ -395,6 +395,12 @@ sub start {
     # installed before this Connection is built -- so a die ends this
     # connection as a write error (on_write_error, below) instead.
     my $inner_writer = $stream->{writer};   # IO::Async::Stream's writer slot
+    # Shared by the writer and on_write_error rather than kept on this
+    # Connection: a close-after-response scope ends, and drops its
+    # Connection, before the loop flushes the response, so the guard and
+    # its log must not need the Connection to still exist.
+    my $write_exception;
+    weaken(my $weak_server = $self->{server});
 
     # Configure I/O chunk lengths and the read handler.
     $stream->configure(
@@ -404,7 +410,7 @@ sub start {
             my $s = shift;
             my $written;
             return $written if eval { $written = $s->$inner_writer(@_); 1 };
-            $weak_self->{write_exception} = $@ if $weak_self;
+            $write_exception = $@;
             $! = EIO;
             return undef;
         },
@@ -517,11 +523,9 @@ sub start {
         },
         on_write_error => sub {
             my ($s, $errno) = @_;
-            return unless $weak_self;
             local $! = $errno;
-            my $died = delete $weak_self->{write_exception};
-            return $weak_self->_h1_transport_closed('write_error', detail => "$!")
-                unless defined $died;
+            my $died = $write_exception;
+            undef $write_exception;
 
             # A writer that died (see the writer above) is a server or library
             # defect, not a network event: the operator's to see, at error,
@@ -529,8 +533,20 @@ sub start {
             # response whose last send was accepted has already ended cleanly
             # (Www.pod: the server finished its output processing), so only
             # this log can say so; one still streaming ends as write_error.
-            my $detail = _detail_from_error("$died") // 'unknown error';
-            $weak_self->_log(error => "socket write died: $detail; the connection was closed");
+            my $detail = defined $died ? (_detail_from_error("$died") // 'unknown error') : undef;
+            if (defined $detail and my $log = $weak_self // $weak_server) {
+                $log->_log(error => "socket write died: $detail; the connection was closed", __PACKAGE__);
+            }
+
+            # No Connection left to end: close the stream here, as IO::Async
+            # would itself were no handler set, or its queued write would be
+            # retried for as long as the peer stays connected.
+            unless ($weak_self) {
+                $s->close_now;
+                return;
+            }
+            return $weak_self->_h1_transport_closed('write_error', detail => "$!")
+                unless defined $detail;
             $weak_self->_h1_transport_closed('write_error', detail => $detail);
             # Whatever closes the connection next -- ending the scope may
             # resume the application, whose return closes with
