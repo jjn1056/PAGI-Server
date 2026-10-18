@@ -3412,8 +3412,10 @@ sub _h2_create_websocket_send {
 
             # Close frame + END_STREAM, and release this stream's keepalive
             # (_h2_ws_close does both). Runs outside feed(), so flush here.
+            # The reason is a String (Www.pod websocket.close): UTF-8 on the wire.
             $weak_self->_h2_ws_close($stream_id,
-                code => $event->{code} // 1000, text => $event->{reason} // '');
+                code => $event->{code} // 1000,
+                text => Encode::encode('UTF-8', $event->{reason} // ''));
             $weak_self->_h2_write_pending;
         }
         elsif ($type eq 'websocket.keepalive') {
@@ -8648,7 +8650,10 @@ sub _create_websocket_send {
 
             # Send close frame
             my $code = $event->{code} // 1000;
-            my $reason = $event->{reason} // '';
+            # The reason is a String (Www.pod websocket.close): UTF-8 on the
+            # wire. Joined unencoded to the packed code, a wide character
+            # re-encoded the code's bytes and a Latin-1 one went out raw.
+            my $reason = Encode::encode('UTF-8', $event->{reason} // '');
 
             # Idempotent with a reciprocal Close already on the wire: in the
             # peer-first race the parser has already sent the server's one Close

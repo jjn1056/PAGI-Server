@@ -319,6 +319,38 @@ subtest 'server-initiated close, peer silent -> close_code 1006, not the server 
     shutdown_server($server);
 };
 
+# websocket.close reason is a String (Www.pod): the server sends it UTF-8
+# encoded after the two code bytes, and the code bytes are never re-encoded.
+for my $reason ("r\x{263a}", "caf\x{e9}") {
+    subtest sprintf('an application close reason goes out as UTF-8 (%vX)', $reason) => sub {
+        require Encode;
+        require Protocol::WebSocket::Frame;
+        my ($app, $obs, $park) = build_ws_app(
+            pre_park => sub { $_[0]->({ type => 'websocket.close', code => 1000, reason => $reason }) },
+        );
+        my $server = start_server($app);
+        my $sock   = connect_client($server->port);
+        my $got = ws_upgrade($sock);
+        like($got, qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
+        my $payload;
+        pump_until(sub {
+            my $n = sysread($sock, my $buf, 4096);
+            $got .= $buf if defined $n && $n > 0;
+            my ($frames) = $got =~ /\r\n\r\n(.*)\z/s or return 0;
+            my $frame = Protocol::WebSocket::Frame->new;
+            $frame->append($frames);
+            $payload = $frame->next_bytes;
+            return defined $payload;
+        }, 5);
+        is(unpack('H*', $payload // ''), unpack('H*', pack('n', 1000) . Encode::encode('UTF-8', $reason)),
+            'Close payload is the code bytes then the reason in UTF-8');
+        close($sock);
+        $park->done unless $park->is_ready;
+        pump_until(sub { $obs->{app_returned} }, 3);
+        shutdown_server($server);
+    };
+}
+
 subtest 'a websocket refusal populates 1006 before its clean completion' => sub {
     my ($app, $seen) = build_refusing_ws_app();
     my $server = start_server($app);

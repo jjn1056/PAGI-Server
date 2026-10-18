@@ -60,6 +60,10 @@
     the application's send fails with a message naming the field and the
     server keeps running. String fields (websocket text, sse data, event,
     id, comment) are unchanged: the server encodes them.
+  - A websocket.close reason with a non-ASCII character went out wrong on
+    HTTP/1.1 and HTTP/2: a character above 0xFF re-encoded the close code's
+    own bytes (1000 sent as 03 C3 A8), and a Latin-1 character was sent
+    unencoded. The reason is a String; the server now sends it as UTF-8.
   - On shutdown the server stopped waiting once connections were closed,
     so an application's cleanup after its server_shutdown disconnect
     (saving state, telling another service) was cut off mid-await and
