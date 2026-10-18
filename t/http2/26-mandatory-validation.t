@@ -202,6 +202,20 @@ my $http_app = async sub {
         await $send->({ type => 'http.response.body', body => $err, more => 0 });
     };
 
+    # A character above 0xFF in a byte field is refused before it reaches
+    # the session (the h1 twin killed the server in syswrite).
+    if ($path eq '/wide-header') {
+        my $err = do { local $@; eval { await $send->({ type => 'http.response.start', status => 200,
+            headers => [['x-wide', "v\x{263a}"]] }) }; $@ };
+        return await $report->($err);
+    }
+    if ($path eq '/wide-body') {
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type','text/plain']] });
+        my $err = do { local $@; eval { await $send->({ type => 'http.response.body', body => "wide \x{263a}", more => 0 }) }; $@ };
+        $err =~ s/\n/ /g;
+        await $send->({ type => 'http.response.body', body => "body:$err", more => 0 });
+        return;
+    }
     if ($path eq '/bad-status') {
         my $err = do { local $@; eval { await $send->({ type => 'http.response.start', status => "50\n0" }) }; $@ };
         return await $report->($err);
@@ -286,6 +300,12 @@ like( $body, qr/trailers:.*trailers were not declared or body is not complete/,
 get_h2('/after-complete', app => $http_app);
 like( $after_complete_err // '', qr/response already complete/,
     'send after http response complete raises on h2, not silently swallowed' );
+
+(undef, $body) = get_h2('/wide-header', app => $http_app);
+like( $body, qr/Invalid header value: contains a character above 0xFF/, 'a wide header value fails the send Future' );
+(undef, $body) = get_h2('/wide-body', app => $http_app);
+like( $body, qr/body:.*'body' contains a character above 0xFF/,
+    'a wide body fails the send Future without disturbing the response' );
 
 (undef, $body) = get_h2('/ok', app => $http_app);
 is( $body, 'NO-ERROR', 'a conforming app is unaffected' );

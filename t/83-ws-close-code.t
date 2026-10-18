@@ -243,6 +243,51 @@ subtest 'peer Close(1000, "bye") -> close_code 1000, close_reason "bye"' => sub 
     shutdown_server($server);
 };
 
+# The peer's reason is UTF-8 on the wire (RFC 6455) and a String to the
+# application (Www.pod websocket.disconnect): decoded once, on receipt. The
+# server's reciprocal Close echoes the peer's own bytes unchanged.
+subtest 'peer Close(1000, "caf\xC3\xA9") -> the application gets "caf\x{e9}"' => sub {
+    require Protocol::WebSocket::Frame;
+    my %obs;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+        $conn->on_complete(sub { $obs{close_reason} = $conn->close_reason });
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        while (1) {
+            my $e = await $receive->();
+            next unless $e->{type} eq 'websocket.disconnect';
+            $obs{event_reason} = $e->{reason};
+            last;
+        }
+        $obs{done} = 1;
+    };
+    my $server = start_server($app);
+    my $sock   = connect_client($server->port);
+    my $got = ws_upgrade($sock);
+    like($got, qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
+    syswrite($sock, make_websocket_frame(8, pack('n', 1000) . "caf\xC3\xA9"));
+    my $echo;
+    pump_until(sub {
+        my $n = sysread($sock, my $buf, 4096);
+        $got .= $buf if defined $n && $n > 0;
+        my ($frames) = $got =~ /\r\n\r\n(.*)\z/s or return 0;
+        my $frame = Protocol::WebSocket::Frame->new;
+        $frame->append($frames);
+        $echo = $frame->next_bytes;
+        return defined $echo;
+    }, 5);
+    is(unpack('H*', $echo // ''), unpack('H*', pack('n', 1000) . "caf\xC3\xA9"),
+        "the server's reciprocal Close echoes the peer's bytes");
+    close($sock);
+    ok(pump_until(sub { $obs{done} && exists $obs{close_reason} }, 5), 'the scope ended');
+    is($obs{event_reason}, "caf\x{e9}", 'websocket.disconnect reason is the decoded text');
+    is($obs{close_reason}, "caf\x{e9}", 'close_reason is the decoded text');
+    shutdown_server($server);
+};
+
 # =============================================================================
 # 2. Peer Close with no code (empty payload) -> 1005 / undef.
 # =============================================================================
@@ -318,6 +363,38 @@ subtest 'server-initiated close, peer silent -> close_code 1006, not the server 
     pump_until(sub { $obs->{app_returned} }, 3);
     shutdown_server($server);
 };
+
+# websocket.close reason is a String (Www.pod): the server sends it UTF-8
+# encoded after the two code bytes, and the code bytes are never re-encoded.
+for my $reason ("r\x{263a}", "caf\x{e9}") {
+    subtest sprintf('an application close reason goes out as UTF-8 (%vX)', $reason) => sub {
+        require Encode;
+        require Protocol::WebSocket::Frame;
+        my ($app, $obs, $park) = build_ws_app(
+            pre_park => sub { $_[0]->({ type => 'websocket.close', code => 1000, reason => $reason }) },
+        );
+        my $server = start_server($app);
+        my $sock   = connect_client($server->port);
+        my $got = ws_upgrade($sock);
+        like($got, qr/HTTP\/1\.1 101/, 'websocket upgrade succeeded');
+        my $payload;
+        pump_until(sub {
+            my $n = sysread($sock, my $buf, 4096);
+            $got .= $buf if defined $n && $n > 0;
+            my ($frames) = $got =~ /\r\n\r\n(.*)\z/s or return 0;
+            my $frame = Protocol::WebSocket::Frame->new;
+            $frame->append($frames);
+            $payload = $frame->next_bytes;
+            return defined $payload;
+        }, 5);
+        is(unpack('H*', $payload // ''), unpack('H*', pack('n', 1000) . Encode::encode('UTF-8', $reason)),
+            'Close payload is the code bytes then the reason in UTF-8');
+        close($sock);
+        $park->done unless $park->is_ready;
+        pump_until(sub { $obs->{app_returned} }, 3);
+        shutdown_server($server);
+    };
+}
 
 subtest 'a websocket refusal populates 1006 before its clean completion' => sub {
     my ($app, $seen) = build_refusing_ws_app();

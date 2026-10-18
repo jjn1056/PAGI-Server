@@ -25,13 +25,24 @@ sub _is_nonneg_number {
     return defined $v && !ref $v && $v =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
 }
 
+# Bytes are characters <= 0xFF, whatever Perl's internal UTF-8 flag says. A
+# wider character cannot be written to a socket: it dies in syswrite, outside
+# any application's send, and takes the server down with it.
+sub _is_bytes {
+    my $copy = $_[0];
+    return utf8::downgrade($copy, 1);
+}
+
 # --- Shared header validation (byte safety per PAGI Www.pod "Header byte safety") ---
 # Names: no CR/LF/NUL and no other control characters. Values: no CR/LF/NUL.
+# Both are bytes.
 
 sub check_header_value {
     my ($value) = @_;
     die "Invalid header value: contains CR, LF, or null byte\n"
         if $value =~ /[\r\n\0]/;
+    die "Invalid header value: contains a character above 0xFF (encode it to bytes)\n"
+        unless _is_bytes($value);
     return $value;
 }
 
@@ -41,6 +52,8 @@ sub check_header_name {
         if $name =~ /[\r\n\0]/;
     die "Invalid header name: contains control characters\n"
         if $name =~ /[[:cntrl:]]/;
+    die "Invalid header name: contains a character above 0xFF (encode it to bytes)\n"
+        unless _is_bytes($name);
     return $name;
 }
 
@@ -132,6 +145,10 @@ sub _validate_http_response_body {
     croak "http.response.body requires exactly one of body/file/fh (got $count)"
         unless $count <= 1;  # 0 is OK - defaults to empty body
 
+    croak "http.response.body 'body' contains a character above 0xFF (encode it to bytes)"
+        if $has_body && defined $event->{body} && !ref $event->{body}
+            && !_is_bytes($event->{body});
+
     # offset must be a non-negative integer if present
     if (exists $event->{offset} && defined $event->{offset}) {
         croak "http.response.body 'offset' must be a non-negative integer"
@@ -216,6 +233,9 @@ sub _validate_websocket_send_event {
 
     croak "websocket.send requires exactly one of bytes/text (got $count)"
         unless $count == 1;
+
+    croak "websocket.send 'bytes' contains a character above 0xFF (encode it to bytes, or send text)"
+        if defined $event->{bytes} && !ref $event->{bytes} && !_is_bytes($event->{bytes});
 }
 
 sub _validate_websocket_close {
@@ -630,7 +650,9 @@ send path.
 =head2 validate_http_send($event, $opts)
 
 Validates HTTP send events: C<http.response.start>, C<http.response.body>,
-C<http.response.trailers>, C<http.fullflush>. C<$opts> is an optional hash
+C<http.response.trailers>, C<http.fullflush>. An C<http.response.body>
+C<body> must be bytes: a character above 0xFF croaks (before this check one
+reached the socket write and killed the server). C<$opts> is an optional hash
 reference of the form C<< { extensions => \%scope_extensions } >>;
 C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
 C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
@@ -638,7 +660,9 @@ with C<"Unrecognized event type '$type' for http protocol">.
 
 =head2 validate_websocket_send($event, $opts)
 
-Validates WebSocket send events: C<websocket.accept>, C<websocket.send>,
+Validates WebSocket send events: C<websocket.accept>, C<websocket.send>
+(whose C<bytes> must be bytes: a character above 0xFF croaks; C<text> is
+characters, encoded by the server),
 C<websocket.close>, C<websocket.keepalive>, and the three HTTP response
 events C<http.response.start>, C<http.response.body> and
 C<http.response.trailers> that refuse the handshake. The refusal events are
@@ -815,15 +839,16 @@ C<"cannot send '<type>' during lifespan phase '<state>'">.
 =head2 check_header_value($value)
 
 Checks a single header value for byte safety: dies with a C<\n>-terminated
-message if C<$value> contains a CR, LF, or null byte. Returns C<$value>
-unchanged on success.
+message if C<$value> contains a CR, LF, or null byte, or a character above
+0xFF (a value is bytes; Perl's internal UTF-8 flag does not matter). Returns
+C<$value> unchanged on success.
 
 =head2 check_header_name($name)
 
 Checks a single header name for byte safety: dies with a C<\n>-terminated
 message if C<$name> contains a CR, LF, or null byte, and dies with a
 separate C<\n>-terminated message if it contains any other control
-character. Returns C<$name> unchanged on success.
+character or a character above 0xFF. Returns C<$name> unchanged on success.
 
 =head2 validate_headers($headers, $event_type)
 

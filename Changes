@@ -34,6 +34,12 @@
     GOAWAY.
 
   [Changed]
+  - A peer's WebSocket close reason reaches the application as text,
+    decoded from the UTF-8 its Close frame carries, in websocket.disconnect's
+    reason and close_reason (PAGI::Spec::Www: a String). It was the raw
+    bytes, so a reason such as "caf\x{e9}" arrived as "caf\x{c3}\x{a9}".
+    PAGI::Test::Client already delivered text. The server's reciprocal Close
+    still echoes the peer's bytes unchanged.
   - The read buffer default is 64 KB (was 8 KB).
   - A body that crosses max_body_size after the response has started ends
     the scope with body_too_large instead of sending a second 413.
@@ -52,6 +58,18 @@
     IO::Async died with "Can't locate object method poll".
 
   [Fixed]
+  - A character above 0xFF in a byte field killed the server process
+    ("Wide character in syswrite") on HTTP/1.1, and the listener with it:
+    a response body, a header name or value (response, trailers,
+    websocket.accept, sse.start, a refusal), or websocket.send bytes. Over
+    HTTP/2 the response went out empty. Event validation now refuses it, so
+    the application's send fails with a message naming the field and the
+    server keeps running. String fields (websocket text, sse data, event,
+    id, comment) are unchanged: the server encodes them.
+  - A websocket.close reason with a non-ASCII character went out wrong on
+    HTTP/1.1 and HTTP/2: a character above 0xFF re-encoded the close code's
+    own bytes (1000 sent as 03 C3 A8), and a Latin-1 character was sent
+    unencoded. The reason is a String; the server now sends it as UTF-8.
   - On shutdown the server stopped waiting once connections were closed,
     so an application's cleanup after its server_shutdown disconnect
     (saving state, telling another service) was cut off mid-await and

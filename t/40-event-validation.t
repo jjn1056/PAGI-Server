@@ -435,6 +435,43 @@ subtest 'header tuple and byte safety validation' => sub {
         qr/contains CR, LF, or null byte/, 'sse refusal headers validated');
 };
 
+subtest 'byte fields refuse a character above 0xFF' => sub {
+    # Header names and values, a body and websocket bytes are bytes (Www.pod
+    # "Header byte safety", the event field types). A wide character there
+    # is an application error; written to the socket it killed the server.
+    my $W = "\x{263a}";
+    my $V = \&PAGI::Server::EventValidator::validate_http_send;
+    my $WS = \&PAGI::Server::EventValidator::validate_websocket_send;
+    my $SSE = \&PAGI::Server::EventValidator::validate_sse_send;
+    my $wide = qr/contains a character above 0xFF/;
+    for my $case (
+        [ 'response header value', sub { $V->({ type => 'http.response.start', status => 200, headers => [['x-a', "v$W"]] }) } ],
+        [ 'response header name',  sub { $V->({ type => 'http.response.start', status => 200, headers => [["x-$W", 'v']] }) } ],
+        [ 'trailer value',         sub { $V->({ type => 'http.response.trailers', headers => [['x-t', "v$W"]] }) } ],
+        [ 'websocket.accept header', sub { $WS->({ type => 'websocket.accept', headers => [['x-a', "v$W"]] }) } ],
+        [ 'websocket refusal body', sub { $WS->({ type => 'http.response.body', body => "no $W" }) } ],
+        [ 'sse.start header',      sub { $SSE->({ type => 'sse.start', headers => [['x-a', "v$W"]] }) } ],
+    ) {
+        my ($what, $send) = @$case;
+        like(dies { $send->() }, $wide, "$what: a wide character is refused");
+    }
+    like(dies { $V->({ type => 'http.response.body', body => "wide $W" }) },
+        qr/http\.response\.body 'body' $wide/, 'response body: a wide character is refused, naming the field');
+    like(dies { $WS->({ type => 'websocket.send', bytes => "b$W" }) },
+        qr/websocket\.send 'bytes' $wide/, 'websocket bytes: a wide character is refused, naming the field');
+
+    # Bytes are characters <= 0xFF whatever Perl's internal flag says.
+    utf8::upgrade(my $flagged = "caf\xC3\xA9");
+    ok(lives { $V->({ type => 'http.response.body', body => $flagged }) }, 'a flagged byte-range body is bytes');
+    ok(lives { $V->({ type => 'http.response.start', status => 200, headers => [['x-a', $flagged]] }) },
+        'a flagged byte-range header value is bytes');
+    ok(lives { $WS->({ type => 'websocket.send', bytes => $flagged }) }, 'flagged byte-range websocket bytes are bytes');
+
+    # String fields are characters, encoded by the server: a wide one is fine.
+    ok(lives { $WS->({ type => 'websocket.send', text => "t$W" }) }, 'websocket text may be wide');
+    ok(lives { $SSE->({ type => 'sse.send', data => "d$W" }) }, 'sse data may be wide');
+};
+
 subtest 'unknown event types are rejected per family' => sub {
     like( dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.bod' }) },
         qr/Unrecognized event type 'http\.response\.bod' for http protocol/, 'http typo throws');

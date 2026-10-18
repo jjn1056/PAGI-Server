@@ -253,8 +253,9 @@ sub close_code { return $_[0]->{_close_code} }
 
     my $reason = $conn->close_reason;   # peer's reason text, or undef
 
-On a C<websocket> scope, the B<peer's> WebSocket Close-frame reason text, or
-C<undef> when the peer sent no reason, sent no code (C<close_code> C<1005>), or
+On a C<websocket> scope, the B<peer's> WebSocket Close-frame reason text,
+decoded from the UTF-8 the frame carries (a character string, as in
+C<websocket.disconnect>), or C<undef> when the peer sent no reason, sent no code (C<close_code> C<1005>), or
 sent no Close at all (C<close_code> C<1006>). Like L</close_code> it reflects
 the peer's Close only and is C<undef> on C<http> and C<sse> scopes. Populated
 before the terminal callbacks fire. See L<PAGI::Spec::Www/"Connection State">.

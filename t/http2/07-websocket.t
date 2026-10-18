@@ -494,6 +494,89 @@ subtest 'WebSocket close handshake over HTTP/2' => sub {
 };
 
 # ============================================================
+# A peer close reason is decoded once, on receipt; the echo keeps its bytes
+# ============================================================
+subtest 'peer Close reason "caf\xC3\xA9" reaches the application as "caf\x{e9}" over HTTP/2' => sub {
+    my (%obs);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'websocket';
+        my $c = $scope->{'pagi.connection'};
+        $c->on_complete(sub { $obs{close_reason} = $c->close_reason });
+        await $send->({ type => 'websocket.accept' });
+        while (1) {
+            my $e = await $receive->();
+            next unless $e->{type} eq 'websocket.disconnect';
+            $obs{event_reason} = $e->{reason};
+            last;
+        }
+    };
+    my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+    my $ws_data = '';
+    my $client = create_client(on_data_chunk_recv => sub { $ws_data .= $_[1]; 0 });
+    complete_h2_handshake($client, $client_sock);
+    my $ws_stream_id = $client->submit_request(
+        method => 'CONNECT', path => '/ws/peer-reason', scheme => 'https', authority => 'localhost',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body => sub { return undef },
+    );
+    $client_sock->syswrite($client->mem_send);
+    exchange_frames($client, $client_sock);
+    my $close_frame = Protocol::WebSocket::Frame->new(
+        type => 'close', buffer => pack('n', 1000) . "caf\xC3\xA9", masked => 1);
+    send_stream_data($client, $client_sock, $ws_stream_id, $close_frame->to_bytes);
+    exchange_frames($client, $client_sock);
+    send_stream_data($client, $client_sock, $ws_stream_id, '', 1);
+    exchange_frames($client, $client_sock);
+
+    my $frame = Protocol::WebSocket::Frame->new;
+    $frame->append($ws_data);
+    is(unpack('H*', $frame->next_bytes // ''), unpack('H*', pack('n', 1000) . "caf\xC3\xA9"),
+        "the server's reciprocal Close echoes the peer's bytes");
+    is($obs{event_reason}, "caf\x{e9}", 'websocket.disconnect reason is the decoded text');
+    is($obs{close_reason}, "caf\x{e9}", 'close_reason is the decoded text');
+
+    $stream_io->close_now;
+    $loop->remove($server);
+};
+
+# ============================================================
+# An application close reason is a String: sent UTF-8 after the code bytes
+# ============================================================
+for my $reason ("r\x{263a}", "caf\x{e9}") {
+    subtest sprintf('an application close reason goes out as UTF-8 over HTTP/2 (%vX)', $reason) => sub {
+        require Encode;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            return unless $scope->{type} eq 'websocket';
+            await $send->({ type => 'websocket.accept' });
+            await $send->({ type => 'websocket.close', code => 1000, reason => $reason });
+            while (1) { my $e = await $receive->(); last if $e->{type} eq 'websocket.disconnect' }
+        };
+        my ($conn, $stream_io, $client_sock, $server) = create_h2_connection(app => $app);
+        my $ws_data = '';
+        my $client = create_client(on_data_chunk_recv => sub { $ws_data .= $_[1]; 0 });
+        complete_h2_handshake($client, $client_sock);
+        my $ws_stream_id = $client->submit_request(
+            method => 'CONNECT', path => '/ws/reason', scheme => 'https', authority => 'localhost',
+            headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+            body => sub { return undef },
+        );
+        $client_sock->syswrite($client->mem_send);
+        exchange_frames($client, $client_sock);
+
+        my $frame = Protocol::WebSocket::Frame->new;
+        $frame->append($ws_data);
+        my $payload = $frame->next_bytes;
+        is(unpack('H*', $payload // ''), unpack('H*', pack('n', 1000) . Encode::encode('UTF-8', $reason)),
+            'Close payload is the code bytes then the reason in UTF-8');
+
+        $stream_io->close_now;
+        $loop->remove($server);
+    };
+}
+
+# ============================================================
 # A Ping that arrives before the accept is ponged
 # ============================================================
 # RFC 6455 section 5.5.3: a Pong must be sent in response to a Ping "as soon
