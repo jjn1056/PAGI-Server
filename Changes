@@ -52,6 +52,14 @@
     IO::Async died with "Can't locate object method poll".
 
   [Fixed]
+  - A character above 0xFF in a byte field killed the server process
+    ("Wide character in syswrite") on HTTP/1.1, and the listener with it:
+    a response body, a header name or value (response, trailers,
+    websocket.accept, sse.start, a refusal), or websocket.send bytes. Over
+    HTTP/2 the response went out empty. Event validation now refuses it, so
+    the application's send fails with a message naming the field and the
+    server keeps running. String fields (websocket text, sse data, event,
+    id, comment) are unchanged: the server encodes them.
   - On shutdown the server stopped waiting once connections were closed,
     so an application's cleanup after its server_shutdown disconnect
     (saving state, telling another service) was cut off mid-await and
