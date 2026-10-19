@@ -8174,13 +8174,17 @@ async sub _handle_websocket_request {
     eval {
         my $app_failed = 0;
         if ($error) {
+            $self->_log(error => "PAGI application error (WebSocket): $error");
             # If neither the handshake nor a refusal response has begun, answer
-            # with an HTTP error; once a refusal has started there is no room on
-            # the wire for a second response.
+            # with an HTTP error and end the scope with the error's first line;
+            # once a refusal has started there is no room on the wire for a
+            # second response. The answer marks the response started, so the
+            # no-response branch below would not run for it.
             if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
                 $self->_send_error_response(500, "Internal Server Error");
+                $self->_end_scope('server_error', detail => _detail_from_error($error));
+                return;
             }
-            $self->_log(error => "PAGI application error (WebSocket): $error");
             $app_failed = 1;
         }
 
@@ -8256,9 +8260,12 @@ async sub _handle_websocket_request {
                 # flushed by _close's close_when_empty before the socket closes.
                 $self->_send_close_frame(1011, '');
                 $self->_record_end($self, reason => 'server_error');
-                $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
+                # A failure was logged above, and its first line is the detail.
+                $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake")
+                    unless $app_failed;
                 $self->_handle_disconnect_and_close('server_error',
-                    detail => 'accepted socket left without a closing handshake');
+                    detail => $app_failed ? _detail_from_error($error)
+                                          : 'accepted socket left without a closing handshake');
                 return;
             }
             # A clean end reaching THIS mark is a completed refusal: a WebSocket
