@@ -7420,11 +7420,17 @@ async sub _handle_sse_request {
     eval {
         if ($error) {
             $app_error = $error;
-            # If SSE not yet started, send HTTP error
-            if (!_sse_stream_started($self->{h1_seq})) {
-                $self->_send_error_response(500, "Internal Server Error");
-            }
             $self->_log(error => "PAGI application error (SSE): $error");
+            # If neither the stream nor a refusal has begun, answer with an HTTP
+            # error and end the scope with the error's first line. The answer
+            # marks the response started, so the no-response branch below would
+            # not run for it.
+            if (!_sse_stream_started($self->{h1_seq}) && !$self->{response_started}) {
+                $self->_stop_sse_idle_timer;
+                $self->_send_error_response(500, "Internal Server Error");
+                $self->_end_scope('server_error', detail => _detail_from_error($error));
+                return;
+            }
             # An exception is not a clean end -- never keep the connection alive
             # after one, exactly as the plain HTTP request path does.
             $app_failed = 1;
