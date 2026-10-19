@@ -1955,8 +1955,11 @@ sub _h2_incomplete_scope_end {
     my $kind   = $stream_state->{is_websocket} ? 'websocket' : 'sse';
     my $seq    = $stream_state->{seq_state};
     my $verb   = _h2_scope_verb($kind, $seq);
+    # A crash reports its error; a return reports what was left undone,
+    # in the words HTTP/1.1 uses for a refusal.
     my $detail = $error ? _detail_from_error($error)
-                        : "started with $verb but never ended cleanly";
+               : ($seq // '') eq 'refusing' ? 'refusal started but never completed'
+               : "started with $verb but never ended cleanly";
     $self->_log(error => $error
         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
@@ -7420,11 +7423,17 @@ async sub _handle_sse_request {
     eval {
         if ($error) {
             $app_error = $error;
-            # If SSE not yet started, send HTTP error
-            if (!_sse_stream_started($self->{h1_seq})) {
-                $self->_send_error_response(500, "Internal Server Error");
-            }
             $self->_log(error => "PAGI application error (SSE): $error");
+            # If neither the stream nor a refusal has begun, answer with an HTTP
+            # error and end the scope with the error's first line. The answer
+            # marks the response started, so the no-response branch below would
+            # not run for it.
+            if (!_sse_stream_started($self->{h1_seq}) && !$self->{response_started}) {
+                $self->_stop_sse_idle_timer;
+                $self->_send_error_response(500, "Internal Server Error");
+                $self->_end_scope('server_error', detail => _detail_from_error($error));
+                return;
+            }
             # An exception is not a clean end -- never keep the connection alive
             # after one, exactly as the plain HTTP request path does.
             $app_failed = 1;
@@ -7472,7 +7481,8 @@ async sub _handle_sse_request {
                 $self->_log(error => "PAGI application returned with an incomplete response")
                     unless $self->{closed} || $app_failed;
                 $self->_end_scope('server_error',
-                    detail => 'refusal started but never completed');
+                    detail => $app_failed ? _detail_from_error($app_error)
+                                          : 'refusal started but never completed');
                 return;
             }
             $self->{current_connection_state}->_mark_complete
@@ -8174,13 +8184,17 @@ async sub _handle_websocket_request {
     eval {
         my $app_failed = 0;
         if ($error) {
+            $self->_log(error => "PAGI application error (WebSocket): $error");
             # If neither the handshake nor a refusal response has begun, answer
-            # with an HTTP error; once a refusal has started there is no room on
-            # the wire for a second response.
+            # with an HTTP error and end the scope with the error's first line;
+            # once a refusal has started there is no room on the wire for a
+            # second response. The answer marks the response started, so the
+            # no-response branch below would not run for it.
             if (!_ws_handshake_accepted($self->{h1_seq}) && !$self->{response_started}) {
                 $self->_send_error_response(500, "Internal Server Error");
+                $self->_end_scope('server_error', detail => _detail_from_error($error));
+                return;
             }
-            $self->_log(error => "PAGI application error (WebSocket): $error");
             $app_failed = 1;
         }
 
@@ -8194,7 +8208,8 @@ async sub _handle_websocket_request {
             $self->_log(error => "PAGI application returned with an incomplete response")
                 unless $self->{closed} || $app_failed;
             $self->_end_scope('server_error',
-                detail => 'refusal started but never completed');
+                detail => $app_failed ? _detail_from_error($error)
+                                      : 'refusal started but never completed');
             return;
         }
 
@@ -8256,9 +8271,12 @@ async sub _handle_websocket_request {
                 # flushed by _close's close_when_empty before the socket closes.
                 $self->_send_close_frame(1011, '');
                 $self->_record_end($self, reason => 'server_error');
-                $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake");
+                # A failure was logged above, and its first line is the detail.
+                $self->_log(error => "PAGI application returned from an accepted WebSocket without a closing handshake")
+                    unless $app_failed;
                 $self->_handle_disconnect_and_close('server_error',
-                    detail => 'accepted socket left without a closing handshake');
+                    detail => $app_failed ? _detail_from_error($error)
+                                          : 'accepted socket left without a closing handshake');
                 return;
             }
             # A clean end reaching THIS mark is a completed refusal: a WebSocket

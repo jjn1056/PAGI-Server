@@ -70,6 +70,24 @@
     HTTP/1.1 and HTTP/2: a character above 0xFF re-encoded the close code's
     own bytes (1000 sent as 03 C3 A8), and a Latin-1 character was sent
     unencoded. The reason is a String; the server now sends it as UTF-8.
+  - A WebSocket or SSE application that died before accepting or starting
+    left its scope's pagi.connection unsettled on HTTP/1.1: no disconnect
+    reason, on_disconnect never fired, disconnect_future stayed pending,
+    and an on_disconnect callback that captured the connection kept it
+    alive (about 2 KB per failed handshake). The 500 it got marked the
+    response started, so the end was never recorded. The scope now ends
+    with server_error and the error's first line, as on HTTP/2.
+  - A refusal left unfinished (an http.response.start before
+    websocket.accept or sse.start, then no final body) was reported
+    differently by the two transports. Both now report the error's first
+    line when the application died (HTTP/1.1 said "refusal started but
+    never completed") and "refusal started but never completed" when it
+    returned (HTTP/2 said "started with http.response.start but never
+    ended cleanly"). The reason, server_error, is unchanged.
+  - A WebSocket application that died after accepting was reported on
+    HTTP/1.1 as "accepted socket left without a closing handshake" (the
+    detail for one that returned) and logged twice; its detail is now the
+    error's first line, logged once, as on HTTP/2.
   - An exception thrown inside a socket write (a write runs from the event
     loop, after the application's send returned) unwound the loop and ended
     the server process, dropping every connection. It now ends only its own
