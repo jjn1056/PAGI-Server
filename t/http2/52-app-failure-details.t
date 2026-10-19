@@ -19,8 +19,8 @@ BEGIN {
 # ============================================================
 # The HTTP/2 twin of t/88-app-failure-details.t: an application that dies is
 # reported with server_error and the error's first line, and the scope's
-# connection object settles. HTTP/2 already did this; these pin it, so the
-# two transports cannot drift apart again.
+# connection object settles. HTTP/2 already did most of this; these rows pin
+# it against t/88's, so the two transports cannot drift apart on them.
 # ============================================================
 
 use PAGI::Server;

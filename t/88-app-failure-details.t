@@ -190,12 +190,13 @@ subtest 'a failure after the peer closed' => sub {
             await $receive->();             # websocket.disconnect, from the peer's Close
             $dies->();
         });
-    note('peer-closed: complete=' . $r->{cs}->response_complete . ' log=' . scalar @{ $r->{log} });
     # The closing handshake completed before the app died, so the exchange
     # is recorded as complete; the failure after it is only logged.
     is(close_codes($r->{wire}), [1000], 'one Close: the reply to the peer, no 1011 after it');
     ok(!$r->{cs}->is_connected, 'settled');
     is($r->{cs}->disconnect_reason, undef, 'a clean end has no reason');
+    ok($r->{cs}->response_complete, 'and is complete');
+    is(scalar @{ $r->{log} }, 1, 'the failure is logged once') or diag(join "\n", @{ $r->{log} });
 };
 
 subtest 'controls: an app that returns without starting' => sub {
