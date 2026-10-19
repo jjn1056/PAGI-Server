@@ -155,15 +155,30 @@ subtest 'an exception object: its first line, without the location' => sub {
     is($r->{cs}->disconnect_detail, 'boom', 'the detail');
 };
 
-subtest 'a failure after a refusal started keeps its detail' => sub {
-    my $r = run_h1(request => $UPGRADE, app => async sub {
+# W4: an unfinished refusal reports the error when the app died, and the
+# refusal left undone when it returned.
+sub refusing {
+    my ($ws, $then) = @_;
+    return async sub {
         my ($scope, $receive, $send) = @_;
-        await $receive->();
+        await $receive->() if $ws;
         await $send->({ type => 'http.response.start', status => 403, headers => [] });
-        $dies->();
-    });
-    is($r->{cs}->disconnect_reason, 'server_error', 'reason');
-    is($r->{cs}->disconnect_detail, 'refusal started but never completed', 'detail');
+        await $send->({ type => 'http.response.body', body => 'no', more => 1 });
+        $dies->() if $then eq 'dies';
+        return;
+    };
+}
+
+subtest 'W4: an unfinished refusal' => sub {
+    for my $case ([ WebSocket => 1, $UPGRADE ], [ SSE => 0, $SSE ]) {
+        my ($label, $ws, $request) = @$case;
+        my $r = run_h1(request => $request, app => refusing($ws, 'returns'));
+        settled_ok($r, 'server_error', 'refusal started but never completed', "$label, returns");
+        $r = run_h1(request => $request, app => refusing($ws, 'dies'));
+        settled_ok($r, 'server_error', 'the handler broke', "$label, dies");
+        is(scalar @{ $r->{log} }, 1, "$label, dies: one error log line") or diag(join "\n", @{ $r->{log} });
+        is(status_of($r->{wire}), 403, "$label: the refusal's own status went out");
+    }
 };
 
 subtest 'a failure after the peer closed' => sub {

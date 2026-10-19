@@ -1955,8 +1955,11 @@ sub _h2_incomplete_scope_end {
     my $kind   = $stream_state->{is_websocket} ? 'websocket' : 'sse';
     my $seq    = $stream_state->{seq_state};
     my $verb   = _h2_scope_verb($kind, $seq);
+    # A crash reports its error; a return reports what was left undone,
+    # in the words HTTP/1.1 uses for a refusal.
     my $detail = $error ? _detail_from_error($error)
-                        : "started with $verb but never ended cleanly";
+               : ($seq // '') eq 'refusing' ? 'refusal started but never completed'
+               : "started with $verb but never ended cleanly";
     $self->_log(error => $error
         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"
         : "PAGI application returned after $verb without ending the scope cleanly (HTTP/2 stream $stream_id)");
@@ -7478,7 +7481,8 @@ async sub _handle_sse_request {
                 $self->_log(error => "PAGI application returned with an incomplete response")
                     unless $self->{closed} || $app_failed;
                 $self->_end_scope('server_error',
-                    detail => 'refusal started but never completed');
+                    detail => $app_failed ? _detail_from_error($app_error)
+                                          : 'refusal started but never completed');
                 return;
             }
             $self->{current_connection_state}->_mark_complete
@@ -8204,7 +8208,8 @@ async sub _handle_websocket_request {
             $self->_log(error => "PAGI application returned with an incomplete response")
                 unless $self->{closed} || $app_failed;
             $self->_end_scope('server_error',
-                detail => 'refusal started but never completed');
+                detail => $app_failed ? _detail_from_error($error)
+                                      : 'refusal started but never completed');
             return;
         }
 

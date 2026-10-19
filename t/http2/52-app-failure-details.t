@@ -208,6 +208,25 @@ subtest 'an exception object: its first line, without the location' => sub {
     is($r->{cs}->disconnect_detail, 'boom', 'the detail');
 };
 
+subtest 'W4: an unfinished refusal' => sub {
+    for my $case ([ WebSocket => 1, $ws ], [ SSE => 0, $sse ]) {
+        my ($label, $is_ws, $submit) = @$case;
+        for my $then ('returns', 'dies') {
+            my $r = run_h2(submit => $submit, app => async sub {
+                my ($scope, $receive, $send) = @_;
+                await $receive->() if $is_ws;
+                await $send->({ type => 'http.response.start', status => 403, headers => [] });
+                await $send->({ type => 'http.response.body', body => 'no', more => 1 });
+                $dies->() if $then eq 'dies';
+                return;
+            });
+            settled_ok($r, 'server_error',
+                $then eq 'dies' ? 'the handler broke' : 'refusal started but never completed', "$label, $then");
+            is($r->{status}, 403, "$label, $then: the refusal's own status went out");
+        }
+    }
+};
+
 subtest 'plain HTTP: an app that dies before http.response.start' => sub {
     my $r = run_h2(submit => $http, app => async sub { $dies->() });
     settled_ok($r, 'server_error', 'the handler broke', 'HTTP');
