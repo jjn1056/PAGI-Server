@@ -2245,7 +2245,7 @@ sub _h2_create_receive {
                     $ss->{body_pending} = Future->new;
                 }
                 $parked = 1;
-                await $ss->{body_pending};
+                await $ss->{body_pending}->without_cancel;
 
                 # Re-fetch stream state (may have changed). A clean end is
                 # answered at the top of the loop, which never touches $ss.
@@ -3188,7 +3188,7 @@ sub _h2_create_websocket_receive {
                     $ss->{body_pending} = Future->new;
                 }
                 $parked = 1;
-                await $ss->{body_pending};
+                await $ss->{body_pending}->without_cancel;
 
                 $ss = $weak_self->{h2_streams}{$stream_id};
                 # A clean end is answered at the top of this loop, which never
@@ -3653,7 +3653,7 @@ sub _h2_create_sse_receive {
                         $ss->{body_pending} = Future->new;
                     }
                     $parked = 1;
-                    await $ss->{body_pending};
+                    await $ss->{body_pending}->without_cancel;
 
                     $ss = $weak_self->{h2_streams}{$stream_id};
                     # A clean end is answered at the top of this loop, which
@@ -3722,7 +3722,7 @@ sub _h2_create_sse_receive {
                     $ss->{body_pending} = Future->new;
                 }
                 $parked = 1;
-                await $ss->{body_pending};
+                await $ss->{body_pending}->without_cancel;
 
                 $ss = $weak_self->{h2_streams}{$stream_id};
                 # A clean end is answered at the top of this loop, which never
@@ -6023,7 +6023,13 @@ async sub _read_chunked_body {
         }
         $parked = 1;
         $self->_client_turn;
-        await $self->{receive_pending};
+        # receive_pending is the connection's wake-up, shared by every receive. A
+        # receive cancelled while parked here (Future->wait_any cancels the
+        # loser) must cancel only its own wait: on Perl 5.24+ Future::AsyncAwait
+        # passes a cancel on to what it awaits, and the next receive would find
+        # the wake-up cancelled. Every receive_pending and body_pending park site
+        # awaits through without_cancel for this reason.
+        await $self->{receive_pending}->without_cancel;
         $self->_app_turn;
         $self->{receive_pending} = undef;
 
@@ -6102,7 +6108,7 @@ async sub _read_chunked_body {
     }
     $parked = 1;
     $self->_client_turn;
-    await $self->{receive_pending};
+    await $self->{receive_pending}->without_cancel;
     $self->_app_turn;
     $self->{receive_pending} = undef;
 
@@ -6118,6 +6124,19 @@ async sub _read_chunked_body {
 
     # This shouldn't happen often - caller should retry
     return { type => $event_type, body => '', more => 1 };
+}
+
+# A receive that awaits a nested async sub -- the chunked body reader -- cancels
+# it when it is cancelled itself. Future::AsyncAwait passes a cancel on to the
+# Future an async sub awaits only on Perl 5.24 and later; below that, a
+# cancelled receive would leave the nested reader parked, to wake on the next
+# chunk and consume it for nobody. $nested holds the Futures this one receive
+# started. On 5.24+ they are already cancelled, and cancelling again does
+# nothing.
+sub _cancel_nested_with {
+    my ($future, $nested) = @_;
+    $future->on_cancel(sub { $_->cancel for grep { !$_->is_ready } @$nested });
+    return;
 }
 
 sub _create_receive {
@@ -6154,7 +6173,9 @@ sub _create_receive {
         return Future->done({ type => 'http.disconnect' }) unless $weak_self;
         return $disconnect->() if $weak_self->{closed};
 
-        my $future = $weak_self->_receive_http_body($request, $disconnect, $scope_ended);
+        my @nested;    # see _cancel_nested_with
+        my $future = $weak_self->_receive_http_body($request, $disconnect, $scope_ended, \@nested);
+        _cancel_nested_with($future, \@nested);
 
         # Track this Future so we can cancel it on close
         push @{$weak_self->{receive_futures}}, $future;
@@ -6171,7 +6192,7 @@ sub _create_receive {
 # connection alive while this coroutine is suspended.
 async sub _receive_http_body {
     weaken(my $weak_self = shift);
-    my ($request, $disconnect, $scope_ended) = @_;
+    my ($request, $disconnect, $scope_ended, $nested) = @_;
 
     my $content_length = $request->{content_length};
     my $is_chunked = $request->{chunked} // 0;
@@ -6217,7 +6238,7 @@ async sub _receive_http_body {
         }
 
         $parked = 1;
-        my $result = await $weak_self->{receive_pending};
+        my $result = await $weak_self->{receive_pending}->without_cancel;
         # receive_pending may be completed with a value (disconnect event)
         # or just done() as a signal
         return $result if ref $result eq 'HASH';
@@ -6246,7 +6267,7 @@ async sub _receive_http_body {
 
     # Handle chunked Transfer-Encoding
     if ($is_chunked) {
-        return await $weak_self->_read_chunked_body(
+        my $reading = $weak_self->_read_chunked_body(
             'http.request',
             $disconnect,
             \$request->{body_complete},
@@ -6254,6 +6275,8 @@ async sub _receive_http_body {
             $scope_ended,
             $disconnect,
         );
+        push @$nested, $reading;
+        return await $reading;
     }
 
     # Handle Content-Length based body reading
@@ -6275,7 +6298,7 @@ async sub _receive_http_body {
         }
         $parked = 1;
         $weak_self->_client_turn;
-        await $weak_self->{receive_pending};
+        await $weak_self->{receive_pending}->without_cancel;
         $weak_self->_app_turn;
         $weak_self->{receive_pending} = undef;
 
@@ -7793,6 +7816,7 @@ sub _create_sse_receive {
             return $disconnect->();
         }
 
+        my @nested;    # see _cancel_nested_with
         my $future = (async sub {
             # True once this call has waited: the answer it then gets is a
             # delivery of the scope's terminal state, not a repeat request
@@ -7821,7 +7845,7 @@ sub _create_sse_receive {
                     # sub parks on the same receive_pending, and the sibling
                     # Content-Length branch below asks the same question in
                     # the same place.
-                    return await $weak_self->_read_chunked_body(
+                    my $reading = $weak_self->_read_chunked_body(
                         'sse.request',
                         $disconnect,
                         \$request->{body_complete},
@@ -7829,6 +7853,8 @@ sub _create_sse_receive {
                         $clean_end,
                         $scope_end,
                     );
+                    push @nested, $reading;
+                    return await $reading;
                 }
 
                 my $remaining = $content_length - $request->{body_bytes_read};
@@ -7846,7 +7872,7 @@ sub _create_sse_receive {
                         $weak_self->{receive_pending} = Future->new;
                     }
                     $parked = 1;
-                    await $weak_self->{receive_pending};
+                    await $weak_self->{receive_pending}->without_cancel;
                     $weak_self->{receive_pending} = undef;
 
                     if (@{$weak_self->{receive_queue}}) {
@@ -7909,10 +7935,11 @@ sub _create_sse_receive {
                     $weak_self->{receive_pending} = Future->new;
                 }
                 $parked = 1;
-                await $weak_self->{receive_pending};
+                await $weak_self->{receive_pending}->without_cancel;
                 $weak_self->{receive_pending} = undef;
             }
         })->();
+        _cancel_nested_with($future, \@nested);
 
         # Track this Future
         push @{$weak_self->{receive_futures}}, $future;
@@ -8477,7 +8504,7 @@ sub _create_websocket_receive {
                     $weak_self->{receive_pending} = Future->new;
                 }
                 $parked = 1;
-                await $weak_self->{receive_pending};
+                await $weak_self->{receive_pending}->without_cancel;
                 $weak_self->{receive_pending} = undef;
 
                 if (@{$weak_self->{receive_queue}}) {
@@ -8503,7 +8530,7 @@ sub _create_websocket_receive {
                     $weak_self->{receive_pending} = Future->new;
                 }
                 $parked = 1;
-                await $weak_self->{receive_pending};
+                await $weak_self->{receive_pending}->without_cancel;
                 $weak_self->{receive_pending} = undef;
             }
         })->();
