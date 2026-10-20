@@ -144,7 +144,8 @@ subtest 'body_min_rate => 0 turns it off' => sub {
 };
 
 subtest 'invalid values die at construction' => sub {
-    for my $bad (-1, 'fast', '') {
+    # 9**9**9 is an infinity; 'Inf', '-Inf' and 'NaN' are numbers to Perl too.
+    for my $bad (-1, 'fast', '', 9**9**9, 'Inf', '-Inf', 'NaN') {
         like(dies { PAGI::Server->new(app => $app, body_min_rate => $bad) },
             qr/\QInvalid body_min_rate '$bad' - must be a non-negative number of bytes per second (0 turns it off)\E/,
             "body_min_rate '$bad'");
@@ -154,6 +155,8 @@ subtest 'invalid values die at construction' => sub {
     }
     ok(lives { PAGI::Server->new(app => $app, body_min_rate => 1024, body_rate_grace => 2.5) },
         'numbers are accepted');
+    ok(lives { PAGI::Server->new(app => $app, body_min_rate => 1e300, body_rate_grace => 0) },
+        'a very large finite number, and zero, are accepted');
 };
 
 done_testing;
