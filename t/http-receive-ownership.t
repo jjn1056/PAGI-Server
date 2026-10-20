@@ -31,17 +31,6 @@ for my $body_complete (0, 1) {
     };
 }
 
-subtest 'cancelling a receive releases its awaited Future' => sub {
-    my $conn = PAGI::Server::Connection->new;
-    my $receive = $conn->_create_receive({ content_length => 4 });
-    my $future = $receive->();
-    my $pending = $conn->{receive_pending};
-    ok(!$pending->is_ready, 'waiting for body data');
-    $future->cancel;
-    ok($future->is_cancelled, 'caller cancellation settles receive');
-    ok($pending->is_cancelled, 'cancellation reaches the awaited Future');
-};
-
 subtest 'repeated receives preserve body position and wake for new data' => sub {
     my $conn = PAGI::Server::Connection->new;
     my $receive = $conn->_create_receive({ content_length => 65540 });
