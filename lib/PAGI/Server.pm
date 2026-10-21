@@ -5063,9 +5063,7 @@ sub _adopt_scope_future {
 # They get until the shutdown deadline to return, so that lifespan.shutdown
 # comes after them; one still running then is left, with a warn line. The
 # wait is a Future the applications' own on_ready callbacks count down, so
-# the deadline never cancels an application, and no without_cancel copy is
-# left behind (Future::XS 0.15 warns "lost a sequence Future" when one is
-# dropped before its original resolves).
+# the deadline never cancels an application.
 async sub _wait_for_applications {
     my ($self, $deadline) = @_;
     my @running = grep { !$_->is_ready } values %{ $self->{_scope_futures} || {} };
@@ -5350,11 +5348,11 @@ so the default holds there. A program that loads Future itself before
 PAGI::Server gets whatever Future chose. The startup block reports
 C<future_xs on> or C<future_xs off>.
 
-Future::XS 0.15 warns C<lost a sequence Future> whenever a C<without_cancel>
-observer is dropped before its original resolves, which is what
-C<< Future->wait_any($work, $conn->disconnect_future) >> does on every race
-the work wins; Future::PP is silent for the same code. The difference has been
-reported upstream.
+Use Future::XS 0.16 or later. Before 0.16 it warns C<lost a sequence Future>
+whenever a C<without_cancel> observer is dropped before its original
+resolves, which is what C<< Future->wait_any($work, $conn->disconnect_future) >>
+does on every race the work wins; Future::PP is silent for the same code.
+0.16 fixes it (RT #181389).
 
 PAGI::Server is designed as a reference implementation prioritizing spec
 compliance and code clarity, yet delivers competitive performance suitable
