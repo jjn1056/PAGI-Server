@@ -626,8 +626,29 @@ sub _restart_idle_timer {
 }
 
 # HTTP/1.x request body: while the application waits for body bytes the client
-# has not sent yet, it is the client's turn -- the idle timer runs, and body
-# bytes reset it -- and once they arrive the application has the turn again.
+# has not sent yet, it is the client's turn -- the idle timer runs, body bytes
+# reset it, and body_min_rate counts the wait -- and otherwise the
+# application's. A wait is a receive's view of the wake-up (_wait_on), and ends
+# when the view settles: woken, or cancelled with its receive (Future->wait_any
+# cancels the loser). With several receives waiting, the turn goes back to the
+# application when the last wait ends. A request's end clears the live waits in
+# place, so a wait settling after it finds itself gone and leaves the next
+# request's turn alone.
+sub _wait_for_body {
+    my ($self, $waits) = @_;
+    my $view = _wait_on($waits, $self->{receive_pending});
+    my $body_waits = $self->{_body_waits} //= {};
+    $self->_client_turn unless %$body_waits;
+    my $id = ++$self->{_body_wait_id};
+    $body_waits->{$id} = 1;
+    weaken(my $weak_self = $self);
+    $view->on_ready(sub {
+        delete $body_waits->{$id} or return;
+        $weak_self->_app_turn if $weak_self && !%$body_waits;
+    });
+    return $view;
+}
+
 sub _client_turn {
     my ($self) = @_;
     $self->{_client_turn} = 1;
@@ -637,8 +658,19 @@ sub _client_turn {
 
 sub _app_turn {
     my ($self) = @_;
+    # The application was waiting until now, whether its wait ended with body
+    # bytes or with it cancelling the receive, so body_min_rate counts it.
+    $self->{_body_wait} += Time::HiRes::time() - $self->{_turn_at}
+        if $self->{body_min_rate} && defined $self->{_turn_at};
     $self->{_client_turn} = 0;
     $self->_pause_idle_timer;
+}
+
+# Ends a request's body turn without charging anyone: its waits are over.
+sub _end_body_waits {
+    my ($self) = @_;
+    %{ $self->{_body_waits} } = () if $self->{_body_waits};
+    $self->{_client_turn} = 0;
 }
 
 # True, after ending the request, when the body has arrived slower than
@@ -5797,7 +5829,7 @@ async sub _handle_request {
         if ($keep_alive) {
             # Reset for next request
             $self->{handling_request} = 0;
-            $self->{_client_turn} = 0;
+            $self->_end_body_waits;
             $self->_restart_idle_timer;
             $self->{response_started} = 0;
             $self->{h1_seq} = 'initial';
@@ -6028,11 +6060,9 @@ async sub _read_chunked_body {
             $self->{receive_pending} = Future->new;
         }
         $parked = 1;
-        $self->_client_turn;
         # receive_pending is the connection's wake-up, shared by every
-        # receive; see _wait_on.
-        await _wait_on($waits, $self->{receive_pending});
-        $self->_app_turn;
+        # receive; see _wait_on and _wait_for_body.
+        await $self->_wait_for_body($waits);
         $self->{receive_pending} = undef;
 
         # Check queue after waiting
@@ -6109,9 +6139,7 @@ async sub _read_chunked_body {
         $self->{receive_pending} = Future->new;
     }
     $parked = 1;
-    $self->_client_turn;
-    await _wait_on($waits, $self->{receive_pending});
-    $self->_app_turn;
+    await $self->_wait_for_body($waits);
     $self->{receive_pending} = undef;
 
     # Recursive call to re-process - but we can't use __SUB__ in nested async
@@ -6308,9 +6336,7 @@ async sub _receive_http_body {
             $weak_self->{receive_pending} = Future->new;
         }
         $parked = 1;
-        $weak_self->_client_turn;
-        await _wait_on($waits, $weak_self->{receive_pending});
-        $weak_self->_app_turn;
+        await $weak_self->_wait_for_body($waits);
         $weak_self->{receive_pending} = undef;
 
         # Check queue after waiting
@@ -7680,6 +7706,7 @@ sub _reset_after_sse_stream {
     $self->{receive_queue}   = [];
     $self->{receive_pending} = undef;
     $self->{receive_futures} = [];
+    $self->_end_body_waits;
 
     # The SSE stream that just ended completed a request on this connection,
     # same as the plain HTTP path: the next idle expiry reports
@@ -7883,7 +7910,7 @@ sub _create_sse_receive {
                         $weak_self->{receive_pending} = Future->new;
                     }
                     $parked = 1;
-                    await _wait_on(\@waits, $weak_self->{receive_pending});
+                    await $weak_self->_wait_for_body(\@waits);
                     $weak_self->{receive_pending} = undef;
 
                     if (@{$weak_self->{receive_queue}}) {
