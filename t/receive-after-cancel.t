@@ -21,12 +21,12 @@ use PAGI::Server;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
-# Two known warnings, from the libraries rather than the server, and nothing
-# else, on any perl: below Perl 5.24 a cancelled async sub stops but stays
-# suspended (Future::AsyncAwait does not pass the cancel on there), so dropping
-# its Future warns "lost its returning future"; and Future::XS, when it is in
-# use, warns "lost a sequence Future" when a without_cancel view is dropped
-# before its original resolves (the upstream bug PAGI::Server's POD notes).
+# One known warning, from a library rather than the server, and nothing else,
+# on any perl: Future::XS, when it is in use, warns "lost a sequence Future"
+# when a without_cancel view is dropped before its original resolves (the
+# upstream bug PAGI::Server's POD notes). Below Perl 5.24 a cancelled receive
+# left suspended would warn "lost its returning future" once the application
+# dropped it, as race_and_lose does.
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
@@ -249,12 +249,26 @@ subtest 'SSE with a chunked request body: a receive after a cancelled one gets t
         'the later receive got the body');
 };
 
+subtest 'SSE with a Content-Length request body: a receive after a cancelled one gets the body' => sub {
+    @sse_body_log = ();
+    my $s = client();
+    print $s "POST /events-body HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n"
+        . "Content-Length: 4\r\n\r\n";
+    my $got = pump($s, 0.3);
+    syswrite($s, "body");
+    $got .= pump($s, 3);
+    close $s;
+    like($got, qr{\AHTTP/1\.1 200 }, 'the stream starts');
+    is(\@sse_body_log, ["first receive cancelled; got sse.request body 'body'"],
+        'the later receive got the body');
+};
+
 is(\@errors, [], 'no application error was logged');
 
 $loop->remove($server);
 $loop->loop_once(0.05) for 1 .. 5;
 my @unexpected = grep {
-    !($] < 5.024 && /lost its returning future/) && !($INC{'Future/XS.pm'} && /lost a sequence Future/)
+    !($INC{'Future/XS.pm'} && /lost a sequence Future/)
 } @warnings;
 is(\@unexpected, [], 'no unexpected warnings');
 done_testing;

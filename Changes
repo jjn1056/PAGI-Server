@@ -63,9 +63,11 @@
     5.24 and later every later receive failed at once with "... was
     cancelled" (so an app that raced its receive died, and the client got
     a 500), and a second pending receive failed with it, on HTTP/1.1,
-    WebSocket, SSE and HTTP/2. Below Perl 5.24, a cancelled receive of a
-    chunked request body consumed the next chunk for nobody, so the body
-    was lost and the next receive waited for it forever.
+    WebSocket, SSE and HTTP/2. Below Perl 5.24 a cancelled receive stayed
+    suspended: one waiting on a chunked request body consumed the next
+    chunk for nobody, so the body was lost and the next receive waited for
+    it forever, and any of them warned "Suspended async sub ... lost its
+    returning future" once the application dropped it.
   - A character above 0xFF in a byte field killed the server process
     ("Wide character in syswrite") on HTTP/1.1, and the listener with it:
     a response body, a header name or value (response, trailers,
