@@ -1663,7 +1663,9 @@ unfinished head do not extend it, so a client trickling its headers cannot
 hold the connection. While a request is handled it runs only when the
 application is waiting for request body bytes the client has not sent yet,
 and each body read restarts it; otherwise it is paused, so a handler may take
-as long as it needs (see C<request_timeout> for stalled I/O). Over HTTP/2 it
+as long as it needs (see C<request_timeout> for stalled I/O). A receive the
+application cancels while it waits (as C<< Future->wait_any >> cancels the
+one that loses a race) stops waiting there and then. Over HTTP/2 it
 is paused while any stream is open and starts over when the last one closes;
 between streams, any read from the client counts as activity.
 The internal disconnect reason recorded for this expiry follows
@@ -1806,7 +1808,8 @@ C<request_timeout> applies during active request processing.
 
 The average rate, in bytes per second, at which a client must send an HTTP/1.x
 request body while the application is waiting for it. Only time the
-application spends waiting for body bytes counts, and only once
+application spends waiting for body bytes counts (a receive it cancels counts
+until it is cancelled), and only once
 C<body_rate_grace> seconds of it have passed; after that, each byte received
 buys C<1/body_min_rate> more seconds, as Apache's C<mod_reqtimeout> C<MinRate>
 does. A body arriving slower ends the request: a C<408 Request Timeout> if no

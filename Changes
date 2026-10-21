@@ -68,6 +68,14 @@
     chunk for nobody, so the body was lost and the next receive waited for
     it forever, and any of them warned "Suspended async sub ... lost its
     returning future" once the application dropped it.
+  - A request body receive the application cancels while it waits no
+    longer leaves the connection charging the application's own work to the
+    client: the idle timeout ran on and could close the connection mid-
+    request, and body_min_rate could answer 408 for body bytes that arrived
+    while the application worked. Time the application did wait before the
+    cancel still counts toward body_min_rate, and the turn stays with the
+    client while another receive is still waiting. body_min_rate now covers
+    an SSE request's Content-Length body as it does a chunked one.
   - A character above 0xFF in a byte field killed the server process
     ("Wide character in syswrite") on HTTP/1.1, and the listener with it:
     a response body, a header name or value (response, trailers,
