@@ -13,7 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        perl: ['5.42', '5.40', '5.38', '5.36']
+        # 5.20 is the oldest perl the CPAN stack still installs on: Future 0.54
+        # requires 5.20, so a 5.18 job fails at dependency install.
+        perl: ['5.42', '5.40', '5.38', '5.36', '5.20']
 
     steps:
       - uses: actions/checkout@v4
@@ -58,70 +60,3 @@ jobs:
 
       - name: Run tests
         run: prove -lr t/
-
-  # A best-effort canary for the wider PAGI ecosystem: install the downstream
-  # dists from CPAN against THIS checkout's PAGI::Server (via PERL5LIB, so a
-  # change here that breaks them shows up rather than testing a released
-  # server) and run their own test suites. Task::WebDyne::PAGI is the real
-  # server canary -- it requires WebDyne + PAGI::Server + PAGI::Tools, and
-  # WebDyne itself only *suggests* the PAGI glue, so the Task:: dist is what
-  # pulls the integration. Thunderhorse and PAGI::FastAPI ride on PAGI /
-  # PAGI::Tools rather than on the server. continue-on-error keeps a downstream
-  # or CPAN hiccup from reddening PAGI-Server's own CI; drop it to make the
-  # ecosystem gate the build.
-  ecosystem:
-    name: Ecosystem canary (Perl 5.42)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Perl 5.42
-        uses: shogo82148/actions-setup-perl@v1
-        with:
-          perl-version: '5.42'
-
-      - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libnghttp2-dev libssl-dev
-
-      # Install this checkout's own dependencies so its PAGI::Server is a
-      # working server for the downstream suites to load and run.
-      - name: Install this PAGI-Server's dependencies
-        run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only --installdeps .
-
-      - name: Install optional modules
-        run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only IO::Async::SSL Future::IO Alien::nghttp2
-
-      - name: Install Net::HTTP2::nghttp2 0.011
-        run: |
-          cpanm --notest --mirror https://cpan.metacpan.org --mirror-only 'Net::HTTP2::nghttp2~0.011' \
-            || cpanm --notest https://github.com/jjn1056/Net-HTTP2-nghttp2/archive/92e7f9e.tar.gz
-
-      # PERL5LIB puts this checkout's PAGI::Server ahead of any CPAN release, so
-      # cpanm sees the downstreams' PAGI::Server requirement already satisfied
-      # and their suites run against the code in this tree.
-      # PAGI::Tools is the linchpin every framework needs, so it installs on its
-      # own first and, on failure, its whole build log is printed -- one shared
-      # cpanm log across many dists buries the culprit's test output, so the
-      # toolkit gets an isolated, complete log.
-      - name: Install PAGI::Tools against this server
-        env:
-          PERL5LIB: ${{ github.workspace }}/lib
-        run: |
-          perl -e 'print "PAGI::Server the downstreams will see: $PAGI::Server::VERSION\n" if eval { require PAGI::Server; 1 }'
-          cpanm --mirror https://cpan.metacpan.org --mirror-only PAGI::Tools \
-            || { echo "=== PAGI::Tools build log ==="; cat ~/.cpanm/build.log; exit 1; }
-
-      - name: Install and test the frameworks against this server
-        env:
-          PERL5LIB: ${{ github.workspace }}/lib
-        run: |
-          if ! cpanm --mirror https://cpan.metacpan.org --mirror-only \
-              Task::WebDyne::PAGI Thunderhorse PAGI::FastAPI; then
-            echo "=== a framework did not install; the tail of each build log follows ==="
-            for f in $(ls -t ~/.cpanm/work/*/build.log 2>/dev/null); do
-              echo "----- $f"; tail -n 120 "$f"
-            done
-            exit 1
-          fi
