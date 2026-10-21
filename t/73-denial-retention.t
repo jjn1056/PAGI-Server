@@ -2,13 +2,9 @@ use strict;
 use warnings;
 
 # This file asserts a warning-free run around a dropped without_cancel
-# observer, which Future::XS 0.15 warns about ("lost a sequence Future";
-# reported to the Future-XS RT queue) and Future::PP does not. Future reads
-# PERL_FUTURE_NO_XS when it is compiled, so it is set before anything below
-# loads Future, and the file needs the pure-perl implementation to be there.
-BEGIN { $ENV{PERL_FUTURE_NO_XS} = 1 }
+# observer, tolerating only the known warning of Future::XS before 0.16
+# (RT #181389; see PAGITest::FutureXS).
 use Test2::V0;
-BEGIN { eval { require Future::PP; 1 } or plan skip_all => 'Future::PP required' }
 use IO::Async::Loop;
 use IO::Async::Stream;
 use Future::AsyncAwait;
@@ -19,9 +15,11 @@ use MIME::Base64 ();
 use Scalar::Util qw(weaken);
 use FindBin;
 use lib "$FindBin::Bin/../lib";
+use lib "$FindBin::Bin/lib";
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
+use PAGITest::FutureXS qw(known_future_xs_warning);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -78,7 +76,8 @@ $SIG{__WARN__} = sub { push @WARNINGS, $_[0] };
 
 sub warnings_since {
     my ($mark) = @_;
-    return [map { my $w = $_; $w =~ s/\s+\z//r } @WARNINGS[$mark .. $#WARNINGS]];
+    return [map { my $w = $_; $w =~ s/\s+\z//r }
+        grep { !known_future_xs_warning($_) } @WARNINGS[$mark .. $#WARNINGS]];
 }
 
 sub make_app {
