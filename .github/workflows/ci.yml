@@ -13,9 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 5.20 is the oldest perl the CPAN stack still installs on: Future 0.54
-        # requires 5.20, so a 5.18 job fails at dependency install.
-        perl: ['5.42', '5.40', '5.38', '5.36', '5.20']
+        # 5.24 is PAGI's minimum Perl.
+        perl: ['5.42', '5.40', '5.38', '5.36', '5.24']
 
     steps:
       - uses: actions/checkout@v4
