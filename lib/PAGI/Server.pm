@@ -9,7 +9,8 @@ our $VERSION = '0.003000';
 # set when Future compiles, so without the opt-in this sets it. That works
 # only if PAGI::Server compiles before Future; pagi-server and
 # PAGI::Server::Runner load it first. An operator who set PERL_FUTURE_NO_XS
-# has decided, and is left alone.
+# has decided, and is left alone. The opt-in needs Future::XS 0.16 or later:
+# earlier versions warn "lost a sequence Future" (RT #181389).
 BEGIN {
     if ($ENV{PAGI_FUTURE_XS}) {
         die <<"END_FUTURE_XS_ERROR" unless eval { require Future::XS; 1 };
@@ -20,6 +21,15 @@ To install Future::XS:
 
 Or unset the PAGI_FUTURE_XS environment variable.
 END_FUTURE_XS_ERROR
+        my $installed = Future::XS->VERSION;
+        die <<"END_FUTURE_XS_VERSION" if version->parse($installed) < version->parse('0.16');
+PAGI_FUTURE_XS=1 needs Future::XS 0.16 or later (installed: $installed).
+
+To upgrade Future::XS:
+    cpanm Future::XS
+
+Or unset the PAGI_FUTURE_XS environment variable.
+END_FUTURE_XS_VERSION
     }
     else {
         $ENV{PERL_FUTURE_NO_XS} //= 1;
@@ -5328,9 +5338,10 @@ __END__
 
 =head2 Future::XS
 
-Opt-in. Set C<PAGI_FUTURE_XS=1>, or pass C<--future-xs> to C<pagi-server>, to
-run Future on L<Future::XS> (install it with C<cpanm Future::XS>); the server
-dies at startup if you ask for it and it is not installed. Without the
+Opt-in, and it needs Future::XS 0.16 or later. Set C<PAGI_FUTURE_XS=1>, or
+pass C<--future-xs> to C<pagi-server>, to run Future on L<Future::XS> (install
+it with C<cpanm Future::XS>); the server dies at startup if you ask for it and
+it is not installed, or is older than 0.16. Without the
 opt-in, PAGI::Server sets C<PERL_FUTURE_NO_XS=1> when it compiles, unless you
 set that variable yourself.
 
@@ -5341,11 +5352,11 @@ so the default holds there. A program that loads Future itself before
 PAGI::Server gets whatever Future chose. The startup block reports
 C<future_xs on> or C<future_xs off>.
 
-Use Future::XS 0.16 or later. Before 0.16 it warns C<lost a sequence Future>
-whenever a C<without_cancel> observer is dropped before its original
-resolves, which is what C<< Future->wait_any($work, $conn->disconnect_future) >>
-does on every race the work wins; Future::PP is silent for the same code.
-0.16 fixes it (RT #181389).
+Why 0.16: before it, Future::XS warns C<lost a sequence Future> whenever a
+C<without_cancel> observer is dropped before its original resolves, which is
+what C<< Future->wait_any($work, $conn->disconnect_future) >> does on every race
+the work wins; Future::PP is silent for the same code. 0.16 fixes it
+(RT #181389).
 
 PAGI::Server is designed as a reference implementation prioritizing spec
 compliance and code clarity, yet delivers competitive performance suitable

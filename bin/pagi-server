@@ -524,7 +524,7 @@ See L<PAGI::Server/ACCESS LOG FORMAT> for the full atoms table.
 =item B<--future-xs>
 
 Run Future on L<Future::XS>, which must be installed separately
-(C<cpanm Future::XS>; 0.16 or later is recommended). Off by default. The same as setting
+(C<cpanm Future::XS>; 0.16 or later is required). Off by default. The same as setting
 C<PAGI_FUTURE_XS=1>. See "Future::XS" under PERFORMANCE in L<PAGI::Server>.
 
 =item B<--http2>
