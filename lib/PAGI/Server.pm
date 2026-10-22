@@ -2653,28 +2653,21 @@ sub _check_body_rate_options {
         unless _is_finite_non_negative($self->{body_rate_grace});
 }
 
-# A finite number minus itself is 0; an infinity minus itself is NaN, and NaN
-# equals nothing. (POSIX::isinf needs a newer perl than the 5.18 we support.)
-sub _is_finite {
-    my ($val) = @_;
-    return $val - $val == 0;
-}
-
 sub _is_finite_non_negative {
     my ($val) = @_;
     return defined($val) && !ref($val) && Scalar::Util::looks_like_number($val)
-        && $val >= 0 && _is_finite($val) ? 1 : 0;
+        && $val >= 0 && !POSIX::isinf($val) ? 1 : 0;
 }
 
 # True only for a finite, strictly positive number. Rejects 0, negatives,
-# non-numbers, NaN (never > 0), and +/-Inf. Used to validate bounds that must
-# always be finite, such as ws_close_timeout.
+# non-numbers, NaN (never > 0), and +/-Inf (isinf). Used to validate bounds that
+# must always be finite, such as ws_close_timeout.
 sub _is_finite_positive {
     my ($val) = @_;
     return 0 unless defined $val;
     return 0 unless Scalar::Util::looks_like_number($val);
     return 0 unless $val > 0;
-    return 0 unless _is_finite($val);
+    return 0 if POSIX::isinf($val);
     return 1;
 }
 
