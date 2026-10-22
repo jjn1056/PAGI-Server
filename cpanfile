@@ -1,7 +1,7 @@
 # PAGI-Server dependencies
 # Install with: cpanm --installdeps .
 
-requires 'perl', '5.018';
+requires 'perl', '5.024';  # see "Perl version support" in PAGI
 
 # Core async framework
 requires 'IO::Socket::IP', '0.43'; # Without this IO::Async doesn't work as well

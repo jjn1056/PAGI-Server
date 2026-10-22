@@ -3,7 +3,7 @@
 This directory contains progressively more advanced PAGI examples. Each subdirectory is prefixed with a two-digit number so you can follow along in order.
 
 ## Requirements
-- Perl 5.18+ with `Future::AsyncAwait`
+- Perl 5.24+ with `Future::AsyncAwait`
 - For timers/sleeps: `Future::IO` (loop-agnostic)
 - Run examples with: `pagi-server examples/01-hello-http/app.pl --port 5000`
 - One exception: `13-custom-logging` is a runner script, run with `perl` — the

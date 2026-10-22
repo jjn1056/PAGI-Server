@@ -3,6 +3,10 @@
 0.003000 - 2026-10-08
 
   [Breaking -- see UPGRADING.md]
+  - Requires Perl 5.24 (was 5.18). Future 0.54 requires 5.20; 5.24 is
+    where Future::AsyncAwait passes a cancel on to what an async sub
+    awaits, and where Future::XS is available. See "Perl version support"
+    in PAGI.
   - In production mode pagi-server logs diagnostics as JSON lines on
     STDERR; --log-format text restores text.
   - Implements PAGI Www 0.6: refusals are ordinary HTTP responses sent
@@ -63,15 +67,10 @@
 
   [Fixed]
   - A receive cancelled while it waits -- as Future->wait_any cancels the
-    receive that lost a race -- no longer breaks the connection. On Perl
-    5.24 and later every later receive failed at once with "... was
-    cancelled" (so an app that raced its receive died, and the client got
-    a 500), and a second pending receive failed with it, on HTTP/1.1,
-    WebSocket, SSE and HTTP/2. Below Perl 5.24 a cancelled receive stayed
-    suspended: one waiting on a chunked request body consumed the next
-    chunk for nobody, so the body was lost and the next receive waited for
-    it forever, and any of them warned "Suspended async sub ... lost its
-    returning future" once the application dropped it.
+    receive that lost a race -- no longer breaks the connection: every
+    later receive failed at once with "... was cancelled" (so an app that
+    raced its receive died, and the client got a 500), and a second pending
+    receive failed with it, on HTTP/1.1, WebSocket, SSE and HTTP/2.
   - A request body receive the application cancels while it waits no
     longer leaves the connection charging the application's own work to the
     client: the idle timeout ran on and could close the connection mid-

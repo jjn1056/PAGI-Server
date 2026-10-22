@@ -23,10 +23,8 @@ use PAGITest::FutureXS qw(known_future_xs_warning);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
-# Nothing may warn, on any perl, but the known warning of Future::XS before
-# 0.16 (RT #181389; see PAGITest::FutureXS). Below Perl 5.24 a cancelled
-# receive left suspended would warn "lost its returning future" once the
-# application dropped it, as race_and_lose does.
+# Nothing may warn but the known warning of Future::XS before 0.16
+# (RT #181389; see PAGITest::FutureXS).
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
