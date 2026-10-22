@@ -2,8 +2,8 @@ use strict;
 use warnings;
 
 # This file asserts a warning-free run around a dropped without_cancel
-# observer, tolerating only the known warning of Future::XS before 0.16
-# (RT #181389; see PAGITest::FutureXS).
+# observer. Future::XS before 0.16 warns "lost a sequence Future" there
+# (RT #181389), so the file skips under it.
 use Test2::V0;
 use IO::Async::Loop;
 use IO::Async::Stream;
@@ -19,7 +19,8 @@ use lib "$FindBin::Bin/lib";
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
-use PAGITest::FutureXS qw(known_future_xs_warning);
+use PAGITest::FutureXS qw(old_future_xs);
+plan skip_all => 'needs Future::XS 0.16 or later (RT #181389)' if old_future_xs();
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -76,8 +77,7 @@ $SIG{__WARN__} = sub { push @WARNINGS, $_[0] };
 
 sub warnings_since {
     my ($mark) = @_;
-    return [map { my $w = $_; $w =~ s/\s+\z//r }
-        grep { !known_future_xs_warning($_) } @WARNINGS[$mark .. $#WARNINGS]];
+    return [map { my $w = $_; $w =~ s/\s+\z//r } @WARNINGS[$mark .. $#WARNINGS]];
 }
 
 sub make_app {
