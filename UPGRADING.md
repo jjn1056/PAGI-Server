@@ -2,6 +2,13 @@
 
 ## 0.003000
 
+### Perl 5.24 is required
+
+PAGI-Server now requires Perl 5.24 (it was 5.18). Future 0.54, which PAGI is
+built on, requires 5.20, and 5.24 is where Future::AsyncAwait passes a cancel
+on to what an `async sub` awaits. See "Perl version support" in
+[PAGI](https://metacpan.org/pod/PAGI) for why, and for the support horizon.
+
 ### Production logs are JSON
 
 In production mode (`--env production`, `PAGI_ENV=production`, or no

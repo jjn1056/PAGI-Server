@@ -27,10 +27,8 @@ BEGIN {
         or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
-# Nothing may warn, on any perl, but the known warning of Future::XS before
-# 0.16 (RT #181389; see PAGITest::FutureXS). Below Perl 5.24 a cancelled
-# receive left suspended would warn "lost its returning future" once the
-# application dropped it.
+# Nothing may warn but the known warning of Future::XS before 0.16
+# (RT #181389; see PAGITest::FutureXS).
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 

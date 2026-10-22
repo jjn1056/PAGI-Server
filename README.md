@@ -35,7 +35,7 @@ itself.
 
 ## Installation
 
-PAGI-Server requires **Perl 5.18+**. Install the dependencies with
+PAGI-Server requires **Perl 5.24+**. Install the dependencies with
 [`cpanm`](https://metacpan.org/pod/App::cpanminus):
 
 ```bash
