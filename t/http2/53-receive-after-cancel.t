@@ -18,6 +18,7 @@ use Socket qw(AF_UNIX SOCK_STREAM);
 use Time::HiRes qw(time);
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
+use lib "$FindBin::Bin/../lib";
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 BEGIN {
@@ -26,17 +27,17 @@ BEGIN {
         or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
-# Future::XS, when it is in use, warns "lost a sequence Future" when a
-# without_cancel view is dropped before its original resolves (the upstream
-# bug PAGI::Server's POD notes). Nothing else may warn, on any perl: below
-# Perl 5.24 a cancelled receive left suspended would warn "lost its returning
-# future" once the application dropped it.
+# Nothing may warn, on any perl, but the known warning of Future::XS before
+# 0.16 (RT #181389; see PAGITest::FutureXS). Below Perl 5.24 a cancelled
+# receive left suspended would warn "lost its returning future" once the
+# application dropped it.
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
+use PAGITest::FutureXS qw(known_future_xs_warning);
 
 my $loop     = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -228,8 +229,6 @@ is([grep { /^\[error\]/ } @LOG], [], 'no application error was logged');
 
 eval { $server->shutdown->get };
 eval { $loop->remove($server) };
-my @unexpected = grep {
-    !($INC{'Future/XS.pm'} && /lost a sequence Future/)
-} @warnings;
+my @unexpected = grep { !known_future_xs_warning($_) } @warnings;
 is(\@unexpected, [], 'no unexpected warnings');
 done_testing;

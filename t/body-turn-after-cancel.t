@@ -16,15 +16,15 @@ use Future::AsyncAwait;
 use Time::HiRes qw(time);
 use FindBin;
 use lib "$FindBin::Bin/../lib";
+use lib "$FindBin::Bin/lib";
 
 use PAGI::Server;
+use PAGITest::FutureXS qw(known_future_xs_warning);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
-# Future::XS, when it is in use, warns "lost a sequence Future" when a
-# without_cancel view is dropped before its original resolves (the upstream
-# bug PAGI::Server's POD notes), and at times "Use of uninitialized value in
-# subroutine entry" with it. Nothing else may warn.
+# Nothing may warn but the known warning of Future::XS before 0.16
+# (RT #181389; see PAGITest::FutureXS).
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
@@ -226,8 +226,6 @@ subtest 'body_min_rate: a trickled SSE Content-Length body is too slow, as a chu
 
 is(\@errors, [], 'no application error was logged');
 
-my @unexpected = grep {
-    !($INC{'Future/XS.pm'} && /lost a sequence Future|uninitialized value in subroutine entry/)
-} @warnings;
+my @unexpected = grep { !known_future_xs_warning($_) } @warnings;
 is(\@unexpected, [], 'no unexpected warnings');
 done_testing;
