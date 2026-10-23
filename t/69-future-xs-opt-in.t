@@ -11,15 +11,16 @@ use Symbol qw(gensym);
 # pagi-server and PAGI::Server::Runner load PAGI::Server before anything that
 # loads Future, so the default holds on every path they own.
 
-plan skip_all => 'Future::XS not installed; nothing to opt into'
-    unless eval { require Future::XS; 1 };
-
 use lib "$FindBin::Bin/lib";
 use PAGITest::FutureXS qw(old_future_xs);
 
-# With a Future::XS older than 0.16 installed the opt-in is refused (see the
-# subtest that pins that), so the checks that need it to work skip.
-my $old_xs = old_future_xs() ? 'needs Future::XS 0.16 or later (RT #181389)' : '';
+# The checks that need the opt-in to work skip without a Future::XS 0.16 or
+# later: with none installed there is nothing to opt into, and an older one is
+# refused (see the subtest that pins that). The refusals use stand-ins, so they
+# run either way.
+my $no_xs = !eval { require Future::XS; 1 } ? 'Future::XS not installed; nothing to opt into'
+          : old_future_xs()                 ? 'needs Future::XS 0.16 or later (RT #181389)'
+          :                                   '';
 
 my $lib = "$FindBin::Bin/../lib";
 my $bin = "$FindBin::Bin/../bin/pagi-server";
@@ -44,12 +45,14 @@ sub child {
 my $report = 'require Future; print Future->isa("Future::XS") ? "XS" : "PP"';
 
 # Runs bin/pagi-server with the given arguments and, as the process ends,
-# prints which Future it has (loading it then if nothing did).
+# prints which Future it has (loading it then if nothing did), or "died" when
+# pagi-server did not exit cleanly: Future loads with XS after a failed
+# startup too, so only a clean exit says the flag worked.
 sub pagi_server_future {
     my (@argv) = @_;
-    my ($out) = child(args => ['-e', 'my $bin = shift; END { ' . $report . ' } do $bin; die $@ if $@',
+    my ($out) = child(args => ['-e', 'my $bin = shift; END { if ($?) { print "died" } else { ' . $report . ' } } do $bin; die $@ if $@',
         $bin, @argv, '--version']);
-    return $out =~ /(XS|PP)\z/ ? $1 : "unknown: $out";
+    return $out =~ /(XS|PP|died)\z/ ? $1 : "unknown: $out";
 }
 
 subtest 'by default Future is pure-perl, silently' => sub {
@@ -59,7 +62,7 @@ subtest 'by default Future is pure-perl, silently' => sub {
 };
 
 subtest 'PAGI_FUTURE_XS=1 opts in' => sub {
-    skip_all $old_xs if $old_xs;
+    skip_all $no_xs if $no_xs;
     my ($out, $err) = child(env => { PAGI_FUTURE_XS => 1 },
                             args => ['-e', "use PAGI::Server; $report"]);
     is($out, 'XS', 'Future is XS');
@@ -90,7 +93,7 @@ subtest 'asking for Future::XS older than 0.16 stops startup' => sub {
 subtest 'pagi-server: pure-perl by default, XS with --future-xs' => sub {
     is(pagi_server_future(), 'PP', 'no flag: pure-perl');
     SKIP: {
-        skip $old_xs, 1 if $old_xs;
+        skip $no_xs, 1 if $no_xs;
         is(pagi_server_future('--future-xs'), 'XS', '--future-xs: XS');
     }
 };

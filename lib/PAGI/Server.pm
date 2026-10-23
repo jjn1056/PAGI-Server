@@ -981,7 +981,8 @@ It also sets the default C<access_log_format>: C<json> under C<json>, C<clf>
 otherwise.
 
 Not everything on C<STDERR> is the server's: the compile-time Future::XS
-error (C<PAGI_FUTURE_XS=1> without Future::XS installed), the runner's argument warnings, Perl's own C<die> output when startup
+errors (C<PAGI_FUTURE_XS=1> without Future::XS installed, or with one older
+than 0.16), the runner's argument warnings, Perl's own C<die> output when startup
 fails, and C<warn>s from application code stay plain text. A JSON stream may
 therefore hold an occasional text line, most likely at startup.
 
