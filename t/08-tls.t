@@ -11,6 +11,13 @@ use File::Spec;
 
 use PAGI::Server;
 
+# TLS 1.3 needs OpenSSL 1.1.1 or later (or a LibreSSL that has it). Net::SSLeay
+# defines its TLS1_3_VERSION constant only then; the checks that need a TLS 1.3
+# connection skip without it.
+my $HAS_TLS13 = eval { require Net::SSLeay; Net::SSLeay::TLS1_3_VERSION(); 1 } ? 1 : 0;
+my $NO_TLS13 = 'this OpenSSL has no TLS 1.3 ('
+    . (eval { Net::SSLeay::SSLeay_version(0) } // 'unknown') . ')';
+
 # Skip entire test if TLS modules not installed
 BEGIN {
     my $tls_available = eval {
@@ -159,10 +166,14 @@ subtest 'TLS connection populates scope.extensions.tls' => sub {
 
     # B8: the reference server terminates TLS itself, so the negotiated cipher is
     # determinable. The spec permits undef only when the server cannot determine
-    # it, so cipher_suite must be a real 16-bit cipher-suite ID here.
-    ok(defined $tls->{cipher_suite}, 'cipher_suite is defined (server terminates TLS)');
-    ok(defined $tls->{cipher_suite} && $tls->{cipher_suite} > 0 && $tls->{cipher_suite} <= 0xFFFF,
-        'cipher_suite is a 16-bit cipher-suite ID');
+    # it, so cipher_suite must be a real 16-bit cipher-suite ID here. The server
+    # determines it for TLS 1.3 ciphers, so this needs a TLS 1.3 connection.
+    SKIP: {
+        skip $NO_TLS13, 2 unless $HAS_TLS13;
+        ok(defined $tls->{cipher_suite}, 'cipher_suite is defined (server terminates TLS)');
+        ok(defined $tls->{cipher_suite} && $tls->{cipher_suite} > 0 && $tls->{cipher_suite} <= 0xFFFF,
+            'cipher_suite is a 16-bit cipher-suite ID');
+    }
 
     # C11: the tls hash must contain exactly the six PAGI::Spec::Tls keys — no
     # implementation-specific extraction-error diagnostics leak into app scope.
@@ -994,6 +1005,7 @@ subtest 'Multi-worker TLS connections work' => sub {
 
 # Test 15: min_version is a FLOOR (TLS 1.3 negotiated), not an exact pin
 subtest 'TLS 1.3 negotiated by default; min_version is a floor not a pin' => sub {
+    skip_all $NO_TLS13 unless $HAS_TLS13;
     my $captured_scope;
 
     my $tls13_app = async sub {
