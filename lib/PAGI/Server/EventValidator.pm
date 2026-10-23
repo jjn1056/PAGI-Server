@@ -246,6 +246,18 @@ sub _validate_websocket_close {
         croak "websocket.close 'code' must be a non-negative integer"
             unless _is_nonneg_int($event->{code});
     }
+
+    # RFC 6455 5.5: a close frame's payload is at most 125 bytes, the 2-byte
+    # code and the reason, which is sent as UTF-8.
+    if (exists $event->{reason} && defined $event->{reason}) {
+        croak "websocket.close 'reason' must be a string"
+            if ref $event->{reason};
+        my $bytes = $event->{reason};
+        utf8::encode($bytes);
+        croak "websocket.close 'reason' must be at most 123 bytes as UTF-8 (got "
+            . length($bytes) . ')'
+            if length($bytes) > 123;
+    }
 }
 
 sub _validate_websocket_keepalive {
@@ -663,7 +675,9 @@ with C<"Unrecognized event type '$type' for http protocol">.
 Validates WebSocket send events: C<websocket.accept>, C<websocket.send>
 (whose C<bytes> must be bytes: a character above 0xFF croaks; C<text> is
 characters, encoded by the server),
-C<websocket.close>, C<websocket.keepalive>, and the three HTTP response
+C<websocket.close> (whose C<reason> must be a string of at most 123 bytes
+as UTF-8, what RFC 6455 leaves for it in a close frame), C<websocket.keepalive>,
+and the three HTTP response
 events C<http.response.start>, C<http.response.body> and
 C<http.response.trailers> that refuse the handshake. The refusal events are
 delegated to C<validate_http_send>, so their rules are the C<http> scope's

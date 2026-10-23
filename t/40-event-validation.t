@@ -178,6 +178,22 @@ subtest 'websocket.close validation' => sub {
         lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.close', code => 1000 }) },
         'integer code is valid'
     );
+
+    # RFC 6455 5.5: a close frame's payload is at most 125 bytes, the 2-byte
+    # code plus at most 123 bytes of UTF-8 reason.
+    my $close = sub { PAGI::Server::EventValidator::validate_websocket_send(
+        { type => 'websocket.close', code => 1000, reason => $_[0] }) };
+    ok(lives { $close->('x' x 123) }, 'a 123-byte reason is valid');
+    ok(lives { $close->("\x{20AC}" x 41) }, 'a reason of 41 three-byte characters (123 bytes) is valid');
+    like(dies { $close->('x' x 124) },
+        qr/^websocket\.close 'reason' must be at most 123 bytes as UTF-8 \(got 124\)/,
+        'a 124-byte reason is refused');
+    like(dies { $close->("\x{20AC}" x 42) },
+        qr/^websocket\.close 'reason' must be at most 123 bytes as UTF-8 \(got 126\)/,
+        'the limit counts encoded bytes, not characters');
+    like(dies { $close->({}) }, qr/^websocket\.close 'reason' must be a string/,
+        'a reference reason is refused');
+    ok(lives { $close->(undef) }, 'an undef reason is valid (no reason)');
 };
 
 subtest 'websocket.keepalive validation' => sub {

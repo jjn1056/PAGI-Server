@@ -408,6 +408,19 @@ ws_probe(app => $ws_app1);
 like( $ws_after_close_err // '', qr/after websocket\.close/,
     'websocket.send after websocket.close raises on h2, not silently swallowed' );
 
+# A close reason longer than a close frame allows (RFC 6455 5.5: code + 123
+# bytes) fails the send, as on HTTP/1.1; a valid close still works.
+my ($ws_long_reason_err, $ws_long_reason_closed);
+ws_probe(app => async sub {
+    my ($scope, $receive, $send) = @_;
+    await $send->({ type => 'websocket.accept' });
+    $ws_long_reason_err = do { local $@; eval { await $send->({ type => 'websocket.close', code => 4000, reason => 'x' x 124 }) }; $@ };
+    $ws_long_reason_closed = eval { await $send->({ type => 'websocket.close', code => 4000, reason => 'x' x 123 }); 1 };
+});
+like( $ws_long_reason_err // '', qr/websocket\.close 'reason' must be at most 123 bytes as UTF-8 \(got 124\)/,
+    'a 124-byte close reason fails the send on h2' );
+ok( $ws_long_reason_closed, 'a 123-byte close reason then goes out on h2' );
+
 my $ws_denial_complete_err;
 my $ws_app2 = async sub {
     my ($scope, $receive, $send) = @_;

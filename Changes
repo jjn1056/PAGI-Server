@@ -115,6 +115,10 @@
     HTTP/1.1 as "accepted socket left without a closing handshake" (the
     detail for one that returned) and logged twice; its detail is now the
     error's first line, logged once, as on HTTP/2.
+  - A websocket.close whose reason was longer than a close frame allows
+    (RFC 6455: at most 123 bytes as UTF-8) went out as an invalid frame,
+    and a reference was accepted as a reason. The send now fails, as for
+    any invalid event, on HTTP/1.1 and HTTP/2.
   - An exception thrown inside a socket write (a write runs from the event
     loop, after the application's send returned) unwound the loop and ended
     the server process, dropping every connection. It now ends only its own
