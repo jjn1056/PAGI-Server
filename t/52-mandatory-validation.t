@@ -429,6 +429,36 @@ SKIP: {
 }
 $ws_after_close_server->shutdown->get;
 
+# --- WebSocket: a close reason longer than a close frame allows ---
+# RFC 6455 5.5 caps the payload at 125 bytes (code + 123 bytes of reason).
+# The send fails like any invalid event, and a valid close still works.
+
+my $ws_long_reason_app = async sub {
+    my ($scope, $receive, $send) = @_;
+    if ($scope->{type} eq 'websocket') {
+        my $e = await $receive->();   # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        my $err = do { local $@; eval { await $send->({ type => 'websocket.close', code => 4000, reason => 'x' x 124 }) }; $@ };
+        ($WsLongReason::ERR = $err // 'NO-ERROR') =~ s/\n/ /g;
+        $WsLongReason::CLOSED = eval { await $send->({ type => 'websocket.close', code => 4000, reason => 'x' x 123 }); 1 };
+        return;
+    }
+    die "unsupported scope $scope->{type}";
+};
+my $ws_long_reason_server = PAGI::Server->new(
+    app => $ws_long_reason_app, host => '127.0.0.1', port => 0, quiet => 1, validate_events => 0);
+$loop->add($ws_long_reason_server);
+$ws_long_reason_server->listen->get;
+
+SKIP: {
+    skip "Cannot connect", 2 unless $ws_handshake_and_drain->($ws_long_reason_server->port);
+
+    like( $WsLongReason::ERR // '', qr/websocket\.close 'reason' must be at most 123 bytes as UTF-8 \(got 124\)/,
+        'a 124-byte close reason fails the send' );
+    ok( $WsLongReason::CLOSED, 'a 123-byte close reason then goes out' );
+}
+$ws_long_reason_server->shutdown->get;
+
 my $ws_denial_complete_app = async sub {
     my ($scope, $receive, $send) = @_;
     if ($scope->{type} eq 'websocket') {
