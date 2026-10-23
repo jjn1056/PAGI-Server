@@ -318,7 +318,8 @@ After binding, drop privileges to run as GROUP.
 
 =item B<-q>, B<--quiet>
 
-Suppress startup banner and development mode message.
+Report errors only: shorthand for C<--log-level error>. An explicit
+C<--log-level> wins over it.
 
 =item B<--no-default-middleware>
 
