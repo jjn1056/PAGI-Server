@@ -352,11 +352,6 @@ connection's disconnect processing or a Future returned by another call.
 Take a fresh one for each race; a Future that lost one race cannot win a
 later one.
 
-Under Future::XS before 0.16 a losing observer that the combinator has
-released makes the original warn C<lost a sequence Future> when the
-connection ends; Future::PP and Future::XS 0.16 do not. Future::XS is opt-in for PAGI::Server (see "Future::XS"
-under PERFORMANCE in L<PAGI::Server>).
-
 This is useful for racing against other async operations:
 
     await Future->wait_any($disconnect_future, $event_future);

@@ -38,10 +38,10 @@
     GOAWAY.
 
   [Changed]
-  - Future::XS 0.16 is recommended for --future-xs: it fixes the "lost a
-    sequence Future" warning a dropped without_cancel Future gave
-    (RT #181389). The tests tolerate that warning only from older
-    Future::XS.
+  - --future-xs (PAGI_FUTURE_XS=1) requires Future::XS 0.16 or later and
+    stops startup with an older one: 0.16 fixes the "lost a sequence
+    Future" warning a dropped without_cancel Future gave (RT #181389). The
+    tests that would meet that warning skip under an older Future::XS.
   - A peer's WebSocket close reason reaches the application as text,
     decoded from the UTF-8 its Close frame carries, in websocket.disconnect's
     reason and close_reason (PAGI::Spec::Www: a String). It was the raw

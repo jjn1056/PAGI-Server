@@ -23,8 +23,9 @@ recommends 'IO::Socket::SSL', '2.074';
 # To enable TLS/HTTPS support, install with:
 #   cpanm IO::Async::SSL IO::Socket::SSL
 
-# Future::XS is opt-in (pagi-server --future-xs, or PAGI_FUTURE_XS=1). 0.16
-# fixes its "lost a sequence Future" warning (RT #181389).
+# Future::XS is opt-in (pagi-server --future-xs, or PAGI_FUTURE_XS=1), and the
+# opt-in requires 0.16 or later, which fixes its "lost a sequence Future"
+# warning (RT #181389).
 recommends 'Future::XS', '0.16';
 
 # HTTP/2 support (optional - only needed for --http2). The server needs 0.011;

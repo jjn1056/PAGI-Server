@@ -27,15 +27,17 @@ BEGIN {
         or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)');
 }
 
-# Nothing may warn but the known warning of Future::XS before 0.16
-# (RT #181389; see PAGITest::FutureXS).
+# Nothing may warn. Future::XS before 0.16 warns "lost a sequence Future" here
+# (RT #181389), so the file skips under it.
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
 use PAGI::Server;
 use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
-use PAGITest::FutureXS qw(known_future_xs_warning);
+use PAGITest::FutureXS qw(old_future_xs);
+
+plan skip_all => 'needs Future::XS 0.16 or later (RT #181389)' if old_future_xs();
 
 my $loop     = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -227,6 +229,5 @@ is([grep { /^\[error\]/ } @LOG], [], 'no application error was logged');
 
 eval { $server->shutdown->get };
 eval { $loop->remove($server) };
-my @unexpected = grep { !known_future_xs_warning($_) } @warnings;
-is(\@unexpected, [], 'no unexpected warnings');
+is(\@warnings, [], 'no warnings');
 done_testing;

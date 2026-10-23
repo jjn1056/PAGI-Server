@@ -14,6 +14,13 @@ use Symbol qw(gensym);
 plan skip_all => 'Future::XS not installed; nothing to opt into'
     unless eval { require Future::XS; 1 };
 
+use lib "$FindBin::Bin/lib";
+use PAGITest::FutureXS qw(old_future_xs);
+
+# With a Future::XS older than 0.16 installed the opt-in is refused (see the
+# subtest that pins that), so the checks that need it to work skip.
+my $old_xs = old_future_xs() ? 'needs Future::XS 0.16 or later (RT #181389)' : '';
+
 my $lib = "$FindBin::Bin/../lib";
 my $bin = "$FindBin::Bin/../bin/pagi-server";
 
@@ -52,6 +59,7 @@ subtest 'by default Future is pure-perl, silently' => sub {
 };
 
 subtest 'PAGI_FUTURE_XS=1 opts in' => sub {
+    skip_all $old_xs if $old_xs;
     my ($out, $err) = child(env => { PAGI_FUTURE_XS => 1 },
                             args => ['-e', "use PAGI::Server; $report"]);
     is($out, 'XS', 'Future is XS');
@@ -67,9 +75,24 @@ subtest 'asking for Future::XS when it is not installed stops startup' => sub {
     like($err, qr/cpanm Future::XS/, 'and how to fix it');
 };
 
+subtest 'asking for Future::XS older than 0.16 stops startup' => sub {
+    # A stand-in Future::XS 0.15: the version check runs before Future loads,
+    # so it needs nothing but its version.
+    my $old = 'BEGIN { unshift @INC, sub { return unless $_[1] eq "Future/XS.pm"; '
+        . 'my $src = "package Future::XS; our \\$VERSION = q(0.15); 1;"; open my $fh, "<", \\$src; return $fh } }';
+    my ($out, $err) = child(env => { PAGI_FUTURE_XS => 1 },
+                            args => ['-e', "$old use PAGI::Server; print 'started'"]);
+    is($out, '', 'it does not start');
+    like($err, qr/PAGI_FUTURE_XS=1 needs Future::XS 0\.16 or later \(installed: 0\.15\)/, 'and says why');
+    like($err, qr/cpanm Future::XS/, 'and how to fix it');
+};
+
 subtest 'pagi-server: pure-perl by default, XS with --future-xs' => sub {
     is(pagi_server_future(), 'PP', 'no flag: pure-perl');
-    is(pagi_server_future('--future-xs'), 'XS', '--future-xs: XS');
+    SKIP: {
+        skip $old_xs, 1 if $old_xs;
+        is(pagi_server_future('--future-xs'), 'XS', '--future-xs: XS');
+    }
 };
 
 subtest 'PAGI::Server::Runner keeps the default although it loads Future::IO first' => sub {

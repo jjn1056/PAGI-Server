@@ -19,12 +19,13 @@ use lib "$FindBin::Bin/../lib";
 use lib "$FindBin::Bin/lib";
 
 use PAGI::Server;
-use PAGITest::FutureXS qw(known_future_xs_warning);
+use PAGITest::FutureXS qw(old_future_xs);
+plan skip_all => 'needs Future::XS 0.16 or later (RT #181389)' if old_future_xs();
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
-# Nothing may warn but the known warning of Future::XS before 0.16
-# (RT #181389; see PAGITest::FutureXS).
+# Nothing may warn. Future::XS before 0.16 warns "lost a sequence Future" here
+# (RT #181389), so the file skips under it.
 my @warnings;
 $SIG{__WARN__} = sub { push @warnings, @_ };
 
@@ -226,6 +227,5 @@ subtest 'body_min_rate: a trickled SSE Content-Length body is too slow, as a chu
 
 is(\@errors, [], 'no application error was logged');
 
-my @unexpected = grep { !known_future_xs_warning($_) } @warnings;
-is(\@unexpected, [], 'no unexpected warnings');
+is(\@warnings, [], 'no warnings');
 done_testing;
