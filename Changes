@@ -105,6 +105,12 @@
     never completed") and "refusal started but never completed" when it
     returned (HTTP/2 said "started with http.response.start but never
     ended cleanly"). The reason, server_error, is unchanged.
+  - On HTTP/2, an SSE application that returned after sse.start without
+    sse.close, and a WebSocket application that returned after accepting
+    without a closing handshake, were reported as "started with ... but
+    never ended cleanly". They now report what HTTP/1.1 reports: "sse.start
+    without sse.close" and "accepted socket left without a closing
+    handshake". The reason, server_error, is unchanged.
   - A WebSocket application that died after accepting was reported on
     HTTP/1.1 as "accepted socket left without a closing handshake" (the
     detail for one that returned) and logged twice; its detail is now the

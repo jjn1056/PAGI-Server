@@ -222,8 +222,8 @@ subtest 'h2: an accepted socket abandoned by the app is closed with 1011 and rep
     is($r{cs}->is_connected, 0, 'is_connected is false');
     is($r{cs}->response_complete, 0, 'response_complete is false: this was not a clean end');
     is($r{cs}->disconnect_reason, 'server_error', 'disconnect_reason is server_error');
-    is($r{cs}->disconnect_detail, 'started with WebSocket accept but never ended cleanly',
-        'disconnect_detail names the condition');
+    is($r{cs}->disconnect_detail, 'accepted socket left without a closing handshake',
+        'disconnect_detail names the condition, as HTTP/1.1 does');
     is(scalar(@{$r{disc} // []}), 1, 'on_disconnect fired exactly once');
     is($r{disc}[0][0], 'server_error', 'with reason server_error') if $r{disc};
     is($r{complete}, undef, 'on_complete never fired');
