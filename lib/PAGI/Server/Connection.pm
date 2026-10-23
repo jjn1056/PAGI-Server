@@ -1987,10 +1987,13 @@ sub _h2_incomplete_scope_end {
     my $kind   = $stream_state->{is_websocket} ? 'websocket' : 'sse';
     my $seq    = $stream_state->{seq_state};
     my $verb   = _h2_scope_verb($kind, $seq);
-    # A crash reports its error; a return reports what was left undone,
-    # in the words HTTP/1.1 uses for a refusal.
+    # A crash reports its error; a return reports what was left undone, in
+    # the words HTTP/1.1 uses for the same ending.
     my $detail = $error ? _detail_from_error($error)
                : ($seq // '') eq 'refusing' ? 'refusal started but never completed'
+               : $kind eq 'websocket' && _ws_handshake_accepted($seq)
+                   ? 'accepted socket left without a closing handshake'
+               : $kind eq 'sse' ? 'sse.start without sse.close'
                : "started with $verb but never ended cleanly";
     $self->_log(error => $error
         ? "PAGI application error after $verb (HTTP/2 stream $stream_id): $error"

@@ -227,6 +227,24 @@ subtest 'W4: an unfinished refusal' => sub {
     }
 };
 
+subtest 'an app that returns leaving the stream open: the words HTTP/1.1 uses' => sub {
+    my $r = run_h2(submit => $sse, app => async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start' });
+        return;
+    });
+    settled_ok($r, 'server_error', 'sse.start without sse.close', 'SSE, returned after sse.start');
+
+    $r = run_h2(submit => $ws, app => async sub {
+        my ($scope, $receive, $send) = @_;
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        return;
+    });
+    settled_ok($r, 'server_error', 'accepted socket left without a closing handshake',
+        'WebSocket, returned after accept');
+};
+
 subtest 'plain HTTP: an app that dies before http.response.start' => sub {
     my $r = run_h2(submit => $http, app => async sub { $dies->() });
     settled_ok($r, 'server_error', 'the handler broke', 'HTTP');
