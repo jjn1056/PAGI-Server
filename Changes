@@ -186,6 +186,10 @@
     match the spec in twelve cases where they did not.
   - Closed connections leaked through a reference cycle.
   - Two diagnostics bypassed the server log (raw warn).
+  - An application error after an HTTP/2 response completed was logged as
+    "after response started"; it is now "PAGI application error (after
+    response complete) (HTTP/2 stream N)", HTTP/1.1's words for the same
+    condition.
   - Two tests depended on the tester's environment.
   - pagi.connection's response_started turns true when a WebSocket handshake
     is accepted or an SSE stream starts, as PAGI Www 0.6 requires; it was set
