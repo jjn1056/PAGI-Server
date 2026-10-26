@@ -424,7 +424,7 @@ subtest 'h2: app throwing after a COMPLETE response still logs the error' => sub
     is($closed{$stream_id}, 0, 'stream closed cleanly (END_STREAM, no RST)');
 
     my @errors = grep {
-        /PAGI application error after response started \(HTTP\/2 stream $stream_id\): boom/
+        /PAGI application error \(after response complete\) \(HTTP\/2 stream $stream_id\): boom/
     } @warnings;
     is(scalar(@errors), 1,
         'the post-completion exception is logged exactly once')

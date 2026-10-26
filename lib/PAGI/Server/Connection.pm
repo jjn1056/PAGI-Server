@@ -1930,8 +1930,10 @@ sub _h2_dispatch_stream {
                     }
                     elsif ($error) {
                         # Response already complete; cannot send a 500 or usefully
-                        # reset a finished stream. Log only.
-                        $self->_log(error => "PAGI application error after response started (HTTP/2 stream $stream_id): $error");
+                        # reset a finished stream. Log only, in the h1 wording
+                        # for the same condition (_handle_request's complete
+                        # branch), with the stream id after it.
+                        $self->_log(error => "PAGI application error (after response complete) (HTTP/2 stream $stream_id): $error");
                     }
                 }
             }

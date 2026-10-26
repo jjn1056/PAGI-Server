@@ -362,7 +362,7 @@ my %APP_ERROR_H1 = (
 my %APP_ERROR_H2 = (
     websocket => undef,
     sse       => undef,
-    http      => 'PAGI application error after response started (HTTP/2 stream 1)',
+    http      => 'PAGI application error (after response complete) (HTTP/2 stream 1)',
 );
 
 # ============================================================
