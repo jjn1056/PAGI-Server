@@ -485,23 +485,13 @@ subtest 'app-initiated close: the close frame carries END_STREAM, same as before
 };
 
 # ============================================================
-# A parked websocket.send() that wakes AFTER the close frame is already
-# queued must not push data behind it (RFC 6455 5.5.1: no frame may follow
-# Close, and Close itself must carry END_STREAM alone).
+# A websocket.send() still parked when the application calls websocket.close
+# goes out before the Close: PAGI::Spec::Www 0.7 "Sends Are Sequential" -- the
+# close takes effect only after every send issued before it, and no earlier
+# send is discarded. Nothing follows the Close (RFC 6455 5.5.1).
 # ============================================================
-# White-box on the wake trigger by necessity: the real trigger is a window
-# grant landing the per-stream queue below the low watermark, but that also
-# tends to deliver the close frame's own EOF pull in the SAME data_callback
-# invocation that releases the drain waiter -- racing the wake against
-# stream teardown in a way that isn't reliably provokable through real
-# pumping. _h2_resolve_stream_drain_waiters is the exact function the real
-# data_callback calls to release a parked send; invoking it directly still
-# exercises the real send()/_h2_ws_close code paths and the real guard,
-# just without gambling on which deferred callback the event loop runs
-# first.
-subtest 'a send() parked when close is queued does not push behind the close frame' => sub {
-    my @marks;
-    my $f2;
+subtest 'a send() parked when the application closes goes out before the Close frame' => sub {
+    my (@marks, $f2, $f2_pending_at_close);
 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
@@ -517,13 +507,12 @@ subtest 'a send() parked when close is queued does not push behind the close fra
                 await $send->({ type => 'websocket.send', text => ('x' x 10_000) });
                 push @marks, 'first-done';
 
-                # Second send: queue already at/above the high mark -> parks.
-                # Fire-and-forget (not awaited) so the app can go on to close
-                # while it is still parked.
+                # Second send: the queue is at/above the high mark, so it
+                # waits. Not awaited, so the application closes meanwhile.
                 $f2 = $send->({ type => 'websocket.send', text => ('y' x 10_000) });
                 $f2->on_ready(sub { push @marks, 'second-settled'; });
 
-                # Close while send#2 is still parked.
+                $f2_pending_at_close = !$f2->is_ready;
                 await $send->({ type => 'websocket.close', code => 1000, reason => 'bye' });
                 push @marks, 'closed';
                 next;
@@ -548,61 +537,27 @@ subtest 'a send() parked when close is queued does not push behind the close fra
 
     send_ws_text($client, $client_sock, $ws_stream_id, 'go');
 
-    my $saw_closed = 0;
-    for (1 .. 10) {
+    my $settled = 0;
+    for (1 .. 40) {
         exchange_frames($client, $client_sock, 1);
-        if (grep { $_ eq 'closed' } @marks) { $saw_closed = 1; last; }
+        if ((grep { $_ eq 'closed' } @marks) && (grep { $_ eq 'second-settled' } @marks)) {
+            $settled = 1;
+            last;
+        }
     }
-    ok($saw_closed, 'app reached websocket.close while the second send was still parked');
+    ok($f2_pending_at_close, 'the second send was still pending when the application closed');
+    ok($settled, 'both the second send and the close settled (bounded)');
+    ok($f2 && $f2->is_done, 'the second send completed');
 
-    my $ss = $conn->{h2_streams}{$ws_stream_id};
-    ok($ss, 'server still holds stream state right after close');
-    ok($ss && $ss->{ws_eof_pending}, 'ws_eof_pending is set (close frame queued)');
-    ok($ss && $ss->{stream_drain_waiters} && @{$ss->{stream_drain_waiters}},
-        'the second send is genuinely parked (a drain waiter is registered)');
-
-    my $queue_bytes_before_wake = $ss ? ($ss->{send_queue_bytes} // 0) : undef;
-
-    # Simulate the window opening enough to drain below the low watermark --
-    # the exact release the real data_callback performs.
-    $conn->_h2_resolve_stream_drain_waiters($ss) if $ss;
-
-    my $saw_settled = 0;
-    for (1 .. 20) {
-        $loop->loop_once(0.05);
-        if (grep { $_ eq 'second-settled' } @marks) { $saw_settled = 1; last; }
-    }
-    ok($saw_settled, 'the parked second send eventually settles (bounded)');
-
-    # The fix: waking must NOT push 'y' x 10_000 behind the already-queued
-    # close frame. $ss may since have been reclaimed by teardown (also a
-    # correct outcome -- either way, no bytes were added by the wake).
-    my $ss_after = $conn->{h2_streams}{$ws_stream_id};
-    if ($ss_after && defined $queue_bytes_before_wake) {
-        ok(($ss_after->{send_queue_bytes} // 0) <= $queue_bytes_before_wake,
-            'the parked send did not push new bytes onto the queue after close was queued')
-            or diag("before=$queue_bytes_before_wake after=$ss_after->{send_queue_bytes}");
-    }
-
-    # Wire assertion: drain everything and confirm no Text/Binary frame
-    # (opcode 1/2, i.e. the 'y' x 10_000 payload) ever reached the wire --
-    # only the Close frame (and whatever of send#1's 'x' payload made it out
-    # under the small window) may appear.
-    for (1 .. 20) {
-        exchange_frames($client, $client_sock, 1);
-    }
+    exchange_frames($client, $client_sock, 1) for 1 .. 10;
     my @frames = extract_ws_frames($ws_data);
-    # send#1's 'x' x 10_000 payload legitimately reached the wire before the
-    # close (it completed and marked 'first-done' before send#2 ever
-    # parked) -- only a 'y'-payload frame (send#2's, which must never have
-    # been pushed) would indicate the bug.
-    my @leaked = grep { ($_->{opcode} == 1 || $_->{opcode} == 2) && $_->{bytes} =~ /^y/ } @frames;
-    is(scalar @leaked, 0,
-        "no Text/Binary frame carrying send#2's payload reached the wire")
-        or diag('leaked frames: ' . join(', ', map { "opcode=$_->{opcode} len=" . length($_->{bytes}) } @leaked));
-
-    my @closes = grep { $_->{opcode} == 8 } @frames;
-    is(scalar @closes, 1, 'exactly one Close frame reached the wire');
+    my @kinds = map {
+          $_->{opcode} == 8 ? 'close'
+        : $_->{opcode} == 1 ? 'text:' . substr($_->{bytes}, 0, 1) . ':' . length($_->{bytes})
+        : "opcode:$_->{opcode}"
+    } @frames;
+    is(\@kinds, ['text:x:10000', 'text:y:10000', 'close'],
+        'the first send, then the parked second send, then the Close -- nothing after it');
 
     $stream_io->close_now;
     $loop->remove($server);
