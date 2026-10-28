@@ -72,9 +72,12 @@ spec behaviour). The full recursive suite (C<prove -lr t/>) is 155 files and
 
 =head1 PAGI SPECIFICATION SUPPORT
 
-PAGI::Server implements HTTP/WebSocket/SSE sub-specification B<0.6> of
+PAGI::Server implements HTTP/WebSocket/SSE sub-specification B<0.7> of
 L<PAGI::Spec::Www>; every http, websocket and sse scope reports
-C<< $scope->{pagi}{spec_version} >> as C<'0.6'>. The core PAGI version
+C<< $scope->{pagi}{spec_version} >> as C<'0.7'>. That includes "Sends Are
+Sequential": an application may issue a send before an earlier one has
+resolved, and the server processes a scope's sends in the order they were
+called, over HTTP/1.1 and HTTP/2. The core PAGI version
 (C<< $scope->{pagi}{version} >>) is independent of it and remains C<'0.5'>.
 See L<PAGI::Upgrading> for what changed for applications.
 
