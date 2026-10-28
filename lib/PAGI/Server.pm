@@ -2169,7 +2169,9 @@ the server is ready to accept connections.
     my $future = $server->shutdown;
 
 Initiates graceful shutdown. Returns a Future that completes when
-shutdown is complete.
+shutdown is complete. When no other server on the same event loop is still
+running, shutdown also stops the worker processes that read large files
+(L<PAGI::Server::AsyncFile>), so none outlives the servers that used them.
 
 =head2 port
 
@@ -2246,7 +2248,9 @@ keys in C<http.response.body> events:
 The server streams files in 64KB chunks to avoid memory bloat. Small files
 (under 64KB) are read synchronously for speed; larger files use async I/O
 via a worker pool (L<PAGI::Server::AsyncFile>, backed by
-L<IO::Async::Function>) to avoid blocking the event loop.
+L<IO::Async::Function>) to avoid blocking the event loop. The pool is shared
+by the servers on one event loop and stopped when the last of them shuts
+down.
 
 B<Deploy note:> a very large C<RLIMIT_NOFILE> (soft file-descriptor limit) on
 the host -- around a million, the kind some container base images or systemd
@@ -5045,6 +5049,16 @@ async sub shutdown {
     if (!$shutdown_result->{success}) {
         my $message = $shutdown_result->{message} // 'Lifespan shutdown failed';
         $self->_log(warn => "PAGI Server shutdown warning: $message");
+    }
+
+    # The large-file worker pool is one per loop, shared by the servers on
+    # it: the last of them to stop takes the workers with it, so none
+    # outlives the servers that used it.
+    if (my $loop = $self->loop) {
+        my $others_running = grep {
+            $_->isa('PAGI::Server') && refaddr($_) != refaddr($self) && $_->{running}
+        } $loop->notifiers;
+        PAGI::Server::AsyncFile->cleanup($loop) unless $others_running;
     }
 
     return $self;
