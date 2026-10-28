@@ -408,8 +408,17 @@ sub start {
         write_len => $self->{write_buffer_size},
         writer    => sub {
             my $s = shift;
+            my $before = length $_[1];   # $_[1] is the buffer the writer consumes
             my $written;
-            return $written if eval { $written = $s->$inner_writer(@_); 1 };
+            if (eval { $written = $s->$inner_writer(@_); 1 }) {
+                # What this call took from the buffer has been written: it
+                # leaves the count of queued bytes (see _write_out).
+                if ($weak_self) {
+                    my $left = ($weak_self->{_queued_bytes} // 0) - ($before - length $_[1]);
+                    $weak_self->{_queued_bytes} = $left > 0 ? $left : 0;
+                }
+                return $written;
+            }
             $write_exception = $@;
             $! = EIO;
             return undef;
@@ -882,7 +891,7 @@ sub _h2_write_pending {
         while (1) {
             my $data = $self->{h2_session}->extract;
             last unless defined $data && length($data) > 0;
-            $self->{stream}->write($data);
+            $self->_write_out($data);
         }
     });
 }
@@ -4821,24 +4830,21 @@ sub _stop_sse_idle_timer {
 # The $send->() Future will block (await) when high watermark is exceeded,
 # and resolve when buffer drains below low watermark.
 
+# Every write to the client goes through here. The bytes count as queued
+# until the stream's writer (wrapped in start) has written them, so
+# _get_write_buffer_size, which every send asks, costs the same however many
+# writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+sub _write_out {
+    my ($self, $bytes) = @_;
+    $self->{_queued_bytes} += length $bytes;
+    $self->{stream}->write($bytes);
+    return;
+}
+
 sub _get_write_buffer_size {
     my ($self) = @_;
-
     return 0 unless $self->{stream};
-
-    # Access IO::Async::Stream's internal write queue
-    # IO::Async doesn't expose a public API for buffer size, so we access internals
-    my $queue = $self->{stream}{writequeue} // [];
-    my $total = 0;
-
-    for my $writer (@$queue) {
-        my $data = $writer->data;
-        if (defined $data && !ref $data) {
-            $total += length($data);
-        }
-    }
-
-    return $total;
+    return $self->{_queued_bytes} // 0;
 }
 
 # HTTP/1.1: the transport handle reads the shared TCP write buffer. One
@@ -5070,7 +5076,7 @@ sub _start_ws_keepalive {
                 type   => 'ping',
                 buffer => '',
             );
-            $weak_self->{stream}->write($ping->to_bytes);
+            $weak_self->_write_out($ping->to_bytes);
 
             # Start pong timeout if configured
             if ($weak_self->{ws_keepalive_timeout} > 0) {
@@ -6280,7 +6286,7 @@ async sub _receive_http_body {
     # Send 100 Continue if client expects it (before reading body)
     if ($expect_continue && !$request->{continue_sent}) {
         $request->{continue_sent} = 1;
-        $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+        $weak_self->_write_out($weak_self->{protocol}->serialize_continue);
     }
 
     # Handle chunked Transfer-Encoding
@@ -6599,7 +6605,7 @@ async sub _send_http_event {
                 $out .= $body;
             }
 
-            $weak_self->{stream}->write($out) if length $out;
+            $weak_self->_write_out($out) if length $out;
             $weak_self->_notify_transport_write;
         }
     }
@@ -6645,7 +6651,7 @@ async sub _send_http_event {
         # Validation already ran before sequence advancement and stripping.
         $trailers .= $weak_self->{protocol}->_encode_trailers($trailer_headers);
 
-        $weak_self->{stream}->write($trailers);
+        $weak_self->_write_out($trailers);
     }
     elsif ($type eq 'http.fullflush') {
         # Fullflush extension - force immediate TCP buffer flush.
@@ -6684,7 +6690,7 @@ sub _flush_pending_headers {
     my $pending = $self->{_resp_pending};
     return unless defined $pending && length $pending;
     $self->{_resp_pending} = undef;
-    $self->{stream}->write($pending);
+    $self->_write_out($pending);
 }
 
 sub _send_error_response {
@@ -6703,7 +6709,7 @@ sub _send_error_response {
     my $response = $self->{protocol}->serialize_response_start($status, $headers, 0);
     $response .= $body;
 
-    $self->{stream}->write($response);
+    $self->_write_out($response);
     $self->{response_started} = 1;
     # A server-synthesized response is still "this request's response started".
     $self->{current_connection_state}->_mark_response_started
@@ -7051,7 +7057,7 @@ sub _send_close_frame {
         buffer => pack('n', $code) . $reason,
     );
 
-    $self->{stream}->write($frame->to_bytes);
+    $self->_write_out($frame->to_bytes);
     $self->{close_sent} = 1;
 }
 
@@ -7106,6 +7112,7 @@ sub _close {
     return if $self->{_cleanup_done};
     $self->{_cleanup_done} = 1;
     $self->{closed} = 1;
+    $self->{_queued_bytes} = 0;   # bytes still queued are never written
 
     # Cancel pending drain waiters early (before other cleanup)
     $self->_cancel_drain_waiters('connection closing');
@@ -7614,7 +7621,7 @@ sub _finish_sse_stream {
     # Send chunked terminator if SSE was started and the stream is still writable
     if (_sse_stream_started($self->{h1_seq}) && !$self->{closed} &&
         $self->{stream} && $self->{stream}->write_handle) {
-        $self->{stream}->write("0\r\n\r\n");
+        $self->_write_out("0\r\n\r\n");
     }
 
     # Mark then wake, for the same reasons as _h2_end_scope_output. A started
@@ -7852,7 +7859,7 @@ sub _create_sse_receive {
                 # Send 100 Continue if client expects it (before reading body)
                 if ($expect_continue && !$request->{continue_sent}) {
                     $request->{continue_sent} = 1;
-                    $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+                    $weak_self->_write_out($weak_self->{protocol}->serialize_continue);
                 }
 
                 if ($is_chunked) {
@@ -8107,7 +8114,7 @@ sub _create_sse_send {
                 $status, \@final_headers, 1  # chunked = 1
             );
 
-            $weak_self->{stream}->write($response);
+            $weak_self->_write_out($response);
 
             # Set protocol-specific keepalive writer (HTTP/1.1 chunked)
             $weak_self->{sse_keepalive_writer} = sub {
@@ -8120,7 +8127,7 @@ sub _create_sse_send {
                 my $bytes = eval { Encode::encode('UTF-8', $text, Encode::FB_CROAK) };
                 die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
                 my $len = sprintf("%x", length($bytes));
-                $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+                $weak_self->_write_out("$len\r\n$bytes\r\n");
             };
         }
         elsif ($type eq 'sse.send') {
@@ -8140,7 +8147,7 @@ sub _create_sse_send {
 
             # Send as chunked data
             my $len = sprintf("%x", length($bytes));
-            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+            $weak_self->_write_out("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'sse.comment') {
@@ -8149,7 +8156,7 @@ sub _create_sse_send {
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
 
             my $len = sprintf("%x", length($bytes));
-            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+            $weak_self->_write_out("$len\r\n$bytes\r\n");
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -8677,7 +8684,7 @@ sub _create_websocket_send {
 
                 push @headers, "\r\n";
 
-                $weak_self->{stream}->write(join('', @headers));
+                $weak_self->_write_out(join('', @headers));
                 1;
             };
             unless ($ok) {
@@ -8754,7 +8761,7 @@ sub _create_websocket_send {
             }
 
             my $bytes = $frame->to_bytes;
-            $weak_self->{stream}->write($bytes);
+            $weak_self->_write_out($bytes);
             $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'websocket.close') {
@@ -8782,7 +8789,7 @@ sub _create_websocket_send {
                     buffer => pack('n', $code) . $reason,
                 );
 
-                $weak_self->{stream}->write($frame->to_bytes);
+                $weak_self->_write_out($frame->to_bytes);
                 $weak_self->{close_sent} = 1;
             }
 
@@ -8982,7 +8989,7 @@ sub _process_websocket_frames {
                     type   => 'close',
                     buffer => pack('n', $code) . $reason,
                 );
-                $self->{stream}->write($close_frame->to_bytes);
+                $self->_write_out($close_frame->to_bytes);
                 $self->{close_sent} = 1;
             }
 
@@ -9053,7 +9060,7 @@ sub _process_websocket_frames {
                 type   => 'pong',
                 buffer => $bytes,
             );
-            $self->{stream}->write($pong->to_bytes);
+            $self->_write_out($pong->to_bytes);
         }
         elsif ($opcode == 10) {
             # Pong - cancel any pending timeout (response to our ping)
@@ -9095,7 +9102,6 @@ async sub _send_file_response {
 
     $self->{_response_size} += $length;
 
-    my $stream = $self->{stream};
 
     if ($self->{sync_file_threshold} > 0 && $length <= $self->{sync_file_threshold}) {
         # Small file fast path: read directly in-process
@@ -9113,12 +9119,12 @@ async sub _send_file_response {
             # twice and desync the connection.
             if (length($data)) {
                 my $len = sprintf("%x", length($data));
-                $stream->write("$len\r\n$data\r\n");
+                $self->_write_out("$len\r\n$data\r\n");
             }
-            $stream->write("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n");
         }
         else {
-            $stream->write($data);
+            $self->_write_out($data);
         }
     }
     else {
@@ -9132,10 +9138,10 @@ async sub _send_file_response {
                 my ($chunk) = @_;
                 if ($chunked) {
                     my $len = sprintf("%x", length($chunk));
-                    $stream->write("$len\r\n$chunk\r\n");
+                    $self->_write_out("$len\r\n$chunk\r\n");
                 }
                 else {
-                    $stream->write($chunk);
+                    $self->_write_out($chunk);
                 }
                 return;  # Sync callback
             },
@@ -9146,7 +9152,7 @@ async sub _send_file_response {
 
         # Send final chunk terminator if chunked
         if ($chunked) {
-            $stream->write("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n");
         }
     }
 }
@@ -9168,7 +9174,6 @@ async sub _send_fh_response {
     # TODO: Consider IO::Async::FileStream for better event loop integration.
 
     my $remaining = $length;  # undef means read to EOF
-    my $stream = $self->{stream};
 
     while (1) {
         my $to_read = FILE_CHUNK_SIZE;
@@ -9190,10 +9195,10 @@ async sub _send_fh_response {
 
         if ($chunked) {
             my $len = sprintf("%x", length($chunk));
-            $stream->write("$len\r\n$chunk\r\n");
+            $self->_write_out("$len\r\n$chunk\r\n");
         }
         else {
-            $stream->write($chunk);
+            $self->_write_out($chunk);
         }
 
         if (defined $remaining) {
@@ -9203,7 +9208,7 @@ async sub _send_fh_response {
 
     # Send final chunk if chunked encoding
     if ($chunked) {
-        $stream->write("0\r\n\r\n");
+        $self->_write_out("0\r\n\r\n");
     }
 }
 

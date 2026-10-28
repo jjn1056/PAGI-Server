@@ -77,11 +77,13 @@ $client->connect(url => "ws://127.0.0.1:$port/")->get;
 
 my ($conn) = values %{$server->{connections}};
 my $blocked = 1;
+# Stall the client by wrapping the server's own writer, not replacing it: the
+# server's writer is where written bytes leave its count of queued bytes.
+my $server_writer = $conn->{stream}{writer};
 $conn->{stream}->configure(writer => sub {
     if ($blocked) { $! = EAGAIN; return undef; }
-    my $n = syswrite($_[1], $_[2], $_[3]);
-    substr($_[2], 0, $n) = '' if defined $n;
-    return $n;
+    my $s = shift;
+    return $s->$server_writer(@_);
 });
 $allow_send->done;
 
