@@ -354,4 +354,109 @@ subtest 'SSE keepalives fall between queued events, never inside one' => sub {
     stop_server($server);
 };
 
+subtest 'trailers issued while a large file body streams come after the whole body' => sub {
+    my %seen;
+    my $file = do {
+        require File::Temp;
+        my ($fh, $path) = File::Temp::tempfile(UNLINK => 1);
+        print {$fh} join '', map { sprintf "line %05d %s\n", $_, 'x' x 30 } 1 .. 5000;
+        close $fh;
+        $path;
+    };
+    my $size = -s $file;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless http_scope($scope);
+        await $send->({ type => 'http.response.start', status => 200,
+                        headers => [['content-type', 'text/plain']], trailers => 1 });
+        my $body = $send->({ type => 'http.response.body', file => $file });
+        $seen{body_pending} = !$body->is_ready;
+        my $trailers = $send->({ type => 'http.response.trailers', headers => [['x-check', 'done']] });
+        await Future->wait_all($body, $trailers);
+        $seen{body_ok} = $body->is_done;
+        $seen{trailers_ok} = $trailers->is_done;
+    };
+    my $server = start_server($app);
+    my $sock = raw_connect($server);
+    syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\nTE: trailers\r\n\r\n");
+    my ($wire) = read_until($sock, sub { $_[0] =~ /x-check: done\r\n\r\n/ });
+    ok($seen{body_pending}, "the file body ($size bytes) was still streaming when the trailers were issued");
+    (my $chunks = $wire) =~ s/\A.*?\r\n\r\n//s;
+    my ($body, $trailer_section) = ('', '');
+    while ($chunks =~ /\G([0-9a-fA-F]+)\r\n/gc) {
+        my $len = hex $1;
+        if (!$len) { $trailer_section = substr($chunks, pos($chunks)); last }
+        $body .= substr($chunks, pos($chunks), $len);
+        pos($chunks) += $len + 2;
+    }
+    is(length $body, $size, 'the whole file arrived');
+    like($trailer_section, qr/\Ax-check: done\r\n/, 'then the trailers');
+    ok($seen{body_ok} && $seen{trailers_ok}, 'and both sends completed');
+    close $sock;
+    stop_server($server);
+};
+
+subtest 'an SSE stream ends -- for pagi.connection too -- only after the sends before sse.close' => sub {
+    my %seen;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless $scope->{type} eq 'sse';
+        my $conn = $scope->{'pagi.connection'};
+        await $receive->();
+        await $send->({ type => 'sse.start' });
+        my $big = $send->({ type => 'sse.send', data => 'B' x 8_000_000 });
+        my $a = $send->({ type => 'sse.send', event => 'marker', data => 'MARKER' });
+        my $close = $send->({ type => 'sse.close' });
+        $seen{a_pending} = !$a->is_ready;
+        $seen{complete_at_close} = $conn->response_complete ? 1 : 0;
+        $seen{connected_at_close} = $conn->is_connected ? 1 : 0;
+        await Future->needs_all($big, $a, $close);
+        $seen{complete_after} = $conn->response_complete ? 1 : 0;
+    };
+    my $server = start_server($app);
+    my $sock = raw_connect($server);
+    syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
+    read_until($sock, sub { $_[0] =~ /\r\n0\r\n\r\n/ });
+    pump_until(sub { exists $seen{complete_after} }, 5);
+    ok($seen{a_pending}, 'the marker was still pending when sse.close was issued');
+    is($seen{complete_at_close}, 0, 'the stream was not yet complete when sse.close was called');
+    is($seen{connected_at_close}, 1, 'nor was the connection reported closed');
+    is($seen{complete_after}, 1, 'it was complete once the sends before it were written');
+    close $sock;
+    stop_server($server);
+};
+
+subtest 'keep-alive after a response whose last bytes were still queued' => sub {
+    my ($n, $queued_at_return) = (0, 0);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless http_scope($scope);
+        $n++;
+        if ($n == 1) {
+            # Every send awaited (PAGI::Spec's Application Completion
+            # Contract); the last bytes are still in the write buffer when
+            # the application returns.
+            await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+            await $send->({ type => 'http.response.body', body => '1' x 2_000_000, more => 1 });
+            await $send->({ type => 'http.response.body', body => "\nFIRST-END\n", more => 0 });
+            $queued_at_return = $scope->{'pagi.transport'}->buffered_amount;
+            return;
+        }
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        await $send->({ type => 'http.response.body', body => 'SECOND', more => 0 });
+    };
+    my $server = start_server($app);
+    my $sock = raw_connect($server);
+    syswrite($sock, "GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    my ($first) = read_until($sock, sub { $_[0] =~ /FIRST-END\n\r\n0\r\n\r\n/ });
+    ok($queued_at_return > 0, "$queued_at_return bytes were still queued when the application returned");
+    like($first, qr/FIRST-END\n\r\n0\r\n\r\n\z/, 'the first response ended cleanly');
+    syswrite($sock, "GET /two HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    my ($second) = read_until($sock, sub { $_[0] =~ /SECOND/ });
+    like($second, qr{\AHTTP/1\.1 200}, 'the second response starts the next bytes');
+    like($second, qr/SECOND/, 'and is complete');
+    close $sock;
+    stop_server($server);
+};
+
 done_testing;

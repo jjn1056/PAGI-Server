@@ -6600,7 +6600,8 @@ async sub _send_http_event {
                 die "File not found: $file\n"  unless -f $file;
                 die "Cannot read file: $file\n" unless -r $file;
 
-                await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked});
+                await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked},
+                    !$state->{expects_trailers});
                 1;
             } or do {
                 my $error = $@;
@@ -6616,7 +6617,8 @@ async sub _send_http_event {
             # send must roll $state->{seq} back instead of leaving it 'complete'.
             $weak_self->_flush_pending_headers;   # headers before the fh body
             eval {
-                await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked});
+                await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked},
+                    !$state->{expects_trailers});
                 1;
             } or do {
                 my $error = $@;
@@ -9151,7 +9153,10 @@ sub _process_websocket_frames {
 #   1. Small files (<=64KB): direct in-process read (fastest for small files)
 #   2. Large files: async chunked reads via worker pool (non-blocking)
 async sub _send_file_response {
-    my ($self, $file, $offset, $length, $chunked) = @_;
+    my ($self, $file, $offset, $length, $chunked, $ends_response) = @_;
+    # Declared trailers end the response, not this body: they write the
+    # last chunk themselves, so the body leaves it to them.
+    $ends_response //= 1;
 
     # Get file size if length not specified
     my $file_size = -s $file;
@@ -9183,7 +9188,7 @@ async sub _send_file_response {
                 my $len = sprintf("%x", length($data));
                 $self->_write_out("$len\r\n$data\r\n");
             }
-            $self->_write_out("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n") if $ends_response;
         }
         else {
             $self->_write_out($data);
@@ -9214,7 +9219,7 @@ async sub _send_file_response {
 
         # Send final chunk terminator if chunked
         if ($chunked) {
-            $self->_write_out("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n") if $ends_response;
         }
     }
 }
@@ -9224,7 +9229,10 @@ async sub _send_file_response {
 # Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
 # may be pipes, may be in-memory). Falls back to chunked reads.
 async sub _send_fh_response {
-    my ($self, $fh, $offset, $length, $chunked) = @_;
+    my ($self, $fh, $offset, $length, $chunked, $ends_response) = @_;
+    # Declared trailers end the response, not this body: they write the
+    # last chunk themselves, so the body leaves it to them.
+    $ends_response //= 1;
 
     # Seek to offset if specified
     if ($offset && $offset > 0) {
@@ -9270,7 +9278,7 @@ async sub _send_fh_response {
 
     # Send final chunk if chunked encoding
     if ($chunked) {
-        $self->_write_out("0\r\n\r\n");
+        $self->_write_out("0\r\n\r\n") if $ends_response;
     }
 }
 
