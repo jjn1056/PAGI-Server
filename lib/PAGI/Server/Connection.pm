@@ -4836,9 +4836,50 @@ sub _stop_sse_idle_timer {
 # writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
 sub _write_out {
     my ($self, $bytes) = @_;
+    # The send whose turn it is writes now: its payload leaves the count of
+    # bytes waiting their turn and is counted here instead.
+    $self->{_current_turn}->release if $self->{_current_turn};
     $self->{_queued_bytes} += length $bytes;
     $self->{stream}->write($bytes);
     return;
+}
+
+# PAGI::Spec::Www 0.7 "Sends Are Sequential": every send takes a turn on its
+# connection, in the order the application called $send. It joins the queue
+# when it is called, after its event is validated, and writes only once the
+# sends before it have finished -- their writes and any wait for the buffer
+# to drain -- so a later send never overtakes an earlier one, and the buffer
+# holds at most one send past the high watermark. Its turn ends however the
+# send ends (written, failed, or cancelled by the application), so it never
+# stalls the sends behind it. Until it writes, its payload counts in
+# buffered_amount.
+sub _join_send_queue {
+    my ($self, $event) = @_;
+    my $prev = $self->{_send_tail};
+    my $mine = Future->new;
+    $self->{_send_tail} = $mine;
+    my $payload = 0;
+    for my $field (qw(body text bytes data)) {
+        $payload += length $event->{$field} if defined $event->{$field} && !ref $event->{$field};
+    }
+    return PAGI::Server::Connection::_SendTurn->new($self, $prev, $mine, $payload);
+}
+
+# Waits for this send's turn (see _join_send_queue), then makes it the
+# current one, whose first write releases its payload from the count.
+async sub _take_turn {
+    my ($self, $turn) = @_;
+    weaken($self);
+    await $turn->ready;
+    weaken($self->{_current_turn} = $turn) if $self;
+    return;
+}
+
+# What buffered_amount reports: bytes written and not yet sent, and the
+# payloads of sends still waiting their turn or for the buffer to drain.
+sub _buffered_amount {
+    my ($self) = @_;
+    return $self->_get_write_buffer_size + ($self->{_held_bytes} // 0);
 }
 
 sub _get_write_buffer_size {
@@ -4859,7 +4900,7 @@ sub _h1_transport_state {
     my ($self) = @_;
     weaken(my $w = $self);
     return PAGI::Server::TransportState->new(
-        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
+        measure   => sub { $w ? $w->_buffered_amount : 0 },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub {
@@ -6425,6 +6466,13 @@ async sub _send_http_event {
     my $seq_before_advance = $state->{seq};
     $state->{seq} = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
     $state->{publish}->($state->{seq});
+
+    # Take this send's turn (see _join_send_queue): validated now, written
+    # once the sends issued before it have finished.
+    my $turn = $weak_self->_join_send_queue($event);
+    await $weak_self->_take_turn($turn);
+    return Future->done unless $weak_self;
+    return Future->done if $weak_self->{closed};
 
     if ($type eq 'http.response.start') {
         $weak_self->{response_started} = 1;
@@ -8071,6 +8119,13 @@ sub _create_sse_send {
             return;
         }
 
+        # Take this send's turn (see _join_send_queue): validated now, written
+        # once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event);
+        await $weak_self->_take_turn($turn);
+        return Future->done unless $weak_self;
+        return Future->done if $weak_self->{closed} && !$already_closed;
+
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
             $weak_self->{current_connection_state}->_mark_response_started
@@ -8635,6 +8690,13 @@ sub _create_websocket_send {
             die $error unless $ok;
             return;
         }
+
+        # Take this send's turn (see _join_send_queue): validated now, written
+        # once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event);
+        await $weak_self->_take_turn($turn);
+        return Future->done unless $weak_self;
+        return Future->done if $weak_self->{closed} && !$already_closed;
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -9225,6 +9287,53 @@ sub _log {
     warn "$msg\n";
     return;
 }
+
+# One send's turn on its connection (see Connection's _join_send_queue).
+package PAGI::Server::Connection::_SendTurn;
+use Scalar::Util qw(weaken);
+
+sub new {
+    my ($class, $conn, $prev, $mine, $payload) = @_;
+    my $self = bless { prev => $prev, mine => $mine, held => 0 }, $class;
+    weaken($self->{conn} = $conn);
+    $self->hold($payload) if $payload;
+    return $self;
+}
+
+# Ready once the sends before this one have finished. It is never cancelled by
+# the application cancelling its own send: that send is abandoned instead,
+# ending its turn.
+sub ready {
+    my ($self) = @_;
+    my $prev = $self->{prev};
+    return Future->done if !$prev || $prev->is_ready;
+    return $prev->without_cancel;
+}
+
+sub hold {
+    my ($self, $bytes) = @_;
+    $self->{held} += $bytes;
+    $self->{conn}{_held_bytes} += $bytes if $self->{conn};
+    return;
+}
+
+sub release {
+    my ($self) = @_;
+    return unless $self->{held};
+    $self->{conn}{_held_bytes} -= $self->{held} if $self->{conn};
+    $self->{held} = 0;
+    return;
+}
+
+# The send finished -- or was abandoned -- so its turn ends.
+sub DESTROY {
+    my ($self) = @_;
+    return if ${^GLOBAL_PHASE} eq 'DESTRUCT';
+    $self->release;
+    $self->{mine}->done unless $self->{mine}->is_ready;
+}
+
+package PAGI::Server::Connection;
 
 1;
 
