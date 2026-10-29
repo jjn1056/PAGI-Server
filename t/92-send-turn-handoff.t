@@ -12,7 +12,7 @@ use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
 use IO::Socket::INET;
-use Socket qw(AF_UNIX SOCK_STREAM);
+use Socket qw(AF_UNIX SOCK_STREAM SOL_SOCKET SO_RCVBUF pack_sockaddr_in inet_aton);
 use Time::HiRes qw(time);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
@@ -238,15 +238,19 @@ subtest 'the server\'s own output does not count a waiting send\'s payload as wr
         die "unsupported\n" unless $scope->{type} eq 'sse';
         await $send->({ type => 'sse.start' });
         await $send->({ type => 'sse.keepalive', interval => 0.02, comment => 'ka' });
-        my $big = $send->({ type => 'sse.send', data => 'B' x 1_000_000 });
+        # Larger than the kernel will absorb (Linux grows a send buffer to 4 MB),
+        # so this event is still being written when the next one is sent.
+        my $big = $send->({ type => 'sse.send', data => 'B' x 8_000_000 });
         my $waiting = $send->({ type => 'sse.send', data => 'W' x 50_000 });
         $seen{waiting} = $waiting;
         await Future->needs_all($big, $waiting);
         await $send->({ type => 'sse.close' });
     };
     my $server = start_server($app);
-    my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp')
-        or die "connect: $!";
+    # A small receive buffer (Linux honours it; its default grows to 32 MB).
+    my $sock = IO::Socket::INET->new(Proto => 'tcp') or die "socket: $!";
+    setsockopt($sock, SOL_SOCKET, SO_RCVBUF, 4096) or die "SO_RCVBUF: $!";
+    $sock->connect(pack_sockaddr_in($server->port, inet_aton('127.0.0.1'))) or die "connect: $!";
     $sock->blocking(0);
     syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
     my $conn;
