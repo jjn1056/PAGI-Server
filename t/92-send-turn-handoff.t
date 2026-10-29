@@ -26,8 +26,8 @@ plan skip_all => "Server integration tests not supported on Windows" if $^O eq '
 
 my $loop = IO::Async::Loop->new;
 my @log;
-my @warnings;
-$SIG{__WARN__} = sub { push @warnings, $_[0] };
+my (@warnings, @every_warning);
+$SIG{__WARN__} = sub { push @warnings, $_[0]; push @every_warning, $_[0] };
 
 sub start_server {
     my ($app, %opts) = @_;
@@ -261,5 +261,7 @@ subtest 'the server\'s own output does not count a waiting send\'s payload as wr
     close $sock;
     stop_server($server);
 };
+
+is(\@every_warning, [], 'no warnings at all');
 
 done_testing;

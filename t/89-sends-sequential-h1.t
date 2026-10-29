@@ -269,6 +269,7 @@ subtest 'a peer close while frames are queued: later sends are quiet no-ops' => 
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         die "unsupported\n" unless $scope->{type} eq 'websocket';
+        $seen{transport} = $scope->{'pagi.transport'};
         await $receive->();
         await $send->({ type => 'websocket.accept' });
         my @bigs = map { $send->({ type => 'websocket.send', bytes => 'W' x 60_000 }) } 1 .. 100;
@@ -280,7 +281,7 @@ subtest 'a peer close while frames are queued: later sends are quiet no-ops' => 
     };
     @log = ();
     my $server = start_server($app);
-    my ($sock, $status) = ws_open($server);
+    my ($sock, $status, $rest) = ws_open($server);
     pump_until(sub { $seen{pending} }, 5);
     # A masked client Close (1000).
     syswrite($sock, Protocol::WebSocket::Frame->new(type => 'close', buffer => pack('n', 1000), masked => 1)->to_bytes);
@@ -289,6 +290,15 @@ subtest 'a peer close while frames are queued: later sends are quiet no-ops' => 
     is($seen{event}, 'websocket.disconnect', 'the application saw the disconnect');
     ok(!grep({ $_->is_failed } @after), 'none of the later sends failed');
     is([grep { ($_->{level} // '') =~ /error|fatal/ } @log], [], 'nothing logged at error');
+    # Everything the server sent, to the end of the connection.
+    my ($more) = read_until($sock, sub { 0 }, 10);
+    my $parser = Protocol::WebSocket::Frame->new(max_payload_size => 1 << 20);
+    $parser->append($rest . $more);
+    my @opcodes;
+    while (defined $parser->next_bytes) { push @opcodes, $parser->opcode }
+    is(scalar(grep { $_ == 8 } @opcodes), 1, 'one Close reached the wire');
+    is($opcodes[-1], 8, 'and nothing followed it') or diag "opcodes: @opcodes";
+    is($seen{transport}->buffered_amount, 0, 'nothing is still counted as waiting');
     close $sock;
     stop_server($server);
 };
@@ -458,6 +468,63 @@ subtest 'keep-alive after a response whose last bytes were still queued' => sub 
     close $sock;
     stop_server($server);
 };
+
+# The two other body sources: an fh, and a file small enough to be read in one
+# go (under sync_file_threshold). Each ends with the trailers, not with a
+# chunked terminator of its own.
+for my $source (qw(fh small-file)) {
+    my $name = $source eq 'fh' ? 'an fh body' : 'a small file body';
+    subtest "$name with trailers: the body, one terminator, then the trailers" => sub {
+        my %seen;
+        my $content = join '', map { sprintf "line %05d %s\n", $_, 'x' x 30 } 1 .. 500;
+        my $path = do {
+            require File::Temp;
+            my ($fh, $path) = File::Temp::tempfile(UNLINK => 1);
+            print {$fh} $content;
+            close $fh;
+            $path;
+        };
+        my $n = 0;
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            die "unsupported\n" unless http_scope($scope);
+            if (++$n == 2) {
+                await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+                await $send->({ type => 'http.response.body', body => 'SECOND', more => 0 });
+                return;
+            }
+            await $send->({ type => 'http.response.start', status => 200,
+                            headers => [['content-type', 'text/plain']], trailers => 1 });
+            my $body = $source eq 'fh'
+                ? do { open my $fh, '<', $path or die $!; $send->({ type => 'http.response.body', fh => $fh }) }
+                : $send->({ type => 'http.response.body', file => $path });
+            my $trailers = $send->({ type => 'http.response.trailers', headers => [['x-check', 'done']] });
+            await Future->wait_all($body, $trailers);
+            $seen{both_done} = $body->is_done && $trailers->is_done;
+        };
+        my $server = start_server($app);
+        my $sock = raw_connect($server);
+        syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\nTE: trailers\r\n\r\n");
+        my ($wire) = read_until($sock, sub { $_[0] =~ /x-check: done\r\n\r\n/ });
+        (my $chunks = $wire) =~ s/\A.*?\r\n\r\n//s;
+        my ($body, $trailer_section, $terminators) = ('', '', 0);
+        while ($chunks =~ /\G([0-9a-fA-F]+)\r\n/gc) {
+            my $len = hex $1;
+            if (!$len) { $terminators++; $trailer_section = substr($chunks, pos($chunks)); last }
+            $body .= substr($chunks, pos($chunks), $len);
+            pos($chunks) += $len + 2;
+        }
+        is($body, $content, 'the whole body arrived');
+        is($terminators, 1, 'one chunked terminator');
+        is($trailer_section, "x-check: done\r\n\r\n", 'then the trailers end the response');
+        ok($seen{both_done}, 'both sends completed');
+        syswrite($sock, "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        my ($more) = read_until($sock, sub { $_[0] =~ /SECOND/ }, 5);
+        like($more, qr{\AHTTP/1\.1 200.*SECOND}s, 'and the connection serves the next request');
+        close $sock;
+        stop_server($server);
+    };
+}
 
 # PAGI::Spec::Www "Transport Flow Control": on_high_water fires when
 # buffered_amount crosses the high mark, and on_drain when it falls below the

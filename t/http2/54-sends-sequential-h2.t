@@ -294,4 +294,45 @@ subtest 'a queued burst crosses the watermarks once each way' => sub {
     finish($h);
 };
 
+subtest 'a parked stream does not hold up another stream on the connection' => sub {
+    my (%seen, @closed, %path);
+    my $slow_queued = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless $scope->{type} eq 'http';
+        if ($scope->{path} eq '/slow') {
+            await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+            my $big = $send->({ type => 'http.response.body', body => 'S' x 1_000_000, more => 1 });
+            my $next = $send->({ type => 'http.response.body', body => "\nSLOW-END\n", more => 0 });
+            $seen{slow_waiting} = !$next->is_ready;
+            $slow_queued->done;
+            await Future->needs_all($big, $next);
+            return;
+        }
+        # The slow stream now holds its turn, waiting for its client to read;
+        # a send on this stream is taken at once all the same.
+        await $slow_queued;
+        my $start = $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        $seen{fast_start_at_once} = $start->is_ready ? 1 : 0;
+        await $start;
+        await $send->({ type => 'http.response.body', body => 'FAST', more => 0 });
+    };
+    my $h = h2_client(open_h2c($app));
+    $h->{client} = Net::HTTP2::nghttp2::Session->new_client(callbacks => {
+        on_begin_headers => sub { 0 }, on_header => sub { 0 }, on_frame_recv => sub { 0 },
+        on_data_chunk_recv => sub { 0 },
+        on_stream_close => sub { push @closed, $path{ $_[0] }; 0 },
+    });
+    $h->{client}->send_connection_preface;
+    for my $path ('/slow', '/fast') {
+        my $sid = $h->{client}->submit_request(method => 'GET', path => $path, scheme => 'http',
+            authority => 'localhost', headers => []);
+        $path{$sid} = $path;
+    }
+    ok(pump_until($h, 4096, sub { @closed == 2 }, 60), 'both streams completed');
+    ok($seen{slow_waiting}, 'the slow stream had a send waiting its turn');
+    is($seen{fast_start_at_once}, 1, "the other stream's send was taken at once");
+    finish($h);
+};
+
 done_testing;
