@@ -412,10 +412,12 @@ sub start {
             my $written;
             if (eval { $written = $s->$inner_writer(@_); 1 }) {
                 # What this call took from the buffer has been written: it
-                # leaves the count of queued bytes (see _write_out).
-                if ($weak_self) {
-                    my $left = ($weak_self->{_queued_bytes} // 0) - ($before - length $_[1]);
+                # leaves the count of queued bytes (see _write_out), and the
+                # client has made progress (see _close_if_write_stalled).
+                if ($weak_self && (my $took = $before - length $_[1]) > 0) {
+                    my $left = ($weak_self->{_queued_bytes} // 0) - $took;
                     $weak_self->{_queued_bytes} = $left > 0 ? $left : 0;
+                    $weak_self->{_write_progress_at} = Time::HiRes::time();
                 }
                 return $written;
             }
@@ -4887,6 +4889,8 @@ sub _write_out {
 # writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
 sub _write_server_output {
     my ($self, $bytes) = @_;
+    # Bytes now wait for the client: its write_timeout clock starts here.
+    $self->{_write_progress_at} = Time::HiRes::time() unless $self->{_queued_bytes};
     $self->{_queued_bytes} += length $bytes;
     $self->{stream}->write($bytes);
     return;
@@ -7364,6 +7368,20 @@ sub _close {
 # Combined disconnect and close - use this from callbacks where $weak_self may
 # become undefined after _handle_disconnect completes its Future callbacks.
 # This method holds a strong reference to $self throughout the operation.
+# write_timeout (PAGI::Server's sweep): a connection with bytes queued that
+# the client has taken none of for $limit seconds has stopped reading. It is
+# closed at once -- waiting for the buffer to drain would never end -- with
+# reason write_timeout (PAGI::Spec::Www). Returns true if it closed.
+sub _close_if_write_stalled {
+    my ($self, $now, $limit) = @_;
+    return 0 if $self->{closed} || !$self->{_queued_bytes};
+    return 0 if $now - ($self->{_write_progress_at} // $now) < $limit;
+    $self->_log(warn => "Write timeout (${limit}s): the client stopped reading - closing connection");
+    $self->_handle_disconnect_and_close('write_timeout',
+        detail => "no bytes written for ${limit}s", close_now => 1);
+    return 1;
+}
+
 sub _handle_disconnect_and_close {
     my ($self, $reason, %opt) = @_;
 

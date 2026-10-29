@@ -1815,6 +1815,31 @@ B<Note:> This differs from C<timeout> (idle connection timeout). The
 C<timeout> applies between requests on keep-alive connections. The
 C<request_timeout> applies during active request processing.
 
+=item write_timeout => $seconds
+
+Disconnect a client that has stopped reading. While bytes are waiting to be
+written to a connection, if the client takes none of them for this many
+seconds, the connection is closed at once with the disconnect reason
+C<write_timeout> (L<PAGI::Spec::Www>): an C<http> scope receives
+C<http.disconnect>, an SSE stream ends, and a WebSocket receives
+C<websocket.disconnect> with code C<1006>. One C<warn> line is logged.
+
+The clock runs only while bytes are queued, starts when they are, and every
+write the client accepts restarts it -- so a client that reads slowly but
+steadily is never cut off, and a connection with nothing to send (an idle
+keep-alive connection, a quiet SSE stream or WebSocket) is never timed out by
+it. Progress over TCP comes in steps (the client's window reopens only once a
+good part of it is free), so allow a slow client a few seconds. One timer per
+server checks the connections, about once a second.
+
+This is the timer for a client that stops reading: C<request_timeout>,
+C<sse_idle_timeout> and C<ws_idle_timeout> restart on the application's sends,
+so an application that keeps sending keeps them from firing.
+
+B<Default:> 0 (disabled)
+
+B<CLI:> C<--write-timeout 60>
+
 =item body_min_rate => $bytes_per_second
 
 The average rate, in bytes per second, at which a client must send an HTTP/1.x
@@ -2857,6 +2882,9 @@ sub _init {
     _check_body_rate_options($self);
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
+    $self->{write_timeout}       = delete $params->{write_timeout} // 0;     # Write-stall timeout (0 = disabled)
+    die "write_timeout must be a number of seconds, 0 or more\n"
+        unless $self->{write_timeout} =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
     $self->{ws_close_timeout}    = delete $params->{ws_close_timeout} // 10;  # Bound on the WebSocket closing-handshake wait (finite, positive; no "zero disables")
     die "Invalid ws_close_timeout '$self->{ws_close_timeout}' - must be a finite, positive number of seconds; the WebSocket closing-handshake wait is always bounded (there is no 'zero disables')\n"
         unless _is_finite_positive($self->{ws_close_timeout});
@@ -4657,6 +4685,7 @@ sub _on_connection {
 
     # Track the connection (O(1) hash insert)
     $self->{connections}{refaddr($conn)} = $conn;
+    $self->_start_write_timeout_sweep;
 
     # Configure stream with callbacks BEFORE adding to loop
     $conn->start;
@@ -5060,8 +5089,43 @@ async sub shutdown {
         } $loop->notifiers;
         PAGI::Server::AsyncFile->cleanup($loop) unless $others_running;
     }
+    $self->_stop_write_timeout_sweep;
 
     return $self;
+}
+
+# write_timeout: one sweep per server, started with its first connection,
+# closes every connection whose queued bytes the client has taken none of for
+# write_timeout seconds. With nothing queued a connection is never touched.
+sub _start_write_timeout_sweep {
+    my ($self) = @_;
+    return if $self->{_write_sweep} || !$self->{write_timeout};
+    my $limit = $self->{write_timeout};
+    weaken(my $weak_self = $self);
+    my $timer = IO::Async::Timer::Periodic->new(
+        interval => $limit / 2 < 1 ? $limit / 2 : 1,
+        on_tick  => sub { $weak_self->_sweep_write_timeouts if $weak_self },
+    );
+    $self->{_write_sweep} = $timer;
+    $self->add_child($timer);
+    $timer->start;
+    return;
+}
+
+sub _sweep_write_timeouts {
+    my ($self) = @_;
+    my $now = Time::HiRes::time();
+    $_->_close_if_write_stalled($now, $self->{write_timeout})
+        for values %{ $self->{connections} };
+    return;
+}
+
+sub _stop_write_timeout_sweep {
+    my ($self) = @_;
+    my $timer = delete $self->{_write_sweep} or return;
+    $timer->stop if $timer->is_running;
+    $self->remove_child($timer);
+    return;
 }
 
 # A scope's application Future, adopted for error handling and remembered
