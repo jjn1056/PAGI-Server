@@ -358,7 +358,9 @@ subtest 'SSE keepalives fall between queued events, never inside one' => sub {
     my @events = grep { length } split /\n\n/, $text;
     my @data = grep { /^data: / } map { split /\n/ } @events;
     is(scalar(@data), 20, 'all 20 events arrived');
-    is(scalar(grep { /\Adata: \d+:e{200000}\z/ } @data), 20, 'each whole: no keepalive inside an event');
+    # A length check, not e{200000}: perl before 5.38 caps a quantifier (32766 on 5.24, 65534 on 5.36).
+    is(scalar(grep { /\Adata: \d+:(e+)\z/ && length $1 == 200_000 } @data), 20,
+        'each whole: no keepalive inside an event');
     ok(scalar(grep { /^: ?ka/ } map { split /\n/ } @events) >= 1, 'keepalives were written');
     close $sock;
     stop_server($server);
