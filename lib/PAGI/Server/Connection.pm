@@ -2672,7 +2672,10 @@ sub _h2_create_send {
             # validated now, processed once the sends issued before it
             # have finished.
             my $turn = $weak_self->_join_send_queue($event, $ss);
-            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             # Empty/absent headers still calls submit_trailer with [] --
             # trailers were declared and must still terminate the response.
@@ -2786,7 +2789,10 @@ sub _h2_create_send {
             # validated now, processed once the sends issued before it
             # have finished.
             my $turn = $weak_self->_join_send_queue($event, $ss);
-            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             my $ok = eval {
                 die "File not found: $file\n"  unless -f $file;
@@ -2846,7 +2852,10 @@ sub _h2_create_send {
             # validated now, processed once the sends issued before it
             # have finished.
             my $turn = $weak_self->_join_send_queue($event, $ss);
-            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             my $ok = eval {
                 $ensure_h2_streaming_started->($ss);
@@ -2888,7 +2897,10 @@ sub _h2_create_send {
         # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event, $ss);
-        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+        }
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -3385,7 +3397,10 @@ sub _h2_create_websocket_send {
         # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event, $ss);
-        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+        }
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -3925,7 +3940,10 @@ sub _h2_create_sse_send {
         # wait on: it is the no-op the sse.close arm below returns.
         return unless $ss;
         my $turn = $weak_self->_join_send_queue($event, $ss);
-        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+        }
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -4851,7 +4869,8 @@ sub _stop_sse_idle_timer {
 # so its payload leaves the count of bytes waiting their turn.
 sub _write_out {
     my ($self, $bytes) = @_;
-    $self->{_current_turn}->release if $self->{_current_turn};
+    my $turn = $self->{_current_turn};
+    $turn->release if $turn && $turn->{held};
     $self->_write_server_output($bytes);
     return;
 }
@@ -4878,7 +4897,7 @@ sub _write_server_output {
 # buffered_amount. The queue belongs to the scope: the connection on
 # HTTP/1.1, and on HTTP/2 the stream's state ($owner), whose sends join it
 # the same way. The send holds the returned turn until it has finished; if
-# the turn is taken, $turn->waiting is the Future it awaits first.
+# the turn is taken, $turn->{waiting} is the Future it awaits first.
 sub _join_send_queue {
     my ($self, $event, $owner) = @_;
     my $payload = 0;
@@ -4888,15 +4907,11 @@ sub _join_send_queue {
     return PAGI::Server::Connection::_SendTurn->new($owner // $self, $self, $payload);
 }
 
-# An HTTP/2 send that had to wait for its turn on the stream: waits, then
-# says whether the stream and connection are still there -- once either is
-# gone the send is a quiet no-op.
-async sub _h2_await_turn {
-    weaken(my $self = shift);
-    my ($stream_id, $ss, $turn) = @_;
-    await $turn->waiting;
-    return 0 unless $self && !$self->{closed};
-    return $self->{h2_streams}{$stream_id} && !$ss->{h2_closed} ? 1 : 0;
+# Whether an HTTP/2 send that waited for its turn still has a stream to send
+# on: once the connection or the stream is gone, the send is a quiet no-op.
+sub _h2_stream_open {
+    my ($self, $stream_id, $ss) = @_;
+    return !$self->{closed} && $self->{h2_streams}{$stream_id} && !$ss->{h2_closed};
 }
 
 # Every application send's bytes join an HTTP/2 stream's send queue through
@@ -4904,7 +4919,8 @@ async sub _h2_await_turn {
 # payload from the bytes waiting their turn, as the queue now counts them.
 sub _h2_enqueue {
     my ($self, $ss, $bytes) = @_;
-    $ss->{_current_turn}->release if $ss->{_current_turn};
+    my $turn = $ss->{_current_turn};
+    $turn->release if $turn && $turn->{held};
     push @{ $ss->{send_queue} //= [] }, $bytes;
     $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
     return;
@@ -6505,7 +6521,7 @@ async sub _send_http_event {
     # Take this send's turn (see _join_send_queue): validated now, written
     # once the sends issued before it have finished.
     my $turn = $weak_self->_join_send_queue($event);
-    await $turn->waiting if $turn->waiting;
+    await $turn->{waiting} if $turn->{waiting};
     return Future->done unless $weak_self;
     return Future->done if $weak_self->{closed};
 
@@ -8159,7 +8175,7 @@ sub _create_sse_send {
         # Take this send's turn (see _join_send_queue): validated now, written
         # once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event);
-        await $turn->waiting if $turn->waiting;
+        await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
 
@@ -8731,7 +8747,7 @@ sub _create_websocket_send {
         # Take this send's turn (see _join_send_queue): validated now, written
         # once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event);
-        await $turn->waiting if $turn->waiting;
+        await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
 
@@ -9340,16 +9356,17 @@ use Scalar::Util qw(weaken);
 
 sub new {
     my ($class, $owner, $conn, $payload) = @_;
-    my $self = bless { held => 0 }, $class;
-    weaken($self->{owner} = $owner);
-    weaken($self->{conn} = $conn);
-    $self->hold($payload) if $payload;
+    my $self = bless { owner => $owner, conn => $conn, held => $payload }, $class;
+    weaken($self->{owner});
+    weaken($self->{conn});
+    # Until its first write, the send's payload counts in buffered_amount.
+    $owner->{_held_bytes} += $payload if $payload;
     my $waiters = $owner->{_turns_waiting} //= [];
     # A send queues while any send waits, even if the turn is free for the
     # moment -- as it is while the hand-off runs an earlier send's callbacks --
     # so a send issued from such a callback never overtakes the queue.
     if (!$owner->{_turn_busy} && !@$waiters) {
-        $self->_hold_turn;
+        _hold_turn($self, $owner);
     }
     else {
         $self->{waiting} = Future->new;
@@ -9359,28 +9376,16 @@ sub new {
     return $self;
 }
 
-# The Future a send awaits before its turn, or nothing if it has the turn.
-sub waiting { $_[0]{waiting} }
-
 sub _hold_turn {
-    my ($self) = @_;
-    my $owner = $self->{owner};
+    my ($self, $owner) = @_;
     $owner->{_turn_busy} = $self->{holding} = 1;
     # Its first write releases its payload from the bytes waiting their turn.
     weaken($owner->{_current_turn} = $self);
     return;
 }
 
-sub hold {
-    my ($self, $bytes) = @_;
-    $self->{held} += $bytes;
-    $self->{owner}{_held_bytes} += $bytes if $self->{owner};
-    return;
-}
-
 sub release {
     my ($self) = @_;
-    return unless $self->{held};
     $self->{owner}{_held_bytes} -= $self->{held} if $self->{owner};
     $self->{held} = 0;
     return;
@@ -9401,7 +9406,7 @@ sub _hand_on {
     while (!$owner->{_turn_busy} && @$waiters) {
         my $next = shift @$waiters;
         next unless $next && !$next->{waiting}->is_ready;   # abandoned or cancelled
-        $next->_hold_turn;
+        _hold_turn($next, $owner);
         my $wake = $next->{waiting};
         # Waking runs the application's callbacks on the sends that finish;
         # one that dies must not strand the sends still waiting.
@@ -9418,8 +9423,9 @@ sub _hand_on {
 sub DESTROY {
     my ($self) = @_;
     return if ${^GLOBAL_PHASE} eq 'DESTRUCT';
-    $self->release;
-    _hand_on($self->{owner}, $self->{conn}) if $self->{holding} && $self->{owner};
+    my $owner = $self->{owner} or return;
+    $owner->{_held_bytes} -= $self->{held} if $self->{held};
+    _hand_on($owner, $self->{conn}) if $self->{holding};
     return;
 }
 
