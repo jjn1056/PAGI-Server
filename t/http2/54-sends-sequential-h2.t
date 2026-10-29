@@ -270,4 +270,28 @@ subtest 'a stream reset while sends are queued: they and later sends settle quie
     finish($h);
 };
 
+subtest 'a queued burst crosses the watermarks once each way' => sub {
+    my (@high, @drain, %seen);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless $scope->{type} eq 'http';
+        my $t = $scope->{'pagi.transport'};
+        $t->on_high_water(sub { push @high, $t->buffered_amount });
+        $t->on_drain(sub { push @drain, $t->buffered_amount });
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        my @sent = map { $send->({ type => 'http.response.body', body => 'x' x 100_000, more => 1 }) } 1 .. 20;
+        $seen{pending} = grep { !$_->is_ready } @sent;
+        push @sent, $send->({ type => 'http.response.body', body => "\nEND\n", more => 0 });
+        await Future->needs_all(@sent);
+    };
+    my $h = h2_client(open_h2c($app));
+    request($h);
+    ok(pump_until($h, 4096, sub { $h->{closed} }, 60), 'the response completed');
+    ok($seen{pending} >= 15, "$seen{pending} sends were queued unawaited");
+    is(scalar @high, 1, 'on_high_water fired once') or diag "at: @high";
+    is(scalar @drain, 1, 'on_drain fired once') or diag "at: @drain";
+    ok(!grep({ $_ >= $LOW } @drain), "on_drain fired below the low mark (@drain)");
+    finish($h);
+};
+
 done_testing;

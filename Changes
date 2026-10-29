@@ -84,6 +84,10 @@
     HTTP/1.1 fell from 209 MB to 131 MB; for smaller sends, and 8 KB on
     HTTP/2, it rose by up to 21% (32-byte sends on HTTP/1.1: 52 MB to 63).
     buffered_amount counts the sends accepted and not yet written.
+  - pagi.transport's on_drain fires once buffered_amount -- sends still
+    waiting their turn included -- is below the low watermark. It fired as
+    soon as the written buffer dipped below it, while a burst of sends
+    could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
   - A receive cancelled while it waits -- as Future->wait_any cancels the

@@ -459,4 +459,61 @@ subtest 'keep-alive after a response whose last bytes were still queued' => sub 
     stop_server($server);
 };
 
+# PAGI::Spec::Www "Transport Flow Control": on_high_water fires when
+# buffered_amount crosses the high mark, and on_drain when it falls below the
+# low mark. buffered_amount counts the sends still waiting their turn, so a
+# burst of them is one crossing each way, however often the written buffer
+# itself empties between turns.
+# Large sends refill the buffer as soon as a waiting one resumes; small ones
+# leave it below the low mark while many more still wait their turn.
+for my $case (['http', 20, 100_000], ['sse', 20, 100_000], ['http', 300, 1_000], ['sse', 300, 1_000]) {
+    my ($kind, $count, $size) = @$case;
+    subtest "$kind: a queued burst of $count x $size bytes crosses the watermarks once each way" => sub {
+        my ($HIGH, $LOW) = (65_536, 16_384);
+        my (@high, @drain, %seen);
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            my $t = $scope->{'pagi.transport'};
+            $t->on_high_water(sub { push @high, $t->buffered_amount });
+            $t->on_drain(sub { push @drain, $t->buffered_amount });
+            my @sent;
+            if ($scope->{type} eq 'http') {
+                await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+                @sent = map { $send->({ type => 'http.response.body', body => 'x' x $size, more => 1 }) } 1 .. $count;
+                $seen{pending} = grep { !$_->is_ready } @sent;
+                push @sent, $send->({ type => 'http.response.body', body => "\nEND\n", more => 0 });
+            }
+            else {
+                await $receive->();
+                await $send->({ type => 'sse.start' });
+                @sent = map { $send->({ type => 'sse.send', data => 'x' x $size }) } 1 .. $count;
+                $seen{pending} = grep { !$_->is_ready } @sent;
+                push @sent, $send->({ type => 'sse.close' });
+            }
+            await Future->needs_all(@sent);
+        };
+        my $server = start_server($app, write_high_watermark => $HIGH, write_low_watermark => $LOW);
+        my $sock = raw_connect($server);
+        syswrite($sock, $kind eq 'http'
+            ? "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            : "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
+        # A slow reader: a little at a time, so the written buffer empties
+        # again and again while sends still wait their turn.
+        my $wire = '';
+        my $deadline = time + 30;
+        until ($wire =~ /\r\n0\r\n\r\n/ || time > $deadline) {
+            my $n = sysread($sock, my $chunk, 40_000);
+            $wire .= $chunk if $n;
+            $loop->loop_once(0.002);
+        }
+        like($wire, qr/\r\n0\r\n\r\n/, 'the response completed');
+        ok($seen{pending} >= $count * 0.75, "$seen{pending} sends were queued unawaited");
+        is(scalar @high, 1, 'on_high_water fired once') or diag "at: @high";
+        is(scalar @drain, 1, 'on_drain fired once') or diag "at: @drain";
+        ok(!grep({ $_ >= $LOW } @drain), "on_drain fired below the low mark (@drain)");
+        close $sock;
+        stop_server($server);
+    };
+}
+
 done_testing;

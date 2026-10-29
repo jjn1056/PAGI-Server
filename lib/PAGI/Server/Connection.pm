@@ -2476,7 +2476,9 @@ sub _h2_create_send {
             # $send to resume its source — which would re-enter nghttp2. Splice
             # the fires out first (so they can't double-fire), then invoke them on
             # the next loop tick.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -3322,7 +3324,9 @@ sub _h2_create_websocket_send {
             # Fire the app's on_drain hysteresis callbacks once this stream's
             # queue falls below the low watermark. Deferred for the same reason:
             # an on_drain callback may call $send, which would re-enter nghttp2.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -3858,7 +3862,9 @@ sub _h2_create_sse_send {
             # Fire the app's on_drain hysteresis callbacks once this stream's
             # queue falls below the low watermark. Deferred for the same reason:
             # an on_drain callback may call $send, which would re-enter nghttp2.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -5013,21 +5019,28 @@ sub _check_drain_waiters {
     return unless @{$self->{_drain_waiters}} || @{$self->{_drain_fires}};
     return unless $self->{stream};
 
-    my $buffered = $self->_get_write_buffer_size;
+    my $low = $self->{write_low_watermark};
 
-    # Resolve/fire everyone once we've drained below low watermark: blocking
-    # producer Futures resolve, and arm_drain's on_drain hysteresis callbacks
-    # fire -- this IS an actual drain, unlike teardown (_cancel_drain_waiters).
-    if ($buffered < $self->{write_low_watermark}) {
+    # A send waiting for the buffer to drain goes on once the bytes written
+    # are below the low watermark: its own payload is still held, so it
+    # cannot wait for that too.
+    if ($self->_get_write_buffer_size < $low) {
         my @waiters = splice @{$self->{_drain_waiters}};
         for my $f (@waiters) {
             $f->done unless $f->is_ready;
         }
+    }
+    # arm_drain's on_drain fires once buffered_amount -- the sends still
+    # waiting their turn included -- is below it (PAGI::Spec::Www "Transport
+    # Flow Control"); until then the next time the buffer empties checks
+    # again. This IS a drain, unlike teardown (_cancel_drain_waiters).
+    if (@{$self->{_drain_fires}} && $self->_buffered_amount < $low) {
         my @fires = splice @{$self->{_drain_fires}};
         $_->() for @fires;
-        # Disable drain checking until next high watermark hit
-        $self->{_drain_check_active} = 0;
     }
+    # Drain checking stays on while either still waits.
+    $self->{_drain_check_active} = 0
+        unless @{$self->{_drain_waiters}} || @{$self->{_drain_fires}};
 }
 
 sub _setup_drain_detection {

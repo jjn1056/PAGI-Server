@@ -110,10 +110,11 @@ sub new {
 
     my $pending = $transport->buffered_amount;
 
-Returns the number of bytes queued for the client but not yet written to the
-network, as an integer; C<0> when the send buffer is fully drained (or once the
-underlying connection has gone away). A synchronous, non-blocking,
-non-destructive read.
+Returns the number of bytes the server has accepted for the client and not yet
+written to the network, as an integer: the bytes in the send buffer, plus the
+payloads of sends still waiting their turn (L<PAGI::Spec::Www> 0.7, "Sends Are
+Sequential"). C<0> when everything has been written (or once the underlying
+connection has gone away). A synchronous, non-blocking, non-destructive read.
 
 =cut
 
@@ -160,10 +161,10 @@ sub low_water_mark {
 
     $transport->on_high_water(sub { $source->pause });
 
-Registers a callback invoked when the outbound buffer reaches or exceeds
+Registers a callback invoked when L</buffered_amount> reaches or exceeds
 L</high_water_mark> (backpressure engaged). Edge-triggered: it fires once when
-the buffer crosses up, and not again until the buffer has drained below the low
-mark and crossed up again. If the buffer is already at or above the mark when
+it crosses up, and not again until it has drained below the low mark and
+crossed up again. If the buffer is already at or above the mark when
 the callback is registered, it is invoked immediately. Multiple callbacks may be
 registered; they are invoked in registration order with no arguments. Returns
 the handle for chaining.
@@ -190,10 +191,11 @@ sub on_high_water {
 
     $transport->on_drain(sub { $source->resume });
 
-Registers a callback invoked when the outbound buffer falls back below
-L</low_water_mark> after having reached the high mark (backpressure released).
-It is not invoked merely because the buffer is below the low mark when
-registered -- only on an actual high-then-low transition. Multiple callbacks may
+Registers a callback invoked when L</buffered_amount> -- sends still waiting
+their turn included -- falls back below L</low_water_mark> after having reached
+the high mark (backpressure released). It is not invoked merely because it is
+below the low mark when registered -- only on an actual high-then-low
+transition. Multiple callbacks may
 be registered; they are invoked in registration order with no arguments. Returns
 the handle for chaining.
 
