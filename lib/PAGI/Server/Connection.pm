@@ -891,7 +891,7 @@ sub _h2_write_pending {
         while (1) {
             my $data = $self->{h2_session}->extract;
             last unless defined $data && length($data) > 0;
-            $self->_write_out($data);
+            $self->_write_server_output($data);
         }
     });
 }
@@ -2668,10 +2668,11 @@ sub _h2_create_send {
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
             $publish->($seq);
-            # Take this send's turn on the stream (see _h2_take_turn):
+            # Take this send's turn on the stream (see _join_send_queue):
             # validated now, processed once the sends issued before it
             # have finished.
-            my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
             # Empty/absent headers still calls submit_trailer with [] --
             # trailers were declared and must still terminate the response.
@@ -2781,10 +2782,11 @@ sub _h2_create_send {
             # mark the response complete, so on failure $seq rolls back to
             # $seq_before exactly as the h1 twin in _create_send does.
             my $seq_before = $advance_seq_for_body->($ss, $event);
-            # Take this send's turn on the stream (see _h2_take_turn):
+            # Take this send's turn on the stream (see _join_send_queue):
             # validated now, processed once the sends issued before it
             # have finished.
-            my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
             my $ok = eval {
                 die "File not found: $file\n"  unless -f $file;
@@ -2840,10 +2842,11 @@ sub _h2_create_send {
             my $fh = $event->{fh};
 
             my $seq_before = $advance_seq_for_body->($ss, $event);
-            # Take this send's turn on the stream (see _h2_take_turn):
+            # Take this send's turn on the stream (see _join_send_queue):
             # validated now, processed once the sends issued before it
             # have finished.
-            my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
             my $ok = eval {
                 $ensure_h2_streaming_started->($ss);
@@ -2882,9 +2885,10 @@ sub _h2_create_send {
         # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
         $publish->($seq);
-        # Take this send's turn on the stream (see _h2_take_turn): validated
+        # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished.
-        my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -3378,9 +3382,10 @@ sub _h2_create_websocket_send {
             return;
         }
 
-        # Take this send's turn on the stream (see _h2_take_turn): validated
+        # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished.
-        my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -3914,12 +3919,13 @@ sub _h2_create_sse_send {
             return;
         }
 
-        # Take this send's turn on the stream (see _h2_take_turn): validated
+        # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished. A
         # repeat sse.close after the stream was reclaimed has no stream to
         # wait on: it is the no-op the sse.close arm below returns.
         return unless $ss;
-        my $turn = await $weak_self->_h2_take_turn($stream_id, $ss, $event) or return;
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        return if $turn->waiting && !await $weak_self->_h2_await_turn($stream_id, $ss, $turn);
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -4839,15 +4845,23 @@ sub _stop_sse_idle_timer {
 # The $send->() Future will block (await) when high watermark is exceeded,
 # and resolve when buffer drains below low watermark.
 
-# Every write to the client goes through here. The bytes count as queued
-# until the stream's writer (wrapped in start) has written them, so
-# _get_write_buffer_size, which every send asks, costs the same however many
-# writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+# An application send's bytes go to the client through here; the server's
+# own output (keepalives, pongs, 100 Continue, its error responses and Close
+# frames) through _write_server_output. The send whose turn it is writes now,
+# so its payload leaves the count of bytes waiting their turn.
 sub _write_out {
     my ($self, $bytes) = @_;
-    # The send whose turn it is writes now: its payload leaves the count of
-    # bytes waiting their turn and is counted here instead.
     $self->{_current_turn}->release if $self->{_current_turn};
+    $self->_write_server_output($bytes);
+    return;
+}
+
+# Every write to the client ends here. The bytes count as queued until the
+# stream's writer (wrapped in start) has written them, so
+# _get_write_buffer_size, which every send asks, costs the same however many
+# writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+sub _write_server_output {
+    my ($self, $bytes) = @_;
     $self->{_queued_bytes} += length $bytes;
     $self->{stream}->write($bytes);
     return;
@@ -4863,42 +4877,26 @@ sub _write_out {
 # stalls the sends behind it. Until it writes, its payload counts in
 # buffered_amount. The queue belongs to the scope: the connection on
 # HTTP/1.1, and on HTTP/2 the stream's state ($owner), whose sends join it
-# the same way.
+# the same way. The send holds the returned turn until it has finished; if
+# the turn is taken, $turn->waiting is the Future it awaits first.
 sub _join_send_queue {
     my ($self, $event, $owner) = @_;
-    $owner //= $self;
-    my $prev = $owner->{_send_tail};
-    my $mine = Future->new;
-    $owner->{_send_tail} = $mine;
     my $payload = 0;
     for my $field (qw(body text bytes data)) {
         $payload += length $event->{$field} if defined $event->{$field} && !ref $event->{$field};
     }
-    return PAGI::Server::Connection::_SendTurn->new($owner, $prev, $mine, $payload);
+    return PAGI::Server::Connection::_SendTurn->new($owner // $self, $self, $payload);
 }
 
-# Waits for this send's turn (see _join_send_queue), then makes it the
-# current one, whose first write releases its payload from the count.
-async sub _take_turn {
-    my ($self, $turn, $owner) = @_;
-    $owner //= $self;
-    weaken($owner);
-    await $turn->ready;
-    weaken($owner->{_current_turn} = $turn) if $owner;
-    return;
-}
-
-# An HTTP/2 send's turn on its stream (see _join_send_queue). Returns the
-# turn, which the send holds until it has finished, or nothing once the
-# stream or connection is gone, which makes the send a quiet no-op.
-async sub _h2_take_turn {
+# An HTTP/2 send that had to wait for its turn on the stream: waits, then
+# says whether the stream and connection are still there -- once either is
+# gone the send is a quiet no-op.
+async sub _h2_await_turn {
     weaken(my $self = shift);
-    my ($stream_id, $ss, $event) = @_;
-    my $turn = $self->_join_send_queue($event, $ss);
-    await $self->_take_turn($turn, $ss);
-    return unless $self && !$self->{closed};
-    return unless $self->{h2_streams}{$stream_id} && !$ss->{h2_closed};
-    return $turn;
+    my ($stream_id, $ss, $turn) = @_;
+    await $turn->waiting;
+    return 0 unless $self && !$self->{closed};
+    return $self->{h2_streams}{$stream_id} && !$ss->{h2_closed} ? 1 : 0;
 }
 
 # Every application send's bytes join an HTTP/2 stream's send queue through
@@ -5154,7 +5152,7 @@ sub _start_ws_keepalive {
                 type   => 'ping',
                 buffer => '',
             );
-            $weak_self->_write_out($ping->to_bytes);
+            $weak_self->_write_server_output($ping->to_bytes);
 
             # Start pong timeout if configured
             if ($weak_self->{ws_keepalive_timeout} > 0) {
@@ -6364,7 +6362,7 @@ async sub _receive_http_body {
     # Send 100 Continue if client expects it (before reading body)
     if ($expect_continue && !$request->{continue_sent}) {
         $request->{continue_sent} = 1;
-        $weak_self->_write_out($weak_self->{protocol}->serialize_continue);
+        $weak_self->_write_server_output($weak_self->{protocol}->serialize_continue);
     }
 
     # Handle chunked Transfer-Encoding
@@ -6507,7 +6505,7 @@ async sub _send_http_event {
     # Take this send's turn (see _join_send_queue): validated now, written
     # once the sends issued before it have finished.
     my $turn = $weak_self->_join_send_queue($event);
-    await $weak_self->_take_turn($turn);
+    await $turn->waiting if $turn->waiting;
     return Future->done unless $weak_self;
     return Future->done if $weak_self->{closed};
 
@@ -6796,7 +6794,7 @@ sub _send_error_response {
     my $response = $self->{protocol}->serialize_response_start($status, $headers, 0);
     $response .= $body;
 
-    $self->_write_out($response);
+    $self->_write_server_output($response);
     $self->{response_started} = 1;
     # A server-synthesized response is still "this request's response started".
     $self->{current_connection_state}->_mark_response_started
@@ -7144,7 +7142,7 @@ sub _send_close_frame {
         buffer => pack('n', $code) . $reason,
     );
 
-    $self->_write_out($frame->to_bytes);
+    $self->_write_server_output($frame->to_bytes);
     $self->{close_sent} = 1;
 }
 
@@ -7946,7 +7944,7 @@ sub _create_sse_receive {
                 # Send 100 Continue if client expects it (before reading body)
                 if ($expect_continue && !$request->{continue_sent}) {
                     $request->{continue_sent} = 1;
-                    $weak_self->_write_out($weak_self->{protocol}->serialize_continue);
+                    $weak_self->_write_server_output($weak_self->{protocol}->serialize_continue);
                 }
 
                 if ($is_chunked) {
@@ -8161,7 +8159,7 @@ sub _create_sse_send {
         # Take this send's turn (see _join_send_queue): validated now, written
         # once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event);
-        await $weak_self->_take_turn($turn);
+        await $turn->waiting if $turn->waiting;
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
 
@@ -8221,7 +8219,7 @@ sub _create_sse_send {
                 my $bytes = eval { Encode::encode('UTF-8', $text, Encode::FB_CROAK) };
                 die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
                 my $len = sprintf("%x", length($bytes));
-                $weak_self->_write_out("$len\r\n$bytes\r\n");
+                $weak_self->_write_server_output("$len\r\n$bytes\r\n");
             };
         }
         elsif ($type eq 'sse.send') {
@@ -8733,7 +8731,7 @@ sub _create_websocket_send {
         # Take this send's turn (see _join_send_queue): validated now, written
         # once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event);
-        await $weak_self->_take_turn($turn);
+        await $turn->waiting if $turn->waiting;
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
 
@@ -9090,7 +9088,7 @@ sub _process_websocket_frames {
                     type   => 'close',
                     buffer => pack('n', $code) . $reason,
                 );
-                $self->_write_out($close_frame->to_bytes);
+                $self->_write_server_output($close_frame->to_bytes);
                 $self->{close_sent} = 1;
             }
 
@@ -9161,7 +9159,7 @@ sub _process_websocket_frames {
                 type   => 'pong',
                 buffer => $bytes,
             );
-            $self->_write_out($pong->to_bytes);
+            $self->_write_server_output($pong->to_bytes);
         }
         elsif ($opcode == 10) {
             # Pong - cancel any pending timeout (response to our ping)
@@ -9334,26 +9332,43 @@ sub _log {
 }
 
 # One send's turn on its scope's queue (see Connection's _join_send_queue):
-# the connection's on HTTP/1.1, the stream's on HTTP/2.
+# the connection's on HTTP/1.1, the stream's on HTTP/2. A send takes the turn
+# at once when nothing holds it and nothing waits for it; otherwise it waits,
+# in the order it was called, and is woken by the hand-off below.
 package PAGI::Server::Connection::_SendTurn;
 use Scalar::Util qw(weaken);
 
 sub new {
-    my ($class, $owner, $prev, $mine, $payload) = @_;
-    my $self = bless { prev => $prev, mine => $mine, held => 0 }, $class;
+    my ($class, $owner, $conn, $payload) = @_;
+    my $self = bless { held => 0 }, $class;
     weaken($self->{owner} = $owner);
+    weaken($self->{conn} = $conn);
     $self->hold($payload) if $payload;
+    my $waiters = $owner->{_turns_waiting} //= [];
+    # A send queues while any send waits, even if the turn is free for the
+    # moment -- as it is while the hand-off runs an earlier send's callbacks --
+    # so a send issued from such a callback never overtakes the queue.
+    if (!$owner->{_turn_busy} && !@$waiters) {
+        $self->_hold_turn;
+    }
+    else {
+        $self->{waiting} = Future->new;
+        push @$waiters, $self;
+        weaken($waiters->[-1]);   # an abandoned send frees its place
+    }
     return $self;
 }
 
-# Ready once the sends before this one have finished. It is never cancelled by
-# the application cancelling its own send: that send is abandoned instead,
-# ending its turn.
-sub ready {
+# The Future a send awaits before its turn, or nothing if it has the turn.
+sub waiting { $_[0]{waiting} }
+
+sub _hold_turn {
     my ($self) = @_;
-    my $prev = $self->{prev};
-    return Future->done if !$prev || $prev->is_ready;
-    return $prev->without_cancel;
+    my $owner = $self->{owner};
+    $owner->{_turn_busy} = $self->{holding} = 1;
+    # Its first write releases its payload from the bytes waiting their turn.
+    weaken($owner->{_current_turn} = $self);
+    return;
 }
 
 sub hold {
@@ -9371,12 +9386,41 @@ sub release {
     return;
 }
 
+# The turn is free: wake the sends waiting for it, in the order they were
+# called, from this one loop. A woken send that finishes at once ends its
+# turn inside the wake, which frees the turn again and lets the loop go on to
+# the next send -- so however many sends are queued, the stack does not
+# grow. The loop stops at the first send that has to wait (for the buffer
+# to drain, say); when that one ends, its own hand-off carries on.
+sub _hand_on {
+    my ($owner, $conn) = @_;
+    $owner->{_turn_busy} = 0;
+    return if $owner->{_handing_on};
+    local $owner->{_handing_on} = 1;
+    my $waiters = $owner->{_turns_waiting} or return;
+    while (!$owner->{_turn_busy} && @$waiters) {
+        my $next = shift @$waiters;
+        next unless $next && !$next->{waiting}->is_ready;   # abandoned or cancelled
+        $next->_hold_turn;
+        my $wake = $next->{waiting};
+        # Waking runs the application's callbacks on the sends that finish;
+        # one that dies must not strand the sends still waiting.
+        next if eval { $wake->done; 1 };
+        my $error = $@;
+        chomp $error;
+        $conn->_log(error => "PAGI application error in a callback on a send's Future: $error")
+            if $conn;
+    }
+    return;
+}
+
 # The send finished -- or was abandoned -- so its turn ends.
 sub DESTROY {
     my ($self) = @_;
     return if ${^GLOBAL_PHASE} eq 'DESTRUCT';
     $self->release;
-    $self->{mine}->done unless $self->{mine}->is_ready;
+    _hand_on($self->{owner}, $self->{conn}) if $self->{holding} && $self->{owner};
+    return;
 }
 
 package PAGI::Server::Connection;
