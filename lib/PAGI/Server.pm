@@ -1761,8 +1761,10 @@ when the master was configured with C<on>.
 =item request_timeout => $seconds
 
 Maximum time in seconds a request can stall without any I/O activity before
-being terminated. This is a "stall timeout" - the timer resets whenever data
-is read from the client or written to the client.
+being terminated. This is a "stall timeout" - the timer restarts whenever data
+is read from the client and whenever the application sends, not when the
+client accepts bytes: an application that keeps sending keeps it from firing
+for a client that has stopped reading. That case is C<write_timeout>'s.
 
 B<Default:> 0 (disabled)
 
@@ -1793,7 +1795,7 @@ B<How it works:>
 
 =item * Timer resets on any read activity (receiving request body)
 
-=item * Timer resets on any write activity (sending response)
+=item * Timer resets on each application send (C<$send>), whether or not the client takes the bytes
 
 =item * If timer expires (no I/O for N seconds), connection is closed
 
@@ -1885,7 +1887,7 @@ When enabled, the timer resets on:
 
 =over 4
 
-=item * Sending any WebSocket frame (accept, send, ping, close)
+=item * The application or server sending any WebSocket frame (accept, send, ping, close) -- when it is sent, not when the client takes it
 
 =item * Receiving any WebSocket frame from client
 
@@ -1954,7 +1956,8 @@ being sent before being closed.
 
 B<Default:> 0 (disabled - SSE connections can be idle indefinitely)
 
-The timer resets each time an event is sent to the client (including
+The timer resets each time the application sends an event -- when it calls
+C<$send>, not when the client takes it (including
 comments and the initial headers).
 
 B<Example:>
