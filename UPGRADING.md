@@ -74,6 +74,28 @@ other connections; after `max_disconnect_receives` (default 100) such
 receives now fail. Check for the end event, or set
 `--max-disconnect-receives 0` to restore unbounded re-delivery.
 
+### PAGI Www 0.7: sends go out in the order they were called
+
+An application may now issue a `$send` before an earlier one has resolved,
+and the server processes a scope's sends in call order, each whole, the
+terminal event last. Scopes report `spec_version` `'0.7'`. Code that
+serialises its own sends (awaiting each before issuing the next) keeps
+working and no longer needs to. Upgrade PAGI-Tools with it: its helpers now
+leave send ordering to the server. What you may notice:
+
+- A send issued while an earlier one waited for the client is no longer
+  written first.
+- An SSE event or WebSocket message still waiting when the application sends
+  `sse.close` or `websocket.close` is now delivered before the close (it was
+  dropped, or on HTTP/1.1 SSE written after the end of the stream).
+- Trailers sent while a file or filehandle body still streams follow the
+  whole body.
+- `buffered_amount` counts sends accepted and not yet written, including
+  those waiting their turn, and `on_drain` fires once that total is below the
+  low watermark: a burst of unawaited sends no longer fires it early.
+- A burst of unawaited sends waits its turn in the server rather than piling
+  into the write buffer.
+
 ## 0.002007
 
 ### Outgoing-event validation is now mandatory, in every environment
