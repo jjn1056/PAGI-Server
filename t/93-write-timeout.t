@@ -107,6 +107,24 @@ sub flood_app {
     };
 }
 
+subtest 'write_timeout is on by default, at 60 seconds' => sub {
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        await $send->({ type => 'http.response.body', body => 'OK', more => 0 });
+    };
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, quiet => 1, access_log => undef);
+    is($server->{write_timeout}, 60, 'write_timeout defaults to 60');
+    $loop->add($server);
+    $server->listen->get;
+    my $sock = small_window_connect($server);
+    syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    ok(pump_until(sub { $server->{_write_sweep} }, 5), 'and its sweep runs once a client connects');
+    close $sock;
+    stop_server($server);
+};
+
 subtest 'a client that stops reading is disconnected with write_timeout' => sub {
     my %seen;
     @log = ();

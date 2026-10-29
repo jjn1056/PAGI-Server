@@ -1842,7 +1842,9 @@ This is the timer for a client that stops reading: C<request_timeout>,
 C<sse_idle_timeout> and C<ws_idle_timeout> restart on the application's sends,
 so an application that keeps sending keeps them from firing.
 
-B<Default:> 0 (disabled)
+B<Default:> 60. C<0> turns it off, which is how every PAGI::Server before
+0.003000 behaved: a client that stopped reading held its connection, and the
+application's queued output, for as long as it stayed connected.
 
 B<CLI:> C<--write-timeout 60>
 
@@ -2888,7 +2890,7 @@ sub _init {
     _check_body_rate_options($self);
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
-    $self->{write_timeout}       = delete $params->{write_timeout} // 0;     # Write-stall timeout (0 = disabled)
+    $self->{write_timeout}       = delete $params->{write_timeout} // 60;    # Write-stall timeout (0 = disabled)
     die "write_timeout must be a number of seconds, 0 or more\n"
         unless $self->{write_timeout} =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
     $self->{ws_close_timeout}    = delete $params->{ws_close_timeout} // 10;  # Bound on the WebSocket closing-handshake wait (finite, positive; no "zero disables")

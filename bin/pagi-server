@@ -476,7 +476,7 @@ Request stall timeout in seconds (default: 0, disabled)
 =item B<--write-timeout> NUM
 
 Close a connection whose client has taken none of the bytes waiting for it in
-this many seconds (default: 0, disabled). See L<PAGI::Server/"write_timeout">.
+this many seconds (default: 60; 0 turns it off). See L<PAGI::Server/"write_timeout">.
 
 =item B<--body-min-rate> NUM
 
