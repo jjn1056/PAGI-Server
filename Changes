@@ -20,6 +20,12 @@
     outside OPTIONS, is answered 400.
   - A scope answers at most max_disconnect_receives (default 100) receives
     after it has ended; further receives fail.
+  - Implements PAGI Www 0.7 ("Sends Are Sequential"): every http, websocket
+    and sse scope reports spec_version '0.7'. An application may issue a
+    send before an earlier one has resolved; the server keeps a scope's
+    sends in the order they were called, over HTTP/1.1 and HTTP/2. Release
+    together with PAGI-Tools PR #74, which leaves that ordering to the
+    server.
 
   [New]
   - body_min_rate (default 500 bytes/s) and body_rate_grace (default 20s):
@@ -64,6 +70,20 @@
     poll: Future::IO 0.21 and later build sysread and syswrite on it, so an
     application reading or writing through Future::IO under an older
     IO::Async died with "Can't locate object method poll".
+  - Sending costs less on HTTP/1.1: the server counts the bytes waiting to
+    be written as it queues and writes them, where it used to add up its
+    write queue on every send. Server CPU per send, one worker, median of
+    three runs: 32-byte sends about 45-65 microseconds, from 410-830; 1 KB
+    awaited sends 0.85-0.89 of before, overlapping 0.14-0.26; 8 KB
+    overlapping 0.22-0.65, awaited 1.01-1.12. HTTP/2 sends of 32 bytes and
+    1 KB cost 1.09-1.33 times as much CPU as before, for keeping them in
+    order; 8 KB 0.98-1.13.
+  - A burst of sends the application does not await waits its turn instead
+    of piling into the write buffer: at most one send past the high
+    watermark is buffered. Peak memory for a burst of 8 KB sends on
+    HTTP/1.1 fell from 209 MB to 131 MB; for smaller sends, and 8 KB on
+    HTTP/2, it rose by up to 21% (32-byte sends on HTTP/1.1: 52 MB to 63).
+    buffered_amount counts the sends accepted and not yet written.
 
   [Fixed]
   - A receive cancelled while it waits -- as Future->wait_any cancels the
@@ -204,6 +224,21 @@
   - After the server's reply to a peer's Close, a websocket.send put a data
     frame on the wire after the Close, which RFC 6455 forbids; it is now a
     no-op.
+  - A send issued while an earlier one waited for the client to read could
+    be written first, on HTTP/1.1 and HTTP/2; sends now go out in the order
+    they were called.
+  - An SSE event or WebSocket message still waiting for the client when the
+    application sent sse.close or websocket.close was lost: dropped on
+    HTTP/2, and on HTTP/1.1 an SSE event came after the end of the stream
+    (garbling the next response on the connection) and WebSocket frames
+    were discarded. The close now takes effect after them.
+  - Trailers sent while a file or fh body was still streaming now follow
+    the whole body. A file or fh body with trailers declared also wrote its
+    own end of the chunked body, so the trailers arrived after it as stray
+    bytes; the trailers now end the body.
+  - The worker processes that read large files outlived the server's
+    shutdown until the process exited; the last server on an event loop to
+    shut down now stops them.
 
 0.002013 - 2026-09-03
 
