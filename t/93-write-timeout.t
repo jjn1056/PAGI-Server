@@ -8,8 +8,11 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use PAGI::Server;
 use IO::Socket::INET;
+use Protocol::WebSocket::Frame;
+use File::Temp qw(tempdir);
 use Socket qw(SOL_SOCKET SO_RCVBUF pack_sockaddr_in inet_aton);
 use Time::HiRes qw(time);
+use POSIX ();
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
 
@@ -203,6 +206,144 @@ subtest 'write_timeout => 0 never times a client out' => sub {
     ok(!exists $seen{reason}, 'and a stalled client is still connected after 3s');
     close $sock;
     stop_server($server);
+};
+
+subtest 'a stalled SSE client is disconnected with write_timeout' => sub {
+    my %seen;
+    my $server = start_server(flood_app(\%seen), write_timeout => 0.5);
+    my $sock = small_window_connect($server);
+    syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
+    ok(pump_until(sub { exists $seen{'all_resolved'} }, 10), 'the stream ended');
+    ok($seen{pending} > 0, "$seen{pending} events were queued");
+    is($seen{event}, 'sse.disconnect', 'with sse.disconnect');
+    is($seen{reason}, 'write_timeout', 'and reason write_timeout');
+    close $sock;
+    stop_server($server);
+};
+
+subtest 'a stalled WebSocket client is disconnected: code 1006, write_timeout' => sub {
+    my %seen;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported\n" unless $scope->{type} eq 'websocket';
+        my $conn = $scope->{'pagi.connection'};
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        my @sent = map { $send->({ type => 'websocket.send', bytes => 'W' x 65_000 }) } 1 .. 128;
+        $seen{pending} = grep { !$_->is_ready } @sent;
+        my $event;
+        do { $event = await $receive->() } until $event->{type} eq 'websocket.disconnect';
+        $seen{code} = $event->{code};
+        $seen{reason} = $conn->disconnect_reason;
+    };
+    my $server = start_server($app, write_timeout => 0.5);
+    my $sock = small_window_connect($server);
+    syswrite($sock, join "\r\n", 'GET /ws HTTP/1.1', 'Host: localhost', 'Upgrade: websocket',
+        'Connection: Upgrade', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '');
+    ok(pump_until(sub { exists $seen{reason} }, 10), 'the application saw the disconnect');
+    ok($seen{pending} > 0, "$seen{pending} frames were queued");
+    is($seen{code}, 1006, 'code 1006: no closing handshake');
+    is($seen{reason}, 'write_timeout', 'reason write_timeout');
+    close $sock;
+    stop_server($server);
+};
+
+subtest 'over TLS a stalled client is disconnected with write_timeout' => sub {
+    my $cert_dir = "$FindBin::Bin/certs";
+    skip_all 'TLS modules not installed (optional)'
+        unless eval { require IO::Async::SSL; require IO::Socket::SSL; 1 };
+    my %seen;
+    my $server = start_server(flood_app(\%seen), write_timeout => 0.5,
+        ssl => { cert_file => "$cert_dir/server.crt", key_file => "$cert_dir/server.key" });
+    my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $server->port, Proto => 'tcp')
+        or die "connect: $!";
+    $sock->blocking(0);
+    IO::Socket::SSL->start_SSL($sock, SSL_verify_mode => 0, SSL_startHandshake => 0)
+        or die "start_SSL: $IO::Socket::SSL::SSL_ERROR";
+    ok(pump_until(sub { $sock->connect_SSL }, 10), 'TLS handshake done');
+    syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    ok(pump_until(sub { exists $seen{all_resolved} }, 10), 'the application saw the connection end');
+    is($seen{reason}, 'write_timeout', 'with reason write_timeout');
+    close $sock;
+    stop_server($server);
+};
+
+subtest 'each server stops its own sweep; another on the loop keeps its own' => sub {
+    my (%seen_a, %seen_b);
+    my $a = start_server(flood_app(\%seen_a), write_timeout => 0.5);
+    my $b = start_server(flood_app(\%seen_b), write_timeout => 0.5);
+    my $sock_a = small_window_connect($a);
+    syswrite($sock_a, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    pump_until(sub { $seen_a{pending} }, 5);
+    ok($a->{_write_sweep}, 'a server sweeps once it has a connection');
+    ok(!$b->{_write_sweep}, 'one without a connection does not yet');
+    close $sock_a;
+    stop_server($a);
+    ok(!$a->{_write_sweep}, 'the first stopped its sweep at shutdown');
+    my $sock_b = small_window_connect($b);
+    syswrite($sock_b, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    ok(pump_until(sub { exists $seen_b{reason} }, 10), "the other's sweep still times out a stalled client");
+    is($seen_b{reason}, 'write_timeout', 'with write_timeout');
+    close $sock_b;
+    stop_server($b);
+};
+
+subtest 'workers mode: a stalled client of a worker is disconnected' => sub {
+    skip_all 'set RELEASE_TESTING=1 for the workers-mode test' unless $ENV{RELEASE_TESTING};
+    my $dir = tempdir(CLEANUP => 1);
+    my $port_file = "$dir/port";
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        return unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        my @sent = map { $send->({ type => 'http.response.body', body => 'x' x 65_536, more => 1 }) } 1 .. 128;
+        my $event;
+        do { $event = await $receive->() } until $event->{type} =~ /disconnect\z/;
+    };
+    my $master = fork() // die "fork: $!";
+    if ($master == 0) {
+        my $child_loop = IO::Async::Loop->new;
+        my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0, workers => 1,
+            quiet => 1, access_log => undef, write_timeout => 0.5);
+        $child_loop->add($server);
+        eval {
+            $server->listen->get;
+            open my $out, '>', $port_file or die $!;
+            print $out $server->port;
+            close $out;
+            $child_loop->run;
+        };
+        POSIX::_exit(0);
+    }
+    my $port;
+    my $deadline = time + 15;
+    until ($port || time > $deadline) { $port = -s $port_file ? do { open my $in, '<', $port_file; <$in> } : undef; Time::HiRes::sleep(0.1) }
+    my $sock;
+    $deadline = time + 10;
+    until ($sock || time > $deadline) {
+        $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $port, Proto => 'tcp', Timeout => 1);
+        Time::HiRes::sleep(0.1) unless $sock;
+    }
+    ok($sock, 'connected to the worker') or do { kill 'KILL', $master; waitpid $master, 0; return };
+    syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    Time::HiRes::sleep(3);   # read nothing for six timeouts
+    $sock->blocking(0);
+    my ($read, $ended) = (0, 0);
+    $deadline = time + 5;
+    until ($ended || time > $deadline) {
+        my $n = sysread($sock, my $buf, 1 << 20);
+        if (defined $n && $n > 0) { $read += $n }
+        elsif (defined $n || !$!{EAGAIN}) { $ended = 1 }
+        else { Time::HiRes::sleep(0.05) }
+    }
+    ok($ended, "the worker had closed the connection ($read bytes were buffered)");
+    ok($read < 128 * 65_536, 'before the response was complete');
+    close $sock;
+    kill 'TERM', $master;
+    my $gone = time + 10;
+    Time::HiRes::sleep(0.1) while kill(0, $master) && time < $gone && !waitpid($master, POSIX::WNOHANG());
+    kill 'KILL', $master if kill 0, $master;
+    waitpid $master, 0;
 };
 
 done_testing;

@@ -1824,6 +1824,12 @@ C<write_timeout> (L<PAGI::Spec::Www>): an C<http> scope receives
 C<http.disconnect>, an SSE stream ends, and a WebSocket receives
 C<websocket.disconnect> with code C<1006>. One C<warn> line is logged.
 
+On HTTP/2 it applies per stream: flow control holds a stalled client's bytes
+in the stream rather than the socket, so a stream with bytes waiting whose
+bytes the client has taken none of for this many seconds is reset
+(C<RST_STREAM> C<CANCEL>) and its application told C<write_timeout>; the
+connection and its other streams carry on.
+
 The clock runs only while bytes are queued, starts when they are, and every
 write the client accepts restarts it -- so a client that reads slowly but
 steadily is never cut off, and a connection with nothing to send (an idle
@@ -4459,6 +4465,7 @@ sub _run_as_worker {
         body_rate_grace     => $self->{body_rate_grace},
         ws_idle_timeout     => $self->{ws_idle_timeout},
         sse_idle_timeout    => $self->{sse_idle_timeout},
+        write_timeout       => $self->{write_timeout},
         ws_close_timeout    => $self->{ws_close_timeout},
         sync_file_threshold => $self->{sync_file_threshold},
         max_receive_queue   => $self->{max_receive_queue},
@@ -5115,8 +5122,10 @@ sub _start_write_timeout_sweep {
 sub _sweep_write_timeouts {
     my ($self) = @_;
     my $now = Time::HiRes::time();
-    $_->_close_if_write_stalled($now, $self->{write_timeout})
-        for values %{ $self->{connections} };
+    for my $conn (values %{ $self->{connections} }) {
+        $conn->_h2_reset_write_stalled_streams($now, $self->{write_timeout});
+        $conn->_close_if_write_stalled($now, $self->{write_timeout});
+    }
     return;
 }
 

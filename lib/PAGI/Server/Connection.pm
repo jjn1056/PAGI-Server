@@ -2456,6 +2456,7 @@ sub _h2_create_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -3308,6 +3309,7 @@ sub _h2_create_websocket_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -3846,6 +3848,7 @@ sub _h2_create_sse_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -7368,6 +7371,35 @@ sub _close {
 # Combined disconnect and close - use this from callbacks where $weak_self may
 # become undefined after _handle_disconnect completes its Future callbacks.
 # This method holds a strong reference to $self throughout the operation.
+# write_timeout on HTTP/2 is per stream: flow control holds a stalled
+# client's bytes in the stream's send queue, not the socket. A stream with
+# bytes waiting that the client has taken none of for $limit seconds is
+# reset, and its application told write_timeout; the connection and its other
+# streams carry on. Its clock starts at the first sweep that finds it waiting
+# and restarts whenever the data callback takes its bytes.
+sub _h2_reset_write_stalled_streams {
+    my ($self, $now, $limit) = @_;
+    my $streams = $self->{h2_streams} or return;
+    for my $stream_id (keys %$streams) {
+        my $ss = $streams->{$stream_id};
+        next if !$ss || $ss->{h2_closed};
+        if (!$ss->{send_queue_bytes}) {
+            delete $ss->{_waiting_since};
+            next;
+        }
+        my $since = $ss->{_waiting_since} //= $now;
+        $since = $ss->{_write_progress_at}
+            if $ss->{_write_progress_at} && $ss->{_write_progress_at} > $since;
+        next if $now - $since < $limit;
+        $self->_log(warn => "Write timeout (${limit}s): the client stopped reading HTTP/2 stream $stream_id - resetting it");
+        $self->_record_end($ss, reason => 'write_timeout', detail => "no bytes written for ${limit}s");
+        $ss->{connection_state}->_mark_disconnected($self->_end_reason($ss), $self->_end_detail($ss))
+            if $ss->{connection_state};
+        $self->_h2_reset_stream($stream_id, _h2_rst_cancel_code());
+    }
+    return;
+}
+
 # write_timeout (PAGI::Server's sweep): a connection with bytes queued that
 # the client has taken none of for $limit seconds has stopped reading. It is
 # closed at once -- waiting for the buffer to drain would never end -- with
