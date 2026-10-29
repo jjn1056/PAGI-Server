@@ -183,15 +183,21 @@ subtest 'a steady reader of one large send is not cut off' => sub {
     my $server = start_server($app, write_timeout => 2);
     my $sock = small_window_connect($server);
     syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    my ($read, $next, $eof) = (0, time, 0);
+    my ($read, $late, $next, $eof) = (0, 0, time, 0);
+    my $limit_passed = time + 2.5;   # write_timeout, and a sweep
     pump_for(5, sub {
         return if time < $next;
         my $n = sysread($sock, my $buf, 131_072);
         $read += $n if $n;
+        $late += $n if $n && time > $limit_passed;
         $eof = 1 if defined $n && $n == 0;
         $next = time + 0.1;
     });
-    ok($read > 600_000 && $read < 8_000_000, "the client read $read of 8,000,000 bytes over 5s");
+    # How much arrives depends on the platform's buffers (Linux honours the
+    # small receive buffer, macOS does not); what matters is that bytes kept
+    # arriving after write_timeout had passed, while the one send went on.
+    ok($late > 0, "the client still received bytes after write_timeout ($late of $read)");
+    ok($read < 8_000_000, "while the one send was still being written ($read of 8,000,000 bytes)");
     is($eof, 0, 'and the server has not closed the connection');
     is([grep { ($_->{message} // '') =~ /Write timeout/ } @log], [], 'nor timed it out');
     close $sock;
