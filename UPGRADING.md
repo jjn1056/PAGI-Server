@@ -96,6 +96,17 @@ leave send ordering to the server. What you may notice:
 - A burst of unawaited sends waits its turn in the server rather than piling
   into the write buffer.
 
+### A client that stops reading is disconnected after 60 seconds
+
+While bytes wait to be written to a client, a client that takes none of
+them for `write_timeout` seconds (default 60) is now disconnected: the
+application sees the disconnect with reason `write_timeout` (a WebSocket
+gets code `1006`), and on HTTP/2 only the stalled stream is reset. A client
+reading slowly but steadily, and a connection with nothing waiting to be
+written, are never cut off. Before, such a client held its connection, and
+the application's queued output, for as long as it stayed connected. Set
+`write_timeout => 0` (or `--write-timeout 0`) to restore that.
+
 ## 0.002007
 
 ### Outgoing-event validation is now mandatory, in every environment

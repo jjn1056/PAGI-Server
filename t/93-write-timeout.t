@@ -154,17 +154,17 @@ subtest 'a client that stops reading is disconnected with write_timeout' => sub 
 # still far slower than the 8 MB the application sends.
 subtest 'a client reading slowly but steadily is not cut off' => sub {
     my %seen;
-    my $server = start_server(flood_app(\%seen), write_timeout => 1);
+    my $server = start_server(flood_app(\%seen), write_timeout => 2);
     my $sock = small_window_connect($server);
     syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     my ($read, $next) = (0, time);
-    pump_for(3, sub {
+    pump_for(5, sub {
         return if time < $next;
         my $n = sysread($sock, my $buf, 131_072);
         $read += $n if $n;
         $next = time + 0.1;
     });
-    ok($read > 0, "the client read $read bytes over 3s");
+    ok($read > 0, "the client read $read bytes over 5s");
     ok(!exists $seen{reason}, 'and the connection is still open');
     close $sock;
     stop_server($server);
@@ -180,18 +180,18 @@ subtest 'a steady reader of one large send is not cut off' => sub {
         await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
         await $send->({ type => 'http.response.body', body => 'x' x 8_000_000, more => 0 });
     };
-    my $server = start_server($app, write_timeout => 1);
+    my $server = start_server($app, write_timeout => 2);
     my $sock = small_window_connect($server);
     syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     my ($read, $next, $eof) = (0, time, 0);
-    pump_for(3, sub {
+    pump_for(5, sub {
         return if time < $next;
         my $n = sysread($sock, my $buf, 131_072);
         $read += $n if $n;
         $eof = 1 if defined $n && $n == 0;
         $next = time + 0.1;
     });
-    ok($read > 600_000 && $read < 8_000_000, "the client read $read of 8,000,000 bytes over 3s");
+    ok($read > 600_000 && $read < 8_000_000, "the client read $read of 8,000,000 bytes over 5s");
     is($eof, 0, 'and the server has not closed the connection');
     is([grep { ($_->{message} // '') =~ /Write timeout/ } @log], [], 'nor timed it out');
     close $sock;

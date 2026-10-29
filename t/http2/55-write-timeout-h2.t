@@ -24,7 +24,8 @@ use Net::HTTP2::nghttp2::Session;
 # in the stream, not in the socket, so a socket measure would never see it.
 
 my $loop = IO::Async::Loop->new;
-my @log;
+my (@log, @warnings);
+$SIG{__WARN__} = sub { push @warnings, $_[0] };
 
 sub start_server {
     my ($app) = @_;
@@ -38,7 +39,8 @@ sub start_server {
 }
 
 # Each path's application sends 128 x 64 KB without awaiting, then records how
-# its scope ended.
+# its scope ended and waits for its sends, as an application keeping its send
+# Futures does.
 sub flood_app {
     my ($seen) = @_;
     return async sub {
@@ -51,6 +53,8 @@ sub flood_app {
         my $event;
         do { $event = await $receive->() } until $event->{type} =~ /disconnect\z/;
         $seen->{ $scope->{path} }{reason} = $conn->disconnect_reason;
+        await Future->wait_all(@sent);
+        $seen->{ $scope->{path} }{all_resolved} = (grep { $_->is_done } @sent) == @sent ? 1 : 0;
     };
 }
 
@@ -100,9 +104,10 @@ subtest 'a client that stops reading: its stream is reset with write_timeout' =>
     h2_request($h, '/stalled');
     h2_flush($h);
     my $deadline = time + 5;
-    $loop->loop_once(0.01) until exists $seen{'/stalled'}{reason} || time > $deadline;   # reads nothing
+    $loop->loop_once(0.01) until exists $seen{'/stalled'}{all_resolved} || time > $deadline;   # reads nothing
     ok($seen{'/stalled'}{pending} > 0, "$seen{'/stalled'}{pending} sends were queued");
     is($seen{'/stalled'}{reason}, 'write_timeout', 'the application saw write_timeout');
+    is($seen{'/stalled'}{all_resolved}, 1, 'every pending send resolved');
     is(scalar(grep { ($_->{message} // '') =~ /Write timeout \(0\.5s\).*stream/ } @log), 1, 'one warn line names the stream');
     # Read now: the stream was reset (CANCEL, 8).
     my $until = time + 3;
@@ -151,5 +156,7 @@ subtest 'one starved stream is reset while another on the connection carries on'
     $server->shutdown->get;
     $loop->remove($server);
 };
+
+is([map { s/\s+\z//r } @warnings], [], 'no warnings');
 
 done_testing;
