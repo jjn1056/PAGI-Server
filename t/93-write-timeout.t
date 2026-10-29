@@ -65,6 +65,21 @@ sub small_window_connect {
     return $sock;
 }
 
+# Whether the server has closed this connection's socket.
+sub socket_closed {
+    my ($conn) = @_;
+    my $stream = $conn && $conn->{stream};
+    my $handle = $stream && $stream->write_handle;
+    return !$handle || !defined fileno $handle;
+}
+
+sub first_connection {
+    my ($server) = @_;
+    my $conn;
+    pump_until(sub { ($conn) = values %{ $server->{connections} }; $conn }, 5);
+    return $conn;
+}
+
 # 8 MB of sends the application does not await, then it waits for the end.
 sub flood_app {
     my ($seen) = @_;
@@ -99,7 +114,11 @@ subtest 'a client that stops reading is disconnected with write_timeout' => sub 
     my $sock = small_window_connect($server);
     my $t0 = time;
     syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    my $conn = first_connection($server);
     ok(pump_until(sub { exists $seen{all_resolved} }, 10), 'the application saw the connection end');
+    # The socket itself is closed at once, not left waiting to drain to a
+    # client that is not reading.
+    ok(pump_until(sub { socket_closed($conn) }, 2), 'and the server closed the socket');
     ok($seen{pending} > 0, "$seen{pending} sends were still queued");
     is($seen{event}, 'http.disconnect', 'it received http.disconnect');
     is($seen{reason}, 'write_timeout', 'with reason write_timeout');
@@ -213,7 +232,9 @@ subtest 'a stalled SSE client is disconnected with write_timeout' => sub {
     my $server = start_server(flood_app(\%seen), write_timeout => 0.5);
     my $sock = small_window_connect($server);
     syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
+    my $conn = first_connection($server);
     ok(pump_until(sub { exists $seen{'all_resolved'} }, 10), 'the stream ended');
+    ok(pump_until(sub { socket_closed($conn) }, 2), 'the server closed the socket');
     ok($seen{pending} > 0, "$seen{pending} events were queued");
     is($seen{event}, 'sse.disconnect', 'with sse.disconnect');
     is($seen{reason}, 'write_timeout', 'and reason write_timeout');
@@ -240,7 +261,9 @@ subtest 'a stalled WebSocket client is disconnected: code 1006, write_timeout' =
     my $sock = small_window_connect($server);
     syswrite($sock, join "\r\n", 'GET /ws HTTP/1.1', 'Host: localhost', 'Upgrade: websocket',
         'Connection: Upgrade', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '');
+    my $conn = first_connection($server);
     ok(pump_until(sub { exists $seen{reason} }, 10), 'the application saw the disconnect');
+    ok(pump_until(sub { socket_closed($conn) }, 2), 'the server closed the socket');
     ok($seen{pending} > 0, "$seen{pending} frames were queued");
     is($seen{code}, 1006, 'code 1006: no closing handshake');
     is($seen{reason}, 'write_timeout', 'reason write_timeout');
@@ -262,7 +285,9 @@ subtest 'over TLS a stalled client is disconnected with write_timeout' => sub {
         or die "start_SSL: $IO::Socket::SSL::SSL_ERROR";
     ok(pump_until(sub { $sock->connect_SSL }, 10), 'TLS handshake done');
     syswrite($sock, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    my $conn = first_connection($server);
     ok(pump_until(sub { exists $seen{all_resolved} }, 10), 'the application saw the connection end');
+    ok(pump_until(sub { socket_closed($conn) }, 2), 'the server closed the socket');
     is($seen{reason}, 'write_timeout', 'with reason write_timeout');
     close $sock;
     stop_server($server);

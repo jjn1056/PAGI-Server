@@ -7349,18 +7349,19 @@ sub _close {
         # abort() MUST NOT wait for an in-flight write to drain, since that
         # write may be blocked by the peer (Www.pod "Connection Object
         # Interface"): close_when_empty does wait, so an app_abort teardown
-        # asks for close_now instead. Every other reason keeps
-        # close_when_empty (flush what's already queued, then close).
+        # asks for close_now instead -- as does write_timeout, whose client
+        # is not reading, so the buffer would never empty. Every other reason
+        # keeps close_when_empty (flush what's already queued, then close).
         #
-        # A scope that ended with app_abort closes now however this teardown
-        # was reached, which the option alone cannot guarantee: settling the
-        # abort resolves the parked send, which resumes the application
-        # inline, which returns into the incomplete-response tail, which
-        # calls in here first with no option of its own. _cleanup_done then
-        # makes the abort's own call a no-op, so the option it carried never
-        # runs. The ending record is the durable fact that survives that
-        # re-entrancy, and exactly one site writes app_abort into it.
-        if ($opt{close_now} || $self->_end_reason($self) eq 'app_abort') {
+        # A scope that ended with app_abort or write_timeout closes now
+        # however this teardown was reached, which the option alone cannot
+        # guarantee: settling the end resolves the parked send or receive,
+        # which resumes the application inline, which returns into the
+        # incomplete-response tail, which calls in here first with no option
+        # of its own. _cleanup_done then makes the end's own call a no-op, so
+        # the option it carried never runs. The ending record is the durable
+        # fact that survives that re-entrancy.
+        if ($opt{close_now} || $self->_end_reason($self) =~ /\A(?:app_abort|write_timeout)\z/) {
             $self->{stream}->close_now;
         } else {
             $self->{stream}->close_when_empty;
@@ -7368,9 +7369,6 @@ sub _close {
     }
 }
 
-# Combined disconnect and close - use this from callbacks where $weak_self may
-# become undefined after _handle_disconnect completes its Future callbacks.
-# This method holds a strong reference to $self throughout the operation.
 # write_timeout on HTTP/2 is per stream: flow control holds a stalled
 # client's bytes in the stream's send queue, not the socket. A stream with
 # bytes waiting that the client has taken none of for $limit seconds is
@@ -7414,6 +7412,9 @@ sub _close_if_write_stalled {
     return 1;
 }
 
+# Combined disconnect and close - use this from callbacks where $weak_self may
+# become undefined after _handle_disconnect completes its Future callbacks.
+# This method holds a strong reference to $self throughout the operation.
 sub _handle_disconnect_and_close {
     my ($self, $reason, %opt) = @_;
 
