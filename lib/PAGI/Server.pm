@@ -1761,8 +1761,10 @@ when the master was configured with C<on>.
 =item request_timeout => $seconds
 
 Maximum time in seconds a request can stall without any I/O activity before
-being terminated. This is a "stall timeout" - the timer resets whenever data
-is read from the client or written to the client.
+being terminated. This is a "stall timeout" - the timer restarts whenever data
+is read from the client and whenever the application sends, not when the
+client accepts bytes: an application that keeps sending keeps it from firing
+for a client that has stopped reading. That case is C<write_timeout>'s.
 
 B<Default:> 0 (disabled)
 
@@ -1793,7 +1795,7 @@ B<How it works:>
 
 =item * Timer resets on any read activity (receiving request body)
 
-=item * Timer resets on any write activity (sending response)
+=item * Timer resets on each application send (C<$send>), whether or not the client takes the bytes
 
 =item * If timer expires (no I/O for N seconds), connection is closed
 
@@ -1814,6 +1816,39 @@ B<CLI:> C<--request-timeout 30>
 B<Note:> This differs from C<timeout> (idle connection timeout). The
 C<timeout> applies between requests on keep-alive connections. The
 C<request_timeout> applies during active request processing.
+
+=item write_timeout => $seconds
+
+Disconnect a client that has stopped reading. While bytes are waiting to be
+written to a connection, if the client takes none of them for this many
+seconds, the connection is closed at once with the disconnect reason
+C<write_timeout> (L<PAGI::Spec::Www>): an C<http> scope receives
+C<http.disconnect>, an SSE stream ends, and a WebSocket receives
+C<websocket.disconnect> with code C<1006>. One C<warn> line is logged.
+
+On HTTP/2 it applies per stream: flow control holds a stalled client's bytes
+in the stream rather than the socket, so a stream with bytes waiting whose
+bytes the client has taken none of for this many seconds is reset
+(C<RST_STREAM> C<CANCEL>) and its application told C<write_timeout>; the
+connection and its other streams carry on.
+
+The clock runs only while bytes are queued, starts when they are, and every
+write the client accepts restarts it -- so a client that reads slowly but
+steadily is never cut off, and a connection with nothing to send (an idle
+keep-alive connection, a quiet SSE stream or WebSocket) is never timed out by
+it. Progress over TCP comes in steps (the client's window reopens only once a
+good part of it is free), so allow a slow client a few seconds. One timer per
+server checks the connections, about once a second.
+
+This is the timer for a client that stops reading: C<request_timeout>,
+C<sse_idle_timeout> and C<ws_idle_timeout> restart on the application's sends,
+so an application that keeps sending keeps them from firing.
+
+B<Default:> 60. C<0> turns it off, which is how every PAGI::Server before
+0.003000 behaved: a client that stopped reading held its connection, and the
+application's queued output, for as long as it stayed connected.
+
+B<CLI:> C<--write-timeout 60>
 
 =item body_min_rate => $bytes_per_second
 
@@ -1852,7 +1887,7 @@ When enabled, the timer resets on:
 
 =over 4
 
-=item * Sending any WebSocket frame (accept, send, ping, close)
+=item * The application or server sending any WebSocket frame (accept, send, ping, close) -- when it is sent, not when the client takes it
 
 =item * Receiving any WebSocket frame from client
 
@@ -1921,7 +1956,8 @@ being sent before being closed.
 
 B<Default:> 0 (disabled - SSE connections can be idle indefinitely)
 
-The timer resets each time an event is sent to the client (including
+The timer resets each time the application sends an event -- when it calls
+C<$send>, not when the client takes it (including
 comments and the initial headers).
 
 B<Example:>
@@ -2857,6 +2893,9 @@ sub _init {
     _check_body_rate_options($self);
     $self->{ws_idle_timeout}     = delete $params->{ws_idle_timeout} // 0;   # WebSocket idle timeout (0 = disabled)
     $self->{sse_idle_timeout}    = delete $params->{sse_idle_timeout} // 0;  # SSE idle timeout (0 = disabled)
+    $self->{write_timeout}       = delete $params->{write_timeout} // 60;    # Write-stall timeout (0 = disabled)
+    die "write_timeout must be a number of seconds, 0 or more\n"
+        unless $self->{write_timeout} =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
     $self->{ws_close_timeout}    = delete $params->{ws_close_timeout} // 10;  # Bound on the WebSocket closing-handshake wait (finite, positive; no "zero disables")
     die "Invalid ws_close_timeout '$self->{ws_close_timeout}' - must be a finite, positive number of seconds; the WebSocket closing-handshake wait is always bounded (there is no 'zero disables')\n"
         unless _is_finite_positive($self->{ws_close_timeout});
@@ -4431,6 +4470,7 @@ sub _run_as_worker {
         body_rate_grace     => $self->{body_rate_grace},
         ws_idle_timeout     => $self->{ws_idle_timeout},
         sse_idle_timeout    => $self->{sse_idle_timeout},
+        write_timeout       => $self->{write_timeout},
         ws_close_timeout    => $self->{ws_close_timeout},
         sync_file_threshold => $self->{sync_file_threshold},
         max_receive_queue   => $self->{max_receive_queue},
@@ -4657,6 +4697,7 @@ sub _on_connection {
 
     # Track the connection (O(1) hash insert)
     $self->{connections}{refaddr($conn)} = $conn;
+    $self->_start_write_timeout_sweep;
 
     # Configure stream with callbacks BEFORE adding to loop
     $conn->start;
@@ -5060,8 +5101,45 @@ async sub shutdown {
         } $loop->notifiers;
         PAGI::Server::AsyncFile->cleanup($loop) unless $others_running;
     }
+    $self->_stop_write_timeout_sweep;
 
     return $self;
+}
+
+# write_timeout: one sweep per server, started with its first connection,
+# closes every connection whose queued bytes the client has taken none of for
+# write_timeout seconds. With nothing queued a connection is never touched.
+sub _start_write_timeout_sweep {
+    my ($self) = @_;
+    return if $self->{_write_sweep} || !$self->{write_timeout};
+    my $limit = $self->{write_timeout};
+    weaken(my $weak_self = $self);
+    my $timer = IO::Async::Timer::Periodic->new(
+        interval => $limit / 2 < 1 ? $limit / 2 : 1,
+        on_tick  => sub { $weak_self->_sweep_write_timeouts if $weak_self },
+    );
+    $self->{_write_sweep} = $timer;
+    $self->add_child($timer);
+    $timer->start;
+    return;
+}
+
+sub _sweep_write_timeouts {
+    my ($self) = @_;
+    my $now = Time::HiRes::time();
+    for my $conn (values %{ $self->{connections} }) {
+        $conn->_h2_reset_write_stalled_streams($now, $self->{write_timeout});
+        $conn->_close_if_write_stalled($now, $self->{write_timeout});
+    }
+    return;
+}
+
+sub _stop_write_timeout_sweep {
+    my ($self) = @_;
+    my $timer = delete $self->{_write_sweep} or return;
+    $timer->stop if $timer->is_running;
+    $self->remove_child($timer);
+    return;
 }
 
 # A scope's application Future, adopted for error handling and remembered

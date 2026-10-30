@@ -697,10 +697,11 @@ on every call. After an abnormal end it is already resolved with the reason;
 after a clean end it stays pending forever, since there is no reason to
 resolve it with.
 
-=item * C<write_timeout> is B<not currently produced>. PAGI::Server has no
-timer on an individual write; a stalled write is caught, if at all, by
-C<timeout> or C<request_timeout>. Socket errors other than a clean EOF
-report C<read_error> / C<write_error>.
+=item * C<write_timeout> is produced by the server's C<write_timeout> option
+(default 60 seconds): a connection whose client takes none of the bytes
+waiting for it for that long is closed, and on HTTP/2 the stalled stream is
+reset (C<RST_STREAM> C<CANCEL>). A WebSocket so ended reports code C<1006>.
+Socket errors other than a clean EOF report C<read_error> / C<write_error>.
 
 =back
 

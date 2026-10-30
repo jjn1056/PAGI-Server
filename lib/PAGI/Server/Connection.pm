@@ -412,10 +412,12 @@ sub start {
             my $written;
             if (eval { $written = $s->$inner_writer(@_); 1 }) {
                 # What this call took from the buffer has been written: it
-                # leaves the count of queued bytes (see _write_out).
-                if ($weak_self) {
-                    my $left = ($weak_self->{_queued_bytes} // 0) - ($before - length $_[1]);
+                # leaves the count of queued bytes (see _write_out), and the
+                # client has made progress (see _close_if_write_stalled).
+                if ($weak_self && (my $took = $before - length $_[1]) > 0) {
+                    my $left = ($weak_self->{_queued_bytes} // 0) - $took;
                     $weak_self->{_queued_bytes} = $left > 0 ? $left : 0;
+                    $weak_self->{_write_progress_at} = Time::HiRes::time();
                 }
                 return $written;
             }
@@ -2454,6 +2456,7 @@ sub _h2_create_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -3306,6 +3309,7 @@ sub _h2_create_websocket_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -3844,6 +3848,7 @@ sub _h2_create_sse_send {
                 $chunk = substr($chunk, 0, $max_len);
             }
             $ss->{send_queue_bytes} -= length($chunk);
+            $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
 
             # Per-stream backpressure: once this stream's queue falls below the
@@ -4887,6 +4892,8 @@ sub _write_out {
 # writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
 sub _write_server_output {
     my ($self, $bytes) = @_;
+    # Bytes now wait for the client: its write_timeout clock starts here.
+    $self->{_write_progress_at} = Time::HiRes::time() unless $self->{_queued_bytes};
     $self->{_queued_bytes} += length $bytes;
     $self->{stream}->write($bytes);
     return;
@@ -7342,23 +7349,67 @@ sub _close {
         # abort() MUST NOT wait for an in-flight write to drain, since that
         # write may be blocked by the peer (Www.pod "Connection Object
         # Interface"): close_when_empty does wait, so an app_abort teardown
-        # asks for close_now instead. Every other reason keeps
-        # close_when_empty (flush what's already queued, then close).
+        # asks for close_now instead -- as does write_timeout, whose client
+        # is not reading, so the buffer would never empty. Every other reason
+        # keeps close_when_empty (flush what's already queued, then close).
         #
-        # A scope that ended with app_abort closes now however this teardown
-        # was reached, which the option alone cannot guarantee: settling the
-        # abort resolves the parked send, which resumes the application
-        # inline, which returns into the incomplete-response tail, which
-        # calls in here first with no option of its own. _cleanup_done then
-        # makes the abort's own call a no-op, so the option it carried never
-        # runs. The ending record is the durable fact that survives that
-        # re-entrancy, and exactly one site writes app_abort into it.
-        if ($opt{close_now} || $self->_end_reason($self) eq 'app_abort') {
+        # A scope that ended with app_abort or write_timeout closes now
+        # however this teardown was reached, which the option alone cannot
+        # guarantee: settling the end resolves the parked send or receive,
+        # which resumes the application inline, which returns into the
+        # incomplete-response tail, which calls in here first with no option
+        # of its own. _cleanup_done then makes the end's own call a no-op, so
+        # the option it carried never runs. The ending record is the durable
+        # fact that survives that re-entrancy.
+        if ($opt{close_now} || $self->_end_reason($self) =~ /\A(?:app_abort|write_timeout)\z/) {
             $self->{stream}->close_now;
         } else {
             $self->{stream}->close_when_empty;
         }
     }
+}
+
+# write_timeout on HTTP/2 is per stream: flow control holds a stalled
+# client's bytes in the stream's send queue, not the socket. A stream with
+# bytes waiting that the client has taken none of for $limit seconds is
+# reset, and its application told write_timeout; the connection and its other
+# streams carry on. Its clock starts at the first sweep that finds it waiting
+# and restarts whenever the data callback takes its bytes.
+sub _h2_reset_write_stalled_streams {
+    my ($self, $now, $limit) = @_;
+    my $streams = $self->{h2_streams} or return;
+    for my $stream_id (keys %$streams) {
+        my $ss = $streams->{$stream_id};
+        next if !$ss || $ss->{h2_closed};
+        if (!$ss->{send_queue_bytes}) {
+            delete $ss->{_waiting_since};
+            next;
+        }
+        my $since = $ss->{_waiting_since} //= $now;
+        $since = $ss->{_write_progress_at}
+            if $ss->{_write_progress_at} && $ss->{_write_progress_at} > $since;
+        next if $now - $since < $limit;
+        $self->_log(warn => "Write timeout (${limit}s): the client stopped reading HTTP/2 stream $stream_id - resetting it");
+        $self->_record_end($ss, reason => 'write_timeout', detail => "no bytes written for ${limit}s");
+        $ss->{connection_state}->_mark_disconnected($self->_end_reason($ss), $self->_end_detail($ss))
+            if $ss->{connection_state};
+        $self->_h2_reset_stream($stream_id, _h2_rst_cancel_code());
+    }
+    return;
+}
+
+# write_timeout (PAGI::Server's sweep): a connection with bytes queued that
+# the client has taken none of for $limit seconds has stopped reading. It is
+# closed at once -- waiting for the buffer to drain would never end -- with
+# reason write_timeout (PAGI::Spec::Www). Returns true if it closed.
+sub _close_if_write_stalled {
+    my ($self, $now, $limit) = @_;
+    return 0 if $self->{closed} || !$self->{_queued_bytes};
+    return 0 if $now - ($self->{_write_progress_at} // $now) < $limit;
+    $self->_log(warn => "Write timeout (${limit}s): the client stopped reading - closing connection");
+    $self->_handle_disconnect_and_close('write_timeout',
+        detail => "no bytes written for ${limit}s", close_now => 1);
+    return 1;
 }
 
 # Combined disconnect and close - use this from callbacks where $weak_self may

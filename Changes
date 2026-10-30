@@ -26,6 +26,13 @@
     sends in the order they were called, over HTTP/1.1 and HTTP/2. Release
     together with PAGI-Tools PR #74, which leaves that ordering to the
     server.
+  - write_timeout (default 60 seconds; --write-timeout): a client that
+    takes none of the bytes waiting for it for that long is disconnected
+    with the reason write_timeout (on HTTP/2 its stalled stream is reset).
+    Before, a client that stopped reading held its connection, and the
+    application's queued output, for as long as it stayed connected; every
+    other timer restarts on the application's sends, so none caught it.
+    write_timeout => 0 restores that.
 
   [New]
   - body_min_rate (default 500 bytes/s) and body_rate_grace (default 20s):

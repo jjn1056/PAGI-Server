@@ -77,6 +77,7 @@ GetOptionsFromArray(
 
     # Write backpressure watermarks
     'write-high-watermark=i' => \$server_opts{write_high_watermark},
+    'write-timeout=i'       => \$server_opts{write_timeout},
     'write-low-watermark=i'  => \$server_opts{write_low_watermark},
 
     # Misc
@@ -471,6 +472,11 @@ many bytes (default: 16384). See L<PAGI::Server/"write_low_watermark">.
 =item B<--request-timeout> NUM
 
 Request stall timeout in seconds (default: 0, disabled)
+
+=item B<--write-timeout> NUM
+
+Close a connection whose client has taken none of the bytes waiting for it in
+this many seconds (default: 60; 0 turns it off). See L<PAGI::Server/"write_timeout">.
 
 =item B<--body-min-rate> NUM
 
