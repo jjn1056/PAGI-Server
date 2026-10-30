@@ -1,6 +1,6 @@
 # Revision history for PAGI-Server
 
-0.003000 - 2026-10-08
+0.003000
 
   [Breaking -- see UPGRADING.md]
   - Requires Perl 5.24 (was 5.18). Future 0.54 requires 5.20; 5.24 is
