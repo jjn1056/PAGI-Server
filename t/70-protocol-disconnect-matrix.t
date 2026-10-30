@@ -5,13 +5,14 @@ use IO::Async::Loop;
 use IO::Async::Stream;
 use IO::Socket::INET;
 use Future::AsyncAwait;
-use Future::IO::Impl::IOAsync;
 use Socket qw(AF_UNIX SOCK_STREAM);
 use MIME::Base64 ();
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
+eval { require Future::IO::Impl::IOAsync; 1 }
+    or plan skip_all => 'Future::IO::Impl::IOAsync required for these tests';
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
