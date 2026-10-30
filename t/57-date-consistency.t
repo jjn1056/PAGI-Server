@@ -7,9 +7,6 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
-eval { require Future::IO::Impl::IOAsync; 1 }
-    or plan skip_all => 'Future::IO::Impl::IOAsync required for these tests';
-
 use PAGI::Server;
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
