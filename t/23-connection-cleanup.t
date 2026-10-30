@@ -413,15 +413,11 @@ subtest 'Multiple connections with exceptions all cleaned up' => sub {
 #
 # Exercises the real Connection-level machinery (_h1_transport_state's
 # arm_drain, _wait_for_drain, _cancel_drain_waiters) directly against a
-# fake stream that reports a controlled, non-draining buffer size -- a
-# unit-level handler invocation, not a real socket, so the buffer-stays-full
-# precondition is exact rather than timing-dependent.
+# fake stream, with the connection's count of queued bytes (_queued_bytes)
+# set to a controlled, non-draining size -- a unit-level handler invocation,
+# not a real socket, so the buffer-stays-full precondition is exact rather
+# than timing-dependent.
 # =============================================================================
-
-package Local::FakeWriter {
-    sub new { my ($c, $d) = @_; return bless { data => $d }, $c }
-    sub data { return $_[0]->{data} }
-}
 
 package Local::FakeStream {
     sub new { return bless { writequeue => [] }, shift }
@@ -444,7 +440,7 @@ subtest 'h1 teardown with buffer above the high mark drops on_drain but resumes 
     );
 
     # Buffer is (and stays, for this test) well above the high mark.
-    $fake_stream->{writequeue} = [ Local::FakeWriter->new('x' x 100) ];
+    $conn->{_queued_bytes} = 100;   # 100 bytes queued for the client, not yet written
 
     my $transport = $conn->_h1_transport_state;
     my $drain_fired = 0;
@@ -477,7 +473,7 @@ subtest 'h1 on_drain still fires normally when the buffer genuinely drains (not 
         write_high_watermark => 10, write_low_watermark => 2,
     );
 
-    $fake_stream->{writequeue} = [ Local::FakeWriter->new('x' x 100) ];
+    $conn->{_queued_bytes} = 100;   # 100 bytes queued for the client, not yet written
 
     my $transport = $conn->_h1_transport_state;
     my $drain_fired = 0;
@@ -488,7 +484,7 @@ subtest 'h1 on_drain still fires normally when the buffer genuinely drains (not 
 
     # The buffer actually falls back below the low mark -- a real drain, the
     # same event on_outgoing_empty reports on a live stream.
-    $fake_stream->{writequeue} = [];
+    $conn->{_queued_bytes} = 0;
     $conn->_check_drain_waiters;
 
     is($drain_fired, 1, 'on_drain fired on a genuine drain');

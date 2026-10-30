@@ -408,8 +408,17 @@ sub start {
         write_len => $self->{write_buffer_size},
         writer    => sub {
             my $s = shift;
+            my $before = length $_[1];   # $_[1] is the buffer the writer consumes
             my $written;
-            return $written if eval { $written = $s->$inner_writer(@_); 1 };
+            if (eval { $written = $s->$inner_writer(@_); 1 }) {
+                # What this call took from the buffer has been written: it
+                # leaves the count of queued bytes (see _write_out).
+                if ($weak_self) {
+                    my $left = ($weak_self->{_queued_bytes} // 0) - ($before - length $_[1]);
+                    $weak_self->{_queued_bytes} = $left > 0 ? $left : 0;
+                }
+                return $written;
+            }
             $write_exception = $@;
             $! = EIO;
             return undef;
@@ -882,7 +891,7 @@ sub _h2_write_pending {
         while (1) {
             my $data = $self->{h2_session}->extract;
             last unless defined $data && length($data) > 0;
-            $self->{stream}->write($data);
+            $self->_write_server_output($data);
         }
     });
 }
@@ -2165,7 +2174,7 @@ sub _h2_create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -2467,7 +2476,9 @@ sub _h2_create_send {
             # $send to resume its source — which would re-enter nghttp2. Splice
             # the fires out first (so they can't double-fire), then invoke them on
             # the next loop tick.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -2514,10 +2525,7 @@ sub _h2_create_send {
             $ss = $weak_self ? $weak_self->{h2_streams}{$stream_id} : undef;
             die $STREAM_GONE unless $ss && !$ss->{h2_closed} && !$weak_self->{closed};
         }
-        if (length $chunk) {
-            push @{$ss->{send_queue}}, $chunk;
-            $ss->{send_queue_bytes} += length $chunk;
-        }
+        $weak_self->_h2_enqueue($ss, $chunk) if length $chunk;
         $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
         $weak_self->{h2_session}->resume_stream($stream_id);
         $weak_self->_h2_write_pending;
@@ -2662,6 +2670,14 @@ sub _h2_create_send {
             my $seq_before = $seq;
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
             $publish->($seq);
+            # Take this send's turn on the stream (see _join_send_queue):
+            # validated now, processed once the sends issued before it
+            # have finished.
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             # Empty/absent headers still calls submit_trailer with [] --
             # trailers were declared and must still terminate the response.
@@ -2771,6 +2787,14 @@ sub _h2_create_send {
             # mark the response complete, so on failure $seq rolls back to
             # $seq_before exactly as the h1 twin in _create_send does.
             my $seq_before = $advance_seq_for_body->($ss, $event);
+            # Take this send's turn on the stream (see _join_send_queue):
+            # validated now, processed once the sends issued before it
+            # have finished.
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             my $ok = eval {
                 die "File not found: $file\n"  unless -f $file;
@@ -2826,6 +2850,14 @@ sub _h2_create_send {
             my $fh = $event->{fh};
 
             my $seq_before = $advance_seq_for_body->($ss, $event);
+            # Take this send's turn on the stream (see _join_send_queue):
+            # validated now, processed once the sends issued before it
+            # have finished.
+            my $turn = $weak_self->_join_send_queue($event, $ss);
+            if (my $wait = $turn->{waiting}) {
+                await $wait;
+                return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+            }
 
             my $ok = eval {
                 $ensure_h2_streaming_started->($ss);
@@ -2864,6 +2896,13 @@ sub _h2_create_send {
         # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
         $publish->($seq);
+        # Take this send's turn on the stream (see _join_send_queue): validated
+        # now, processed once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
+        }
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -2894,10 +2933,7 @@ sub _h2_create_send {
                     $streaming_started = 1;
                     $ss->{send_queue}       //= [];
                     $ss->{send_queue_bytes} //= 0;
-                    if (length $body) {
-                        push @{$ss->{send_queue}}, $body;
-                        $ss->{send_queue_bytes} += length $body;
-                    }
+                    $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous: we're in the app's send path (not nghttp2's
                     # extract), so on_high_water can fire here to tell the app to
                     # pause its source.
@@ -2920,10 +2956,7 @@ sub _h2_create_send {
                         return if $weak_self->{closed};
                         return unless $weak_self->{h2_streams}{$stream_id};
                     }
-                    if (length $body) {
-                        push @{$ss->{send_queue}}, $body;
-                        $ss->{send_queue_bytes} += length $body;
-                    }
+                    $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
                     $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->resume_stream($stream_id);
@@ -2940,10 +2973,7 @@ sub _h2_create_send {
                         return unless $weak_self->{h2_streams}{$stream_id};
                     }
                     $eof_pending = 1;
-                    if (length $body) {
-                        push @{$ss->{send_queue}}, $body;
-                        $ss->{send_queue_bytes} += length $body;
-                    }
+                    $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
                     $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->resume_stream($stream_id);
@@ -2962,10 +2992,7 @@ sub _h2_create_send {
                     $ss->{send_queue}       //= [];
                     $ss->{send_queue_bytes} //= 0;
                     $eof_pending = 1;
-                    if (length $body) {
-                        push @{$ss->{send_queue}}, $body;
-                        $ss->{send_queue_bytes} += length $body;
-                    }
+                    $weak_self->_h2_enqueue($ss, $body) if length $body;
                     $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
@@ -3048,7 +3075,7 @@ sub _h2_create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => '2',
         scheme       => $self->_get_ws_scheme,
@@ -3297,7 +3324,9 @@ sub _h2_create_websocket_send {
             # Fire the app's on_drain hysteresis callbacks once this stream's
             # queue falls below the low watermark. Deferred for the same reason:
             # an on_drain callback may call $send, which would re-enter nghttp2.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -3367,6 +3396,14 @@ sub _h2_create_websocket_send {
             my $error = $@;
             die $error unless $ok;
             return;
+        }
+
+        # Take this send's turn on the stream (see _join_send_queue): validated
+        # now, processed once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
 
         if ($type eq 'websocket.accept') {
@@ -3479,8 +3516,7 @@ sub _h2_create_websocket_send {
                 return if $ss->{ws_eof_pending};
             }
 
-            push @{$ss->{send_queue}}, $bytes;
-            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+            $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
             $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
@@ -3557,7 +3593,7 @@ sub _h2_create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => '2',
         method       => $pseudo->{':method'} // 'GET',
@@ -3826,7 +3862,9 @@ sub _h2_create_sse_send {
             # Fire the app's on_drain hysteresis callbacks once this stream's
             # queue falls below the low watermark. Deferred for the same reason:
             # an on_drain callback may call $send, which would re-enter nghttp2.
-            if (($ss->{send_queue_bytes} // 0) < $weak_self->{write_low_watermark}
+            # on_drain counts the sends still waiting their turn too (Www
+            # "Transport Flow Control": buffered_amount below the low mark).
+            if (($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $weak_self->{write_low_watermark}
                     && $ss->{transport_drain_fires} && @{$ss->{transport_drain_fires}}) {
                 my @fires = splice @{$ss->{transport_drain_fires}};
                 $weak_self->{server}->loop->later(sub {
@@ -3837,10 +3875,10 @@ sub _h2_create_sse_send {
             return ($chunk, 0);  # SSE streams never EOF via data_callback
         }
 
-        # Queue empty. If the application closed this stream (sse.close), emit a
-        # final empty DATA frame with END_STREAM to terminate it; otherwise defer.
-        return ('', 1) if ($ss->{seq_state} // '') eq 'closed'
-                       || $ss->{sse_server_ending};
+        # Queue empty. Once the application's sse.close has had its turn --
+        # after every send before it, not when it was called -- emit a final
+        # empty DATA frame with END_STREAM to terminate it; otherwise defer.
+        return ('', 1) if $ss->{sse_app_closed} || $ss->{sse_server_ending};
 
 
         # Queue empty — defer (NGHTTP2_ERR_DEFERRED in the C layer)
@@ -3900,6 +3938,17 @@ sub _h2_create_sse_send {
             my $error = $@;
             die $error unless $ok;
             return;
+        }
+
+        # Take this send's turn on the stream (see _join_send_queue): validated
+        # now, processed once the sends issued before it have finished. A
+        # repeat sse.close after the stream was reclaimed has no stream to
+        # wait on: it is the no-op the sse.close arm below returns.
+        return unless $ss;
+        my $turn = $weak_self->_join_send_queue($event, $ss);
+        if (my $wait = $turn->{waiting}) {
+            await $wait;
+            return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
 
         if ($type eq 'sse.start') {
@@ -3993,8 +4042,7 @@ sub _h2_create_sse_send {
             # wire boundary — a failed encode fails this send's Future.
             my $bytes = eval { Encode::encode('UTF-8', $sse_data, Encode::FB_CROAK) };
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
-            push @{$ss->{send_queue} ||= []}, $bytes;
-            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+            $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
             $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
@@ -4007,8 +4055,7 @@ sub _h2_create_sse_send {
             my $comment = _format_sse_comment($event);
             my $bytes = eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK) };
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
-            push @{$ss->{send_queue} ||= []}, $bytes;
-            $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+            $weak_self->_h2_enqueue($ss, $bytes);
             $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
@@ -4030,6 +4077,7 @@ sub _h2_create_sse_send {
             # is the idempotent no-op advance_sse just allowed; nothing left
             # to do.
             return unless $ss;
+            $ss->{sse_app_closed} = 1;
 
             # This stream is ending -- stop its keepalive and idle timers so
             # neither fires (or leaks) after the stream is reclaimed.
@@ -4043,12 +4091,12 @@ sub _h2_create_sse_send {
             $weak_self->_h2_end_scope_output($ss);
 
             # End THIS HTTP/2 stream now: flush remaining queued events, then the
-            # data_callback emits a final END_STREAM frame. `reason` is
-            # server-side only and is never written to the wire.
-            # seq_state is already 'closed' -- the mirror above runs before
-            # this arm, so the data_callback's END_STREAM decision and
-            # _h2_on_close's per-scope clean computation both see it even if
-            # resuming the stream closes it synchronously.
+            # data_callback emits a final END_STREAM frame (sse_app_closed,
+            # set above). `reason` is server-side only and is never written
+            # to the wire. seq_state is already 'closed' -- the mirror runs
+            # when the send is called -- so _h2_on_close's per-scope clean
+            # computation sees it even if resuming the stream closes it
+            # synchronously.
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -4821,24 +4869,80 @@ sub _stop_sse_idle_timer {
 # The $send->() Future will block (await) when high watermark is exceeded,
 # and resolve when buffer drains below low watermark.
 
+# An application send's bytes go to the client through here; the server's
+# own output (keepalives, pongs, 100 Continue, its error responses and Close
+# frames) through _write_server_output. The send whose turn it is writes now,
+# so its payload leaves the count of bytes waiting their turn.
+sub _write_out {
+    my ($self, $bytes) = @_;
+    my $turn = $self->{_current_turn};
+    $turn->release if $turn && $turn->{held};
+    $self->_write_server_output($bytes);
+    return;
+}
+
+# Every write to the client ends here. The bytes count as queued until the
+# stream's writer (wrapped in start) has written them, so
+# _get_write_buffer_size, which every send asks, costs the same however many
+# writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+sub _write_server_output {
+    my ($self, $bytes) = @_;
+    $self->{_queued_bytes} += length $bytes;
+    $self->{stream}->write($bytes);
+    return;
+}
+
+# PAGI::Spec::Www 0.7 "Sends Are Sequential": every send takes a turn on its
+# connection, in the order the application called $send. It joins the queue
+# when it is called, after its event is validated, and writes only once the
+# sends before it have finished -- their writes and any wait for the buffer
+# to drain -- so a later send never overtakes an earlier one, and the buffer
+# holds at most one send past the high watermark. Its turn ends however the
+# send ends (written, failed, or cancelled by the application), so it never
+# stalls the sends behind it. Until it writes, its payload counts in
+# buffered_amount. The queue belongs to the scope: the connection on
+# HTTP/1.1, and on HTTP/2 the stream's state ($owner), whose sends join it
+# the same way. The send holds the returned turn until it has finished; if
+# the turn is taken, $turn->{waiting} is the Future it awaits first.
+sub _join_send_queue {
+    my ($self, $event, $owner) = @_;
+    my $payload = 0;
+    for my $field (qw(body text bytes data)) {
+        $payload += length $event->{$field} if defined $event->{$field} && !ref $event->{$field};
+    }
+    return PAGI::Server::Connection::_SendTurn->new($owner // $self, $self, $payload);
+}
+
+# Whether an HTTP/2 send that waited for its turn still has a stream to send
+# on: once the connection or the stream is gone, the send is a quiet no-op.
+sub _h2_stream_open {
+    my ($self, $stream_id, $ss) = @_;
+    return !$self->{closed} && $self->{h2_streams}{$stream_id} && !$ss->{h2_closed};
+}
+
+# Every application send's bytes join an HTTP/2 stream's send queue through
+# here, the twin of _write_out: the send whose turn it is releases its
+# payload from the bytes waiting their turn, as the queue now counts them.
+sub _h2_enqueue {
+    my ($self, $ss, $bytes) = @_;
+    my $turn = $ss->{_current_turn};
+    $turn->release if $turn && $turn->{held};
+    push @{ $ss->{send_queue} //= [] }, $bytes;
+    $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
+    return;
+}
+
+# What buffered_amount reports: bytes written and not yet sent, and the
+# payloads of sends still waiting their turn or for the buffer to drain.
+sub _buffered_amount {
+    my ($self) = @_;
+    return $self->_get_write_buffer_size + ($self->{_held_bytes} // 0);
+}
+
 sub _get_write_buffer_size {
     my ($self) = @_;
-
     return 0 unless $self->{stream};
-
-    # Access IO::Async::Stream's internal write queue
-    # IO::Async doesn't expose a public API for buffer size, so we access internals
-    my $queue = $self->{stream}{writequeue} // [];
-    my $total = 0;
-
-    for my $writer (@$queue) {
-        my $data = $writer->data;
-        if (defined $data && !ref $data) {
-            $total += length($data);
-        }
-    }
-
-    return $total;
+    return $self->{_queued_bytes} // 0;
 }
 
 # HTTP/1.1: the transport handle reads the shared TCP write buffer. One
@@ -4853,7 +4957,7 @@ sub _h1_transport_state {
     my ($self) = @_;
     weaken(my $w = $self);
     return PAGI::Server::TransportState->new(
-        measure   => sub { $w ? $w->_get_write_buffer_size : 0 },
+        measure   => sub { $w ? $w->_buffered_amount : 0 },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub {
@@ -4879,7 +4983,7 @@ sub _h2_transport_state {
     my ($self, $ss) = @_;
     weaken(my $w = $self);
     return PAGI::Server::TransportState->new(
-        measure   => sub { $ss->{send_queue_bytes} // 0 },
+        measure   => sub { ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub { my $fire = shift; push @{$ss->{transport_drain_fires}}, $fire },
@@ -4915,21 +5019,28 @@ sub _check_drain_waiters {
     return unless @{$self->{_drain_waiters}} || @{$self->{_drain_fires}};
     return unless $self->{stream};
 
-    my $buffered = $self->_get_write_buffer_size;
+    my $low = $self->{write_low_watermark};
 
-    # Resolve/fire everyone once we've drained below low watermark: blocking
-    # producer Futures resolve, and arm_drain's on_drain hysteresis callbacks
-    # fire -- this IS an actual drain, unlike teardown (_cancel_drain_waiters).
-    if ($buffered < $self->{write_low_watermark}) {
+    # A send waiting for the buffer to drain goes on once the bytes written
+    # are below the low watermark: its own payload is still held, so it
+    # cannot wait for that too.
+    if ($self->_get_write_buffer_size < $low) {
         my @waiters = splice @{$self->{_drain_waiters}};
         for my $f (@waiters) {
             $f->done unless $f->is_ready;
         }
+    }
+    # arm_drain's on_drain fires once buffered_amount -- the sends still
+    # waiting their turn included -- is below it (PAGI::Spec::Www "Transport
+    # Flow Control"); until then the next time the buffer empties checks
+    # again. This IS a drain, unlike teardown (_cancel_drain_waiters).
+    if (@{$self->{_drain_fires}} && $self->_buffered_amount < $low) {
         my @fires = splice @{$self->{_drain_fires}};
         $_->() for @fires;
-        # Disable drain checking until next high watermark hit
-        $self->{_drain_check_active} = 0;
     }
+    # Drain checking stays on while either still waits.
+    $self->{_drain_check_active} = 0
+        unless @{$self->{_drain_waiters}} || @{$self->{_drain_fires}};
 }
 
 sub _setup_drain_detection {
@@ -5070,7 +5181,7 @@ sub _start_ws_keepalive {
                 type   => 'ping',
                 buffer => '',
             );
-            $weak_self->{stream}->write($ping->to_bytes);
+            $weak_self->_write_server_output($ping->to_bytes);
 
             # Start pong timeout if configured
             if ($weak_self->{ws_keepalive_timeout} > 0) {
@@ -5988,7 +6099,7 @@ sub _create_scope {
         type         => 'http',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -6280,7 +6391,7 @@ async sub _receive_http_body {
     # Send 100 Continue if client expects it (before reading body)
     if ($expect_continue && !$request->{continue_sent}) {
         $request->{continue_sent} = 1;
-        $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+        $weak_self->_write_server_output($weak_self->{protocol}->serialize_continue);
     }
 
     # Handle chunked Transfer-Encoding
@@ -6420,6 +6531,13 @@ async sub _send_http_event {
     $state->{seq} = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
     $state->{publish}->($state->{seq});
 
+    # Take this send's turn (see _join_send_queue): validated now, written
+    # once the sends issued before it have finished.
+    my $turn = $weak_self->_join_send_queue($event);
+    await $turn->{waiting} if $turn->{waiting};
+    return Future->done unless $weak_self;
+    return Future->done if $weak_self->{closed};
+
     if ($type eq 'http.response.start') {
         $weak_self->{response_started} = 1;
         $weak_self->{current_connection_state}->_mark_response_started
@@ -6546,7 +6664,8 @@ async sub _send_http_event {
                 die "File not found: $file\n"  unless -f $file;
                 die "Cannot read file: $file\n" unless -r $file;
 
-                await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked});
+                await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked},
+                    !$state->{expects_trailers});
                 1;
             } or do {
                 my $error = $@;
@@ -6562,7 +6681,8 @@ async sub _send_http_event {
             # send must roll $state->{seq} back instead of leaving it 'complete'.
             $weak_self->_flush_pending_headers;   # headers before the fh body
             eval {
-                await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked});
+                await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked},
+                    !$state->{expects_trailers});
                 1;
             } or do {
                 my $error = $@;
@@ -6599,7 +6719,7 @@ async sub _send_http_event {
                 $out .= $body;
             }
 
-            $weak_self->{stream}->write($out) if length $out;
+            $weak_self->_write_out($out) if length $out;
             $weak_self->_notify_transport_write;
         }
     }
@@ -6645,7 +6765,7 @@ async sub _send_http_event {
         # Validation already ran before sequence advancement and stripping.
         $trailers .= $weak_self->{protocol}->_encode_trailers($trailer_headers);
 
-        $weak_self->{stream}->write($trailers);
+        $weak_self->_write_out($trailers);
     }
     elsif ($type eq 'http.fullflush') {
         # Fullflush extension - force immediate TCP buffer flush.
@@ -6684,7 +6804,7 @@ sub _flush_pending_headers {
     my $pending = $self->{_resp_pending};
     return unless defined $pending && length $pending;
     $self->{_resp_pending} = undef;
-    $self->{stream}->write($pending);
+    $self->_write_out($pending);
 }
 
 sub _send_error_response {
@@ -6703,7 +6823,7 @@ sub _send_error_response {
     my $response = $self->{protocol}->serialize_response_start($status, $headers, 0);
     $response .= $body;
 
-    $self->{stream}->write($response);
+    $self->_write_server_output($response);
     $self->{response_started} = 1;
     # A server-synthesized response is still "this request's response started".
     $self->{current_connection_state}->_mark_response_started
@@ -7051,7 +7171,7 @@ sub _send_close_frame {
         buffer => pack('n', $code) . $reason,
     );
 
-    $self->{stream}->write($frame->to_bytes);
+    $self->_write_server_output($frame->to_bytes);
     $self->{close_sent} = 1;
 }
 
@@ -7106,6 +7226,7 @@ sub _close {
     return if $self->{_cleanup_done};
     $self->{_cleanup_done} = 1;
     $self->{closed} = 1;
+    $self->{_queued_bytes} = 0;   # bytes still queued are never written
 
     # Cancel pending drain waiters early (before other cleanup)
     $self->_cancel_drain_waiters('connection closing');
@@ -7614,7 +7735,7 @@ sub _finish_sse_stream {
     # Send chunked terminator if SSE was started and the stream is still writable
     if (_sse_stream_started($self->{h1_seq}) && !$self->{closed} &&
         $self->{stream} && $self->{stream}->write_handle) {
-        $self->{stream}->write("0\r\n\r\n");
+        $self->_write_out("0\r\n\r\n");
     }
 
     # Mark then wake, for the same reasons as _h2_end_scope_output. A started
@@ -7719,7 +7840,7 @@ sub _create_sse_scope {
         type         => 'sse',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => $request->{http_version},
         method       => $request->{method},
@@ -7852,7 +7973,7 @@ sub _create_sse_receive {
                 # Send 100 Continue if client expects it (before reading body)
                 if ($expect_continue && !$request->{continue_sent}) {
                     $request->{continue_sent} = 1;
-                    $weak_self->{stream}->write($weak_self->{protocol}->serialize_continue);
+                    $weak_self->_write_server_output($weak_self->{protocol}->serialize_continue);
                 }
 
                 if ($is_chunked) {
@@ -8064,6 +8185,13 @@ sub _create_sse_send {
             return;
         }
 
+        # Take this send's turn (see _join_send_queue): validated now, written
+        # once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event);
+        await $turn->{waiting} if $turn->{waiting};
+        return Future->done unless $weak_self;
+        return Future->done if $weak_self->{closed} && !$already_closed;
+
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
             $weak_self->{current_connection_state}->_mark_response_started
@@ -8107,7 +8235,7 @@ sub _create_sse_send {
                 $status, \@final_headers, 1  # chunked = 1
             );
 
-            $weak_self->{stream}->write($response);
+            $weak_self->_write_out($response);
 
             # Set protocol-specific keepalive writer (HTTP/1.1 chunked)
             $weak_self->{sse_keepalive_writer} = sub {
@@ -8120,7 +8248,7 @@ sub _create_sse_send {
                 my $bytes = eval { Encode::encode('UTF-8', $text, Encode::FB_CROAK) };
                 die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
                 my $len = sprintf("%x", length($bytes));
-                $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+                $weak_self->_write_server_output("$len\r\n$bytes\r\n");
             };
         }
         elsif ($type eq 'sse.send') {
@@ -8140,7 +8268,7 @@ sub _create_sse_send {
 
             # Send as chunked data
             my $len = sprintf("%x", length($bytes));
-            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+            $weak_self->_write_out("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'sse.comment') {
@@ -8149,7 +8277,7 @@ sub _create_sse_send {
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
 
             my $len = sprintf("%x", length($bytes));
-            $weak_self->{stream}->write("$len\r\n$bytes\r\n");
+            $weak_self->_write_out("$len\r\n$bytes\r\n");
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -8365,7 +8493,7 @@ sub _create_websocket_scope {
         type         => 'websocket',
         pagi         => {
             version      => '0.5',
-            spec_version => '0.6',
+            spec_version => '0.7',
         },
         http_version => $request->{http_version},
         scheme       => $self->_get_ws_scheme,
@@ -8629,6 +8757,13 @@ sub _create_websocket_send {
             return;
         }
 
+        # Take this send's turn (see _join_send_queue): validated now, written
+        # once the sends issued before it have finished.
+        my $turn = $weak_self->_join_send_queue($event);
+        await $turn->{waiting} if $turn->{waiting};
+        return Future->done unless $weak_self;
+        return Future->done if $weak_self->{closed} && !$already_closed;
+
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
 
@@ -8677,7 +8812,7 @@ sub _create_websocket_send {
 
                 push @headers, "\r\n";
 
-                $weak_self->{stream}->write(join('', @headers));
+                $weak_self->_write_out(join('', @headers));
                 1;
             };
             unless ($ok) {
@@ -8754,7 +8889,7 @@ sub _create_websocket_send {
             }
 
             my $bytes = $frame->to_bytes;
-            $weak_self->{stream}->write($bytes);
+            $weak_self->_write_out($bytes);
             $weak_self->_notify_transport_write;
         }
         elsif ($type eq 'websocket.close') {
@@ -8782,7 +8917,7 @@ sub _create_websocket_send {
                     buffer => pack('n', $code) . $reason,
                 );
 
-                $weak_self->{stream}->write($frame->to_bytes);
+                $weak_self->_write_out($frame->to_bytes);
                 $weak_self->{close_sent} = 1;
             }
 
@@ -8982,7 +9117,7 @@ sub _process_websocket_frames {
                     type   => 'close',
                     buffer => pack('n', $code) . $reason,
                 );
-                $self->{stream}->write($close_frame->to_bytes);
+                $self->_write_server_output($close_frame->to_bytes);
                 $self->{close_sent} = 1;
             }
 
@@ -9053,7 +9188,7 @@ sub _process_websocket_frames {
                 type   => 'pong',
                 buffer => $bytes,
             );
-            $self->{stream}->write($pong->to_bytes);
+            $self->_write_server_output($pong->to_bytes);
         }
         elsif ($opcode == 10) {
             # Pong - cancel any pending timeout (response to our ping)
@@ -9082,7 +9217,10 @@ sub _process_websocket_frames {
 #   1. Small files (<=64KB): direct in-process read (fastest for small files)
 #   2. Large files: async chunked reads via worker pool (non-blocking)
 async sub _send_file_response {
-    my ($self, $file, $offset, $length, $chunked) = @_;
+    my ($self, $file, $offset, $length, $chunked, $ends_response) = @_;
+    # Declared trailers end the response, not this body: they write the
+    # last chunk themselves, so the body leaves it to them.
+    $ends_response //= 1;
 
     # Get file size if length not specified
     my $file_size = -s $file;
@@ -9095,7 +9233,6 @@ async sub _send_file_response {
 
     $self->{_response_size} += $length;
 
-    my $stream = $self->{stream};
 
     if ($self->{sync_file_threshold} > 0 && $length <= $self->{sync_file_threshold}) {
         # Small file fast path: read directly in-process
@@ -9113,12 +9250,12 @@ async sub _send_file_response {
             # twice and desync the connection.
             if (length($data)) {
                 my $len = sprintf("%x", length($data));
-                $stream->write("$len\r\n$data\r\n");
+                $self->_write_out("$len\r\n$data\r\n");
             }
-            $stream->write("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n") if $ends_response;
         }
         else {
-            $stream->write($data);
+            $self->_write_out($data);
         }
     }
     else {
@@ -9132,10 +9269,10 @@ async sub _send_file_response {
                 my ($chunk) = @_;
                 if ($chunked) {
                     my $len = sprintf("%x", length($chunk));
-                    $stream->write("$len\r\n$chunk\r\n");
+                    $self->_write_out("$len\r\n$chunk\r\n");
                 }
                 else {
-                    $stream->write($chunk);
+                    $self->_write_out($chunk);
                 }
                 return;  # Sync callback
             },
@@ -9146,7 +9283,7 @@ async sub _send_file_response {
 
         # Send final chunk terminator if chunked
         if ($chunked) {
-            $stream->write("0\r\n\r\n");
+            $self->_write_out("0\r\n\r\n") if $ends_response;
         }
     }
 }
@@ -9156,7 +9293,10 @@ async sub _send_file_response {
 # Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
 # may be pipes, may be in-memory). Falls back to chunked reads.
 async sub _send_fh_response {
-    my ($self, $fh, $offset, $length, $chunked) = @_;
+    my ($self, $fh, $offset, $length, $chunked, $ends_response) = @_;
+    # Declared trailers end the response, not this body: they write the
+    # last chunk themselves, so the body leaves it to them.
+    $ends_response //= 1;
 
     # Seek to offset if specified
     if ($offset && $offset > 0) {
@@ -9168,7 +9308,6 @@ async sub _send_fh_response {
     # TODO: Consider IO::Async::FileStream for better event loop integration.
 
     my $remaining = $length;  # undef means read to EOF
-    my $stream = $self->{stream};
 
     while (1) {
         my $to_read = FILE_CHUNK_SIZE;
@@ -9190,10 +9329,10 @@ async sub _send_fh_response {
 
         if ($chunked) {
             my $len = sprintf("%x", length($chunk));
-            $stream->write("$len\r\n$chunk\r\n");
+            $self->_write_out("$len\r\n$chunk\r\n");
         }
         else {
-            $stream->write($chunk);
+            $self->_write_out($chunk);
         }
 
         if (defined $remaining) {
@@ -9203,7 +9342,7 @@ async sub _send_fh_response {
 
     # Send final chunk if chunked encoding
     if ($chunked) {
-        $stream->write("0\r\n\r\n");
+        $self->_write_out("0\r\n\r\n") if $ends_response;
     }
 }
 
@@ -9220,6 +9359,90 @@ sub _log {
     warn "$msg\n";
     return;
 }
+
+# One send's turn on its scope's queue (see Connection's _join_send_queue):
+# the connection's on HTTP/1.1, the stream's on HTTP/2. A send takes the turn
+# at once when nothing holds it and nothing waits for it; otherwise it waits,
+# in the order it was called, and is woken by the hand-off below.
+package PAGI::Server::Connection::_SendTurn;
+use Scalar::Util qw(weaken);
+
+sub new {
+    my ($class, $owner, $conn, $payload) = @_;
+    my $self = bless { owner => $owner, conn => $conn, held => $payload }, $class;
+    weaken($self->{owner});
+    weaken($self->{conn});
+    # Until its first write, the send's payload counts in buffered_amount.
+    $owner->{_held_bytes} += $payload if $payload;
+    my $waiters = $owner->{_turns_waiting} //= [];
+    # A send queues while any send waits, even if the turn is free for the
+    # moment -- as it is while the hand-off runs an earlier send's callbacks --
+    # so a send issued from such a callback never overtakes the queue.
+    if (!$owner->{_turn_busy} && !@$waiters) {
+        _hold_turn($self, $owner);
+    }
+    else {
+        $self->{waiting} = Future->new;
+        push @$waiters, $self;
+        weaken($waiters->[-1]);   # an abandoned send frees its place
+    }
+    return $self;
+}
+
+sub _hold_turn {
+    my ($self, $owner) = @_;
+    $owner->{_turn_busy} = $self->{holding} = 1;
+    # Its first write releases its payload from the bytes waiting their turn.
+    weaken($owner->{_current_turn} = $self);
+    return;
+}
+
+sub release {
+    my ($self) = @_;
+    $self->{owner}{_held_bytes} -= $self->{held} if $self->{owner};
+    $self->{held} = 0;
+    return;
+}
+
+# The turn is free: wake the sends waiting for it, in the order they were
+# called, from this one loop. A woken send that finishes at once ends its
+# turn inside the wake, which frees the turn again and lets the loop go on to
+# the next send -- so however many sends are queued, the stack does not
+# grow. The loop stops at the first send that has to wait (for the buffer
+# to drain, say); when that one ends, its own hand-off carries on.
+sub _hand_on {
+    my ($owner, $conn) = @_;
+    $owner->{_turn_busy} = 0;
+    return if $owner->{_handing_on};
+    local $owner->{_handing_on} = 1;
+    my $waiters = $owner->{_turns_waiting} or return;
+    while (!$owner->{_turn_busy} && @$waiters) {
+        my $next = shift @$waiters;
+        next unless $next && !$next->{waiting}->is_ready;   # abandoned or cancelled
+        _hold_turn($next, $owner);
+        my $wake = $next->{waiting};
+        # Waking runs the application's callbacks on the sends that finish;
+        # one that dies must not strand the sends still waiting.
+        next if eval { $wake->done; 1 };
+        my $error = $@;
+        chomp $error;
+        $conn->_log(error => "PAGI application error in a callback on a send's Future: $error")
+            if $conn;
+    }
+    return;
+}
+
+# The send finished -- or was abandoned -- so its turn ends.
+sub DESTROY {
+    my ($self) = @_;
+    return if ${^GLOBAL_PHASE} eq 'DESTRUCT';
+    my $owner = $self->{owner} or return;
+    $owner->{_held_bytes} -= $self->{held} if $self->{held};
+    _hand_on($owner, $self->{conn}) if $self->{holding};
+    return;
+}
+
+package PAGI::Server::Connection;
 
 1;
 
