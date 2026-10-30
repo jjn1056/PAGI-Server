@@ -6,10 +6,6 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
-# Configure Future::IO for tests that use Future::IO->sleep()
-eval { require Future::IO::Impl::IOAsync; 1 }
-    or plan skip_all => 'Future::IO::Impl::IOAsync required for SSE tests';
-
 use PAGI::Server;
 use IO::Socket::INET;
 

@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-# Future::IO::Impl::IOAsync below loads Future before PAGI::Server can keep Future::XS out
+# Future::AsyncAwait below loads Future before PAGI::Server can keep Future::XS out
 # (see "Future::XS" under PERFORMANCE in PAGI::Server); pin pure-perl here.
 BEGIN { $ENV{PERL_FUTURE_NO_XS} = 1 }
 use Test2::V0;
@@ -9,9 +9,6 @@ use IO::Socket::INET;
 use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
-
-eval { require Future::IO::Impl::IOAsync; 1 }
-    or plan skip_all => 'Future::IO::Impl::IOAsync required for these tests';
 
 use PAGI::Server;
 use Protocol::WebSocket::Frame;

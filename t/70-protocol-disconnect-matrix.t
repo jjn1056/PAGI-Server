@@ -5,7 +5,6 @@ use IO::Async::Loop;
 use IO::Async::Stream;
 use IO::Socket::INET;
 use Future::AsyncAwait;
-use Future::IO::Impl::IOAsync;
 use Socket qw(AF_UNIX SOCK_STREAM);
 use MIME::Base64 ();
 use FindBin;

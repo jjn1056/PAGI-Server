@@ -7,9 +7,9 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
-# Configure Future::IO for tests that use Future::IO->sleep()
-eval { require Future::IO::Impl::IOAsync; 1 }
-    or plan skip_all => 'Future::IO::Impl::IOAsync required for SSE tests';
+# Bind Future::IO to IO::Async when it is installed, as pagi-server does: the
+# example broadcaster sleeps with Future::IO when it can (and without it, does not).
+eval { require Future::IO::Impl::IOAsync };
 
 use PAGI::Server;
 
