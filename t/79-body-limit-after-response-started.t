@@ -268,7 +268,7 @@ sub streaming_app {
         }
         else {
             await Future->wait_any(
-                $conn->disconnect_future->without_cancel,
+                $conn->disconnect_future,
                 $loop->delay_future(after => 5)->then(sub { Future->done('timeout') }),
             );
         }
@@ -298,7 +298,7 @@ sub sse_app {
         }
         else {
             await Future->wait_any(
-                $conn->disconnect_future->without_cancel,
+                $conn->disconnect_future,
                 $loop->delay_future(after => 5)->then(sub { Future->done('timeout') }),
             );
         }
