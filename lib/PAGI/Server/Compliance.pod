@@ -692,8 +692,8 @@ Two details the spec leaves to the server:
 
 =over 4
 
-=item * C<disconnect_future> returns a fresh, cancellation-isolated observer
-on every call. After an abnormal end it is already resolved with the reason;
+=item * C<disconnect_future> returns a fresh Future on every call; cancelling
+one affects nothing else. After an abnormal end it is already resolved with the reason;
 after a clean end it stays pending forever, since there is no reason to
 resolve it with.
 
