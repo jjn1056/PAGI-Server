@@ -132,6 +132,7 @@ sub exchange_frames {
 
 sub h2_get {
     my ($path) = @_;
+    $NoBody::FH_TELL_AFTER = undef;   # each request reports its own
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $NoBody::app);
     my (%headers, $close_code);
     my $body = '';
@@ -155,6 +156,7 @@ sub h2_get {
 
 package NoBody;
 our %ERROR;
+our %FINISHED;   # set once every send on the path has resolved
 our $FH_TELL_AFTER;
 package main;
 
@@ -167,11 +169,21 @@ $NoBody::app = async sub {
     }
     my ($status, $kind) = ($scope->{path} // '/') =~ m{\A/(\d+)/(\w+)\z} or die "unknown path";
     my $try = async sub { my ($event) = @_; local $@; eval { await $send->($event) }; $ERROR{"$status/$kind"} .= $@ // '' };
+    my $finished = sub { $FINISHED{"$status/$kind"} = 1 };
+    if ($kind eq 'double') {
+        # A second start is rejected; it must change nothing about the first.
+        await $send->({ type => 'http.response.start', status => $status, headers => [] });
+        await $try->({ type => 'http.response.start', status => 204, headers => [] });
+        await $send->({ type => 'http.response.body', body => 'hello', more => 0 });
+        $finished->();
+        return;
+    }
     if ($kind eq 'body') {
         await $send->({ type => 'http.response.start', status => $status,
                         headers => [['etag', '"v1"'], ($status == 304 ? ['content-length', '5'] : ())] });
         await $try->({ type => 'http.response.body', body => 'he', more => 1 });
         await $try->({ type => 'http.response.body', body => 'llo', more => 0 });
+        $finished->();
         return;
     }
     if ($kind eq 'file') {
@@ -181,6 +193,7 @@ $NoBody::app = async sub {
         close $fh;
         unlink $tmpfile;   # if the server opened or statted it, the send fails
         await $try->({ type => 'http.response.body', file => $tmpfile });
+        $finished->();
         return;
     }
     if ($kind eq 'fh') {
@@ -188,12 +201,14 @@ $NoBody::app = async sub {
         open my $fh, '<', \"hello" or die "Cannot open scalar handle: $!";
         await $try->({ type => 'http.response.body', fh => $fh, offset => 3 });
         $NoBody::FH_TELL_AFTER = tell($fh);
+        $finished->();
         return;
     }
     if ($kind eq 'trailers') {
         await $send->({ type => 'http.response.start', status => $status, trailers => 1, headers => [] });
         await $try->({ type => 'http.response.body', body => 'hello', more => 0 });
         await $try->({ type => 'http.response.trailers', headers => [['x-t', '1']] });
+        $finished->();
         return;
     }
     die "unknown kind $kind";
@@ -208,21 +223,31 @@ for my $status (204, 304) {
     is( $res->{headers}{':status'}, $status, "$status: the status arrives" );
     is( $res->{body}, '', "$status: no DATA" );
     is( $res->{close_code}, 0, "$status: the stream ends cleanly (no RST_STREAM)" );
-    is( $NoBody::ERROR{"$status/body"} // '', '', "$status: every body send resolves" );
+    is( $NoBody::ERROR{"$status/body"} // '', '', "$status: no body send fails" );
+    ok( $NoBody::FINISHED{"$status/body"}, "$status: every body send resolves" );
     is( $res->{headers}{etag}, '"v1"', "$status: headers pass through" );
 
     is( h2_get("/$status/file")->{body}, '', "$status file: no body" );
     is( $NoBody::ERROR{"$status/file"} // '', '', "$status file: never opened or statted" );
+    ok( $NoBody::FINISHED{"$status/file"}, "$status file: the send resolves" );
 
     is( h2_get("/$status/fh")->{body}, '', "$status fh: no body" );
     is( $NoBody::FH_TELL_AFTER, 0, "$status fh: never seeked or read" );
+    ok( $NoBody::FINISHED{"$status/fh"}, "$status fh: the send resolves" );
 
     my $trailed = h2_get("/$status/trailers");
     is( $trailed->{body}, '', "$status trailers: no body" );
     is( $trailed->{headers}{'x-t'}, undef, "$status trailers: discarded" );
     is( $NoBody::ERROR{"$status/trailers"} // '', '', "$status trailers: accepted" );
+    ok( $NoBody::FINISHED{"$status/trailers"}, "$status trailers: every send resolves" );
 }
 is( h2_get('/304/body')->{headers}{'content-length'}, '5', '304 keeps the Content-Length its 200 would have had' );
+
+# A rejected second start (status 204) leaves the first, a 200, as it was.
+my $double = h2_get('/200/double');
+like( $NoBody::ERROR{'200/double'} // '', qr/./, 'the second start is rejected' );
+is( $double->{body}, 'hello', 'and the 200 keeps its body' );
+ok( $NoBody::FINISHED{'200/double'}, 'its sends resolve' );
 
 # control: a 200 still gets its body
 is( h2_get('/200/body')->{body}, 'hello', '200 unaffected' );

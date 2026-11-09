@@ -508,9 +508,9 @@ max_frame_size, max_header_list_size
 431 response (RFC 9113 section 10.5.1) instead of a bare RST_STREAM,
 matching HTTP/1.1
 
-=item * Body suppression for a HEAD request and for a 1xx, 204 or 304
-response, matching HTTP/1.1: DATA frames are withheld, file/fh bodies are
-never opened, and the stream ends cleanly (PAGI Www.pod "HEAD Requests" and
+=item * Body suppression for a HEAD request and for a 204 or 304 response,
+matching HTTP/1.1: DATA frames are withheld, file/fh bodies are never
+opened, and the stream ends cleanly (PAGI Www.pod "HEAD Requests" and
 "Statuses Without Content")
 
 =item * File and filehandle body streaming through the per-stream send queue,
@@ -599,7 +599,7 @@ event does not end the stream: the final C<DATA> frame carries no
 C<END_STREAM>. A following C<http.response.trailers> event submits a
 trailing C<HEADERS> block that carries C<END_STREAM>, completing the
 response; an empty or absent C<headers> list is valid and still terminates
-the stream. On a HEAD request, or a 1xx, 204 or 304 response, the trailers
+the stream. On a HEAD request, or a 204 or 304 response, the trailers
 event is validated and discarded rather than transmitted -- there is no
 body, so nothing needs to reach the wire, but the response still completes
 normally.

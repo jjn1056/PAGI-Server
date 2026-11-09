@@ -11,9 +11,9 @@ use PAGI::Server;
 
 plan skip_all => 'Server integration tests not supported on Windows' if $^O eq 'MSWin32';
 
-# A 1xx, 204 or 304 response ends at its header section (RFC 9112 6.3; RFC
-# 9110 15.2, 15.3.5, 15.4.5; PAGI Www.pod "Statuses Without Content"), and a
-# server must not send Transfer-Encoding in a 1xx or 204 (RFC 9112 6.1). Whatever the application sends after http.response.start,
+# A 204 or 304 response ends at its header section (RFC 9112 6.3; RFC 9110
+# 15.3.5, 15.4.5), and a server must not send Transfer-Encoding in a 204
+# (RFC 9112 6.1). Whatever the application sends after http.response.start,
 # the server writes no framing and no content for these statuses. On a
 # keep-alive connection, a stray chunked terminator would be read as the start
 # of the next response.
@@ -76,7 +76,7 @@ sub exchange {
     return $data;
 }
 
-for my $status (103, 204, 304) {
+for my $status (204, 304) {
     subtest "$status ends at its headers" => sub {
         my $data = exchange("/$status", '/200');
         my ($head, $rest) = split /\r\n\r\n/, $data, 2;

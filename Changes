@@ -194,8 +194,7 @@
     body was opened or read; RFC 9113 gives those statuses no DATA frames.
     The body is now suppressed as for HEAD -- nothing written, file/fh not
     opened, trailers accepted and discarded, every send resolving -- and
-    the stream ends cleanly. A 1xx start is treated the same way on
-    HTTP/1.1 and HTTP/2. This implements PAGI Www 0.7, "Statuses Without
+    the stream ends cleanly. This implements PAGI Www 0.7, "Statuses Without
     Content".
   - A request head still arriving is held to max_header_size and the
     request-line limit (431 / 414 as soon as either is exceeded) instead of
