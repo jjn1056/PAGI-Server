@@ -2365,7 +2365,10 @@ sub _h2_create_send {
     # Mirrors the stream state's own starting point (see the seq_state =>
     # 'initial' initializer in _h2_on_request); the two must stay in step.
     my $seq = 'initial';
-    my $is_head = (($stream_state->{pseudo}{':method'} // '') eq 'HEAD');
+    # Whether the response may carry content: not for HEAD, nor (once the
+    # start is sent) for a 204 or 304 status (PAGI Www.pod "HEAD Requests"
+    # and "Statuses Without Content"; RFC 9113 8.1.1).
+    my $no_content = (($stream_state->{pseudo}{':method'} // '') eq 'HEAD');
     # Set once, from http.response.start's own 'trailers' flag (section 6
     # below), and never changed again. $data_callback's no_end computation
     # MUST key off this rather than $ss->{seq_state}: the trailers arm
@@ -2635,15 +2638,19 @@ sub _h2_create_send {
         PAGI::Server::EventValidator::validate_http_send(
             $event, { extensions => $weak_self->{extensions} });
 
-        # 2. HEAD: the server suppresses the body (PAGI Www.pod "HEAD Requests").
-        # The app responds exactly as for GET; we discard payloads, never open
-        # file/fh, and accept-and-discard trailers. Sequence state still
-        # advances so the lifecycle (completion, post-complete raises) matches GET.
-        if ($is_head && ($type eq 'http.response.body' || $type eq 'http.response.trailers')) {
+        # 2. No content: the server suppresses the body of a HEAD response
+        # (PAGI Www.pod "HEAD Requests") and of a 204 or 304 one
+        # ("Statuses Without Content"). The app responds as it would
+        # otherwise; we discard payloads, never open file/fh, and
+        # accept-and-discard trailers. Sequence state still advances so the
+        # lifecycle (completion, post-complete raises) matches a response
+        # with content. A start's status sets $no_content in section 6, once
+        # the start has passed the sequence check.
+        if ($no_content && ($type eq 'http.response.body' || $type eq 'http.response.trailers')) {
             $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
             $publish->($seq);
-            if ($seq eq 'complete' && !$ss->{h2_head_finished}) {
-                $ss->{h2_head_finished} = 1;
+            if ($seq eq 'complete' && !$ss->{h2_no_content_finished}) {
+                $ss->{h2_no_content_finished} = 1;
                 $weak_self->{h2_session}->submit_response($stream_id,
                     status  => $status,
                     headers => \@response_headers,
@@ -2899,6 +2906,15 @@ sub _h2_create_send {
         # different pre/post-state needs; do not consolidate them.
         $seq = PAGI::Server::EventValidator::advance_http($seq, $event);
         $publish->($seq);
+        # An accepted start with a 204 or 304 status has no content.
+        # Decided here, when the start is sent and has passed the sequence
+        # check (sends are validated in call order), not when it is
+        # processed: body events sent behind it are checked before then. A
+        # rejected start (a second one) never reaches this line.
+        if ($type eq 'http.response.start') {
+            my $start_status = $event->{status};
+            $no_content ||= $start_status == 204 || $start_status == 304;
+        }
         # Take this send's turn on the stream (see _join_send_queue): validated
         # now, processed once the sends issued before it have finished.
         my $turn = $weak_self->_join_send_queue($event, $ss);

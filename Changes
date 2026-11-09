@@ -189,6 +189,13 @@
     forbids and which a keep-alive client reads as the start of the next
     response; it now ends at its headers, and any body the application
     sends is dropped, as for HEAD.
+  - An HTTP/2 204 or 304 response whose application sent body events had
+    its stream reset (RST_STREAM) instead of completing, and a file or fh
+    body was opened or read; RFC 9113 gives those statuses no DATA frames.
+    The body is now suppressed as for HEAD -- nothing written, file/fh not
+    opened, trailers accepted and discarded, every send resolving -- and
+    the stream ends cleanly. This implements PAGI Www 0.7, "Statuses Without
+    Content".
   - A request head still arriving is held to max_header_size and the
     request-line limit (431 / 414 as soon as either is exceeded) instead of
     being buffered without bound until it completes, and a head using bare
