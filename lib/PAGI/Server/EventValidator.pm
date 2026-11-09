@@ -6,6 +6,7 @@ use warnings;
 our $VERSION = '0.003000';
 
 use Carp qw(croak);
+use Scalar::Util ();
 use Encode ();
 
 # --- Primitive shape checks (anchored; undef and refs are always false) ---
@@ -145,6 +146,11 @@ sub _validate_http_response_body {
     croak "http.response.body requires exactly one of body/file/fh (got $count)"
         unless $count <= 1;  # 0 is OK - defaults to empty body
 
+    # A body is bytes (PAGI Www.pod): a plain reference would go out as its
+    # address, ARRAY(0x...).
+    croak "http.response.body 'body' must be bytes, not a " . ref($event->{body}) . ' reference'
+        if $has_body && ref $event->{body} && !Scalar::Util::blessed($event->{body});
+
     croak "http.response.body 'body' contains a character above 0xFF (encode it to bytes)"
         if $has_body && defined $event->{body} && !ref $event->{body}
             && !_is_bytes($event->{body});
@@ -233,6 +239,9 @@ sub _validate_websocket_send_event {
 
     croak "websocket.send requires exactly one of bytes/text (got $count)"
         unless $count == 1;
+
+    croak "websocket.send 'bytes' must be bytes, not a " . ref($event->{bytes}) . ' reference'
+        if ref $event->{bytes} && !Scalar::Util::blessed($event->{bytes});
 
     croak "websocket.send 'bytes' contains a character above 0xFF (encode it to bytes, or send text)"
         if defined $event->{bytes} && !ref $event->{bytes} && !_is_bytes($event->{bytes});

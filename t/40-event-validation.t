@@ -78,6 +78,22 @@ subtest 'http.response.body validation' => sub {
         'body and fh throws'
     );
 
+    # A body is bytes (PAGI Www.pod): a plain reference would go out as ARRAY(0x...)
+    like(
+        dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => [1] }) },
+        qr/\Ahttp\.response\.body 'body' must be bytes, not a ARRAY reference/,
+        'an array reference body throws'
+    );
+    like(
+        dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => { a => 1 } }) },
+        qr/not a HASH reference/,
+        'a hash reference body throws'
+    );
+    ok(
+        lives { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => "caf\xE9" }) },
+        'bytes 128-255 are bytes'
+    );
+
     # Invalid offset should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.body', body => 'x', offset => 'bad' }) },
@@ -146,6 +162,13 @@ subtest 'websocket.send validation' => sub {
         dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.send', bytes => 'x', text => 'y' }) },
         qr/exactly one of bytes\/text/,
         'both present throws'
+    );
+
+    # bytes are bytes (PAGI Www.pod): a plain reference would go out as its address
+    like(
+        dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'websocket.send', bytes => [1] }) },
+        qr/\Awebsocket\.send 'bytes' must be bytes, not a ARRAY reference/,
+        'a reference as bytes throws'
     );
 
     # Valid events should pass

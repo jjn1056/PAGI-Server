@@ -189,6 +189,10 @@
     forbids and which a keep-alive client reads as the start of the next
     response; it now ends at its headers, and any body the application
     sends is dropped, as for HEAD.
+  - A response body, or websocket.send bytes, that is a plain reference
+    (body => [ ... ]) is refused, failing the send, as a string with a
+    character above 0xFF already was: they are bytes, and a reference went
+    out as its address, ARRAY(0x...).
   - An HTTP/2 204 or 304 response whose application sent body events had
     its stream reset (RST_STREAM) instead of completing, and a file or fh
     body was opened or read; RFC 9113 gives those statuses no DATA frames.
