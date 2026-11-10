@@ -26,10 +26,12 @@ my $bin = abs_path(File::Spec->catfile($FindBin::Bin, '..', 'bin', 'pagi-server'
 $SIG{TERM} = 'IGNORE';
 
 my @groups;
+# By process group: after a hot restart the first master is gone and the
+# new one, in the same group, may still be running.
 END {
-    kill('TERM', -$_) for grep { kill(0, $_) } @groups;
+    kill('TERM', -$_) for grep { kill(0, -$_) } @groups;
     select(undef, undef, undef, 0.5) if @groups;
-    kill('KILL', -$_) for grep { kill(0, $_) } @groups;
+    kill('KILL', -$_) for grep { kill(0, -$_) } @groups;
     $? = 0;
 }
 
