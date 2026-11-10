@@ -51,6 +51,7 @@ on 'test' => sub {
     requires 'URI', '1.60';
     requires 'JSON::MaybeXS', '1.004003';
     requires 'Time::HiRes', '1.9764';  # Core module, for timing-sensitive tests
+    requires 'Test::TempDir::Tiny', '0.018';  # kept when a test fails, for inspection
 
     # No test here loads PAGI-Tools: the toolkit's behavior on a real server is
     # tested in PAGI-Tools' t/integration/. PAGI::Server::Runner's defaults

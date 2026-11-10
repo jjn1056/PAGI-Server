@@ -261,6 +261,18 @@
   - The worker processes that read large files outlived the server's
     shutdown until the process exited; the last server on an event loop to
     shut down now stops them.
+  - A process the application started (system, a piped open, backticks)
+    inherited the server's listening sockets, which were kept open across
+    exec for hot restart. While it ran, a stopped server's clients waited
+    instead of being refused, and the server could not be started again on
+    that address ("already in use"). Listening sockets are now close-on-exec;
+    hot restart clears that on exactly the sockets it hands to the new
+    master, just before exec. --reuseport sockets were not inherited.
+  - A hot restart of a master that had adopted its listening socket from
+    PAGI_REUSE lost it, because Perl marks an adopted descriptor
+    close-on-exec: the new master died with "Cannot open inherited fd", or
+    took over and served nothing. Hot restart now hands adopted sockets
+    over too.
 
 0.002013 - 2026-09-03
 
