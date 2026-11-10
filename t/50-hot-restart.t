@@ -290,4 +290,82 @@ subtest 'USR2 in single-worker mode is ignored' => sub {
     kill('TERM', $server_pid);
 };
 
+# The master serving on $port: the parent of the workers listening there.
+sub find_master_on_port {
+    my ($port) = @_;
+    my %listening = map { $_ => 1 } find_pids_on_port($port);
+    for my $pid (keys %listening) {
+        my $parent = `ps -o ppid= -p $pid`;
+        $parent =~ s/\s+//g;
+        return $parent if $parent && $listening{$parent};
+    }
+    return undef;
+}
+
+# Waits for any process to end, not only a child of this test (wait_for_exit
+# relies on waitpid, which reports a process that isn't ours as gone).
+sub wait_until_gone {
+    my ($pid, $timeout) = @_;
+    my $deadline = time() + ($timeout // 15);
+    while (time() < $deadline) {
+        waitpid($pid, WNOHANG);
+        return 1 unless kill(0, $pid);
+        select(undef, undef, undef, 0.25);
+    }
+    return 0;
+}
+
+# Each master a hot restart starts must be able to hot restart in turn.
+subtest 'two hot restarts in a row' => sub {
+    my $tmpdir = tempdir(CLEANUP => 1);
+    my $app_file = write_pid_app($tmpdir);
+    my $port = 40000 + int(rand(20000));
+    my $server_log = File::Spec->catfile($tmpdir, 'server.log');
+
+    my $master = fork();
+    die "fork failed: $!" unless defined $master;
+    if ($master == 0) {
+        setpgrp(0, 0);
+        open STDOUT, '>', $server_log or POSIX::_exit(1);
+        open STDERR, '>&STDOUT' or POSIX::_exit(1);
+        exec($^X, '-Ilib', $bin,
+            '--host', '127.0.0.1',
+            '--port', $port,
+            '--workers', 2,
+            '--quiet',
+            '--heartbeat-timeout', 5,
+            '--no-default-middleware',
+            '--no-access-log',
+            $app_file,
+        ) or POSIX::_exit(1);
+    }
+    push @pids_to_cleanup, $master;
+    my $dump_log = sub {
+        open my $log_fh, '<', $server_log or return;
+        local $/;
+        diag "Server log:\n" . <$log_fh>;
+    };
+
+    ok(wait_for_port($port, 15), "server started on port $port") or return;
+
+    for my $restart (1, 2) {
+        my ($worker_before) = (http_get($port) // '') =~ /pid=(\d+)/;
+        kill('USR2', $master);
+        my $gone = wait_until_gone($master, 30);
+        my $new_master = find_master_on_port($port);
+        push @pids_to_cleanup, grep { $_ } $new_master;   # before any early return
+        ok($gone, "restart $restart: the master ($master) handed over and exited")
+            or return $dump_log->();
+        ok($new_master && $new_master != $master, "restart $restart: a new master serves the port")
+            or return $dump_log->();
+        my ($worker_after) = (http_get($port) // '') =~ /pid=(\d+)/;
+        ok($worker_after && $worker_after != ($worker_before // 0),
+            "restart $restart: answered by a new worker");
+        $master = $new_master;
+    }
+
+    kill('TERM', $master);
+    wait_until_gone($master, 15);
+};
+
 done_testing;
