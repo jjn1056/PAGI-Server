@@ -261,6 +261,12 @@
   - The worker processes that read large files outlived the server's
     shutdown until the process exited; the last server on an event loop to
     shut down now stops them.
+  - A hot restart of a master systemd started (socket activation) failed:
+    the new master died "Port ... is already in use" and the old one kept
+    running. The server removes LISTEN_FDS from its environment once it has
+    the sockets, as sd_listen_fds asks, and listed only the sockets it
+    created in PAGI_REUSE, so the new master couldn't find them. Sockets
+    systemd hands over are now listed there too.
   - A process the application started (system, a piped open, backticks)
     inherited the server's listening sockets, which were kept open across
     exec for hot restart. While it ran, a stopped server's clients waited

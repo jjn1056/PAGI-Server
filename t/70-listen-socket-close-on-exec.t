@@ -330,4 +330,41 @@ subtest 'a hot restart of a master that adopted its socket' => sub {
     stop_server($master);
 };
 
+# A master systemd started (socket activation) hands its socket to the master
+# a hot restart starts: LISTEN_FDS is gone by then, so it must be in
+# PAGI_REUSE, and reach the new master open.
+subtest 'a hot restart of a master systemd started' => sub {
+    skip_all 'hot restart requires RELEASE_TESTING' unless $ENV{RELEASE_TESTING};
+    my $dir = tempdir('systemd hot restart');
+    my $socket = IO::Socket::INET->new(LocalAddr => '127.0.0.1', LocalPort => 0, Listen => 128, ReuseAddr => 1)
+        or die "Cannot listen: $!";
+    my $port = $socket->sockport;
+    my $master = start_server(dir => $dir, app => write_app($dir),
+        env    => { PROBE_PORT => $port, LISTEN_FDS => 1 },
+        before => sub {                    # as systemd hands it over: fd 3, inheritable
+            POSIX::dup2(fileno($socket), 3) // POSIX::_exit(1);
+            $ENV{LISTEN_PID} = $$;
+        },
+        argv => ['--host', '127.0.0.1', '--port', $port, '--workers', 2, '--heartbeat-timeout', 5]);
+    close $socket;
+    ok(wait_until_serving({ port => $port }), 'serving') or return diag(server_log($dir));
+    like(server_log($dir), qr/Reusing inherited fd 3 .*source: systemd/, 'it adopted fd 3 from systemd')
+        or diag(server_log($dir));
+    my %old_workers = map { $_ => 1 } split ' ', `pgrep -P $master`;
+
+    kill('USR2', $master);
+    my $deadline = time + 30;
+    while (time < $deadline && kill(0, $master)) {
+        waitpid($master, POSIX::WNOHANG());
+        select(undef, undef, undef, 0.25);
+    }
+    ok(!kill(0, $master), 'the old master handed over and exited') or return diag(server_log($dir));
+    like(server_log($dir), qr/Reusing inherited fd 3 .*source: pagi_reuse/, 'the new master found it in PAGI_REUSE')
+        or diag(server_log($dir));
+    my $body = child_inherits_nothing({ port => $port }, $dir, 'the new master');
+    my ($pid) = ($body // '') =~ /^pid=(\d+)/;
+    ok($pid && !$old_workers{$pid}, 'answered by a new worker, on the handed-over socket') or diag($body);
+    stop_server($master);                  # the new master shares the old one's process group
+};
+
 done_testing;
