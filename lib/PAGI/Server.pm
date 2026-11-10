@@ -51,6 +51,7 @@ use Scalar::Util qw(weaken refaddr);
 use Time::HiRes ();
 use Socket qw(sockaddr_family unpack_sockaddr_in unpack_sockaddr_un AF_UNIX AF_INET);
 use POSIX ();
+use Fcntl ();
 
 use PAGI::Server::AppNormalizer ();
 use PAGI::Server::Connection;
@@ -608,13 +609,17 @@ restarts.
 
 =head2 File Descriptor Inheritance
 
-To ensure that listening socket fds are inherited across C<exec()>,
-PAGI::Server sets C<$^F = 1023> before creating sockets. Perl uses C<$^F>
-(the maximum system file descriptor, equivalent to C<POSIX_OPEN_MAX> in
-spirit) to decide which fds receive the C<FD_CLOEXEC> close-on-exec flag:
-fds with numbers greater than C<$^F> get C<FD_CLOEXEC> set automatically.
-By raising C<$^F> to 1023, listen socket fds remain open across C<exec()>
-without requiring explicit C<fcntl> calls.
+Listening sockets are close-on-exec (C<FD_CLOEXEC>), whether the server
+created them or adopted them from C<PAGI_REUSE> or C<LISTEN_FDS>: Perl sets
+the flag on every descriptor above C<$^F> that it opens. So a process the
+application starts (C<system>, a piped C<open>, backticks) does not hold the
+server's address: when the server stops, clients are refused rather than
+left waiting, and the server can be started again at once. Forked workers
+share the sockets as before, since C<fork> keeps every descriptor.
+
+Hot restart is the one hand-over across C<exec()>: the forked process that
+becomes the new master clears C<FD_CLOEXEC> on each listening socket just
+before it execs, and the new master adopts them from C<PAGI_REUSE>.
 
 =head1 HOT RESTART (EXPERIMENTAL)
 
@@ -3596,11 +3601,7 @@ async sub _listen_singleworker {
             $old_umask = umask(0177);  # Owner-only until chmod
         }
 
-        # Start listening ($^F raised so fd survives exec for hot restart)
-        {
-            local $^F = 1023;
-            await $listener->listen(%listen_opts);
-        }
+        await $listener->listen(%listen_opts);
 
         # Restore umask after bind
         umask($old_umask) if defined $old_umask;
@@ -3790,14 +3791,11 @@ sub _listen_multiworker {
             my $old_umask = umask(0177);
 
             require IO::Socket::UNIX;
-            {
-                local $^F = 1023;
-                $socket = IO::Socket::UNIX->new(
-                    Local   => $spec->{path},
-                    Type    => Socket::SOCK_STREAM(),
-                    Listen  => $self->{listener_backlog},
-                ) or die "Cannot create Unix socket $spec->{path}: $!";
-            }
+            $socket = IO::Socket::UNIX->new(
+                Local   => $spec->{path},
+                Type    => Socket::SOCK_STREAM(),
+                Listen  => $self->{listener_backlog},
+            ) or die "Cannot create Unix socket $spec->{path}: $!";
 
             umask($old_umask);
 
@@ -3836,17 +3834,14 @@ sub _listen_multiworker {
             close($probe_socket);
         } else {
             # Shared-socket TCP: parent creates, workers inherit
-            {
-                local $^F = 1023;
-                $socket = IO::Socket::INET->new(
-                    LocalAddr => $spec->{host},
-                    LocalPort => $spec->{port},
-                    Proto     => 'tcp',
-                    Listen    => $self->{listener_backlog},
-                    ReuseAddr => 1,
-                    Blocking  => 0,
-                ) or die "Cannot create listening socket on $spec->{host}:$spec->{port}: $!";
-            }
+            $socket = IO::Socket::INET->new(
+                LocalAddr => $spec->{host},
+                LocalPort => $spec->{port},
+                Proto     => 'tcp',
+                Listen    => $self->{listener_backlog},
+                ReuseAddr => 1,
+                Blocking  => 0,
+            ) or die "Cannot create listening socket on $spec->{host}:$spec->{port}: $!";
             $spec->{bound_port} = $socket->sockport;
             $self->{bound_port} //= $spec->{bound_port};
 
@@ -4256,7 +4251,15 @@ sub _hot_restart {
     }
 
     if ($pid == 0) {
-        # Child: exec new master
+        # Child: exec new master. Listening sockets are close-on-exec, so a
+        # process the application starts doesn't hold them (Perl sets that
+        # on sockets it creates or adopts). The new master must inherit
+        # them, so clear it on exactly these, here, just before exec.
+        for my $entry (@{$self->{_listen_entries} // []}) {
+            my $socket = $entry->{socket} or next;
+            my $flags = fcntl($socket, Fcntl::F_GETFD(), 0) // next;
+            fcntl($socket, Fcntl::F_SETFD(), $flags & ~Fcntl::FD_CLOEXEC());
+        }
         my @args = defined $ENV{PAGI_ARGV}
             ? split(/\0/, $ENV{PAGI_ARGV})
             : ();
