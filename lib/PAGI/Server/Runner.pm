@@ -598,6 +598,12 @@ sub load_server {
     # Hand over what only the runner knows, for the startup block.
     $server_opts{startup_notes} = $self->{_startup_notes} || [];
 
+    # A master a hot restart started writes the pid file when it takes over
+    # (the server calls back then), not at startup: until then the old
+    # master is in charge, and a new master that fails must leave its file.
+    $server_opts{_on_takeover} = sub { $self->_take_pid_file }
+        if $self->{pid_file} && $ENV{PAGI_MASTER_PID};
+
     # Handle access log
     # Production mode disables logging by default for performance
     # Use --access-log to explicitly enable in production
@@ -707,11 +713,10 @@ sub run {
         $self->_daemonize;
     }
 
-    # Write PID file (after daemonizing so we record the daemon's PID)
-    if ($self->{pid_file}) {
-        $self->_write_pid_file($self->{pid_file});
-        # Store for END block cleanup
-        $_current_runner = $self;
+    # Write PID file (after daemonizing so we record the daemon's PID); a
+    # master a hot restart started writes it when it takes over instead
+    if ($self->{pid_file} && !$ENV{PAGI_MASTER_PID}) {
+        $self->_take_pid_file;
     }
 
     # Drop privileges
@@ -989,6 +994,14 @@ sub _redirect_std_handles {
     return if $self->_redirect_stderr_to_error_log;
 
     open(STDERR, '>', '/dev/null') or die "Cannot redirect STDERR: $!";
+}
+
+# Writes the pid file and makes this runner the one that removes it (the
+# END block, on an abnormal exit).
+sub _take_pid_file {
+    my ($self) = @_;
+    $self->_write_pid_file($self->{pid_file});
+    $_current_runner = $self;
 }
 
 sub _write_pid_file {

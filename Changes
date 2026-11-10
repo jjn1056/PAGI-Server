@@ -102,6 +102,15 @@
     old master after a hot restart: forked workers run the master's END
     block, and it removed the file without checking whose pid was in it.
     The file is now removed only by the process it names.
+  - A hot restart whose new master failed to start (the redeployed
+    application didn't compile, or its startup failed) went unnoticed: the
+    old master kept serving, but every later SIGUSR2 was ignored ("Hot
+    restart already in progress") until a full restart, and a new master
+    that got far enough to write the pid file removed it as it died. The
+    old master now watches the new one: if it exits before taking over, the
+    old master logs "Hot restart failed" at error level and accepts the next
+    SIGUSR2. A master a hot restart started writes the pid file when it
+    takes over, before the old master is told to stop, not at startup.
   - A receive cancelled while it waits -- as Future->wait_any cancels the
     receive that lost a race -- no longer breaks the connection: every
     later receive failed at once with "... was cancelled" (so an app that

@@ -709,14 +709,14 @@ sends C<SIGTERM>:
 =item * B<Fork failure> — The old master logs the error and continues serving.
 No new master is started.
 
-=item * B<Exec failure> — The forked child exits before loading any code.
-The old master notices (via C<waitpid>) and continues serving.
-
-=item * B<New master crash during startup> — The old master never receives
-C<SIGTERM> and continues serving indefinitely.
+=item * B<Exec failure, or a new master that fails to start> — The new
+master exits without sending C<SIGTERM> (the redeployed application doesn't
+compile, say). The old master, which watches it, logs C<Hot restart failed>
+at error level, keeps serving with its pid file, and accepts the next
+C<SIGUSR2>.
 
 =item * B<Workers fail lifespan startup> — The new master exits without
-sending C<SIGTERM>. The old master is unaffected.
+sending C<SIGTERM>, and the old master handles it as above.
 
 =back
 
@@ -2740,6 +2740,12 @@ sub _init {
     # being served, which mode resolved and why. Rendered in the startup block
     # rather than printed separately, so startup reads as one thing.
     $self->{startup_notes}    = delete $params->{startup_notes} // [];
+    # Called once when a master a hot restart started takes over from the
+    # one that started it. The runner writes the pid file then rather than
+    # at startup, so a new master that fails never touches the old one's.
+    $self->{_on_takeover}     = delete $params->{_on_takeover};
+    die "Invalid _on_takeover - must be a coderef\n"
+        if defined $self->{_on_takeover} && ref($self->{_on_takeover}) ne 'CODE';
     $self->{logger}           = delete $params->{logger};
     die "Invalid logger - must be a coderef taking one hashref\n"
         if defined $self->{logger} && ref($self->{logger}) ne 'CODE';
@@ -4000,6 +4006,11 @@ sub _listen_multiworker {
                     return;
                 }
 
+                # This master is in charge from here. The pid file names it
+                # before the old master is told to stop, so the old one's
+                # exit finds it isn't its own and leaves it.
+                $weak_self_handoff->{_on_takeover}->() if $weak_self_handoff->{_on_takeover};
+
                 if (kill(0, $old_master_pid)) {
                     $weak_self_handoff->_log(info =>
                         "Hot restart: $worker_count workers healthy, "
@@ -4267,7 +4278,20 @@ sub _hot_restart {
             };
     }
 
-    # Parent: log and continue running
+    # Parent: keep serving, and watch the new master. If it exits before it
+    # has taken over (it tells this master to stop first), the hot restart
+    # failed: say so, and accept the next USR2.
+    weaken(my $weak_self = $self);
+    $self->loop->watch_process($pid => sub {
+        my ($exit_pid, $exitcode) = @_;
+        return unless $weak_self && !$weak_self->{shutting_down};
+        $weak_self->{_hot_restart_in_progress} = 0;
+        my $how = POSIX::WIFSIGNALED($exitcode)
+            ? 'was killed by signal ' . POSIX::WTERMSIG($exitcode)
+            : 'exited with status ' . POSIX::WEXITSTATUS($exitcode);
+        $weak_self->_log(error => "Hot restart failed: new master $exit_pid $how before taking over; "
+            . "still serving, and the next USR2 tries again");
+    });
     $self->_log(info => "Hot restart: new master spawned as PID $pid");
 }
 
