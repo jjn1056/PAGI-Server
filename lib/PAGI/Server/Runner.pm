@@ -1003,11 +1003,18 @@ sub _write_pid_file {
     $self->{_pid_file_path} = $pid_file;
 }
 
+# Removes the pid file only while it still names this process. Forked
+# workers run this process's END block when they exit, and after a hot
+# restart the file names the new master: neither may remove it.
 sub _remove_pid_file {
     my ($self) = @_;
 
-    return unless $self->{_pid_file_path};
-    unlink($self->{_pid_file_path});
+    my $path = $self->{_pid_file_path} or return;
+    open(my $fh, '<', $path) or return;
+    my $pid = <$fh>;
+    close($fh);
+    return unless defined $pid && $pid =~ /^(\d+)$/ && $1 == $$;
+    unlink($path);
 }
 
 sub _drop_privileges {

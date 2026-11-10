@@ -97,6 +97,11 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - The --pid file was deleted while the master was still running whenever
+    a worker ended (a --max-requests recycle, SIGHUP, SIGTTOU), and by the
+    old master after a hot restart: forked workers run the master's END
+    block, and it removed the file without checking whose pid was in it.
+    The file is now removed only by the process it names.
   - A receive cancelled while it waits -- as Future->wait_any cancels the
     receive that lost a race -- no longer breaks the connection: every
     later receive failed at once with "... was cancelled" (so an app that
