@@ -3460,6 +3460,22 @@ sub _create_loop {
 # correctly leave the master's fds alone.
 my %OWNED_REUSE_FDS;
 
+# Lists a listening socket in PAGI_REUSE, where a master a hot restart starts
+# finds it, and in %OWNED_REUSE_FDS, so another server in this process
+# leaves it alone. $port is the bound port (TCP).
+sub _publish_for_hot_restart {
+    my ($spec, $fd, $port) = @_;
+    my $reuse_key = $spec->{type} eq 'unix'
+        ? "unix:$spec->{path}:$fd"
+        : "$spec->{host}:$port:$fd";
+    $spec->{_reuse_key} = $reuse_key;
+    $spec->{_reuse_fd}  = $fd;
+    $OWNED_REUSE_FDS{$fd} = 1;
+    $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
+        ? "$ENV{PAGI_REUSE},$reuse_key"
+        : $reuse_key;
+}
+
 async sub listen {
     my ($self) = @_;
 
@@ -3535,6 +3551,11 @@ async sub _listen_singleworker {
 
             $self->_log(info => "Reusing inherited fd $inh->{fd} for $match_key"
                 . " (source: $inh->{source})");
+
+            # LISTEN_FDS is gone from the environment now: a master a hot
+            # restart starts finds a socket systemd handed over only here.
+            _publish_for_hot_restart($spec, $inh->{fd}, $spec->{port})
+                if $inh->{source} eq 'systemd';
 
             push @listen_entries, { listener => $listener, spec => $spec };
             next;  # Skip normal bind/listen
@@ -3640,17 +3661,7 @@ async sub _listen_singleworker {
         my $rh = $listener->read_handle;
         if ($rh) {
             my $fd = fileno($rh);
-            if (defined $fd) {
-                my $reuse_key = $spec->{type} eq 'unix'
-                    ? "unix:$spec->{path}:$fd"
-                    : "$spec->{host}:$spec->{port}:$fd";
-                $spec->{_reuse_key} = $reuse_key;
-                $spec->{_reuse_fd} = $fd;
-                $OWNED_REUSE_FDS{$fd} = 1;
-                $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
-                    ? "$ENV{PAGI_REUSE},$reuse_key"
-                    : $reuse_key;
-            }
+            _publish_for_hot_restart($spec, $fd, $spec->{port}) if defined $fd;
         }
 
         push @listen_entries, { listener => $listener, spec => $spec };
@@ -3782,6 +3793,11 @@ sub _listen_multiworker {
 
             $self->_log(info => "Reusing inherited fd $inh->{fd} for $match_key"
                 . " (source: $inh->{source})");
+
+            # LISTEN_FDS is gone from the environment now: a master a hot
+            # restart starts finds a socket systemd handed over only here.
+            _publish_for_hot_restart($spec, $inh->{fd}, $spec->{port})
+                if $inh->{source} eq 'systemd';
         }
         elsif ($spec->{type} eq 'unix') {
             # Unix socket: parent creates, workers inherit
@@ -3805,16 +3821,8 @@ sub _listen_multiworker {
             }
 
             # Register in PAGI_REUSE for hot restart fd inheritance
-            if ($socket && !$spec->{_inherited}) {
-                my $fd = fileno($socket);
-                my $reuse_key = "unix:$spec->{path}:$fd";
-                $spec->{_reuse_key} = $reuse_key;
-                $spec->{_reuse_fd} = $fd;
-                $OWNED_REUSE_FDS{$fd} = 1;
-                $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
-                    ? "$ENV{PAGI_REUSE},$reuse_key"
-                    : $reuse_key;
-            }
+            _publish_for_hot_restart($spec, fileno($socket))
+                if $socket && !$spec->{_inherited};
         } elsif ($reuseport) {
             # reuseport TCP: probe to get port, workers create their own
             # Note: reuseport sockets are not registered in PAGI_REUSE because
@@ -3846,16 +3854,8 @@ sub _listen_multiworker {
             $self->{bound_port} //= $spec->{bound_port};
 
             # Register in PAGI_REUSE for hot restart fd inheritance
-            if ($socket && !$spec->{_inherited}) {
-                my $fd = fileno($socket);
-                my $reuse_key = "$spec->{host}:" . $socket->sockport . ":$fd";
-                $spec->{_reuse_key} = $reuse_key;
-                $spec->{_reuse_fd} = $fd;
-                $OWNED_REUSE_FDS{$fd} = 1;
-                $ENV{PAGI_REUSE} = length($ENV{PAGI_REUSE} // '')
-                    ? "$ENV{PAGI_REUSE},$reuse_key"
-                    : $reuse_key;
-            }
+            _publish_for_hot_restart($spec, fileno($socket), $socket->sockport)
+                if $socket && !$spec->{_inherited};
         }
 
         push @listen_entries, { socket => $socket, spec => $spec };

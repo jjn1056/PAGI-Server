@@ -87,6 +87,11 @@ subtest 'systemd: reuses LISTEN_FDS TCP socket' => sub {
     ok(!defined $ENV{LISTEN_FDS}, 'LISTEN_FDS cleaned');
     ok(!defined $ENV{LISTEN_PID}, 'LISTEN_PID cleaned');
 
+    # Published for a hot restart: the new master finds it in PAGI_REUSE,
+    # since LISTEN_FDS is gone
+    like($ENV{PAGI_REUSE} // '', qr/(?:^|,)127\.0\.0\.1:$port:3(?:,|$)/,
+        'the adopted socket is listed in PAGI_REUSE');
+
     # Make request using IO::Async::Stream to avoid blocking
     my $resp_future = $loop->new_future;
     my $response = '';
@@ -122,6 +127,7 @@ subtest 'systemd: reuses LISTEN_FDS TCP socket' => sub {
     $loop->remove($client_stream) if $client_stream->parent;
     $server->shutdown->get;
     $loop->remove($server);
+    unlike($ENV{PAGI_REUSE} // '', qr/:$port:3(?:,|$)/, 'and unlisted when the server shuts down');
 
     # Close our socket at target_fd and restore whatever was there before
     if ($orig_fd != $target_fd) {
