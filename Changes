@@ -273,6 +273,13 @@
     close-on-exec: the new master died with "Cannot open inherited fd", or
     took over and served nothing. Hot restart now hands adopted sockets
     over too.
+  - A second hot restart in a row never happened: the master a hot restart
+    started re-ran itself as "pagi-server --port" (or whatever came first on
+    the command line) and died "Invalid module name: --port", leaving the
+    old master running. The arguments travel in PAGI_ARGV joined by NULs,
+    and an environment entry can't hold one, so a master inherited only
+    the first; it also kept that copy instead of capturing its own. Each
+    master now captures its own arguments.
 
 0.002013 - 2026-09-03
 
