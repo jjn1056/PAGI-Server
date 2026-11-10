@@ -46,6 +46,7 @@ cover_db/
 # Local testing
 local/
 *.log
+tmp/
 
 # Perl local::lib
 perl5/

@@ -66,11 +66,15 @@ subtest 'PID file creation and cleanup' => sub {
         is($written_pid, $pid, 'PID matches child process');
     }
 
-    # Test cleanup
+    # Test cleanup: only the process the file names removes it
     my $runner = PAGI::Server::Runner->new(port => 0, quiet => 1);
     $runner->{_pid_file_path} = $pid_file;
     $runner->_remove_pid_file;
-    ok(!-f $pid_file, 'PID file removed by cleanup');
+    ok(-f $pid_file, 'PID file naming another process is kept');
+
+    $runner->_write_pid_file($pid_file);
+    $runner->_remove_pid_file;
+    ok(!-f $pid_file, 'PID file removed by the process it names');
 };
 
 # 'PID file with actual server process' has been relocated to the
