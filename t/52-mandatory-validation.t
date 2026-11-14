@@ -127,7 +127,7 @@ like( $get->('/duplicate-start')->content, qr/dup:.*duplicate http\.response\.st
     'duplicate start fails without disturbing the real response' );
 like( $get->('/undeclared-trailers')->content, qr/trailers:.*not declared/,
     'undeclared trailers fail' );
-like( $get->('/wide-header')->content, qr/Invalid header value: contains a character above 0xFF/,
+like( $get->('/wide-header')->content, qr/http\.response\.start header 0 \('x-wide'\): value contains a character above 0xFF/,
     'a wide header value fails the send Future' );
 like( $get->('/wide-body')->content, qr/body:.*'body' contains a character above 0xFF/,
     'a wide body fails the send Future without disturbing the response' );

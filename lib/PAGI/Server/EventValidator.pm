@@ -34,27 +34,67 @@ sub _is_bytes {
     return utf8::downgrade($copy, 1);
 }
 
-# --- Shared header validation (byte safety per PAGI Www.pod "Header byte safety") ---
-# Names: no CR/LF/NUL and no other control characters. Values: no CR/LF/NUL.
-# Both are bytes.
+# --- Shared header validation (PAGI Www.pod "Header byte safety") ---
+# A name is an RFC 9110 token (S5.1). A value is an RFC 9110 field value
+# (S5.5): empty, or bytes 0x21-0x7E and 0x80-0xFF with SP and HTAB allowed
+# only between two of them. A message shows the offending character by code
+# and offset; it may show the name, escaped, and never shows the value.
+
+my %CHAR_NAME = ("\t" => 'HTAB', ' ' => 'SP', "\r" => 'CR', "\n" => 'LF',
+    "\0" => 'NUL', "\x7F" => 'DEL');
+
+sub _describe_char {
+    my ($c) = @_;
+    my $ord = ord $c;
+    return "a character above 0xFF (" . sprintf('\x{%x}', $ord) . ")" if $ord > 0xFF;
+    my $code = sprintf '\x%02x', $ord;
+    return "$CHAR_NAME{$c} ($code)"            if exists $CHAR_NAME{$c};
+    return "a control character ($code)"      if $ord < 0x20;
+    return "a non-ASCII byte ($code)"         if $ord >= 0x80;
+    return "'$c' ($code)";
+}
+
+sub _escape_name {
+    my ($name) = @_;
+    $name =~ s/([^\x20-\x7E])/ord $1 > 0xFF ? sprintf('\x{%x}', ord $1) : sprintf('\x%02x', ord $1)/ge;
+    return $name;
+}
+
+# Each returns undef for a valid name or value, else the problem, beginning
+# "name" or "value".
+sub _header_name_problem {
+    my ($name) = @_;
+    return 'name is empty' if $name eq '';
+    return undef unless $name =~ /[^!#\$%&'*+\-.^_`|~0-9A-Za-z]/;
+    my $at = $-[0];
+    return "name '" . _escape_name($name) . "' contains " . _describe_char(substr $name, $at, 1)
+        . " at offset $at (a header name must be an RFC 9110 token)";
+}
+
+sub _header_value_problem {
+    my ($value) = @_;
+    if ($value =~ /[^\t\x20-\x7E\x80-\xFF]/) {
+        my $at = $-[0];
+        my $c  = substr $value, $at, 1;
+        return 'value contains ' . _describe_char($c) . " at offset $at"
+            . (ord $c > 0xFF ? ' (encode it to bytes)' : '');
+    }
+    return 'value starts with ' . _describe_char($1) . '; trim it' if $value =~ /\A([ \t])/;
+    return 'value ends with '   . _describe_char($1) . '; trim it' if $value =~ /([ \t])\z/;
+    return undef;
+}
 
 sub check_header_value {
     my ($value) = @_;
-    die "Invalid header value: contains CR, LF, or null byte\n"
-        if $value =~ /[\r\n\0]/;
-    die "Invalid header value: contains a character above 0xFF (encode it to bytes)\n"
-        unless _is_bytes($value);
+    my $problem = _header_value_problem($value);
+    die "Invalid header $problem\n" if defined $problem;
     return $value;
 }
 
 sub check_header_name {
     my ($name) = @_;
-    die "Invalid header name: contains CR, LF, or null byte\n"
-        if $name =~ /[\r\n\0]/;
-    die "Invalid header name: contains control characters\n"
-        if $name =~ /[[:cntrl:]]/;
-    die "Invalid header name: contains a character above 0xFF (encode it to bytes)\n"
-        unless _is_bytes($name);
+    my $problem = _header_name_problem($name);
+    die "Invalid header $problem\n" if defined $problem;
     return $name;
 }
 
@@ -62,13 +102,18 @@ sub validate_headers {
     my ($headers, $event_type) = @_;
     croak "$event_type 'headers' must be an array reference"
         unless ref $headers eq 'ARRAY';
-    for my $h (@$headers) {
+    for my $i (0 .. $#$headers) {
+        my $h = $headers->[$i];
         croak "$event_type headers: each header must be a 2-element array reference"
             unless ref $h eq 'ARRAY' && @$h == 2;
         croak "$event_type headers: header name and value must be defined strings"
             if !defined $h->[0] || !defined $h->[1] || ref $h->[0] || ref $h->[1];
-        check_header_name($h->[0]);
-        check_header_value($h->[1]);
+        if (defined(my $problem = _header_name_problem($h->[0]))) {
+            die "$event_type header $i: $problem\n";
+        }
+        if (defined(my $problem = _header_value_problem($h->[1]))) {
+            die "$event_type header $i ('" . _escape_name($h->[0]) . "'): $problem\n";
+        }
     }
     return;
 }
@@ -861,17 +906,22 @@ C<"cannot send '<type>' during lifespan phase '<state>'">.
 
 =head2 check_header_value($value)
 
-Checks a single header value for byte safety: dies with a C<\n>-terminated
-message if C<$value> contains a CR, LF, or null byte, or a character above
-0xFF (a value is bytes; Perl's internal UTF-8 flag does not matter). Returns
-C<$value> unchanged on success.
+Checks a single header value against RFC 9110 S5.5: the value is empty, or
+bytes C<0x21>-C<0x7E> and C<0x80>-C<0xFF> with SP and HTAB allowed only
+between two of them. A character above 0xFF fails (a value is bytes; Perl's
+internal UTF-8 flag does not matter). On failure dies with a
+C<\n>-terminated message beginning C<Invalid header value> that names the
+offending character by code and offset and does not include the value.
+Returns C<$value> unchanged on success.
 
 =head2 check_header_name($name)
 
-Checks a single header name for byte safety: dies with a C<\n>-terminated
-message if C<$name> contains a CR, LF, or null byte, and dies with a
-separate C<\n>-terminated message if it contains any other control
-character or a character above 0xFF. Returns C<$name> unchanged on success.
+Checks a single header name against RFC 9110 S5.1: the name is a non-empty
+token, C<!#$%&'*+-.^_`|~>, digits and letters. Upper case is allowed. On
+failure dies with a C<\n>-terminated message beginning C<Invalid header name>
+that shows the name with its non-printable characters escaped and names the
+offending character by code and offset. Returns C<$name> unchanged on
+success.
 
 =head2 validate_headers($headers, $event_type)
 
@@ -880,8 +930,12 @@ Validates a C<headers> field shared by every event shape that carries one
 C<sse.start>).
 C<$event_type> is the event type string used in croak messages. Croaks
 unless C<$headers> is an array reference of 2-element array references,
-each holding a defined, non-reference name and value; each name and value
-is then passed through C<check_header_name> and C<check_header_value>.
+each holding a defined, non-reference name and value. Each name and value
+is then checked by the rules of C<check_header_name> and
+C<check_header_value>; a failure dies with a C<\n>-terminated message that
+names the event and the header's index (from 0), and for a value problem the
+escaped name, for example
+C<http.response.start header 2 ('x-v'): value contains CR (\x0d) at offset 1>.
 Returns nothing.
 
 =head1 SEE ALSO

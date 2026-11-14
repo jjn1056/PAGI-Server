@@ -209,15 +209,28 @@ subtest "te: 'trailers' is preserved, not stripped" => sub {
     $loop->remove($server);
 };
 
-subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => sub {
+subtest "te: 'trailers' with surrounding OWS fails the send, as any padded value does" => sub {
+    # RFC 9110 S5.5: a field value neither starts nor ends with whitespace
+    # (Www.pod "Header byte safety"). The app reports the failed send in a
+    # valid response, so the test sees the failure and the message.
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
         await $receive->();
+        my $err = do {
+            local $@;
+            eval {
+                await $send->({
+                    type => 'http.response.start', status => 200,
+                    headers => [['te', "  trailers  "], ['x-marker', 'ok']],
+                });
+                1;
+            } ? 'NO-ERROR' : $@;
+        };
         await $send->({
             type => 'http.response.start', status => 200,
-            headers => [['te', "  trailers  "], ['x-marker', 'ok']],
+            headers => [['x-marker', 'ok']],
         });
-        await $send->({ type => 'http.response.body', body => 'unharmed', more => 0 });
+        await $send->({ type => 'http.response.body', body => $err, more => 0 });
     };
 
     my ($conn, $stream_io, $client_sock, $server) = create_h2c_connection(app => $app);
@@ -244,20 +257,12 @@ subtest "te: 'trailers' with surrounding OWS is not treated as a violation" => s
     pump($client, $client_sock, sub { $stream_closed });
 
     ok($stream_closed, 'request completed');
-    is($headers{':status'}, '200', 'status arrived');
-    is($body, 'unharmed', 'response is not corrupted by an OWS-padded te: trailers');
-    is($headers{'x-marker'}, 'ok', 'a sibling app header still arrives intact');
-    ok(!(grep { /connection-specific header/ } @warnings),
-        "no strip warning for te with OWS around trailers -- the compare correctly recognizes the token");
-
-    # RFC 9113 8.2.1 forbids OWS in field values, and libnghttp2 versions
-    # disagree on what to do with one (reject-and-omit the field vs fail the
-    # whole HEADERS submission -- the latter corrupts the response to bare
-    # :status, observed on CPAN smokers). The server therefore never hands
-    # nghttp2 the padded value: a te that passes the trailers carve-out is
-    # submitted with the normalized token, identically on every libnghttp2.
-    is($headers{'te'}, 'trailers',
-        "te arrives normalized -- the server trims RFC-forbidden OWS before submission");
+    like($body, qr/\Ahttp\.response\.start header 0 \('te'\): value starts with SP \(\\x20\); trim it\n\z/,
+        'the padded te fails the send and the message names the header');
+    is($headers{':status'}, '200', "the app's own response still goes out");
+    is($headers{'x-marker'}, 'ok', 'with its header intact');
+    ok(!exists $headers{'te'}, 'the padded te never reaches nghttp2');
+    ok(!(grep { /connection-specific header/ } @warnings), 'no strip warning: the send failed before stripping');
 
     $stream_io->close_now;
     $loop->remove($server);
