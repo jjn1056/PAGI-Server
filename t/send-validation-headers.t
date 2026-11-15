@@ -234,4 +234,41 @@ subtest 'h2c: a non-token name never reaches the wire' => sub {
     is([grep { $_->{level} eq 'error' } @$logged], [], 'control: nothing is logged as an error');
 };
 
+# A failed send's message ends where the application's send failed. The
+# server's own call into the validator is no help to the application.
+subtest 'a failed send does not point into the server' => sub {
+    my %err;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope" if $scope->{type} ne 'http';
+        await $receive->();
+        $err{sequence} = do { local $@; eval { await $send->({ type => 'http.response.body', body => 'x' }) }; $@ };
+        $err{field}    = do { local $@; eval { await $send->({ type => 'http.response.start', status => 200, trailers => 2 }) }; $@ };
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        await $send->({ type => 'http.response.body', body => 'ok', more => 0 });
+    };
+    my $server = PAGI::Server->new(app => $app, host => '127.0.0.1', port => 0,
+        log_level => 'info', logger => sub { }, access_log => undef);
+    $loop->add($server);
+    $server->listen->get;
+    my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $server->port,
+        Proto => 'tcp', Timeout => 2) or die "Cannot connect: $!";
+    print $sock "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    $sock->blocking(0);
+    my $eof = 0;
+    my $deadline = time + 3;
+    while (!$eof && time < $deadline) {
+        $loop->loop_once(0.05);
+        my $n = sysread($sock, my $buf, 4096);
+        $eof = 1 if defined $n && !$n;
+    }
+    close $sock;
+    $server->shutdown->get;
+    $loop->remove($server);
+
+    is($err{sequence}, "cannot send 'http.response.body' before http.response.start\n",
+        'a sequence error is the message alone');
+    is($err{field}, "http.response.start 'trailers' must be 0 or 1\n", 'a field error is the message alone');
+};
+
 done_testing;

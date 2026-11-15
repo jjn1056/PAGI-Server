@@ -154,13 +154,13 @@ sub check_header_name {
 
 sub validate_headers {
     my ($headers, $event_type) = @_;
-    croak "$event_type 'headers' must be an array reference"
+    die "$event_type 'headers' must be an array reference\n"
         unless ref $headers eq 'ARRAY';
     for my $i (0 .. $#$headers) {
         my $h = $headers->[$i];
-        croak "$event_type headers: each header must be a 2-element array reference"
+        die "$event_type headers: each header must be a 2-element array reference\n"
             unless ref $h eq 'ARRAY' && @$h == 2;
-        croak "$event_type headers: header name and value must be defined strings"
+        die "$event_type headers: header name and value must be defined strings\n"
             if !defined $h->[0] || !defined $h->[1] || ref $h->[0] || ref $h->[1];
         if (defined(my $problem = _header_name_problem($h->[0]))) {
             die "$event_type header $i: $problem\n";
@@ -204,11 +204,11 @@ sub validate_http_send {
         _validate_http_response_trailers($event);
     }
     elsif ($type eq 'http.fullflush') {
-        croak "Extension not enabled: fullflush"
+        die "Extension not enabled: fullflush\n"
             unless exists $ext->{fullflush};
     }
     else {
-        croak "Unrecognized event type '$type' for http protocol";
+        die "Unrecognized event type '$type' for http protocol\n";
     }
     return;
 }
@@ -217,7 +217,7 @@ sub _validate_http_response_start {
     my ($event) = @_;
 
     # status is required, 200 to 599
-    croak "http.response.start requires 'status' field"
+    die "http.response.start requires 'status' field\n"
         unless exists $event->{status};
     _check_status('http.response.start', $event->{status});
 
@@ -230,7 +230,7 @@ sub _validate_http_response_start {
 
     # trailers must be 0 or 1 if present
     if (exists $event->{trailers} && defined $event->{trailers}) {
-        croak "http.response.start 'trailers' must be 0 or 1"
+        die "http.response.start 'trailers' must be 0 or 1\n"
             unless _is_bool01($event->{trailers});
     }
 }
@@ -244,33 +244,33 @@ sub _validate_http_response_body {
     my $has_fh = exists $event->{fh};
     my $count = $has_body + $has_file + $has_fh;
 
-    croak "http.response.body requires exactly one of body/file/fh (got $count)"
+    die "http.response.body requires exactly one of body/file/fh (got $count)\n"
         unless $count <= 1;  # 0 is OK - defaults to empty body
 
     # A body is bytes (PAGI Www.pod): a plain reference would go out as its
     # address, ARRAY(0x...).
-    croak "http.response.body 'body' must be bytes, not a " . ref($event->{body}) . ' reference'
+    die "http.response.body 'body' must be bytes, not a " . ref($event->{body}) . " reference\n"
         if $has_body && ref $event->{body} && !Scalar::Util::blessed($event->{body});
 
-    croak "http.response.body 'body' contains a character above 0xFF (encode it to bytes)"
+    die "http.response.body 'body' contains a character above 0xFF (encode it to bytes)\n"
         if $has_body && defined $event->{body} && !ref $event->{body}
             && !_is_bytes($event->{body});
 
     # offset must be a non-negative integer if present
     if (exists $event->{offset} && defined $event->{offset}) {
-        croak "http.response.body 'offset' must be a non-negative integer"
+        die "http.response.body 'offset' must be a non-negative integer\n"
             unless _is_nonneg_int($event->{offset});
     }
 
     # length must be a non-negative integer if present
     if (exists $event->{length} && defined $event->{length}) {
-        croak "http.response.body 'length' must be a non-negative integer"
+        die "http.response.body 'length' must be a non-negative integer\n"
             unless _is_nonneg_int($event->{length});
     }
 
     # more must be 0 or 1 if present
     if (exists $event->{more} && defined $event->{more}) {
-        croak "http.response.body 'more' must be 0 or 1"
+        die "http.response.body 'more' must be 0 or 1\n"
             unless _is_bool01($event->{more});
     }
 }
@@ -315,11 +315,11 @@ sub validate_websocket_send {
         # section 5), so a refusal's status is 300 or above.
         if ($type eq 'http.response.start' && defined $event->{status}
             && _is_nonneg_int($event->{status}) && $event->{status} < 300) {
-            croak "WebSocket refusal status must be 300 or above (got $event->{status})";
+            die "WebSocket refusal status must be 300 or above (got $event->{status})\n";
         }
     }
     else {
-        croak "Unrecognized event type '$type' for websocket protocol";
+        die "Unrecognized event type '$type' for websocket protocol\n";
     }
     return;
 }
@@ -338,13 +338,13 @@ sub _validate_websocket_send_event {
     # Exactly one of bytes or text must be present and defined
     my $count = (defined $event->{bytes} ? 1 : 0) + (defined $event->{text} ? 1 : 0);
 
-    croak "websocket.send requires exactly one of bytes/text (got $count)"
+    die "websocket.send requires exactly one of bytes/text (got $count)\n"
         unless $count == 1;
 
-    croak "websocket.send 'bytes' must be bytes, not a " . ref($event->{bytes}) . ' reference'
+    die "websocket.send 'bytes' must be bytes, not a " . ref($event->{bytes}) . " reference\n"
         if ref $event->{bytes} && !Scalar::Util::blessed($event->{bytes});
 
-    croak "websocket.send 'bytes' contains a character above 0xFF (encode it to bytes, or send text)"
+    die "websocket.send 'bytes' contains a character above 0xFF (encode it to bytes, or send text)\n"
         if defined $event->{bytes} && !ref $event->{bytes} && !_is_bytes($event->{bytes});
 }
 
@@ -353,19 +353,19 @@ sub _validate_websocket_close {
 
     # code must be a non-negative integer if present
     if (exists $event->{code} && defined $event->{code}) {
-        croak "websocket.close 'code' must be a non-negative integer"
+        die "websocket.close 'code' must be a non-negative integer\n"
             unless _is_nonneg_int($event->{code});
     }
 
     # RFC 6455 5.5: a close frame's payload is at most 125 bytes, the 2-byte
     # code and the reason, which is sent as UTF-8.
     if (exists $event->{reason} && defined $event->{reason}) {
-        croak "websocket.close 'reason' must be a string"
+        die "websocket.close 'reason' must be a string\n"
             if ref $event->{reason};
         my $bytes = $event->{reason};
         utf8::encode($bytes);
-        croak "websocket.close 'reason' must be at most 123 bytes as UTF-8 (got "
-            . length($bytes) . ')'
+        die "websocket.close 'reason' must be at most 123 bytes as UTF-8 (got "
+            . length($bytes) . ")\n"
             if length($bytes) > 123;
     }
 }
@@ -374,14 +374,14 @@ sub _validate_websocket_keepalive {
     my ($event) = @_;
 
     # interval is required (Number)
-    croak "websocket.keepalive requires 'interval' field"
+    die "websocket.keepalive requires 'interval' field\n"
         unless exists $event->{interval};
-    croak "websocket.keepalive 'interval' must be a non-negative number"
+    die "websocket.keepalive 'interval' must be a non-negative number\n"
         unless _is_nonneg_number($event->{interval});
 
     # timeout must be a non-negative number if present
     if (exists $event->{timeout} && defined $event->{timeout}) {
-        croak "websocket.keepalive 'timeout' must be a non-negative number"
+        die "websocket.keepalive 'timeout' must be a non-negative number\n"
             unless _is_nonneg_number($event->{timeout});
     }
 }
@@ -420,11 +420,11 @@ sub validate_sse_send {
         validate_http_send($event, $opts);
     }
     elsif ($type eq 'http.fullflush') {
-        croak "Extension not enabled: fullflush"
+        die "Extension not enabled: fullflush\n"
             unless exists $ext->{fullflush};
     }
     else {
-        croak "Unrecognized event type '$type' for sse protocol";
+        die "Unrecognized event type '$type' for sse protocol\n";
     }
     return;
 }
@@ -434,7 +434,7 @@ sub _validate_sse_close {
 
     # reason is optional and server-side only; if present it must be a string
     if (exists $event->{reason} && defined $event->{reason}) {
-        croak "sse.close 'reason' must be a string"
+        die "sse.close 'reason' must be a string\n"
             if ref $event->{reason};
     }
 }
@@ -455,19 +455,19 @@ sub _validate_sse_send_event {
     my ($event) = @_;
 
     # data is required (String)
-    croak "sse.send requires 'data' field"
+    die "sse.send requires 'data' field\n"
         unless exists $event->{data};
-    croak "sse.send 'data' must be a string"
+    die "sse.send 'data' must be a string\n"
         unless defined $event->{data} && !ref $event->{data};
 
     for my $f (qw(event id)) {
         next unless exists $event->{$f} && defined $event->{$f};
-        croak "sse.send '$f' must be a string" if ref $event->{$f};
-        croak "sse.send '$f' must not contain newline characters"
+        die "sse.send '$f' must be a string\n" if ref $event->{$f};
+        die "sse.send '$f' must not contain newline characters\n"
             if $event->{$f} =~ /[\r\n]/;
     }
     if (exists $event->{retry} && defined $event->{retry}) {
-        croak "sse.send 'retry' must be a non-negative integer"
+        die "sse.send 'retry' must be a non-negative integer\n"
             unless _is_nonneg_int($event->{retry});
     }
 }
@@ -476,9 +476,9 @@ sub _validate_sse_comment {
     my ($event) = @_;
 
     # comment is required (String)
-    croak "sse.comment requires 'comment' field"
+    die "sse.comment requires 'comment' field\n"
         unless exists $event->{comment};
-    croak "sse.comment 'comment' must be a string"
+    die "sse.comment 'comment' must be a string\n"
         unless defined $event->{comment} && !ref $event->{comment};
 }
 
@@ -486,9 +486,9 @@ sub _validate_sse_keepalive {
     my ($event) = @_;
 
     # interval is required (Number)
-    croak "sse.keepalive requires 'interval' field"
+    die "sse.keepalive requires 'interval' field\n"
         unless exists $event->{interval};
-    croak "sse.keepalive 'interval' must be a non-negative number"
+    die "sse.keepalive 'interval' must be a non-negative number\n"
         unless _is_nonneg_number($event->{interval});
 
     # comment is optional (String); when present it must be encodable as
@@ -503,7 +503,7 @@ sub _validate_sse_keepalive {
         my $comment = $event->{comment};
         my $ok = !ref($comment)
             && eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK); 1 };
-        croak "sse.keepalive 'comment' must be a UTF-8-encodable string"
+        die "sse.keepalive 'comment' must be a UTF-8-encodable string\n"
             unless $ok;
     }
 }
@@ -521,11 +521,11 @@ sub validate_lifespan_send {
     }
     elsif ($type eq 'lifespan.startup.failed' or $type eq 'lifespan.shutdown.failed') {
         if (exists $event->{message} && defined $event->{message}) {
-            croak "$type 'message' must be a string" if ref $event->{message};
+            die "$type 'message' must be a string\n" if ref $event->{message};
         }
     }
     else {
-        croak "Unrecognized event type '$type' for lifespan protocol";
+        die "Unrecognized event type '$type' for lifespan protocol\n";
     }
     return;
 }
@@ -555,20 +555,20 @@ sub advance_http {
     my ($state, $event) = @_;
     my $type = $event->{type} // '';
 
-    croak "cannot send '$type': response already complete"
+    die "cannot send '$type': response already complete\n"
         if $state eq 'complete';
 
     if ($state eq 'initial') {
-        croak "cannot send '$type' before http.response.start"
+        die "cannot send '$type' before http.response.start\n"
             unless $type eq 'http.response.start';
         return $event->{trailers} ? 'started_t' : 'started';
     }
 
-    croak "cannot send duplicate http.response.start"
+    die "cannot send duplicate http.response.start\n"
         if $type eq 'http.response.start';
 
     if ($type eq 'http.response.trailers') {
-        croak "cannot send http.response.trailers: trailers were not declared or body is not complete"
+        die "cannot send http.response.trailers: trailers were not declared or body is not complete\n"
             unless $state eq 'awaiting_trailers';
         return 'complete';
     }
@@ -583,7 +583,7 @@ sub advance_http {
         # them. An intermediary that transforms body bytes commits to an
         # encoding before it could know a file event was coming, and cannot
         # apply it to bytes the server streams on the application's behalf.
-        croak "cannot send a file/fh body after inline body bytes"
+        die "cannot send a file/fh body after inline body bytes\n"
             if _http_body_is_opaque($event) && $state =~ /_i\z/;
 
         if ($state =~ /\Astarted(_t)?(?:_i)?\z/) {
@@ -597,7 +597,7 @@ sub advance_http {
     # awaiting_trailers state only accepts trailers/fullflush (handled above);
     # anything else here means a body chunk arrived after completion was
     # already declared but before the required trailers were sent.
-    croak "cannot send '$type' during http response phase '$state'";
+    die "cannot send '$type' during http response phase '$state'\n";
 }
 
 # The refusal branch of both machines below abbreviates advance_http: it
@@ -611,9 +611,9 @@ sub advance_websocket {
     my ($state, $event) = @_;
     my $type = $event->{type} // '';
 
-    croak "cannot send '$type' after websocket.close"
+    die "cannot send '$type' after websocket.close\n"
         if $state eq 'closed';
-    croak "cannot send '$type': refusal already complete"
+    die "cannot send '$type': refusal already complete\n"
         if $state eq 'refusal_complete';
 
     if ($state eq 'connecting') {
@@ -623,23 +623,23 @@ sub advance_websocket {
         # exclusive. websocket.close is not one of them -- sent before accept
         # it is out of sequence ("Close - send event").
         return 'refusing' if $type eq 'http.response.start';
-        croak "cannot send '$type' before websocket.accept";
+        die "cannot send '$type' before websocket.accept\n";
     }
 
     if ($state eq 'accepted') {
         return 'accepted' if $type eq 'websocket.send' || $type eq 'websocket.keepalive';
         return 'closed' if $type eq 'websocket.close';
-        croak "cannot send '$type' after websocket.accept";
+        die "cannot send '$type' after websocket.accept\n";
     }
 
     if ($state eq 'refusing') {
         return _http_body_is_terminal($event) ? 'refusal_complete' : 'refusing'
             if $type eq 'http.response.body';
         return 'refusal_complete' if $type eq 'http.response.trailers';
-        croak "cannot send '$type' after http.response.start";
+        die "cannot send '$type' after http.response.start\n";
     }
 
-    croak "cannot send '$type' in websocket state '$state'";
+    die "cannot send '$type' in websocket state '$state'\n";
 }
 
 sub advance_sse {
@@ -648,33 +648,33 @@ sub advance_sse {
 
     if ($state eq 'closed') {
         return 'closed' if $type eq 'sse.close';
-        croak "cannot send '$type' after sse.close";
+        die "cannot send '$type' after sse.close\n";
     }
-    croak "cannot send '$type': refusal already complete"
+    die "cannot send '$type': refusal already complete\n"
         if $state eq 'refusal_complete';
 
     if ($state eq 'initial') {
         return 'streaming' if $type eq 'sse.start';
         return 'refusing' if $type eq 'http.response.start';
-        croak "cannot send '$type' before sse.start";
+        die "cannot send '$type' before sse.start\n";
     }
 
     if ($state eq 'streaming') {
         return 'streaming' if $type eq 'sse.send' || $type eq 'sse.comment' || $type eq 'sse.keepalive' || $type eq 'http.fullflush';
         return 'closed' if $type eq 'sse.close';
-        croak "cannot send duplicate sse.start"
+        die "cannot send duplicate sse.start\n"
             if $type eq 'sse.start';
-        croak "cannot send '$type' after sse.start";
+        die "cannot send '$type' after sse.start\n";
     }
 
     if ($state eq 'refusing') {
         return _http_body_is_terminal($event) ? 'refusal_complete' : 'refusing'
             if $type eq 'http.response.body';
         return 'refusal_complete' if $type eq 'http.response.trailers';
-        croak "cannot send '$type' after http.response.start";
+        die "cannot send '$type' after http.response.start\n";
     }
 
-    croak "cannot send '$type' in sse state '$state'";
+    die "cannot send '$type' in sse state '$state'\n";
 }
 
 # The lifecycle questions every scope kind answers the same way, phrased
@@ -715,7 +715,7 @@ sub advance_lifespan {
         return 'finished' if $type eq 'lifespan.shutdown.complete' || $type eq 'lifespan.shutdown.failed';
     }
 
-    croak "cannot send '$type' during lifespan phase '$state'";
+    die "cannot send '$type' during lifespan phase '$state'\n";
 }
 
 1;
@@ -765,6 +765,12 @@ causes the corresponding C<$send> Future to fail; see
 L<PAGI::Server::Connection> for how these functions are wired into each
 send path.
 
+Each of these failures dies with a message that ends in a newline, so Perl
+adds no file and line: the message names the problem in the application's
+send rather than a line inside the server. The one exception is a caller
+bug: C<scope_started> and C<scope_send_clean> croak on an unknown scope
+kind.
+
 =head1 FUNCTIONS
 
 =head2 validate_http_send($event, $opts)
@@ -776,17 +782,17 @@ pass; C<'0204'>, C<101>, C<600> and C<200.0> fail with
 C<"http.response.start 'status' must be 200 to 599 (got '0204')">), because
 the server writes the status to the wire as given and C<1xx> responses are
 the server's own. An C<http.response.body>
-C<body> must be bytes: a character above 0xFF croaks (before this check one
+C<body> must be bytes: a character above 0xFF dies (before this check one
 reached the socket write and killed the server). C<$opts> is an optional hash
 reference of the form C<< { extensions => \%scope_extensions } >>;
-C<http.fullflush> croaks with C<"Extension not enabled: fullflush"> unless
-C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
+C<http.fullflush> dies with C<"Extension not enabled: fullflush"> unless
+C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type dies
 with C<"Unrecognized event type '$type' for http protocol">.
 
 =head2 validate_websocket_send($event, $opts)
 
 Validates WebSocket send events: C<websocket.accept>, C<websocket.send>
-(whose C<bytes> must be bytes: a character above 0xFF croaks; C<text> is
+(whose C<bytes> must be bytes: a character above 0xFF dies; C<text> is
 characters, encoded by the server),
 C<websocket.close> (whose C<reason> must be a string of at most 123 bytes
 as UTF-8, what RFC 6455 leaves for it in a close frame), C<websocket.keepalive>,
@@ -796,12 +802,12 @@ C<http.response.trailers> that refuse the handshake. The refusal events are
 delegated to C<validate_http_send>, so their rules are the C<http> scope's
 own; nothing gates them, because refusing a handshake is not an extension
 (PAGI::Spec::Www, "Refusing the handshake"). One rule is added on top: an
-C<http.response.start> whose C<status> is below C<300> croaks with
+C<http.response.start> whose C<status> is below C<300> dies with
 C<"WebSocket refusal status must be 300 or above (got $status)"> -- C<101>
 is the HTTP/1.1 acceptance and any HTTP/2 C<2xx> answer to the C<CONNECT>
 opens the tunnel, so neither is a refusal. C<$opts> is an optional hash
 reference of the form C<< { extensions => \%scope_extensions } >>, passed
-through to C<validate_http_send>. Any other event type croaks with
+through to C<validate_http_send>. Any other event type dies with
 C<"Unrecognized event type '$type' for websocket protocol">.
 
 =head2 validate_sse_send($event, $opts)
@@ -816,15 +822,15 @@ status C<validate_http_send> accepts, C<200> included (PAGI::Spec::Www,
 "Refusing the stream"). An C<sse.start> C<status>, when present, follows the
 same C<200> to C<599> rule as C<http.response.start>. C<$opts> is an
 optional hash reference of the form
-C<< { extensions => \%scope_extensions } >>; C<http.fullflush> croaks with
+C<< { extensions => \%scope_extensions } >>; C<http.fullflush> dies with
 C<"Extension not enabled: fullflush"> unless
-C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type croaks
+C<$opts-E<gt>{extensions}{fullflush}> exists. Any other event type dies
 with C<"Unrecognized event type '$type' for sse protocol">.
 
 C<sse.keepalive>'s C<comment> field is optional (defaults to C<''>), but
 when present it is validated here, at arm time: it must be a defined
 non-reference string that round-trips
-C<Encode::encode('UTF-8', $comment, Encode::FB_CROAK)>, or this call croaks
+C<Encode::encode('UTF-8', $comment, Encode::FB_CROAK)>, or this call dies
 with C<"sse.keepalive 'comment' must be a UTF-8-encodable string">. This
 keeps an unencodable comment from surfacing later as an uncaught die inside
 the keepalive timer tick.
@@ -835,7 +841,7 @@ Validates lifespan send events: C<lifespan.startup.complete>,
 C<lifespan.startup.failed>, C<lifespan.shutdown.complete>,
 C<lifespan.shutdown.failed>. For the C<*.failed> types, C<message> is
 optional but must be a defined non-reference string when present. Any
-other event type croaks with
+other event type dies with
 C<"Unrecognized event type '$type' for lifespan protocol">.
 
 =head2 advance_http($state, $event)
@@ -855,7 +861,7 @@ succeeds from C<awaiting_trailers>, advancing to C<complete>.
 C<http.fullflush> is legal in C<started>, C<started_t>, and
 C<awaiting_trailers> and leaves the state unchanged.
 
-Croaks: any event in C<initial> other than C<http.response.start>
+Dies: any event in C<initial> other than C<http.response.start>
 (C<"cannot send '<type>' before http.response.start">); C<http.response.start>
 outside C<initial> (C<"cannot send duplicate http.response.start">);
 C<http.response.trailers> outside C<awaiting_trailers>
@@ -886,7 +892,7 @@ through the delegated HTTP send path -- takes that machine's answer as the
 fact, and reports C<refusal_complete> exactly when the response it is has
 reached C<complete>.
 
-Croaks: C<websocket.send>/C<websocket.keepalive>, and C<websocket.close>,
+Dies: C<websocket.send>/C<websocket.keepalive>, and C<websocket.close>,
 before accept (C<"cannot send '<type>' before websocket.accept"> -- a
 pre-accept close is out of sequence, refusing is done with an HTTP
 response); any refusal or accept event once C<accepted>
@@ -915,7 +921,7 @@ C<refusal_complete>, with the same abbreviation
 C<advance_websocket> documents. From C<closed>, C<sse.close> is idempotent
 and stays C<closed>.
 
-Croaks: any event in C<initial> other than C<sse.start>/a refusal start
+Dies: any event in C<initial> other than C<sse.start>/a refusal start
 (C<"cannot send '<type>' before sse.start">); a refusal start, or any other
 event, once C<streaming> (C<"cannot send '<type>' after sse.start">); a
 duplicate C<sse.start> (C<"cannot send duplicate sse.start">); any
@@ -962,7 +968,7 @@ From C<startup_pending>: C<lifespan.startup.complete> advances to
 C<running>; C<lifespan.startup.failed> advances to C<finished>. From
 C<shutdown_pending>: C<lifespan.shutdown.complete> or
 C<lifespan.shutdown.failed> advances to C<finished>. Every other
-C<($state, $event)> combination croaks with
+C<($state, $event)> combination dies with
 C<"cannot send '<type>' during lifespan phase '<state>'">.
 
 =head2 check_header_value($value)
@@ -989,7 +995,7 @@ success.
 Validates a C<headers> field shared by every event shape that carries one
 (C<http.response.start>, C<http.response.trailers>, C<websocket.accept>,
 C<sse.start>).
-C<$event_type> is the event type string used in croak messages. Croaks
+C<$event_type> is the event type string used in its messages. Dies
 unless C<$headers> is an array reference of 2-element array references,
 each holding a defined, non-reference name and value. Each name and value
 is then checked by the rules of C<check_header_name> and

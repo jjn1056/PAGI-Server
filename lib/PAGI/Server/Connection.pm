@@ -2668,7 +2668,7 @@ sub _h2_create_send {
         # and its $ss mirror advance FIRST, then the native submit is
         # attempted (directly here, or via $deliver_trailer_eof above --
         # see the closure-top comment for why). advance_http itself may
-        # croak here (trailers undeclared or body not yet complete) -- that
+        # die here (trailers undeclared or body not yet complete) -- that
         # propagates unrolled-back, same as validate_http_send's shape
         # check above, since $seq was never reassigned in that case. If
         # submit_trailer throws, both are rolled back to their pre-event
@@ -3915,8 +3915,8 @@ sub _h2_create_sse_send {
         # Once the machine has already recorded this stream as closed --
         # either an app-initiated sse.close or a completed refusal response
         # -- the machine, not the stream-gone check below, decides what
-        # happens next: idempotent no-op for a repeat sse.close, croak for
-        # anything else (refusal_complete has no idempotent case; it croaks
+        # happens next: idempotent no-op for a repeat sse.close, die for
+        # anything else (refusal_complete has no idempotent case; it dies
         # unconditionally). h2_streams entries for a closed stream are
         # reclaimed asynchronously by _h2_on_close, so by the time a
         # post-close send arrives $ss may already be gone.
@@ -6789,7 +6789,7 @@ async sub _send_http_event {
     # the machine.
     elsif ($type eq 'http.response.trailers' && !$state->{no_body}) {
         # No "return unless $state->{expects_trailers}" guard here: advance_http
-        # (called unconditionally above, line ~2886) already croaks for
+        # (called unconditionally above, line ~2886) already dies for
         # undeclared trailers -- "cannot send http.response.trailers:
         # trailers were not declared or body is not complete" -- before
         # execution ever reaches this branch, so the guard was dead code.
@@ -6832,7 +6832,7 @@ async sub _send_http_event {
     elsif ($type eq 'http.fullflush') {
         # Fullflush extension - force immediate TCP buffer flush.
         # validate_http_send (called above, unconditionally) already
-        # croaks "Extension not enabled: fullflush" when the extension
+        # dies with "Extension not enabled: fullflush" when the extension
         # isn't advertised, so no re-check is needed here.
 
         # Force flush by ensuring TCP_NODELAY and flushing any pending writes
@@ -8255,8 +8255,8 @@ sub _create_sse_send {
         # (whose finalize branch also closes the transport as a side
         # effect) -- the machine, not the transport-closed check below,
         # decides what happens next: idempotent no-op for a repeat
-        # sse.close, croak for anything else (refusal_complete has no
-        # idempotent case; it croaks unconditionally).
+        # sse.close, die for anything else (refusal_complete has no
+        # idempotent case; it dies unconditionally).
         my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         # Transport already gone for reasons other than our own close (a real
@@ -8414,7 +8414,7 @@ sub _create_sse_send {
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush.
             # validate_sse_send (called above, unconditionally) already
-            # croaks "Extension not enabled: fullflush" when the extension
+            # dies with "Extension not enabled: fullflush" when the extension
             # isn't advertised, so no re-check is needed here.
 
             # Force flush by ensuring TCP_NODELAY
