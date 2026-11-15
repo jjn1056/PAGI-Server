@@ -117,7 +117,7 @@ $loop->add($http);
 
 my $get = sub { $http->GET("http://127.0.0.1:$port$_[0]")->get };
 
-like( $get->('/bad-status')->content, qr/must be a non-negative integer/,
+like( $get->('/bad-status')->content, qr/'status' must be 200 to 599 \(got '50\\x0a0'\)/,
     'malformed status fails the send Future with validate_events => 0' );
 like( $get->('/body-before-start')->content, qr/before http\.response\.start/,
     'body before start fails' );
@@ -202,7 +202,7 @@ $loop->add($dev_server);
 $dev_server->listen->get;
 my $dev_port = $dev_server->port;
 like( $http->GET("http://127.0.0.1:$dev_port/bad-status")->get->content,
-    qr/must be a non-negative integer/,
+    qr/'status' must be 200 to 599 \(got '50\\x0a0'\)/,
     'development configuration validates identically' );
 $dev_server->shutdown->get;
 

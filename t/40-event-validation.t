@@ -29,14 +29,14 @@ subtest 'http.response.start validation' => sub {
     # Non-integer status should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => 'ok' }) },
-        qr/must be a non-negative integer/,
+        qr/'status' must be 200 to 599 \(got 'ok'\)/,
         'non-integer status throws'
     );
 
     # Undef status should die
     like(
         dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => undef }) },
-        qr/must be a non-negative integer/,
+        qr/'status' must be 200 to 599 \(got 'undef'\)/,
         'undef status throws'
     );
 
@@ -375,7 +375,7 @@ subtest 'anchored numeric validation' => sub {
         my $label = ref $bad ? ref($bad) . ' ref' : "'" . ($bad =~ s/\n/\\n/r) . "'";
         like(
             dies { PAGI::Server::EventValidator::validate_http_send({ type => 'http.response.start', status => $bad }) },
-            qr/must be a non-negative integer/,
+            qr/'status' must be 200 to 599/,
             "status $label throws"
         );
     }
@@ -565,13 +565,18 @@ subtest 'HTTP response events are valid on websocket and sse scopes before accep
         qr/header 0: name 'bad name' contains SP/, 'header byte safety applies on websocket');
 };
 
-subtest 'a WebSocket refusal status must be 300 or above; SSE refusals may use any status' => sub {
-    for my $status (101, 200, 204) {
+subtest 'a WebSocket refusal status must be 300 or above; SSE refusals may use any final status' => sub {
+    for my $status (200, 204) {
         like(dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => $status, headers => [] }, {}) },
             qr/WebSocket refusal status must be 300 or above \(got $status\)/, "websocket refuses $status");
         ok(lives { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.response.start', status => $status, headers => [] }, {}) },
             "sse accepts $status");
     }
+    # 101 is not a final status: no refusal of either kind may send it.
+    like(dies { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 101, headers => [] }, {}) },
+        qr/'status' must be 200 to 599 \(got '101'\)/, 'websocket refuses 101');
+    like(dies { PAGI::Server::EventValidator::validate_sse_send({ type => 'http.response.start', status => 101, headers => [] }, {}) },
+        qr/'status' must be 200 to 599 \(got '101'\)/, 'sse refuses 101');
     ok(lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 300, headers => [] }, {}) }, 'websocket accepts 300');
     ok(lives { PAGI::Server::EventValidator::validate_websocket_send({ type => 'http.response.start', status => 401, headers => [] }, {}) }, 'websocket accepts 401');
 };

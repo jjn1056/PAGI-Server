@@ -26,6 +26,21 @@ sub _is_nonneg_number {
     return defined $v && !ref $v && $v =~ /\A[0-9]+(?:\.[0-9]+)?\z/;
 }
 
+# A response's status is final: three digits, 200 to 599. 1xx belongs to the
+# server, and a leading zero, sign, fraction or padding would go to the wire
+# as given.
+sub _is_final_status {
+    my ($v) = @_;
+    return defined $v && !ref $v && $v =~ /\A[2-5][0-9]{2}\z/;
+}
+
+sub _check_status {
+    my ($event_type, $status) = @_;
+    return if _is_final_status($status);
+    my $got = defined $status ? _escape_nonprintable("$status") : 'undef';
+    die "$event_type 'status' must be 200 to 599 (got '$got')\n";
+}
+
 # Bytes are characters <= 0xFF, whatever Perl's internal UTF-8 flag says. A
 # wider character cannot be written to a socket: it dies in syswrite, outside
 # any application's send, and takes the server down with it.
@@ -54,10 +69,10 @@ sub _describe_char {
     return "'$c' ($code)";
 }
 
-sub _escape_name {
-    my ($name) = @_;
-    $name =~ s/([^\x20-\x7E])/ord $1 > 0xFF ? sprintf('\x{%x}', ord $1) : sprintf('\x%02x', ord $1)/ge;
-    return $name;
+sub _escape_nonprintable {
+    my ($text) = @_;
+    $text =~ s/([^\x20-\x7E])/ord $1 > 0xFF ? sprintf('\x{%x}', ord $1) : sprintf('\x%02x', ord $1)/ge;
+    return $text;
 }
 
 # Each returns undef for a valid name or value, else the problem, beginning
@@ -67,7 +82,7 @@ sub _header_name_problem {
     return 'name is empty' if $name eq '';
     return undef unless $name =~ /[^!#\$%&'*+\-.^_`|~0-9A-Za-z]/;
     my $at = $-[0];
-    return "name '" . _escape_name($name) . "' contains " . _describe_char(substr $name, $at, 1)
+    return "name '" . _escape_nonprintable($name) . "' contains " . _describe_char(substr $name, $at, 1)
         . " at offset $at (a header name must be an RFC 9110 token)";
 }
 
@@ -112,7 +127,7 @@ sub validate_headers {
             die "$event_type header $i: $problem\n";
         }
         if (defined(my $problem = _header_value_problem($h->[1]))) {
-            die "$event_type header $i ('" . _escape_name($h->[0]) . "'): $problem\n";
+            die "$event_type header $i ('" . _escape_nonprintable($h->[0]) . "'): $problem\n";
         }
     }
     return;
@@ -162,11 +177,10 @@ sub validate_http_send {
 sub _validate_http_response_start {
     my ($event) = @_;
 
-    # status is required (Int)
+    # status is required, 200 to 599
     croak "http.response.start requires 'status' field"
         unless exists $event->{status};
-    croak "http.response.start 'status' must be a non-negative integer"
-        unless _is_nonneg_int($event->{status});
+    _check_status('http.response.start', $event->{status});
 
     # headers must be a valid tuple list if present
     validate_headers($event->{headers}, 'http.response.start')
@@ -386,11 +400,9 @@ sub _validate_sse_close {
 sub _validate_sse_start {
     my ($event) = @_;
 
-    # status must be a non-negative integer if present
-    if (exists $event->{status} && defined $event->{status}) {
-        croak "sse.start 'status' must be a non-negative integer"
-            unless _is_nonneg_int($event->{status});
-    }
+    # status, if present, is 200 to 599
+    _check_status('sse.start', $event->{status})
+        if exists $event->{status} && defined $event->{status};
 
     # headers must be a valid tuple list if present
     validate_headers($event->{headers}, 'sse.start')
@@ -716,7 +728,12 @@ send path.
 =head2 validate_http_send($event, $opts)
 
 Validates HTTP send events: C<http.response.start>, C<http.response.body>,
-C<http.response.trailers>, C<http.fullflush>. An C<http.response.body>
+C<http.response.trailers>, C<http.fullflush>. An C<http.response.start>
+C<status> must be three digits from C<200> to C<599> (C<204> and C<'204'>
+pass; C<'0204'>, C<101>, C<600> and C<200.0> fail with
+C<"http.response.start 'status' must be 200 to 599 (got '0204')">), because
+the server writes the status to the wire as given and C<1xx> responses are
+the server's own. An C<http.response.body>
 C<body> must be bytes: a character above 0xFF croaks (before this check one
 reached the socket write and killed the server). C<$opts> is an optional hash
 reference of the form C<< { extensions => \%scope_extensions } >>;
@@ -752,8 +769,10 @@ C<sse.keepalive>, C<sse.close>, C<http.fullflush>, and the three HTTP
 response events C<http.response.start>, C<http.response.body> and
 C<http.response.trailers> that refuse the stream. As on a C<websocket>
 scope the refusal events are delegated to C<validate_http_send> and nothing
-gates them, but no status rule applies: an SSE refusal may carry any status,
-C<200> included (PAGI::Spec::Www, "Refusing the stream"). C<$opts> is an
+gates them, but no refusal status rule is added: an SSE refusal may carry any
+status C<validate_http_send> accepts, C<200> included (PAGI::Spec::Www,
+"Refusing the stream"). An C<sse.start> C<status>, when present, follows the
+same C<200> to C<599> rule as C<http.response.start>. C<$opts> is an
 optional hash reference of the form
 C<< { extensions => \%scope_extensions } >>; C<http.fullflush> croaks with
 C<"Extension not enabled: fullflush"> unless

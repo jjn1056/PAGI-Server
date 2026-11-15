@@ -276,7 +276,7 @@ my $http_app = async sub {
 my (undef, $body);
 
 (undef, $body) = get_h2('/bad-status', app => $http_app);
-like( $body, qr/must be a non-negative integer/,
+like( $body, qr/'status' must be 200 to 599 \(got '50\\x0a0'\)/,
     'malformed status fails the send Future with validate_events => 0' );
 
 (undef, $body) = get_h2('/body-before-start', app => $http_app);
