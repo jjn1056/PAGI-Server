@@ -107,6 +107,29 @@ written, are never cut off. Before, such a client held its connection, and
 the application's queued output, for as long as it stayed connected. Set
 `write_timeout => 0` (or `--write-timeout 0`) to restore that.
 
+### Sends the wire can't carry now fail
+
+The server now fails a `$send` it used to write as given, and writes
+nothing for it:
+
+- A header name that isn't an RFC 9110 token (`set-cookie:a=b; x`), or a
+  value with a control character or leading or trailing whitespace. A
+  padded `te: trailers` on HTTP/2 is one of these.
+- A status outside 200 to 599: `'0204'`, `600`, or `101` on an SSE or
+  WebSocket refusal.
+- A `content-length` that isn't one decimal number, or appears twice.
+- Over HTTP/1.x, a body that would go past its declared `content-length`,
+  or a final body send that leaves bytes owing. HEAD, 204, 304 and HTTP/2
+  aren't counted.
+
+Before, the client read these as something the application never meant: a
+header split in two, or the next response on a kept-alive connection read
+from the wrong bytes. The fix is in the application: send the right length,
+or leave `content-length` out and let the server frame the body. The
+messages name the event, the header by index, and the problem, never the
+header's value:
+`http.response.start header 1 ('x-v'): value contains CR (\x0d) at offset 1`.
+
 ## 0.002007
 
 ### Outgoing-event validation is now mandatory, in every environment
