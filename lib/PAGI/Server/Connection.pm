@@ -6487,6 +6487,42 @@ async sub _receive_http_body {
     };
 }
 
+# An HTTP/1.x body framed by content-length must be exactly that long, or the
+# next response on the connection is read from the wrong bytes (RFC 9112 6.3).
+# Returns the count record a send leaves: set by a start that declares a
+# length and has a body, reduced by each body send at call time. Dies, and
+# changes nothing, when a send does not fit. An fh with no length cannot be
+# counted here; _send_fh_response counts it while it streams.
+sub _http1_body_count {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+    if ($type eq 'http.response.start') {
+        my $status = $event->{status};
+        return undef if $state->{is_head_request} || $status == 204 || $status == 304;
+        my $declared = PAGI::Server::EventValidator::declared_content_length($event->{headers} // []);
+        return defined $declared ? +{ declared => $declared, remaining => $declared } : undef;
+    }
+    my $count = $state->{count};
+    return $count unless $count && $type eq 'http.response.body';
+
+    my ($file, $fh) = @$event{qw(file fh)};
+    my $bytes;
+    if (defined $file) {
+        return $count unless -f $file;   # the file arm reports it
+        $bytes = $event->{length} // ((-s $file) - ($event->{offset} // 0));
+        $bytes = 0 if $bytes < 0;
+    }
+    elsif (defined $fh) {
+        return $count unless defined $event->{length};
+        $bytes = $event->{length};
+    }
+    else {
+        $bytes = length($event->{body} // '');
+    }
+    my $terminal = defined $file || defined $fh || !($event->{more} // 0);
+    return PAGI::Server::EventValidator::count_body_bytes($count, $bytes, $terminal);
+}
+
 sub _create_send {
     my ($self, $request, %opt) = @_;
 
@@ -6551,7 +6587,10 @@ async sub _send_http_event {
     PAGI::Server::EventValidator::validate_http_send(
         $event, { extensions => $weak_self->{extensions} });
     my $seq_before_advance = $state->{seq};
-    $state->{seq} = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
+    my $seq   = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
+    my $count = _http1_body_count($state, $event);
+    $state->{seq}   = $seq;
+    $state->{count} = $count;
     $state->{publish}->($state->{seq});
 
     # Take this send's turn (see _join_send_queue): validated now, written
@@ -6705,7 +6744,7 @@ async sub _send_http_event {
             $weak_self->_flush_pending_headers;   # headers before the fh body
             eval {
                 await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked},
-                    !$state->{expects_trailers});
+                    !$state->{expects_trailers}, defined $length ? undef : $state->{count});
                 1;
             } or do {
                 my $error = $@;
@@ -9359,11 +9398,18 @@ async sub _send_file_response {
 # (the fh can't cross a fork into the worker pool; see below).
 # Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
 # may be pipes, may be in-memory). Falls back to chunked reads.
+#
+# $count, when given, is the response's content-length count record (see
+# _http1_body_count) for an fh with no length: the handle is read up to the
+# declared length and no further. A handle that holds more, or ends short,
+# fails the send. The record's remaining count follows the bytes actually
+# written, so after a short handle the application may still send the rest.
 async sub _send_fh_response {
-    my ($self, $fh, $offset, $length, $chunked, $ends_response) = @_;
+    my ($self, $fh, $offset, $length, $chunked, $ends_response, $count) = @_;
     # Declared trailers end the response, not this body: they write the
     # last chunk themselves, so the body leaves it to them.
     $ends_response //= 1;
+    $length = $count->{remaining} if $count;
 
     # Seek to offset if specified
     if ($offset && $offset > 0) {
@@ -9405,6 +9451,18 @@ async sub _send_fh_response {
         if (defined $remaining) {
             $remaining -= $bytes_read;
         }
+        $count->{remaining} -= $bytes_read if $count;
+    }
+
+    if ($count) {
+        my $extra;
+        {
+            no warnings 'closed';
+            read($fh, $extra, 1);
+        }
+        die "http.response.body would send more than the declared content-length ($count->{declared})\n"
+            if defined $extra && length $extra;
+        PAGI::Server::EventValidator::count_body_bytes({ %$count }, 0, 1);   # dies when short
     }
 
     # Send final chunk if chunked encoding

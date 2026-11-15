@@ -118,6 +118,18 @@ sub _check_content_length {
     return;
 }
 
+sub count_body_bytes {
+    my ($count, $bytes, $terminal) = @_;
+    my ($declared, $remaining) = @$count{qw(declared remaining)};
+    die "http.response.body would send $bytes bytes, " . ($bytes - $remaining)
+        . " more than the declared content-length ($declared)\n"
+        if $bytes > $remaining;
+    my $left = $remaining - $bytes;
+    die "http.response.body ends the response $left bytes short of the declared content-length ($declared)\n"
+        if $terminal && $left > 0;
+    return +{ declared => $declared, remaining => $left };
+}
+
 sub declared_content_length {
     my ($headers) = @_;
     for my $h (@$headers) {
@@ -1003,6 +1015,20 @@ when no C<content-length> field line is present. The name is compared
 case-insensitively. Call it only on headers that have passed
 C<validate_http_send>, which guarantees there is at most one such line and
 that it holds a decimal number.
+
+=head2 count_body_bytes($count, $bytes, $terminal)
+
+Counts one body send against a declared length. C<$count> is
+C<< { declared => $n, remaining => $m } >>; C<$bytes> is the number of body
+bytes the send would write, and C<$terminal> is true when the send ends the
+body. Returns a new record with C<remaining> reduced by C<$bytes>, leaving
+C<$count> unchanged. Dies with a C<\n>-terminated message, and changes
+nothing, when the send would go past the declared length
+(C<http.response.body would send 5 bytes, 2 more than the declared content-length (3)>)
+or when a terminal send leaves bytes owing
+(C<http.response.body ends the response 5 bytes short of the declared content-length (10)>).
+PAGI::Server counts HTTP/1.x responses with it; HTTP/2 frames the body
+itself and is not counted.
 
 =head1 SEE ALSO
 
