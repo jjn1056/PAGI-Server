@@ -99,6 +99,33 @@ sub _header_value_problem {
     return undef;
 }
 
+# A response frames its body by content-length, so it may carry one field
+# line holding one decimal number (RFC 9110 S8.6). A list ('5, 5') or a
+# second line, equal or not, is a framing ambiguity and fails.
+sub _check_content_length {
+    my ($headers, $event_type) = @_;
+    my $first;
+    for my $i (0 .. $#$headers) {
+        my ($name, $value) = @{ $headers->[$i] };
+        next unless lc $name eq 'content-length';
+        my $where = "$event_type header $i ('" . _escape_nonprintable($name) . "')";
+        die "$where: content-length appears more than once (also header $first)\n"
+            if defined $first;
+        die "$where: content-length must be one decimal number\n"
+            unless $value =~ /\A[0-9]+\z/;
+        $first = $i;
+    }
+    return;
+}
+
+sub declared_content_length {
+    my ($headers) = @_;
+    for my $h (@$headers) {
+        return 0 + $h->[1] if lc $h->[0] eq 'content-length';
+    }
+    return undef;
+}
+
 sub check_header_value {
     my ($value) = @_;
     my $problem = _header_value_problem($value);
@@ -182,9 +209,12 @@ sub _validate_http_response_start {
         unless exists $event->{status};
     _check_status('http.response.start', $event->{status});
 
-    # headers must be a valid tuple list if present
-    validate_headers($event->{headers}, 'http.response.start')
-        if exists $event->{headers} && defined $event->{headers};
+    # headers must be a valid tuple list if present, with at most one
+    # decimal content-length
+    if (exists $event->{headers} && defined $event->{headers}) {
+        validate_headers($event->{headers}, 'http.response.start');
+        _check_content_length($event->{headers}, 'http.response.start');
+    }
 
     # trailers must be 0 or 1 if present
     if (exists $event->{trailers} && defined $event->{trailers}) {
@@ -956,6 +986,23 @@ names the event and the header's index (from 0), and for a value problem the
 escaped name, for example
 C<http.response.start header 2 ('x-v'): value contains CR (\x0d) at offset 1>.
 Returns nothing.
+
+An C<http.response.start> (on any scope, refusals included, but not
+C<sse.start>) also fails unless it carries at most one C<content-length>
+field line, compared case-insensitively, whose value is one decimal number
+(RFC 9110 S8.6): C<'abc'>, C<'-1'>, C<'+5'>, an empty value and a list
+such as C<'5, 5'> fail with
+C<http.response.start header 1 ('content-length'): content-length must be one decimal number>,
+and a second line, equal or not, with
+C<... content-length appears more than once (also header 0)>.
+
+=head2 declared_content_length($headers)
+
+Returns the body length that C<$headers> declares, as a number, or undef
+when no C<content-length> field line is present. The name is compared
+case-insensitively. Call it only on headers that have passed
+C<validate_http_send>, which guarantees there is at most one such line and
+that it holds a decimal number.
 
 =head1 SEE ALSO
 
