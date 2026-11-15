@@ -276,7 +276,7 @@ my $http_app = async sub {
 my (undef, $body);
 
 (undef, $body) = get_h2('/bad-status', app => $http_app);
-like( $body, qr/must be a non-negative integer/,
+like( $body, qr/'status' must be 200 to 599 \(got '50\\x0a0'\)/,
     'malformed status fails the send Future with validate_events => 0' );
 
 (undef, $body) = get_h2('/body-before-start', app => $http_app);
@@ -302,7 +302,7 @@ like( $after_complete_err // '', qr/response already complete/,
     'send after http response complete raises on h2, not silently swallowed' );
 
 (undef, $body) = get_h2('/wide-header', app => $http_app);
-like( $body, qr/Invalid header value: contains a character above 0xFF/, 'a wide header value fails the send Future' );
+like( $body, qr/http\.response\.start header 0 \('x-wide'\): value contains a character above 0xFF/, 'a wide header value fails the send Future' );
 (undef, $body) = get_h2('/wide-body', app => $http_app);
 like( $body, qr/body:.*'body' contains a character above 0xFF/,
     'a wide body fails the send Future without disturbing the response' );

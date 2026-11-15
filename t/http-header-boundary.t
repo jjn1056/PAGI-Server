@@ -28,7 +28,7 @@ subtest 'bad start cannot consume the initial state, even for a stripped field' 
     my $bad = $send->({type=>'http.response.start', status=>200,
         headers=>[['connection', "close\r\nInjected: yes"]]});
     ok($bad->is_failed, 'invalid start fails');
-    like(($bad->failure)[0], qr/Invalid header value/, 'byte-safety error');
+    like(($bad->failure)[0], qr/http\.response\.start header 0 \('connection'\): value contains CR/, 'byte-safety error');
     is($sink->{bytes}, '', 'no bytes emitted');
     ok(!$conn->{current_connection_state}->response_started, 'response has not started');
     my $headers = [['set-cookie','a=1'],['set-cookie','b=2'],['x-bytes',"tab\tand\xff"]];
@@ -50,7 +50,7 @@ for my $method ('GET', 'HEAD') {
         my $before = $sink->{bytes};
         my $bad = $send->({type=>'http.response.trailers',headers=>[['connection',"bad\0value"]]});
         ok($bad->is_failed,'bad trailer fails even when stripped or HEAD-discarded');
-        like(($bad->failure)[0],qr/Invalid header value/,'byte-safety error');
+        like(($bad->failure)[0],qr/http\.response\.trailers header 0 \('connection'\): value contains NUL/,'byte-safety error');
         is($sink->{bytes},$before,'failed trailers emit nothing');
         ok(!$conn->{current_connection_state}->response_complete,'bad trailers do not complete the response');
         my $trailers = [['x-trailer','one'],['x-trailer','two']];

@@ -2668,7 +2668,7 @@ sub _h2_create_send {
         # and its $ss mirror advance FIRST, then the native submit is
         # attempted (directly here, or via $deliver_trailer_eof above --
         # see the closure-top comment for why). advance_http itself may
-        # croak here (trailers undeclared or body not yet complete) -- that
+        # die here (trailers undeclared or body not yet complete) -- that
         # propagates unrolled-back, same as validate_http_send's shape
         # check above, since $seq was never reassigned in that case. If
         # submit_trailer throws, both are rolled back to their pre-event
@@ -3915,8 +3915,8 @@ sub _h2_create_sse_send {
         # Once the machine has already recorded this stream as closed --
         # either an app-initiated sse.close or a completed refusal response
         # -- the machine, not the stream-gone check below, decides what
-        # happens next: idempotent no-op for a repeat sse.close, croak for
-        # anything else (refusal_complete has no idempotent case; it croaks
+        # happens next: idempotent no-op for a repeat sse.close, die for
+        # anything else (refusal_complete has no idempotent case; it dies
         # unconditionally). h2_streams entries for a closed stream are
         # reclaimed asynchronously by _h2_on_close, so by the time a
         # post-close send arrives $ss may already be gone.
@@ -6487,6 +6487,47 @@ async sub _receive_http_body {
     };
 }
 
+# An HTTP/1.x body framed by content-length must be exactly that long, or the
+# next response on the connection is read from the wrong bytes (RFC 9112 6.3).
+# Returns the count record a send leaves: set by a start that declares a
+# length and has a body, reduced by each body send at call time. Dies, and
+# changes nothing, when a send does not fit. An fh with no length cannot be
+# counted here; _send_fh_response counts it while it streams.
+sub _http1_body_count {
+    my ($state, $event) = @_;
+    my $type = $event->{type} // '';
+    if ($type eq 'http.response.start') {
+        my $status = $event->{status};
+        return undef if $state->{is_head_request} || $status == 204 || $status == 304;
+        my $declared = PAGI::Server::EventValidator::declared_content_length($event->{headers} // []);
+        return defined $declared ? +{ declared => $declared, remaining => $declared } : undef;
+    }
+    my $count = $state->{count};
+    return $count unless $count && $type eq 'http.response.body';
+
+    my ($file, $fh) = @$event{qw(file fh)};
+    return PAGI::Server::EventValidator::count_body_bytes(
+        $count, length($event->{body} // ''), !($event->{more} // 0))
+        unless defined $file || defined $fh;
+
+    # A file or fh body ends the response. What it will send is checked
+    # here, and the record it returns is the count before it: the send
+    # counts its bytes as it writes them (_send_file_response,
+    # _send_fh_response), so one that fails leaves owing what it didn't
+    # write. An fh without a length is checked only as it streams.
+    if (defined $file) {
+        return $count unless -f $file;   # the file arm reports it
+        my $holds = (-s $file) - ($event->{offset} // 0);
+        $holds = 0 if $holds < 0;
+        my $bytes = defined $event->{length} && $event->{length} < $holds ? $event->{length} : $holds;
+        PAGI::Server::EventValidator::count_body_bytes($count, $bytes, 1);
+    }
+    elsif (defined $event->{length}) {
+        PAGI::Server::EventValidator::count_body_bytes($count, $event->{length}, 1);
+    }
+    return +{ %$count };
+}
+
 sub _create_send {
     my ($self, $request, %opt) = @_;
 
@@ -6551,7 +6592,10 @@ async sub _send_http_event {
     PAGI::Server::EventValidator::validate_http_send(
         $event, { extensions => $weak_self->{extensions} });
     my $seq_before_advance = $state->{seq};
-    $state->{seq} = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
+    my $seq   = PAGI::Server::EventValidator::advance_http($state->{seq}, $event);
+    my $count = _http1_body_count($state, $event);
+    $state->{seq}   = $seq;
+    $state->{count} = $count;
     $state->{publish}->($state->{seq});
 
     # Take this send's turn (see _join_send_queue): validated now, written
@@ -6677,7 +6721,8 @@ async sub _send_http_event {
             # so on failure we roll $state->{seq} back to its pre-event value. That
             # lets a conforming app recover with a normal error body
             # instead of being permanently locked out by "response already
-            # complete" for a body that was never actually sent.
+            # complete" for a body that was never actually sent. The body
+            # count needs no rollback: the send counts bytes as it writes them.
             $weak_self->_flush_pending_headers;   # headers before the file body
             eval {
                 # h2 parity (Connection.pm _h2_create_send file arm): fail
@@ -6688,7 +6733,7 @@ async sub _send_http_event {
                 die "Cannot read file: $file\n" unless -r $file;
 
                 await $weak_self->_send_file_response($file, $offset, $length, $state->{chunked},
-                    !$state->{expects_trailers});
+                    !$state->{expects_trailers}, $state->{count});
                 1;
             } or do {
                 my $error = $@;
@@ -6705,7 +6750,7 @@ async sub _send_http_event {
             $weak_self->_flush_pending_headers;   # headers before the fh body
             eval {
                 await $weak_self->_send_fh_response($fh, $offset, $length, $state->{chunked},
-                    !$state->{expects_trailers});
+                    !$state->{expects_trailers}, $state->{count});
                 1;
             } or do {
                 my $error = $@;
@@ -6750,7 +6795,7 @@ async sub _send_http_event {
     # the machine.
     elsif ($type eq 'http.response.trailers' && !$state->{no_body}) {
         # No "return unless $state->{expects_trailers}" guard here: advance_http
-        # (called unconditionally above, line ~2886) already croaks for
+        # (called unconditionally above, line ~2886) already dies for
         # undeclared trailers -- "cannot send http.response.trailers:
         # trailers were not declared or body is not complete" -- before
         # execution ever reaches this branch, so the guard was dead code.
@@ -6793,7 +6838,7 @@ async sub _send_http_event {
     elsif ($type eq 'http.fullflush') {
         # Fullflush extension - force immediate TCP buffer flush.
         # validate_http_send (called above, unconditionally) already
-        # croaks "Extension not enabled: fullflush" when the extension
+        # dies with "Extension not enabled: fullflush" when the extension
         # isn't advertised, so no re-check is needed here.
 
         # Force flush by ensuring TCP_NODELAY and flushing any pending writes
@@ -8216,8 +8261,8 @@ sub _create_sse_send {
         # (whose finalize branch also closes the transport as a side
         # effect) -- the machine, not the transport-closed check below,
         # decides what happens next: idempotent no-op for a repeat
-        # sse.close, croak for anything else (refusal_complete has no
-        # idempotent case; it croaks unconditionally).
+        # sse.close, die for anything else (refusal_complete has no
+        # idempotent case; it dies unconditionally).
         my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         # Transport already gone for reasons other than our own close (a real
@@ -8375,7 +8420,7 @@ sub _create_sse_send {
         elsif ($type eq 'http.fullflush') {
             # Fullflush extension - force immediate TCP buffer flush.
             # validate_sse_send (called above, unconditionally) already
-            # croaks "Extension not enabled: fullflush" when the extension
+            # dies with "Extension not enabled: fullflush" when the extension
             # isn't advertised, so no re-check is needed here.
 
             # Force flush by ensuring TCP_NODELAY
@@ -9283,8 +9328,12 @@ sub _process_websocket_frames {
 # Async file response - prioritizes speed based on file size:
 #   1. Small files (<=64KB): direct in-process read (fastest for small files)
 #   2. Large files: async chunked reads via worker pool (non-blocking)
+#
+# $count, when given, is the response's content-length count record (see
+# _http1_body_count): its remaining count follows the bytes written, and a
+# file that ends before the declared length fails the send.
 async sub _send_file_response {
-    my ($self, $file, $offset, $length, $chunked, $ends_response) = @_;
+    my ($self, $file, $offset, $length, $chunked, $ends_response, $count) = @_;
     # Declared trailers end the response, not this body: they write the
     # last chunk themselves, so the body leaves it to them.
     $ends_response //= 1;
@@ -9324,6 +9373,7 @@ async sub _send_file_response {
         else {
             $self->_write_out($data);
         }
+        $count->{remaining} -= length $data if $count;
     }
     else {
         # Large file path: async chunked reads via worker pool
@@ -9341,6 +9391,7 @@ async sub _send_file_response {
                 else {
                     $self->_write_out($chunk);
                 }
+                $count->{remaining} -= length $chunk if $count;
                 return;  # Sync callback
             },
             offset     => $offset,
@@ -9353,17 +9404,30 @@ async sub _send_file_response {
             $self->_write_out("0\r\n\r\n") if $ends_response;
         }
     }
+
+    # A file that shrank since it was counted ends short. (A counted
+    # response declares its length, so it is never chunked.)
+    PAGI::Server::EventValidator::count_body_bytes({ %$count }, 0, 1) if $count;
 }
 
 # Async filehandle response - synchronous chunked reads in the send loop
 # (the fh can't cross a fork into the worker pool; see below).
 # Note: Can't easily use sendfile for arbitrary filehandles (may not have fd,
 # may be pipes, may be in-memory). Falls back to chunked reads.
+#
+# $count, when given, is the response's content-length count record (see
+# _http1_body_count). An fh with no length is read up to the declared length
+# and no further, and one that holds more fails the send. Either way a
+# handle that ends short fails it. The record's remaining count follows the
+# bytes actually written, so after a short handle the application may still
+# send the rest.
 async sub _send_fh_response {
-    my ($self, $fh, $offset, $length, $chunked, $ends_response) = @_;
+    my ($self, $fh, $offset, $length, $chunked, $ends_response, $count) = @_;
     # Declared trailers end the response, not this body: they write the
     # last chunk themselves, so the body leaves it to them.
     $ends_response //= 1;
+    my $length_given = defined $length;
+    $length = $count->{remaining} if $count && !$length_given;
 
     # Seek to offset if specified
     if ($offset && $offset > 0) {
@@ -9405,6 +9469,20 @@ async sub _send_fh_response {
         if (defined $remaining) {
             $remaining -= $bytes_read;
         }
+        $count->{remaining} -= $bytes_read if $count;
+    }
+
+    if ($count) {
+        if (!$length_given) {
+            my $extra;
+            {
+                no warnings 'closed';
+                read($fh, $extra, 1);
+            }
+            die "http.response.body would send more than the declared content-length ($count->{declared})\n"
+                if defined $extra && length $extra;
+        }
+        PAGI::Server::EventValidator::count_body_bytes({ %$count }, 0, 1);   # dies when short
     }
 
     # Send final chunk if chunked encoding
