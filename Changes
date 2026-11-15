@@ -34,12 +34,14 @@
     other timer restarts on the application's sends, so none caught it.
     write_timeout => 0 restores that.
   - Sends are checked against RFC 9110 and PAGI Www 0.7 more strictly, and
-    a send that fails writes nothing: a header name must be a token and a
+    a send that fails writes nothing (an fh body, counted as it streams,
+    writes what it read first): a header name must be a token and a
     value a field value (a padded te: trailers on HTTP/2 now fails too); a
     status must be 200 to 599 (1xx is the server's; an SSE or WebSocket
     refusal with 101 fails); a response may carry one content-length, one
     decimal number; and over HTTP/1.x a body that would go past its
-    content-length, or ends short of it, fails the send. Before, each went
+    content-length, or ends short of it, fails the send, a file or fh
+    counted by what it holds rather than its length. Before, each went
     to the wire as given. Validator messages now end where the
     application's send failed, not inside PAGI::Server::Connection.
 

@@ -110,7 +110,7 @@ the application's queued output, for as long as it stayed connected. Set
 ### Sends the wire can't carry now fail
 
 The server now fails a `$send` it used to write as given, and writes
-nothing for it:
+nothing for it (except an `fh` body, below):
 
 - A header name that isn't an RFC 9110 token (`set-cookie:a=b; x`), or a
   value with a control character or leading or trailing whitespace. A
@@ -120,7 +120,11 @@ nothing for it:
 - A `content-length` that isn't one decimal number, or appears twice.
 - Over HTTP/1.x, a body that would go past its declared `content-length`,
   or a final body send that leaves bytes owing. HEAD, 204, 304 and HTTP/2
-  aren't counted.
+  aren't counted. A `file` counts what it holds, whatever `length` says. An
+  `fh` is counted as it streams, so it fails having written what it read:
+  an `fh` without a `length` writes up to the declared length, and one that
+  ends early writes what it had. After either, the application may send the
+  bytes still owed.
 
 Before, the client read these as something the application never meant: a
 header split in two, or the next response on a kept-alive connection read

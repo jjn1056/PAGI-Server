@@ -89,6 +89,9 @@ my $loop = IO::Async::Loop->new;
 my $dir  = tempdir();
 my $file = "$dir/five.txt";
 { open my $out, '>:raw', $file or die "write $file: $!"; print $out 'hello'; close $out }
+my $unreadable = "$dir/unreadable.txt";
+{ open my $out, '>:raw', $unreadable or die "write $unreadable: $!"; print $out 'hello'; close $out }
+chmod 0000, $unreadable;
 
 # Each path sends one response shape and records what its body sends did.
 my %result;
@@ -130,6 +133,23 @@ my $app = async sub {
     }
     elsif ($path =~ m{\A/file/}) {
         $result{$path} = await $try->({ file => $file });
+    }
+    elsif ($path =~ m{\A/file-unreadable/}) {
+        $result{$path} = [ await $try->({ file => $unreadable }), await $try->({ body => 'hello', more => 0 }) ];
+    }
+    elsif ($path =~ m{\A/fh-closed/}) {
+        open my $fh, '<:raw', $file or die "read $file: $!";
+        close $fh;
+        $result{$path} = [ await $try->({ fh => $fh, length => 5 }), await $try->({ body => 'hello', more => 0 }) ];
+    }
+    elsif ($path =~ m{\A/file-length/}) {
+        $result{$path} = await $try->({ file => $file, length => 10 });
+    }
+    elsif ($path =~ m{\A/fh-length/}) {
+        open my $fh, '<:raw', $file or die "read $file: $!";
+        $result{$path} = [ await $try->({ fh => $fh, length => 10 }) ];
+        push @{ $result{$path} }, await $try->({ body => 'world', more => 0 })
+            if $result{$path}[0] =~ /short/;
     }
     elsif ($path =~ m{\A/fh/}) {
         open my $fh, '<:raw', $file or die "read $file: $!";
@@ -287,6 +307,43 @@ subtest 'an fh without a length is counted while it streams' => sub {
     $r = get_once('/fh/10', done => $ends_with->('helloworld'));
     my ($short, $rest) = @{ $result{'/fh/10'} };
     like($short, qr/ends the response 5 bytes short of the declared content-length \(10\)/, 'a 5-byte handle fails against 10');
+    is($rest, 'NO-ERROR', 'the count kept the bytes already written, so the remainder completes it');
+    is($r->{body}, 'helloworld', 'the client reads the declared length');
+    ok(!$r->{closed}, 'the connection stays open');
+    is(logged_errors(), [], 'nothing is logged as an error');
+};
+
+subtest 'a file or fh send that fails before writing leaves the count as it was' => sub {
+    SKIP: {
+        skip 'running as root: an unreadable file is readable', 1 if $> == 0;
+        my $r = get_once('/file-unreadable/5', done => $ends_with->('hello'));
+        my ($failed, $retry) = @{ $result{'/file-unreadable/5'} };
+        like($failed, qr/\ACannot read file: /, 'the unreadable file fails');
+        is($retry, 'NO-ERROR', 'the right body then fits the declared length');
+        is($r->{body}, 'hello', 'and is what the client reads');
+        like($r->{second} // '', qr{\AHTTP/1\.1 200 .*\r\n\r\nhello\z}s, 'the connection is reused cleanly');
+    }
+
+    my $r = get_once('/fh-closed/5', done => $ends_with->('hello'));
+    my ($failed, $retry) = @{ $result{'/fh-closed/5'} };
+    like($failed, qr/\AFailed to read filehandle: /, 'a closed handle fails');
+    is($retry, 'NO-ERROR', 'the right body then fits the declared length');
+    is($r->{body}, 'hello', 'and is what the client reads');
+    ok(!$r->{closed}, 'the connection stays open');
+    is(logged_errors(), [], 'nothing is logged as an error');
+};
+
+subtest 'a length longer than the file or handle holds is short' => sub {
+    my $r = get_once('/file-length/10');
+    like($result{'/file-length/10'}, qr/ends the response 5 bytes short of the declared content-length \(10\)/,
+        'a file is counted by what it holds, not the length given');
+    is($r->{body}, '', 'none of it is written');
+    ok($r->{closed}, 'the connection closes');
+
+    $r = get_once('/fh-length/10', done => $ends_with->('helloworld'));
+    my ($short, $rest) = @{ $result{'/fh-length/10'} };
+    like($short, qr/ends the response 5 bytes short of the declared content-length \(10\)/,
+        'a handle that ends before its length fails');
     is($rest, 'NO-ERROR', 'the count kept the bytes already written, so the remainder completes it');
     is($r->{body}, 'helloworld', 'the client reads the declared length');
     ok(!$r->{closed}, 'the connection stays open');
