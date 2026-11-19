@@ -2452,12 +2452,7 @@ sub _h2_create_send {
         my $q = $ss->{send_queue} ||= [];
 
         if (@$q) {
-            my $chunk = shift @$q;
-            # Respect max_len — XS truncates without preserving remainder
-            if (length($chunk) > $max_len) {
-                unshift @$q, substr($chunk, $max_len);
-                $chunk = substr($chunk, 0, $max_len);
-            }
+            my $chunk = _h2_take_chunk($q, $max_len);
             $ss->{send_queue_bytes} -= length($chunk);
             $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
@@ -3318,12 +3313,7 @@ sub _h2_create_websocket_send {
         my $q = $ss->{send_queue} ||= [];
 
         if (@$q) {
-            my $chunk = shift @$q;
-            # Respect max_len — XS truncates without preserving remainder
-            if (length($chunk) > $max_len) {
-                unshift @$q, substr($chunk, $max_len);
-                $chunk = substr($chunk, 0, $max_len);
-            }
+            my $chunk = _h2_take_chunk($q, $max_len);
             $ss->{send_queue_bytes} -= length($chunk);
             $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
@@ -3857,12 +3847,7 @@ sub _h2_create_sse_send {
         my $q = $ss->{send_queue} ||= [];
 
         if (@$q) {
-            my $chunk = shift @$q;
-            # Respect max_len — XS truncates without preserving remainder
-            if (length($chunk) > $max_len) {
-                unshift @$q, substr($chunk, $max_len);
-                $chunk = substr($chunk, 0, $max_len);
-            }
+            my $chunk = _h2_take_chunk($q, $max_len);
             $ss->{send_queue_bytes} -= length($chunk);
             $ss->{_write_progress_at} = Time::HiRes::time();   # the client took bytes (write_timeout)
             $ss->{access}{size} += length $chunk if $ss->{access};
@@ -4953,6 +4938,19 @@ sub _h2_enqueue {
     push @{ $ss->{send_queue} //= [] }, $bytes;
     $ss->{send_queue_bytes} = ($ss->{send_queue_bytes} // 0) + length $bytes;
     return;
+}
+
+# The next DATA payload off a stream's send queue: at most $max_len bytes,
+# what nghttp2 has room for in this frame (the frame size, or less if flow
+# control allows less). One frame at a time, so the queue still holds what
+# hasn't gone: the data callbacks count bytes as they leave it (write_timeout
+# progress, the access log) and buffered_amount and the drain watermarks
+# read what is left. A larger chunk gives up its front in place: 4-arg
+# substr moves the string's start rather than copying the rest, so a large
+# body costs each frame only its own bytes, not a copy of all that remains.
+sub _h2_take_chunk {
+    my ($q, $max_len) = @_;
+    return length($q->[0]) > $max_len ? substr($q->[0], 0, $max_len, '') : shift @$q;
 }
 
 # What buffered_amount reports: bytes written and not yet sent, and the

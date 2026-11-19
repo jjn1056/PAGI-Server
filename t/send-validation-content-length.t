@@ -352,7 +352,7 @@ subtest 'a length longer than the file or handle holds is short' => sub {
 
 subtest 'h2c: the body is not counted' => sub {
     require PAGI::Server::Protocol::HTTP2;
-    skip_all 'HTTP/2 not available (Net::HTTP2::nghttp2 0.011+ required)'
+    skip_all 'HTTP/2 not available (Net::HTTP2::nghttp2 0.013+ required)'
         unless PAGI::Server::Protocol::HTTP2->available;
     delete $result{'/body/3'};
 

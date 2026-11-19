@@ -53,9 +53,12 @@ The server implements sub-spec 0.6. The changes an application can feel:
 
 `PAGI::Upgrading` in the PAGI distribution has before/after code for each.
 
-### HTTP/2 needs Net::HTTP2::nghttp2 0.011
+### HTTP/2 needs Net::HTTP2::nghttp2 0.013
 
-Upgrade it (`cpanm Net::HTTP2::nghttp2`) to keep `--http2` working.
+Upgrade it (`cpanm Net::HTTP2::nghttp2`) to keep `--http2` working. Earlier
+versions sent only the first 16384 bytes of a response body given in one
+send, then ended the stream cleanly, so larger responses over HTTP/2 arrived
+cut short with no error.
 
 ### Request targets that are not paths are refused
 
