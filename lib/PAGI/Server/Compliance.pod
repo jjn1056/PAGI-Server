@@ -77,8 +77,11 @@ L<PAGI::Spec::Www>; every http, websocket and sse scope reports
 C<< $scope->{pagi}{spec_version} >> as C<'0.7'>. That includes "Sends Are
 Sequential": an application may issue a send before an earlier one has
 resolved, and the server processes a scope's sends in the order they were
-called, over HTTP/1.1 and HTTP/2. The core PAGI version
-(C<< $scope->{pagi}{version} >>) is independent of it and remains C<'0.5'>.
+called, over HTTP/1.1 and HTTP/2. It implements core PAGI specification
+B<0.6> (L<PAGI::Spec>), reported as C<< $scope->{pagi}{version} >>
+C<'0.6'>: a send made after the connection has closed, or on a WebSocket
+once the server has sent a Close of its own, does no work and resolves on a
+later turn of the event loop, never within the call to C<$send>.
 See L<PAGI::Upgrading> for what changed for applications.
 
 Of the capabilities the spec leaves optional, PAGI::Server implements, on

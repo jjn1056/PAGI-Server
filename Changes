@@ -81,6 +81,18 @@
   - The terminal response event ends an http scope whether or not the body
     was read; terminal notifications are delivered outside the
     application's call stack.
+  - A send made after the connection has closed, cleanly or not, or on a
+    WebSocket once the server has answered the client's Close, still
+    does nothing and succeeds, but settles on the next turn of the event
+    loop rather than at once, on every scope over HTTP/1.1 and HTTP/2. A
+    body whose only waits are sends, raced against disconnect_future or
+    end_future as PAGI::Spec::Www advises, now stops once the client has
+    gone; before, it never gave the loop a turn and ran to its end,
+    holding up every other request on the worker, and a graceful shutdown
+    as well. An application that checks nothing still makes all its
+    sends, a loop turn apiece. Sends waiting when the connection closed
+    still settle at once. This is PAGI core spec 0.6, and every scope
+    reports $scope->{pagi}{version} as '0.6' (was '0.5').
   - Future::XS is opt-in, and the opt-in now works: --future-xs or
     PAGI_FUTURE_XS=1 runs Future on Future::XS (startup dies if it is not
     installed); otherwise Future stays pure-perl. Before, Future used

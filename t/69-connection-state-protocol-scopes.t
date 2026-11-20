@@ -298,8 +298,12 @@ subtest 'h1 websocket: abort() while a send is parked on backpressure resolves i
 
     $cs->abort('overloaded');   # MUST NOT wait for the parked write to drain
 
+    # The app checks nothing and makes all 400 sends. Each one made after
+    # the abort settles from the loop (PAGI::Spec "Send Completion
+    # Contract"), a turn apiece, so finishing takes about as many turns as
+    # sends remain.
     my $app_completed = 0;
-    for (1 .. 20) {
+    for (1 .. 1000) {
         $app_completed = 1, last if $obs{app_completed};
         $loop->loop_once(0.05);
     }
