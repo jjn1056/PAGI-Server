@@ -2175,7 +2175,7 @@ sub _h2_create_scope {
     return {
         type         => 'http',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => '2',
@@ -3091,7 +3091,7 @@ sub _h2_create_websocket_scope {
     return {
         type         => 'websocket',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => '2',
@@ -3614,7 +3614,7 @@ sub _h2_create_sse_scope {
     return {
         type         => 'sse',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => '2',
@@ -6147,7 +6147,7 @@ sub _create_scope {
     my $scope = {
         type         => 'http',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => $request->{http_version},
@@ -7980,7 +7980,7 @@ sub _create_sse_scope {
     my $scope = {
         type         => 'sse',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => $request->{http_version},
@@ -8637,7 +8637,7 @@ sub _create_websocket_scope {
     my $scope = {
         type         => 'websocket',
         pagi         => {
-            version      => '0.5',
+            version      => '0.6',
             spec_version => '0.7',
         },
         http_version => $request->{http_version},

@@ -91,7 +91,8 @@
     holding up every other request on the worker, and a graceful shutdown
     as well. An application that checks nothing still makes all its
     sends, a loop turn apiece. Sends waiting when the connection closed
-    still settle at once.
+    still settle at once. This is PAGI core spec 0.6, and every scope
+    reports $scope->{pagi}{version} as '0.6' (was '0.5').
   - Future::XS is opt-in, and the opt-in now works: --future-xs or
     PAGI_FUTURE_XS=1 runs Future on Future::XS (startup dies if it is not
     installed); otherwise Future stays pure-perl. Before, Future used
