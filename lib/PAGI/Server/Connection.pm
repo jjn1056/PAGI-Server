@@ -23,6 +23,9 @@ use PAGI::Server::EventValidator;
 
 use constant FILE_CHUNK_SIZE => 65536;  # 64KB chunks for file streaming
 
+# Stops an HTTP/1.1 file body whose client has gone (see _send_file_response).
+my $FILE_CLIENT_GONE = "PAGI::h1 client gone during a file body\n";
+
 # Per-second cache for CLF timestamp in access log (same pattern as HTTP1::format_date)
 my $_cached_log_timestamp;
 my $_cached_log_time = 0;
@@ -6766,6 +6769,7 @@ async sub _send_http_event {
                 1;
             } or do {
                 my $error = $@;
+                return if $error eq $FILE_CLIENT_GONE;   # the client left: quiet no-op
                 $state->{seq} = $seq_before_advance;
                 $state->{publish}->($state->{seq});
                 die $error;
@@ -9374,6 +9378,11 @@ sub _process_websocket_frames {
 # $count, when given, is the response's content-length count record (see
 # _http1_body_count): its remaining count follows the bytes written, and a
 # file that ends before the declared length fails the send.
+#
+# A large file stops being read once the client has gone: the chunk callback
+# dies with $FILE_CLIENT_GONE, which the send treats as the quiet end the
+# Send Completion Contract asks of a send pending when the connection ends
+# (the HTTP/2 file pump's $STREAM_GONE does the same).
 async sub _send_file_response {
     my ($self, $file, $offset, $length, $chunked, $ends_response, $count) = @_;
     # Declared trailers end the response, not this body: they write the
@@ -9426,6 +9435,7 @@ async sub _send_file_response {
             $loop, $file,
             sub {
                 my ($chunk) = @_;
+                die $FILE_CLIENT_GONE if $self->{closed};
                 if ($chunked) {
                     my $len = sprintf("%x", length($chunk));
                     $self->_write_out("$len\r\n$chunk\r\n");

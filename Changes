@@ -123,6 +123,15 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/1.1: a file body (over sync_file_threshold) whose client left was
+    still read to its end by the file workers, and its send settled only
+    then (2.3s after the client left, for 256 MB); its chunks went to the
+    closed connection, sometimes printing IO::Async's "Cannot write data to
+    a Stream that is closing" on STDERR. The read now stops once the client
+    has gone, and the send settles successfully within a millisecond, as
+    PAGI's Send Completion Contract asks of a send pending when the
+    connection ends. HTTP/2 already stopped. The unchecked read dates from
+    0.001004 or earlier.
   - HTTP/2: a large body sent in one event, with more to follow (or over
     SSE or WebSocket), is split into DATA frames from the front in place;
     each frame copied all that remained, so time grew with the square of
