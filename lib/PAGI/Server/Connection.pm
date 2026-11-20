@@ -3489,8 +3489,14 @@ sub _h2_create_websocket_send {
             # The server's Close is queued (its reply to the peer's Close): RFC
             # 6455 5.5.1 allows no data after it, and an application racing the
             # peer's close through no fault of its own gets a no-op (Www.pod
-            # "Disconnected Client - sending after disconnect").
-            return if $ss->{ws_eof_pending};
+            # "Disconnected Client - sending after disconnect"), settled from
+            # the loop like a send after the connection closed
+            # (_send_after_close): a body whose only waits are sends then
+            # lets the closing handshake finish.
+            if ($ss->{ws_eof_pending}) {
+                await $weak_self->_send_after_close;
+                return;
+            }
 
             my $frame;
             if (defined $event->{text}) {
@@ -8996,8 +9002,14 @@ sub _create_websocket_send {
             # The server's Close is on the wire (its reply to the peer's Close):
             # RFC 6455 5.5.1 allows no data after it, and an application racing
             # the peer's close through no fault of its own gets a no-op
-            # (Www.pod "Disconnected Client - sending after disconnect").
-            return if $weak_self->{close_sent};
+            # (Www.pod "Disconnected Client - sending after disconnect"),
+            # settled from the loop like a send after the connection closed
+            # (_send_after_close): a body whose only waits are sends then
+            # lets the closing handshake finish.
+            if ($weak_self->{close_sent}) {
+                await $weak_self->_send_after_close;
+                return;
+            }
 
             # --- BACKPRESSURE CHECK ---
             if ($weak_self->_get_write_buffer_size >= $weak_self->{write_high_watermark}) {

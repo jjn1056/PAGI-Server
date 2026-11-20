@@ -246,6 +246,49 @@ subtest 'a websocket body that starts after a clean close stops at its first sen
     stop_server($server);
 };
 
+# The closing window: the client's Close has arrived and the server has
+# answered with its own, but the connection is not yet closed. Sends there
+# do no work (RFC 6455 5.5.1 allows no data after a Close) and settle from
+# the loop, so a body that is sending when the client says goodbye lets the
+# server finish closing, and a race against end_future ends it.
+subtest 'a websocket body sending when the client closes cleanly stops at once' => sub {
+    my %obs = (sent => 0);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type: $scope->{type}\n" unless $scope->{type} eq 'websocket';
+        my $conn = $obs{conn} = $scope->{'pagi.connection'};
+        await $receive->();   # websocket.connect
+        await $send->({ type => 'websocket.accept' });
+        my $export = async sub {
+            for my $n (1 .. 20_000) {
+                $obs{sent}++;
+                await $send->({ type => 'websocket.send', text => 'x' x 1024 });
+            }
+        }->();
+        await Future->wait_any($export, $conn->end_future);
+        $obs{export_cancelled} = $export->is_cancelled ? 1 : 0;
+        $obs{done} = 1;
+    };
+
+    my $server = start_server($app);
+    my $sock   = connect_client($server, $SCOPE{websocket}{request});
+    my $reading = sub { 1 while (sysread($sock, my $buf, 65536) // 0) > 0; 0 };
+    ok(pump_until(sub { $reading->() || $obs{sent} >= 200 }), 'the body is sending, the client reading');
+    my $sent_at_close = $obs{sent};
+    syswrite($sock, Protocol::WebSocket::Frame->new(
+        type => 'close', buffer => pack('n', 1000), masked => 1)->to_bytes);
+
+    ok(pump_until(sub { $reading->() || $obs{done} }, 30), 'the application finished');
+    is($obs{export_cancelled}, 1, 'the body was cancelled, not run to its end')
+        or diag "sent=$obs{sent} of 20000";
+    cmp_ok($obs{sent} - $sent_at_close, '<=', 10, 'a few sends after the Close, not the rest')
+        or diag "sent after the Close: " . ($obs{sent} - $sent_at_close);
+    ok($obs{conn}->response_complete, 'the socket ended cleanly');
+
+    close $sock;
+    stop_server($server);
+};
+
 is(\@log, [], 'nothing logged');
 
 done_testing;
