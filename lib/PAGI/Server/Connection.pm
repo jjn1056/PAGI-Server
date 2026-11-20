@@ -2625,9 +2625,12 @@ sub _h2_create_send {
         # deleted -- see the 413-overrun branch in _h2_on_body) is treated
         # the same as an absent one: both are post-close sends and must
         # silently no-op, not reach nghttp2 a second time on this stream id.
-        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
-
-        return if $weak_self->{closed} && !$already_closed;
+        # Like any send after the connection has closed, it settles from the
+        # loop (_send_after_close).
+        if (!$already_closed && (!$ss || $ss->{h2_closed} || $weak_self->{closed})) {
+            await $weak_self->_send_after_close;
+            return;
+        }
 
         # 1. Shape validation (mandatory)
         PAGI::Server::EventValidator::validate_http_send(
@@ -3377,9 +3380,12 @@ sub _h2_create_websocket_send {
         # deleted -- see the 413-overrun branch in _h2_on_body) is treated
         # the same as an absent one: both are post-close sends and must
         # silently no-op, not reach nghttp2 a second time on this stream id.
-        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
-
-        return if $weak_self->{closed} && !$already_closed;
+        # Like any send after the connection has closed, it settles from the
+        # loop (_send_after_close).
+        if (!$already_closed && (!$ss || $ss->{h2_closed} || $weak_self->{closed})) {
+            await $weak_self->_send_after_close;
+            return;
+        }
 
         PAGI::Server::EventValidator::validate_websocket_send(
             $event, { extensions => $weak_self->{extensions} });
@@ -3912,9 +3918,12 @@ sub _h2_create_sse_send {
         # deleted -- see the 413-overrun branch in _h2_on_body) is treated
         # the same as an absent one: both are post-close sends and must
         # silently no-op, not reach nghttp2 a second time on this stream id.
-        return if (!$ss || $ss->{h2_closed}) && !$already_closed;
-
-        return if $weak_self->{closed} && !$already_closed;
+        # Like any send after the connection has closed, it settles from the
+        # loop (_send_after_close).
+        if (!$already_closed && (!$ss || $ss->{h2_closed} || $weak_self->{closed})) {
+            await $weak_self->_send_after_close;
+            return;
+        }
 
         # Reset THIS stream's SSE idle timer on send activity (skip once fully closed)
         $weak_self->_h2_reset_sse_idle_timer($ss) unless $already_closed;
@@ -5105,6 +5114,19 @@ sub _wait_for_drain {
     $self->_setup_drain_detection;
 
     return $f;
+}
+
+# A send issued once the connection has closed does no work and resolves
+# successfully, from the event loop, never within the call to $send (PAGI::Spec
+# "Send Completion Contract"). The scope's terminal notifications were queued
+# on the loop when the end was detected, so they are delivered first: a body
+# whose only waits are sends still returns to the loop, where a race against
+# disconnect_future can end it. A send pending when the connection closed is
+# not this: it settles at once (_cancel_drain_waiters).
+sub _send_after_close {
+    my ($self) = @_;
+    my $loop = $self->{server} ? $self->{server}->loop : undef;
+    return $loop ? $loop->later : Future->done;
 }
 
 sub _cancel_drain_waiters {
@@ -6578,7 +6600,10 @@ async sub _send_http_event {
     weaken(my $weak_self = shift);
     my ($state, $event) = @_;
     return Future->done unless $weak_self;
-    return Future->done if $weak_self->{closed};
+    if ($weak_self->{closed}) {
+        await $weak_self->_send_after_close;
+        return;
+    }
 
     # Reset stall timer on write activity
     $weak_self->_reset_stall_timer;
@@ -8264,8 +8289,12 @@ sub _create_sse_send {
         my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
         # Transport already gone for reasons other than our own close (a real
-        # client disconnect): sends are a silent no-op.
-        return Future->done if $weak_self->{closed} && !$already_closed;
+        # client disconnect): sends are a silent no-op, settled from the loop
+        # (_send_after_close).
+        if ($weak_self->{closed} && !$already_closed) {
+            await $weak_self->_send_after_close;
+            return;
+        }
 
         # Reset SSE idle timer on send activity (skip once fully closed)
         $weak_self->_reset_sse_idle_timer unless $already_closed;
@@ -8823,10 +8852,13 @@ sub _create_websocket_send {
         # websocket.close), so a post-close send from the app is a protocol
         # violation, not a benign transport no-op. A real client disconnect
         # with no app-initiated terminal in play still falls through to the
-        # plain no-op below.
+        # plain no-op below, settled from the loop (_send_after_close).
         my $already_closed = ($seq eq 'closed' || $seq eq 'refusal_complete');
 
-        return Future->done if $weak_self->{closed} && !$already_closed;
+        if ($weak_self->{closed} && !$already_closed) {
+            await $weak_self->_send_after_close;
+            return;
+        }
 
         # Reset WebSocket idle timer on send activity
         $weak_self->_reset_ws_idle_timer;
