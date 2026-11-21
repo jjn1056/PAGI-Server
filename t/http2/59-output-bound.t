@@ -45,7 +45,8 @@ my $LINES = 20_000;
 sub line { sprintf("%07d", $_[0]) . ('x' x 92) . "\n" }
 
 sub create_h2_connection {
-    my ($app) = @_;
+    my ($app, %watermarks) = @_;
+    %watermarks = (write_high_watermark => $HIGH, write_low_watermark => 2048, %watermarks);
     socketpair(my $sock_a, my $sock_b, AF_UNIX, SOCK_STREAM, 0)
         or die "socketpair: $!";
     $sock_a->blocking(0);
@@ -54,7 +55,7 @@ sub create_h2_connection {
     my $server = PAGI::Server->new(
         app => $app, host => '127.0.0.1', port => 0, quiet => 1, access_log => undef,
         http2 => 1, shutdown_timeout => 1, logger => sub { push @log, $_[0] },
-        write_high_watermark => $HIGH, write_low_watermark => 2048,
+        %watermarks,
     );
     $loop->add($server);
 
@@ -64,7 +65,7 @@ sub create_h2_connection {
     my $conn = PAGI::Server::Connection->new(
         stream => $stream, app => $app, protocol => $protocol, server => $server,
         h2_protocol => $server->{http2_protocol}, alpn_protocol => 'h2',
-        write_high_watermark => $HIGH, write_low_watermark => 2048,
+        %watermarks,
     );
     $server->add_child($stream);
     $conn->start;
@@ -272,6 +273,50 @@ subtest 'the client closes while output is held' => sub {
     pump_until(sub { 0 }, 0.5);   # let anything the drain scheduled run
     is([grep { $_->{level} =~ /^(?:warn|error|fatal)$/ } @log], [], 'nothing logged at warn or above');
     is(\@warnings, [], 'no Perl warnings');
+    stop_server($server);
+};
+
+subtest 'a protocol error while output is held still ends the connection as an error' => sub {
+    my $resolved = 0;
+    my %reason;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $conn = $scope->{'pagi.connection'};
+        $conn->end_future->on_done(sub { $reason{end} = $conn->disconnect_reason // 'clean' });
+        await body_app(\$resolved, $LINES)->($scope, $receive, $send);
+    };
+    my ($client_sock, $server, $h2conn) = create_h2_connection($app);
+    my ($client, $seen) = big_window_client($client_sock);
+    submit_get($client, $client_sock);
+    ok(until_parked(sub { $resolved }), 'the body parks');
+
+    # A WINDOW_UPDATE with a zero increment on stream 0 is a connection error
+    # (RFC 9113 6.9): nghttp2 answers with GOAWAY and ends the session.
+    @log = ();
+    $client_sock->syswrite(pack('CnCCN', 0, 4, 8, 0, 0) . pack('N', 0));
+    my $eof;
+    ok(pump_until(sub {
+        while (defined(my $n = $client_sock->sysread(my $buf, 65536))) {
+            if (!$n) { $eof = 1; last }
+            $client->mem_recv($buf);
+        }
+        return $eof && $reason{end};
+    }, 10), 'once the client reads, the server closes the connection');
+    is($reason{end}, 'protocol_error', 'the scope ends with protocol_error');
+    ok((grep { $_->{level} eq 'error' && $_->{message} =~ /^PAGI connection error \(HTTP\/2\): / } @log),
+        "nghttp2's diagnostic is logged as a connection error")
+        or diag join "\n", map { "$_->{level}: $_->{message}" } @log;
+    stop_server($server);
+};
+
+subtest 'a fractional write_high_watermark is served' => sub {
+    my $resolved = 0;
+    my ($client_sock, $server, $h2conn) = create_h2_connection(body_app(\$resolved, 100),
+        write_high_watermark => 65536 / 3, write_low_watermark => 2048.5);
+    my ($client, $seen) = big_window_client($client_sock);
+    my $sid = submit_get($client, $client_sock);
+    ok(read_until($client, $client_sock, sub { exists $seen->{closed}{$sid} }, 10), 'the stream completes');
+    ok(($seen->{body}{$sid} // '') eq join('', map { line($_) } 1 .. 100), 'every line arrived');
     stop_server($server);
 };
 
