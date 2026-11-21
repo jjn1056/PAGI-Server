@@ -42,7 +42,7 @@ use constant H2_PREFACE_LENGTH => 24;
 
 # Check for nghttp2 availability
 our $AVAILABLE;
-use constant MIN_NGHTTP2_VERSION => '0.013';
+use constant MIN_NGHTTP2_VERSION => '0.014';
 BEGIN {
     $AVAILABLE = eval {
         require Net::HTTP2::nghttp2;
@@ -549,14 +549,17 @@ sub feed {
 =head2 extract
 
     my $data = $session->extract;
+    my $data = $session->extract($max_bytes);
 
-Extract outgoing data from the session. Returns bytes to send.
+Extract outgoing data from the session. Returns bytes to send. With
+C<$max_bytes>, returns at most that many; the rest stays queued in the
+session for a later call.
 
 =cut
 
 sub extract {
-    my ($self) = @_;
-    return $self->{nghttp2}->mem_send;
+    my ($self, $max_bytes) = @_;
+    return defined $max_bytes ? $self->{nghttp2}->mem_send($max_bytes) : $self->{nghttp2}->mem_send;
 }
 
 =head2 want_read

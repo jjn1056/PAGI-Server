@@ -13,11 +13,12 @@
     before websocket.accept or sse.start; websocket.http.response.* and
     sse.http.response.* are removed; sse.close is the only clean end of an
     SSE stream.
-  - HTTP/2 requires Net::HTTP2::nghttp2 0.013. Earlier versions sent only
-    the first DATA frame (16384 bytes) of a response body given in one
+  - HTTP/2 requires Net::HTTP2::nghttp2 0.014. Versions before 0.013 sent
+    only the first DATA frame (16384 bytes) of a response body given in one
     send and ended the stream there, with no error: any larger response
-    over HTTP/2 arrived cut short. With an older version installed, HTTP/2
-    is reported unavailable.
+    over HTTP/2 arrived cut short. 0.014 adds the mem_send limit the server
+    uses to bound a connection's output (see Fixed). With an older version
+    installed, HTTP/2 is reported unavailable.
   - Request targets: absolute-form is reduced to its path and query (400
     when its host differs from Host); a target that is not a path, or *
     outside OPTIONS, is answered 400.

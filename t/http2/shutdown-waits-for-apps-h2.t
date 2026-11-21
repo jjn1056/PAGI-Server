@@ -13,7 +13,7 @@ use Scalar::Util qw(refaddr);
 BEGIN {
     require PAGI::Server::Protocol::HTTP2;
     PAGI::Server::Protocol::HTTP2->available
-        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.013+ required)');
+        or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.014+ required)');
 }
 
 # HTTP/2 twin of t/shutdown-waits-for-apps.t: a shutting-down server waits,
