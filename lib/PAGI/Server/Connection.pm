@@ -421,6 +421,17 @@ sub start {
                     my $left = ($weak_self->{_queued_bytes} // 0) - $took;
                     $weak_self->{_queued_bytes} = $left > 0 ? $left : 0;
                     $weak_self->{_write_progress_at} = Time::HiRes::time();
+                    # HTTP/2 output held behind a full buffer (_h2_write_pending)
+                    # resumes once it drains, on a later turn: nghttp2 is never
+                    # driven from inside IO::Async's own write.
+                    if ($weak_self->{h2_output_held}
+                            && $weak_self->{_queued_bytes} < $weak_self->{write_low_watermark}) {
+                        $weak_self->{h2_output_held} = 0;
+                        $weak_self->{server}->loop->later(sub {
+                            $weak_self->_h2_write_pending
+                                if $weak_self && $weak_self->{h2_session} && !$weak_self->{closed};
+                        });
+                    }
                 }
                 return $written;
             }
@@ -888,17 +899,29 @@ sub _h2_session_call {
     return;
 }
 
+# Hands nghttp2's output to the connection, but only as much as fits under
+# write_high_watermark: the server's bound, not the peer's flow-control
+# window, decides what this connection holds in memory (CVE-2019-9517). What
+# does not fit stays queued in nghttp2, which then stops pulling from the
+# streams' send queues, so they fill and their sends wait (each stream is
+# bounded on its own queue). The connection's writer resumes this once the
+# buffer drains below write_low_watermark. The hold is keyed on the buffer
+# being full, never on nghttp2's want_write, so a held connection always has
+# bytes for the writer to drain.
 sub _h2_write_pending {
     my ($self) = @_;
     return unless $self->{h2_session};
     return $self->{h2_flush_wanted} = 1 if $self->{h2_session_depth};
+    my $room;
     $self->_h2_session_call(sub {
-        while (1) {
-            my $data = $self->{h2_session}->extract;
-            last unless defined $data && length($data) > 0;
+        while (($room = $self->{write_high_watermark} - $self->_get_write_buffer_size) > 0) {
+            my $data = $self->{h2_session}->extract($room);
+            last unless defined $data && length $data;
             $self->_write_server_output($data);
         }
     });
+    $self->{h2_output_held} = 1 if $room <= 0;
+    return;
 }
 
 # =============================================================================
