@@ -42,13 +42,11 @@ jobs:
       - name: Install optional modules the tests exercise
         run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only IO::Async::SSL Future::IO Alien::nghttp2
 
-      # PAGI::Server needs Net::HTTP2::nghttp2 0.011. Until the CPAN mirrors
-      # carry it, the pinned commit is the 0.011 tree from the binding's repo;
-      # the CPAN install wins as soon as the mirrors catch up.
-      - name: Install Net::HTTP2::nghttp2 0.011
-        run: |
-          cpanm --notest --mirror https://cpan.metacpan.org --mirror-only 'Net::HTTP2::nghttp2~0.011' \
-            || cpanm --notest https://github.com/jjn1056/Net-HTTP2-nghttp2/archive/92e7f9e.tar.gz
+      # PAGI::Server's HTTP/2 needs Net::HTTP2::nghttp2 0.014 (mem_send's limit).
+      # With an older one every t/http2 test skips and the job would still pass,
+      # so there is no fallback: failing to install 0.014 fails the job.
+      - name: Install Net::HTTP2::nghttp2 0.014
+        run: cpanm --notest --mirror https://cpan.metacpan.org --mirror-only 'Net::HTTP2::nghttp2~0.014'
 
       - name: Report what the server sees
         run: |

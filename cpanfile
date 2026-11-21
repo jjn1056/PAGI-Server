@@ -28,10 +28,10 @@ recommends 'IO::Socket::SSL', '2.074';
 # warning (RT #181389).
 recommends 'Future::XS', '0.16';
 
-# HTTP/2 support (optional - only needed for --http2). The server needs 0.011;
-# 0.013 is required for HTTP/2: earlier versions cut any response body
-# larger than one DATA frame (16384 bytes) short, with no error.
-recommends 'Net::HTTP2::nghttp2', '0.013';
+# HTTP/2 support (optional - only needed for --http2). 0.013 stopped cutting
+# response bodies larger than one DATA frame (16384 bytes) short; 0.014 adds
+# the mem_send limit the server uses to bound a connection's output.
+recommends 'Net::HTTP2::nghttp2', '0.014';
 # To enable HTTP/2 support, install with:
 #   cpanm Net::HTTP2::nghttp2
 

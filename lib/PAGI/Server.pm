@@ -1831,15 +1831,22 @@ C<write_timeout> (L<PAGI::Spec::Www>): an C<http> scope receives
 C<http.disconnect>, an SSE stream ends, and a WebSocket receives
 C<websocket.disconnect> with code C<1006>. One C<warn> line is logged.
 
-On HTTP/2 it applies per stream: flow control holds a stalled client's bytes
-in the stream rather than the socket, so a stream with bytes waiting whose
-bytes the client has taken none of for this many seconds is reset
-(C<RST_STREAM> C<CANCEL>) and its application told C<write_timeout>; the
-connection and its other streams carry on.
+On HTTP/2 there are two clocks. The connection's is the one above: bytes
+waiting in its write buffer that the client takes none of for this many
+seconds close the connection. Each stream has its own as well: a stream with
+bytes waiting in its queue that the connection takes none of for this many
+seconds is reset (C<RST_STREAM> C<CANCEL>) and its application told
+C<write_timeout>, while the connection and its other streams carry on. That
+is a client that stopped reading one stream (flow control holds that stream's
+bytes in its queue) while it still reads the others. The connection's buffer
+is bounded by C<write_high_watermark> and its streams share it, so a stream's
+bytes leave its queue only in its turn: a client reading many busy streams so
+slowly that one of them goes this long without a turn loses that stream.
 
 The clock runs only while bytes are queued, starts when they are, and every
 write the client accepts restarts it -- so a client that reads slowly but
-steadily is never cut off, and a connection with nothing to send (an idle
+steadily is never cut off (on HTTP/2, while each of its streams gets a turn
+within it), and a connection with nothing to send (an idle
 keep-alive connection, a quiet SSE stream or WebSocket) is never timed out by
 it. Progress over TCP comes in steps (the client's window reopens only once a
 good part of it is free), so allow a slow client a few seconds. One timer per

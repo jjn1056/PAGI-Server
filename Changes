@@ -13,11 +13,12 @@
     before websocket.accept or sse.start; websocket.http.response.* and
     sse.http.response.* are removed; sse.close is the only clean end of an
     SSE stream.
-  - HTTP/2 requires Net::HTTP2::nghttp2 0.013. Earlier versions sent only
-    the first DATA frame (16384 bytes) of a response body given in one
+  - HTTP/2 requires Net::HTTP2::nghttp2 0.014. Versions before 0.013 sent
+    only the first DATA frame (16384 bytes) of a response body given in one
     send and ended the stream there, with no error: any larger response
-    over HTTP/2 arrived cut short. With an older version installed, HTTP/2
-    is reported unavailable.
+    over HTTP/2 arrived cut short. 0.014 adds the mem_send limit the server
+    uses to bound a connection's output (see Fixed). With an older version
+    installed, HTTP/2 is reported unavailable.
   - Request targets: absolute-form is reduced to its path and query (400
     when its host differs from Host); a target that is not a path, or *
     outside OPTIONS, is answered 400.
@@ -123,6 +124,20 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/2: the client's flow-control window, not the server, decided how
+    much a connection's output the server held in memory
+    (CVE-2019-9517, "Internal Data Buffering"). A client that advertised a
+    large window and read slowly had everything that window allowed
+    serialized into the process: 11.4 MB for one stream with curl's 10 MiB
+    window, 218 MB for 100 streams on one connection. Its sends never
+    waited, so the application never yielded and other connections were
+    not served for seconds (118 s in the 100-stream case). A connection now
+    holds at most write_high_watermark of output, plus write_high_watermark
+    per stream in its streams' queues, whatever window the client
+    advertises; output resumes once the buffer drains below
+    write_low_watermark. Bounding on the stream queue alone dates from
+    0.002000's per-stream backpressure fix. Requires Net::HTTP2::nghttp2
+    0.014 for mem_send's limit.
   - HTTP/1.1: a file body (over sync_file_threshold) whose client left was
     still read to its end by the file workers, and its send settled only
     then (2.3s after the client left, for 256 MB); its chunks went to the

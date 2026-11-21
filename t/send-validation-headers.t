@@ -165,7 +165,7 @@ subtest 'HTTP/1.1: a non-token name never reaches the wire' => sub {
 
 subtest 'h2c: a non-token name never reaches the wire' => sub {
     require PAGI::Server::Protocol::HTTP2;
-    skip_all 'HTTP/2 not available (Net::HTTP2::nghttp2 0.013+ required)'
+    skip_all 'HTTP/2 not available (Net::HTTP2::nghttp2 0.014+ required)'
         unless PAGI::Server::Protocol::HTTP2->available;
 
     my $h2c_get = sub {
