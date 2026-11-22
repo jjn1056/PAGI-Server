@@ -124,6 +124,15 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/1.1: a streaming response on a connection that closes after it
+    (Connection: close, or HTTP/1.0) lost its tail when the application's
+    last sends were resumed by the write buffer draining: 196,771 of about
+    212,125 bytes for 2,000 sends of 100 bytes, with no final chunk. The
+    drain woke the application inside IO::Async::Stream's on_outgoing_empty
+    event; its last bytes and the scope's close_when_empty ran there, and
+    IO::Async then closed the stream on the emptiness it had checked before
+    the event, discarding them. Drain waiters are now woken on a later pass
+    of the loop.
   - HTTP/2: the client's flow-control window, not the server, decided how
     much a connection's output the server held in memory
     (CVE-2019-9517, "Internal Data Buffering"). A client that advertised a

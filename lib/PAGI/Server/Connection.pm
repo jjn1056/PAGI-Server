@@ -5128,10 +5128,19 @@ sub _setup_drain_detection {
     # Store previous handler to chain if needed
     my $prev_on_empty = $self->{_prev_on_outgoing_empty};
 
+    # The waiters are woken on a later pass of the loop, never inside this
+    # event: waking one runs the application, which may write its last bytes
+    # and end the scope, and IO::Async::Stream closes a stream marked
+    # close_when_empty right after this event on the strength of the
+    # emptiness it checked before it -- discarding whatever was written
+    # meanwhile (the tail of a Connection: close or HTTP/1.0 response).
     $self->{stream}->configure(
         on_outgoing_empty => sub {
+            my ($stream) = @_;
             return unless $weak_self;
-            $weak_self->_check_drain_waiters;
+            if (my $loop = $stream->loop) {
+                $loop->later(sub { $weak_self->_check_drain_waiters if $weak_self });
+            }
             # Call previous handler if any
             $prev_on_empty->(@_) if $prev_on_empty;
         },
