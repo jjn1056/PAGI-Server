@@ -497,8 +497,13 @@ sub start {
                     return;
                 }
 
-                # If in WebSocket mode, process WebSocket frames
-                if (_ws_handshake_accepted($weak_self->{h1_seq})) {
+                # If in WebSocket mode, process WebSocket frames. h1_seq
+                # alone cannot say so: an SSE scope's state lives there too
+                # and also ends in 'closed', and bytes that arrive after its
+                # sse.close while the application still runs are the next
+                # request, buffered below until the scope ends.
+                if (($weak_self->{scope_kind} // '') eq 'websocket'
+                        && _ws_handshake_accepted($weak_self->{h1_seq})) {
                     $weak_self->_process_websocket_frames;
                     return;
                 }
