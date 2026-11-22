@@ -1519,6 +1519,41 @@ B<Example:>
         write_low_watermark  => 16384,   # 16KB (8:1 ratio)
     );
 
+=item max_sends_per_turn => $count
+
+How many sends that leave their scope open a worker runs before it returns
+to the event loop for its other connections. The sends counted are
+C<http.response.body> with C<more>, C<sse.send>, C<sse.comment> and
+C<websocket.send>.
+
+B<Default:> 384. C<0> turns it off.
+
+Awaiting C<$send> gives the loop a chance to run only when the send has to
+wait, and below C<write_high_watermark> it does not: a response streamed in
+small sends runs until its buffer is full. Without a limit, many such
+responses starting together hold every other connection on the worker for
+a second or more. With it, once the worker has run that many such sends,
+further ones are held: their Futures stay pending until the loop has
+looked at its other connections. A scope's next four still go through, so
+a short response is not held, and a request that never streams is not
+held at all. The bytes of a held send are already on their way.
+
+What it does not do: a response with more than four such sends takes turns
+with the other streams, it is not served ahead of them; and the limit counts
+sends, so an application that works for long between sends still holds the
+loop for that long.
+
+A held send is pending for a reason other than a slow client. Do not read
+C<< $future->is_ready >> after a send as a backpressure signal; use
+C<pagi.transport> for that.
+
+B<When to adjust:> raise it when one worker serves many hundreds of
+connections at once and throughput matters more than the wait: every
+return to the loop costs more the more connections it watches. Lower it
+for a shorter wait.
+
+B<CLI:> C<--max-sends-per-turn 384>
+
 =item max_body_size => $bytes
 
 Maximum request body size in bytes. Default: 10,000,000 (10MB).
@@ -2751,6 +2786,14 @@ sub _validate_io_buffer_size {
     return $value;
 }
 
+# max_sends_per_turn is a whole number of sends; 0 turns the limit off.
+sub _validate_max_sends_per_turn {
+    my ($count) = @_;
+    die "Invalid max_sends_per_turn '" . ($count // 'undef') . "' - must be 0 (off) or a positive count\n"
+        unless defined($count) && !ref($count) && $count =~ /\A(?:0|[1-9][0-9]*)\z/;
+    return $count + 0;
+}
+
 sub _init {
     my ($self, $params) = @_;
 
@@ -2939,6 +2982,7 @@ sub _init {
         'write_buffer_size', delete $params->{write_buffer_size} // 8192);
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
+    $self->{max_sends_per_turn} = _validate_max_sends_per_turn(delete $params->{max_sends_per_turn} // 384);  # 0 = off
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
     if (my $lt = $self->{loop_type}) {
         die "Invalid loop_type '$lt': must contain only letters, digits, and ::\n"
@@ -3110,6 +3154,9 @@ sub configure {
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
+    }
+    if (exists $params{max_sends_per_turn}) {
+        $self->{max_sends_per_turn} = _validate_max_sends_per_turn(delete $params{max_sends_per_turn});
     }
     if (exists $params{max_disconnect_receives}) {
         my $cap = delete $params{max_disconnect_receives};
@@ -4523,6 +4570,7 @@ sub _run_as_worker {
         write_buffer_size => $self->{write_buffer_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
+        max_sends_per_turn   => $self->{max_sends_per_turn},
         max_connections   => $self->{max_connections},
         heartbeat_timeout => $self->{heartbeat_timeout},
         lifespan_mode            => $self->{lifespan_mode},
