@@ -148,6 +148,15 @@ B<Not yet implemented:>
 
 For HTTP/2, see L</ENABLING HTTP/2 SUPPORT (EXPERIMENTAL)>.
 
+Over HTTP/1.1, a client that closes its side of the connection (a TCP
+half-close, as C<nc -N> does) is taken to have gone, even if it is still
+reading: the scope ends with C<client_closed> and no response is written. If
+the request and the close arrive together, the application does not run at
+all. That is what lets a client's walkout resolve C<end_future> at once.
+RFC 9112 S9.6 notes that a half-close does not by itself mean the client has
+lost interest in the response, so a client that sends one will get nothing
+from this server.
+
 =head1 UNIX DOMAIN SOCKET SUPPORT (EXPERIMENTAL)
 
 B<This feature is experimental.> The API is subject to change in future
