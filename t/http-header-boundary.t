@@ -8,7 +8,16 @@ use PAGI::Server::Protocol::HTTP1;
 # socket I/O; neither validation, sequencing nor formatting is mocked.
 {
     package Local::HeaderSink;
-    sub write { $_[0]{bytes} .= $_[1]; }
+    # IO::Async::Stream's write takes a string or a CODE generator, called
+    # until it returns undef; the server hands it a generator.
+    sub write {
+        my ($self, $data) = @_;
+        if (ref $data eq 'CODE') {
+            while (defined(my $chunk = $data->($self))) { $self->{bytes} .= $chunk }
+            return;
+        }
+        $self->{bytes} .= $data;
+    }
     package Local::HeaderConnection;
     our @ISA = ('PAGI::Server::Connection');
     sub _get_write_buffer_size { 0 }

@@ -4941,13 +4941,47 @@ sub _write_out {
 # stream's writer (wrapped in start) has written them, so
 # _get_write_buffer_size, which every send asks, costs the same however many
 # writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+#
+# A burst of output reaches the stream as one generator (IO::Async::Stream's
+# CODE form of write), not one write per call: each write builds an object
+# IO::Async merges again when it flushes, and that costs more than a small
+# send's own work. The first call queues the generator over a buffer; later
+# calls append to it; each time the socket can take more, the generator
+# hands over everything gathered, and once nothing is left it returns undef
+# and leaves the queue, so the next call starts a new burst. The buffer
+# belongs to the generator: a close-after-response Connection may be gone
+# before the loop writes its response, and the bytes must still go out.
 sub _write_server_output {
     my ($self, $bytes) = @_;
     # Bytes now wait for the client: its write_timeout clock starts here.
     $self->{_write_progress_at} = Time::HiRes::time() unless $self->{_queued_bytes};
     $self->{_queued_bytes} += length $bytes;
-    $self->{stream}->write($bytes);
-    return;
+    if (my $gathering = $self->{_out_buf}) {
+        $$gathering .= $bytes;
+        return;
+    }
+    my $buf = \(my $gathered = $bytes);
+    # Recorded before the write, so a stream that runs the generator inside
+    # write (autoflush) finds it.
+    $self->{_out_buf} = $buf;
+    weaken(my $weak_self = $self);
+    my $queued = eval {
+        $self->{stream}->write(sub {
+            if (length $$buf) {
+                my $out = $$buf;
+                $$buf = '';
+                return $out;
+            }
+            delete $weak_self->{_out_buf}
+                if $weak_self && $weak_self->{_out_buf} && $weak_self->{_out_buf} == $buf;
+            return undef;
+        });
+        1;
+    };
+    return if $queued;
+    my $error = $@;
+    delete $self->{_out_buf} if $self->{_out_buf} && $self->{_out_buf} == $buf;
+    die $error;
 }
 
 # PAGI::Spec::Www 0.7 "Sends Are Sequential": every send takes a turn on its
