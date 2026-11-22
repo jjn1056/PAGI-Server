@@ -103,8 +103,11 @@ subtest 'WebSocket frame parser cleaned up on close (3.1)' => sub {
     # Close the socket
     close($sock);
 
-    # Let server process the close
-    $loop->loop_once(0.2);
+    # Let the server process the close: run the loop until it has (or two
+    # seconds pass), not for one pass, which a writable event still due on
+    # the stream can end before the client's EOF has arrived.
+    my $close_deadline = time + 2;
+    $loop->loop_once(0.05) while $ws_connection->{websocket_frame} && time < $close_deadline;
 
     # After close, websocket_frame should be cleaned up
     ok(!$ws_connection->{websocket_frame}, "WebSocket frame parser cleaned up after close");

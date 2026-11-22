@@ -130,6 +130,12 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/1.1 WebSocket: a websocket.keepalive sent after the server's Close
+    was on the wire (the peer had closed while the application was busy)
+    started a ping timer anyway; each tick's Ping was refused by IO::Async
+    with a raw "Cannot write data to a Stream that is closing" warning until
+    the socket closed. It is now the same no-op as a websocket.send at that
+    point.
   - HTTP/1.1: a streaming response on a connection that closes after it
     (Connection: close, or HTTP/1.0) lost its tail when the application's
     last sends were resumed by the write buffer draining: 196,771 of about
