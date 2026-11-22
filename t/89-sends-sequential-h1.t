@@ -585,4 +585,41 @@ for my $case (['http', 20, 100_000], ['sse', 20, 100_000], ['http', 300, 1_000],
     };
 }
 
+# Waiting sends count for on_high_water as soon as they are accepted, not only
+# once they are written. Here the bytes written stay under the high mark while
+# the sends behind them take buffered_amount over it. The buffer is first
+# filled by an sse.comment, which neither waits on backpressure nor reports to
+# the transport handle, so the callbacks are still unarmed when the events
+# queue up behind it.
+subtest 'on_high_water fires as soon as waiting sends take buffered_amount to the high mark' => sub {
+    my ($HIGH, $LOW) = (65_536, 16_384);
+    my (@high, @events, %seen);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        my $t = $scope->{'pagi.transport'};
+        await $receive->();
+        await $send->({ type => 'sse.start' });
+        $t->on_high_water(sub {
+            push @high, { amount => $t->buffered_amount, resolved => scalar(grep { $_->is_ready } @events) };
+        });
+        await $send->({ type => 'sse.comment', comment => 'x' x 400_000 });
+        $seen{fired_by_comment} = scalar @high;
+        @events = map { $send->({ type => 'sse.send', data => 'x' x $_ }) } 20_000, 30_000, 30_000;
+        $seen{pending} = grep { !$_->is_ready } @events;
+        await Future->needs_all(@events, $send->({ type => 'sse.close' }));
+    };
+    my $server = start_server($app, write_high_watermark => $HIGH, write_low_watermark => $LOW);
+    my $sock = raw_connect($server);
+    syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
+    my ($wire) = read_until($sock, sub { $_[0] =~ /\r\n0\r\n\r\n/ }, 30);
+    like($wire, qr/\r\n0\r\n\r\n/, 'the stream completed');
+    is($seen{fired_by_comment}, 0, 'the comment alone did not fire on_high_water');
+    is($seen{pending}, 3, 'three events queued unawaited behind it');
+    is(scalar @high, 1, 'on_high_water fired once');
+    is($high[0]{resolved}, 0, 'before the first waiting event had resolved');
+    cmp_ok($high[0]{amount}, '>=', $HIGH, 'with buffered_amount at the high mark');
+    close $sock;
+    stop_server($server);
+};
+
 done_testing;

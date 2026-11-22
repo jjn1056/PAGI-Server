@@ -2567,7 +2567,7 @@ sub _h2_create_send {
             die $STREAM_GONE unless $ss && !$ss->{h2_closed} && !$weak_self->{closed};
         }
         $weak_self->_h2_enqueue($ss, $chunk) if length $chunk;
-        $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+        $weak_self->_h2_notify_transport_write($ss);
         $weak_self->{h2_session}->resume_stream($stream_id);
         $weak_self->_h2_write_pending;
         return;
@@ -2994,7 +2994,7 @@ sub _h2_create_send {
                     # Synchronous: we're in the app's send path (not nghttp2's
                     # extract), so on_high_water can fire here to tell the app to
                     # pause its source.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -3015,7 +3015,7 @@ sub _h2_create_send {
                     }
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 }
@@ -3032,7 +3032,7 @@ sub _h2_create_send {
                     $eof_pending = 1;
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 } elsif ($seq eq 'awaiting_trailers') {
@@ -3050,7 +3050,7 @@ sub _h2_create_send {
                     $ss->{send_queue_bytes} //= 0;
                     $eof_pending = 1;
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -3581,7 +3581,7 @@ sub _h2_create_websocket_send {
             $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -4106,7 +4106,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -4117,7 +4117,7 @@ sub _h2_create_sse_send {
             my $bytes = eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK) };
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
             $weak_self->_h2_enqueue($ss, $bytes);
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_write_pending;
         }
@@ -5097,6 +5097,13 @@ sub _h1_transport_state {
     );
 }
 
+# What buffered_amount reports for an HTTP/2 stream: its queued bytes and the
+# payloads of its sends still waiting their turn.
+sub _h2_buffered_amount {
+    my ($ss) = @_;
+    return ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0);
+}
+
 # HTTP/2: the transport handle reads this stream's send queue, not the shared
 # TCP write buffer — under h2, N streams multiplex one connection, so that
 # buffer is the whole connection's backlog (meaningless per stream). $ss is the
@@ -5110,7 +5117,7 @@ sub _h2_transport_state {
     my ($self, $ss) = @_;
     weaken(my $w = $self);
     return PAGI::Server::TransportState->new(
-        measure   => sub { ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) },
+        measure   => sub { _h2_buffered_amount($ss) },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub { my $fire = shift; push @{$ss->{transport_drain_fires}}, $fire },
@@ -5134,10 +5141,25 @@ sub _transport_log_sink {
 
 # Notify the current transport-state handle after an application write so its
 # backpressure callbacks (on_high_water/on_drain) can fire on a watermark cross.
+# The handle is asked only when the buffered amount is at the high mark, the
+# one case in which its check does anything: measuring through the handle on
+# every send costs more than the rest of a small send once the buffer drains
+# between sends.
 sub _notify_transport_write {
     my ($self) = @_;
-    my $ts = $self->{current_transport_state};
-    $ts->_check_watermarks if $ts;
+    my $ts = $self->{current_transport_state} or return;
+    return if $self->_buffered_amount < $self->{write_high_watermark};
+    $ts->_check_watermarks;
+    return;
+}
+
+# The HTTP/2 twin, for one stream's handle and that stream's buffered amount.
+sub _h2_notify_transport_write {
+    my ($self, $ss) = @_;
+    my $ts = $ss->{transport_state} or return;
+    return if _h2_buffered_amount($ss) < $self->{write_high_watermark};
+    $ts->_check_watermarks;
+    return;
 }
 
 sub _check_drain_waiters {
