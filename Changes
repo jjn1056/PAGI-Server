@@ -66,6 +66,12 @@
     GOAWAY.
 
   [Changed]
+  - A burst of output reaches IO::Async as one write generator rather than
+    one write per send, so small sends cost less: an HTTP/1.1 application
+    sending 100-byte bodies spends 28-31 us per send (was 40-47 on the
+    same machine), and 100 such responses at once move 3.3 MB/s (was
+    2.0-2.1). HTTP/2, whose sends already reached the stream in batches,
+    is unchanged.
   - --future-xs (PAGI_FUTURE_XS=1) requires Future::XS 0.16 or later and
     stops startup with an older one: 0.16 fixes the "lost a sequence
     Future" warning a dropped without_cancel Future gave (RT #181389). The
@@ -124,6 +130,21 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/1.1 WebSocket: a websocket.keepalive sent after the server's Close
+    was on the wire (the peer had closed while the application was busy)
+    started a ping timer anyway; each tick's Ping was refused by IO::Async
+    with a raw "Cannot write data to a Stream that is closing" warning until
+    the socket closed. It is now the same no-op as a websocket.send at that
+    point.
+  - HTTP/1.1: a streaming response on a connection that closes after it
+    (Connection: close, or HTTP/1.0) lost its tail when the application's
+    last sends were resumed by the write buffer draining: 196,771 of about
+    212,125 bytes for 2,000 sends of 100 bytes, with no final chunk. The
+    drain woke the application inside IO::Async::Stream's on_outgoing_empty
+    event; its last bytes and the scope's close_when_empty ran there, and
+    IO::Async then closed the stream on the emptiness it had checked before
+    the event, discarding them. Drain waiters are now woken on a later pass
+    of the loop.
   - HTTP/1.1 SSE keep-alive: a request that arrived on the connection after
     sse.close, while the application was still running (awaiting anything
     after its last send), was handed to the WebSocket frame parser, which an

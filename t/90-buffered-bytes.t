@@ -45,7 +45,9 @@ sub burst_app {
     };
 }
 
-# What the old measure computed: a walk over IO::Async::Stream's write queue.
+# Every byte queued and not yet written, counted the slow way: a walk over
+# IO::Async::Stream's write queue, plus what the connection has gathered for
+# the generator it queued there.
 sub walked {
     my ($conn) = @_;
     my $total = 0;
@@ -53,6 +55,7 @@ sub walked {
         my $data = $writer->data;
         $total += length $data if defined $data && !ref $data;
     }
+    $total += length ${ $conn->{_out_buf} } if $conn->{_out_buf};
     return $total;
 }
 
@@ -111,11 +114,11 @@ subtest 'the count matches the write queue while it drains, and ends at 0' => su
     $loop->remove($server);
 };
 
-subtest 'measuring costs the same with 10 or many thousands of queued writes' => sub {
+subtest 'measuring costs the same however many bytes are waiting' => sub {
     my $server = start_server(app => burst_app(20_000, 32), write_high_watermark => 1 << 30);
     my ($sock, $conn) = open_request($server);
-    ok(pump_until(sub { @{ $conn->{stream}{writequeue} // [] } >= 5000 }, 20),
-        'thousands of writes are queued') or diag scalar @{ $conn->{stream}{writequeue} // [] };
+    ok(pump_until(sub { $conn->_get_write_buffer_size >= 160_000 }, 20),
+        'thousands of sends are waiting') or diag $conn->_get_write_buffer_size;
 
     my $time = sub {
         my $t0 = time;
@@ -125,7 +128,7 @@ subtest 'measuring costs the same with 10 or many thousands of queued writes' =>
     my $many = $time->();
 
     read_some($sock, 1 << 30);
-    pump_until(sub { @{ $conn->{stream}{writequeue} // [] } <= 10 }, 20);
+    pump_until(sub { $conn->_get_write_buffer_size <= 320 }, 20);
     my $few = $time->();
     ok($many < 10 * $few + 0.001,
         sprintf('100 measures: %.4fs with a long queue, %.4fs with a short one', $many, $few));

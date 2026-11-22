@@ -15,7 +15,16 @@ use PAGI::Server::Connection;
 use PAGI::Server::Protocol::HTTP1;
 {
     package Local::Stream;
-    sub write { $_[0]{output} .= $_[1]; }
+    # IO::Async::Stream's write takes a string or a CODE generator, called
+    # until it returns undef; the server hands it a generator.
+    sub write {
+        my ($self, $data) = @_;
+        if (ref $data eq 'CODE') {
+            while (defined(my $chunk = $data->($self))) { $self->{output} .= $chunk }
+            return;
+        }
+        $self->{output} .= $data;
+    }
     package Local::Server;
     sub loop { $_[0]{loop} }
     package Local::Connection;

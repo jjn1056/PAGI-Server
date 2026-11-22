@@ -4946,12 +4946,63 @@ sub _write_out {
 # stream's writer (wrapped in start) has written them, so
 # _get_write_buffer_size, which every send asks, costs the same however many
 # writes are queued; the count is PAGI::Spec::Www 0.7's buffered_amount.
+#
+# A burst of output reaches the stream as one generator (IO::Async::Stream's
+# CODE form of write), not one write per call: each write builds an object
+# IO::Async merges again when it flushes, and that costs more than a small
+# send's own work. The first call queues the generator over a buffer; later
+# calls append to it; each time the socket can take more, the generator
+# hands over everything gathered, and once nothing is left it returns undef
+# and leaves the queue, so the next call starts a new burst. The buffer
+# belongs to the generator: a close-after-response Connection may be gone
+# before the loop writes its response, and the bytes must still go out.
 sub _write_server_output {
     my ($self, $bytes) = @_;
     # Bytes now wait for the client: its write_timeout clock starts here.
     $self->{_write_progress_at} = Time::HiRes::time() unless $self->{_queued_bytes};
     $self->{_queued_bytes} += length $bytes;
-    $self->{stream}->write($bytes);
+    if ($self->{_out_closing}) {
+        $self->{stream}->write($bytes);
+        return;
+    }
+    if (my $gathering = $self->{_out_buf}) {
+        $$gathering .= $bytes;
+        return;
+    }
+    my $buf = \(my $gathered = $bytes);
+    # Recorded before the write, so a stream that runs the generator inside
+    # write (autoflush) finds it.
+    $self->{_out_buf} = $buf;
+    weaken(my $weak_self = $self);
+    my $queued = eval {
+        $self->{stream}->write(sub {
+            if (length $$buf) {
+                my $out = $$buf;
+                $$buf = '';
+                return $out;
+            }
+            delete $weak_self->{_out_buf}
+                if $weak_self && $weak_self->{_out_buf} && $weak_self->{_out_buf} == $buf;
+            return undef;
+        });
+        1;
+    };
+    return if $queued;
+    my $error = $@;
+    delete $self->{_out_buf} if $self->{_out_buf} && $self->{_out_buf} == $buf;
+    die $error;
+}
+
+# Called just before the stream is closed. Bytes already gathered stay with
+# the generator in the stream's queue: close_when_empty waits for them,
+# close_now discards them, as it does queued strings. Output after this goes
+# to the stream as strings, so IO::Async refuses it once the stream is
+# closing, as it always has, instead of a still-queued generator sending it
+# after the close began (a Ping after the server's WebSocket Close, say).
+sub _stop_gathering {
+    my ($self) = @_;
+    delete $self->{_out_buf};
+    $self->{_out_closing} = 1;
     return;
 }
 
@@ -5133,10 +5184,19 @@ sub _setup_drain_detection {
     # Store previous handler to chain if needed
     my $prev_on_empty = $self->{_prev_on_outgoing_empty};
 
+    # The waiters are woken on a later pass of the loop, never inside this
+    # event: waking one runs the application, which may write its last bytes
+    # and end the scope, and IO::Async::Stream closes a stream marked
+    # close_when_empty right after this event on the strength of the
+    # emptiness it checked before it -- discarding whatever was written
+    # meanwhile (the tail of a Connection: close or HTTP/1.0 response).
     $self->{stream}->configure(
         on_outgoing_empty => sub {
+            my ($stream) = @_;
             return unless $weak_self;
-            $weak_self->_check_drain_waiters;
+            if (my $loop = $stream->loop) {
+                $loop->later(sub { $weak_self->_check_drain_waiters if $weak_self });
+            }
             # Call previous handler if any
             $prev_on_empty->(@_) if $prev_on_empty;
         },
@@ -5551,6 +5611,7 @@ sub _initiate_ws_h1_transport_close {
     # answered, so the abnormal reason is close_incomplete, not close_timeout.
     $self->_arm_ws_h1_finish_bound;
 
+    $self->_stop_gathering;
     $self->{stream}->close_when_empty if $self->{stream};
     return;
 }
@@ -7492,6 +7553,7 @@ sub _close {
         # of its own. _cleanup_done then makes the end's own call a no-op, so
         # the option it carried never runs. The ending record is the durable
         # fact that survives that re-entrancy.
+        $self->_stop_gathering;
         if ($opt{close_now} || $self->_end_reason($self) =~ /\A(?:app_abort|write_timeout)\z/) {
             $self->{stream}->close_now;
         } else {
@@ -9152,6 +9214,14 @@ sub _create_websocket_send {
         }
         elsif ($type eq 'websocket.keepalive') {
             return unless _ws_handshake_accepted($weak_self->{h1_seq});
+
+            # Once the server's Close is on the wire no Ping may follow it
+            # (RFC 6455 5.5.1): the same no-op as websocket.send above. The
+            # closing phase has already stopped any keepalive started before.
+            if ($weak_self->{close_sent}) {
+                await $weak_self->_send_after_close;
+                return;
+            }
 
             my $interval = $event->{interval} // 0;
             my $timeout = $event->{timeout};
