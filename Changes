@@ -124,6 +124,13 @@
     could still be waiting (megabytes of them, in a measured case).
 
   [Fixed]
+  - HTTP/1.1 SSE keep-alive: a request that arrived on the connection after
+    sse.close, while the application was still running (awaiting anything
+    after its last send), was handed to the WebSocket frame parser, which an
+    SSE connection does not have. The server logged "Can't call method
+    "append" on an undefined value", closed the connection, and the request
+    was never answered. It is now served once the application returns, as on
+    a plain HTTP scope.
   - HTTP/2: the client's flow-control window, not the server, decided how
     much a connection's output the server held in memory
     (CVE-2019-9517, "Internal Data Buffering"). A client that advertised a

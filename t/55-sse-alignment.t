@@ -876,6 +876,40 @@ subtest 'clean SSE end by sse.close: connection stays open and serves the next r
     $server->shutdown->get;
 };
 
+subtest 'a request arriving while the SSE application runs on after sse.close is served once it returns' => sub {
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $returned = 0;
+    my $server = reuse_server(async sub {
+        my ($scope, $receive, $send) = @_;
+        await $send->({ type => 'sse.start', status => 200 });
+        await $send->({ type => 'sse.send', event => 'tick', data => 'three' });
+        await $send->({ type => 'sse.close' });
+        # Work after the stream has ended (an unsubscribe, an audit write):
+        # the next request on the socket arrives during it.
+        await $loop->delay_future(after => 0.3);
+        $returned = 1;
+        return;
+    });
+    my $port = $server->port;
+
+    my $sock = sse_socket($port);
+    SKIP: {
+        skip "Cannot connect", 4 unless $sock;
+
+        my ($stream, $eof) = read_until($sock, $TERMINATOR);
+        like($stream, $TERMINATOR, 'chunked terminator written on sse.close');
+        ok(!$eof && !$returned,    'the application is still running, the connection open');
+
+        my ($second) = plain_request_on($sock, $port);
+        like($second, qr/PLAIN-OK/, 'the request sent meanwhile is served on the SAME socket');
+        close $sock;
+    }
+
+    $server->shutdown->get;
+    is([grep { /PAGI connection error|append/ } @warnings], [], 'no connection error was logged');
+};
+
 subtest 'post-sse.close send still raises, with the connection left open' => sub {
     my $post_close_err;
     my $server = reuse_server(async sub {
