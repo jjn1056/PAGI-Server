@@ -66,6 +66,12 @@
     GOAWAY.
 
   [Changed]
+  - A burst of output reaches IO::Async as one write generator rather than
+    one write per send, so small sends cost less: an HTTP/1.1 application
+    sending 100-byte bodies spends 28-31 us per send (was 40-47 on the
+    same machine), and 100 such responses at once move 3.3 MB/s (was
+    2.0-2.1). HTTP/2, whose sends already reached the stream in batches,
+    is unchanged.
   - --future-xs (PAGI_FUTURE_XS=1) requires Future::XS 0.16 or later and
     stops startup with an older one: 0.16 fixes the "lost a sequence
     Future" warning a dropped without_cancel Future gave (RT #181389). The
