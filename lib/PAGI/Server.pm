@@ -4910,9 +4910,21 @@ sub _pause_accepting {
 # has to wait, so a response streamed in small sends runs until its buffer is
 # full, and many of them, runnable together, run back to back while every
 # other connection waits. The server therefore counts the sends that carry
-# data and leave their scope open (Connection's _paced_send). Past the count
+# data and leave their scope open -- a body send with more, an SSE event or
+# comment, a WebSocket message -- on HTTP/1.1 and HTTP/2 alike. Past the count
 # such a send has still done all its work; what waits is its Future, until the
 # loop has polled its other connections.
+#
+# The count itself is in PAGI::Server::Connection, at each of those eight
+# sends, once its bytes are written:
+#
+#     ++$server->{_paced_sends} > $server->{max_sends_per_turn}
+#
+# It is written out at each site and not put behind one call as a performance
+# optimization. A send of 100 bytes takes about 23 us; a call per send to
+# count it added 1 to 1.5 us, which measured as 5-10% of HTTP/1.1 throughput
+# with 100 streaming connections. Inline, a send costs what it did without
+# the limit. With the limit at 0 nothing is counted.
 #
 # A paced send found the count spent. The scopes whose sends wait are served
 # after the loop's next poll whether or not this send becomes one of them, so

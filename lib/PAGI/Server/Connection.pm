@@ -938,7 +938,7 @@ sub _h2_write_pending {
     return;
 }
 
-# For a send that carries data and leaves its stream open (see _paced_send):
+# For a send that carries data and leaves its stream open (a paced send):
 # it has queued its bytes on the stream and resumed it, and nghttp2 is asked
 # for the frames once per loop pass, however many such sends ran in it. Asking
 # on every send costs more than the rest of a small send, and a connection
@@ -3052,7 +3052,13 @@ sub _h2_create_send {
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_extract_soon;
                 }
-                $paced = $weak_self->_paced_send($ss);
+                # Counted against the worker's max_sends_per_turn. Written out here, not
+                # behind a call, as a performance optimization: PAGI::Server's
+                # _budget_spent says what the count is for and what a call would cost.
+                if (my $server = $weak_self->{server}) {
+                    my $limit = $server->{max_sends_per_turn};
+                    $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+                }
             } else {
                 if ($streaming_started) {
                     # Final chunk on an already-streaming response. Bound on THIS
@@ -3110,7 +3116,7 @@ sub _h2_create_send {
             $weak_self->_h2_write_pending;
         }
 
-        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
         # done. It gives up its place in the stream's order, so the sends behind
         # it are not kept waiting, and resolves once the loop has polled again.
         if ($paced) {
@@ -3627,7 +3633,13 @@ sub _h2_create_websocket_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
-            $paced = $weak_self->_paced_send($ss);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket,
@@ -3665,7 +3677,7 @@ sub _h2_create_websocket_send {
             }
         }
 
-        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
         # done. It gives up its place in the stream's order, so the sends behind
         # it are not kept waiting, and resolves once the loop has polled again.
         if ($paced) {
@@ -4161,7 +4173,13 @@ sub _h2_create_sse_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
-            $paced = $weak_self->_paced_send($ss);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.comment') {
             return unless $ss->{response_started};
@@ -4173,7 +4191,13 @@ sub _h2_create_sse_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
-            $paced = $weak_self->_paced_send($ss);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.keepalive') {
             my $interval = $event->{interval} // 0;
@@ -4221,7 +4245,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_write_pending;
         }
 
-        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
         # done. It gives up its place in the stream's order, so the sends behind
         # it are not kept waiting, and resolves once the loop has polled again.
         if ($paced) {
@@ -5335,20 +5359,6 @@ sub _cancel_drain_waiters {
     $self->{_drain_fires} = [];
     $self->{_drain_check_active} = 0;
     $self->_settle_paced_sends($self);
-}
-
-# Called by a send that carries data and leaves its scope open -- a body send
-# with more, an SSE event or comment, a WebSocket message -- once its bytes are
-# written: counts it against the worker's max_sends_per_turn (see PAGI::Server's
-# _budget_spent). Returns nothing, or the Future the send waits on as its last
-# step. $owner is the scope's state: the connection on HTTP/1.1, the stream's
-# state on HTTP/2. With the limit off, or no server, nothing is counted.
-sub _paced_send {
-    my ($self, $owner) = @_;
-    my $server = $self->{server} or return;
-    my $limit = $server->{max_sends_per_turn} or return;
-    return if ++$server->{_paced_sends} <= $limit;
-    return $server->_budget_spent($owner);
 }
 
 # A paced send still waiting when its connection or stream ends resolves with
@@ -7030,7 +7040,13 @@ async sub _send_http_event {
 
             $weak_self->_write_out($out) if length $out;
             $weak_self->_notify_transport_write;
-            $paced = $weak_self->_paced_send($weak_self) if $more;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if ($more and my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
     }
     # A response with no body accepts and discards trailers after advancing
@@ -7105,7 +7121,7 @@ async sub _send_http_event {
         if $weak_self
         && PAGI::Server::EventValidator::scope_send_clean('http', $state->{seq});
 
-    # Paced, and past the worker's count (see _paced_send): the send's work is
+    # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
     # done. It gives up its place in the scope's order, so the sends behind it
     # are not kept waiting, and resolves once the loop has polled again.
     if ($paced) {
@@ -8640,7 +8656,13 @@ sub _create_sse_send {
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
-            $paced = $weak_self->_paced_send($weak_self);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.comment') {
             my $comment = _format_sse_comment($event);
@@ -8649,7 +8671,13 @@ sub _create_sse_send {
 
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
-            $paced = $weak_self->_paced_send($weak_self);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -8691,7 +8719,7 @@ sub _create_sse_send {
             }
         }
 
-        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
         # done. It gives up its place in the scope's order, so the sends behind it
         # are not kept waiting, and resolves once the loop has polled again.
         if ($paced) {
@@ -9280,7 +9308,13 @@ sub _create_websocket_send {
             my $bytes = $frame->to_bytes;
             $weak_self->_write_out($bytes);
             $weak_self->_notify_transport_write;
-            $paced = $weak_self->_paced_send($weak_self);
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket
@@ -9365,7 +9399,7 @@ sub _create_websocket_send {
             }
         }
 
-        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
         # done. It gives up its place in the scope's order, so the sends behind it
         # are not kept waiting, and resolves once the loop has polled again.
         if ($paced) {
