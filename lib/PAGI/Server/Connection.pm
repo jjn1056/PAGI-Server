@@ -5273,6 +5273,31 @@ sub _cancel_drain_waiters {
     # actually fell back below the low mark, which never happened here.
     $self->{_drain_fires} = [];
     $self->{_drain_check_active} = 0;
+    $self->_settle_paced_sends($self);
+}
+
+# Called by a send that carries data and leaves its scope open -- a body send
+# with more, an SSE event or comment, a WebSocket message -- once its bytes are
+# written: counts it against the worker's max_sends_per_turn (see PAGI::Server's
+# _budget_spent). Returns nothing, or the Future the send waits on as its last
+# step. $owner is the scope's state: the connection on HTTP/1.1, the stream's
+# state on HTTP/2. With the limit off, or no server, nothing is counted.
+sub _paced_send {
+    my ($self, $owner) = @_;
+    my $server = $self->{server} or return;
+    my $limit = $server->{max_sends_per_turn} or return;
+    return if ++$server->{_paced_sends} <= $limit;
+    return $server->_budget_spent($owner);
+}
+
+# A paced send still waiting when its connection or stream ends resolves with
+# the sends waiting on backpressure, as part of the disconnect (PAGI::Spec
+# "Send Completion Contract"): never failed, never cancelled.
+sub _settle_paced_sends {
+    my ($self, $owner) = @_;
+    my $waits = delete $owner->{_paced_waits} or return;
+    $_->done for @$waits;   # one the application cancelled ignores it
+    return;
 }
 
 # HTTP/2 per-stream backpressure: the h2 analogue of _wait_for_drain. Resolves
@@ -6756,6 +6781,7 @@ async sub _send_http_event {
     await $turn->{waiting} if $turn->{waiting};
     return Future->done unless $weak_self;
     return Future->done if $weak_self->{closed};
+    my $paced;
 
     if ($type eq 'http.response.start') {
         $weak_self->{response_started} = 1;
@@ -6942,6 +6968,7 @@ async sub _send_http_event {
 
             $weak_self->_write_out($out) if length $out;
             $weak_self->_notify_transport_write;
+            $paced = $weak_self->_paced_send($weak_self) if $more;
         }
     }
     # A response with no body accepts and discards trailers after advancing
@@ -7015,6 +7042,14 @@ async sub _send_http_event {
     $weak_self->_h1_end_scope_output
         if $weak_self
         && PAGI::Server::EventValidator::scope_send_clean('http', $state->{seq});
+
+    # Paced, and past the worker's count (see _paced_send): the send's work is
+    # done. It gives up its place in the scope's order, so the sends behind it
+    # are not kept waiting, and resolves once the loop has polled again.
+    if ($paced) {
+        undef $turn;
+        await $paced;
+    }
     return;
 }
 
@@ -8463,6 +8498,7 @@ sub _create_sse_send {
         await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
+        my $paced;
 
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
@@ -8542,6 +8578,7 @@ sub _create_sse_send {
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
+            $paced = $weak_self->_paced_send($weak_self);
         }
         elsif ($type eq 'sse.comment') {
             my $comment = _format_sse_comment($event);
@@ -8550,6 +8587,7 @@ sub _create_sse_send {
 
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
+            $paced = $weak_self->_paced_send($weak_self);
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -8591,6 +8629,13 @@ sub _create_sse_send {
             }
         }
 
+        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # done. It gives up its place in the scope's order, so the sends behind it
+        # are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -9038,6 +9083,7 @@ sub _create_websocket_send {
         await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
+        my $paced;
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -9172,6 +9218,7 @@ sub _create_websocket_send {
             my $bytes = $frame->to_bytes;
             $weak_self->_write_out($bytes);
             $weak_self->_notify_transport_write;
+            $paced = $weak_self->_paced_send($weak_self);
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket
@@ -9256,6 +9303,13 @@ sub _create_websocket_send {
             }
         }
 
+        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # done. It gives up its place in the scope's order, so the sends behind it
+        # are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }

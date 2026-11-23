@@ -86,6 +86,11 @@ sub has_http2 { return $HTTP2_AVAILABLE }
 # Windows doesn't support Unix signals - signal handling is conditional
 use constant WIN32 => $^O eq 'MSWin32';
 
+# Sends a scope may still run once the worker's max_sends_per_turn is spent,
+# before one of its sends waits for the loop: a short response, or a chat
+# connection's one message, does not queue behind the streams that spent it.
+use constant UNHELD_SENDS_PER_SCOPE => 4;
+
 =encoding utf8
 
 =head1 NAME
@@ -4894,6 +4899,89 @@ sub _pause_accepting {
     });
 
     $self->{_accept_pause_timer} = $timer_id;
+}
+
+# max_sends_per_turn. Awaiting a send returns to the loop only when the send
+# has to wait, so a response streamed in small sends runs until its buffer is
+# full, and many of them, runnable together, run back to back while every
+# other connection waits. The server therefore counts the sends that carry
+# data and leave their scope open (Connection's _paced_send). Past the count
+# such a send has still done all its work; what waits is its Future, until the
+# loop has polled its other connections.
+#
+# A paced send found the count spent. The scopes whose sends wait are served
+# after the loop's next poll whether or not this send becomes one of them, so
+# the count and every scope's unheld sends start afresh each turn the count
+# was spent, and a worker that is not stalling holds nothing. Returns nothing
+# for a scope's first UNHELD_SENDS_PER_SCOPE such sends since the last
+# serving; after that, the Future the send waits on. $owner is the scope's
+# state (a connection, or an HTTP/2 stream's state); it joins the queue once,
+# however many of its sends wait.
+sub _budget_spent {
+    my ($self, $owner) = @_;
+    $self->_serve_paced_sends_soon;
+    my $round = $self->{_paced_round} //= 0;
+    if (($owner->{_paced_round} // -1) != $round) {
+        $owner->{_paced_round}  = $round;
+        $owner->{_paced_unheld} = 0;
+    }
+    return if ++$owner->{_paced_unheld} <= UNHELD_SENDS_PER_SCOPE;
+    my $waits = $owner->{_paced_waits} //= [];
+    if (!@$waits) {
+        my $scopes = $self->{_paced_scopes} //= [];
+        push @$scopes, $owner;
+        weaken($scopes->[-1]);   # a scope that has gone frees its place
+    }
+    push @$waits, my $wait = $self->loop->new_future;
+    return $wait;
+}
+
+# Arranges one serving after the loop's next poll. A later queued from an I/O
+# callback runs in that same turn, before the loop polls again, so it takes a
+# second one, queued from the first, to get past the poll; from inside a
+# serving one is enough.
+sub _serve_paced_sends_soon {
+    my ($self) = @_;
+    return if $self->{_paced_serving_soon};
+    $self->{_paced_serving_soon} = 1;
+    weaken(my $weak_self = $self);
+    my $serve = sub { $weak_self->_serve_paced_sends if $weak_self };
+    my $loop = $self->loop;
+    return $loop->later($serve) if $self->{_paced_serving};
+    $loop->later(sub { $loop->later($serve) });
+    return;
+}
+
+# One serving: the count starts again from zero, and the waiting scopes are
+# taken first in, first out. Resolving a scope's sends runs its application at
+# once, and what it sends counts, so the scope at the head may use the whole
+# count; each scope served counts as one even if it sends nothing more. The
+# scopes not reached wait for the serving after the next poll.
+sub _serve_paced_sends {
+    my ($self) = @_;
+    $self->{_paced_serving_soon} = 0;
+    $self->{_paced_sends} = 0;
+    $self->{_paced_round}++;
+    my $scopes = $self->{_paced_scopes} or return;
+    local $self->{_paced_serving} = 1;
+    my $limit = $self->{max_sends_per_turn};
+    # With the limit turned off since they were held, every scope is served.
+    while (@$scopes && (!$limit || $self->{_paced_sends} < $limit)) {
+        my $owner = shift @$scopes or next;              # the scope has gone
+        my $waits = delete $owner->{_paced_waits} or next;   # settled when it ended
+        $self->{_paced_sends}++;
+        for my $wait (@$waits) {
+            # Resolving runs the application's callbacks on the send; one
+            # that dies must not strand the scopes still waiting. A send
+            # the application cancelled ignores it.
+            next if eval { $wait->done; 1 };
+            my $error = $@;
+            chomp $error;
+            $self->_log(error => "PAGI application error in a callback on a send's Future: $error");
+        }
+    }
+    $self->_serve_paced_sends_soon if @$scopes;
+    return;
 }
 
 # Called when a request completes (for max_requests tracking)
