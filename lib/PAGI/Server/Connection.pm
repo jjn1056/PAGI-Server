@@ -938,6 +938,35 @@ sub _h2_write_pending {
     return;
 }
 
+# For a send that carries data and leaves its stream open (see _paced_send):
+# it has queued its bytes on the stream and resumed it, and nghttp2 is asked
+# for the frames once per loop pass, however many such sends ran in it. Asking
+# on every send costs more than the rest of a small send, and a connection
+# whose buffer has room -- as it always has when its sends take turns with
+# other connections' -- would pay that every time. Until the pass ends the
+# frames wait where held output already waits, in nghttp2 and the streams'
+# queues, and whatever else extracts takes them along: a scope's last send, a
+# control frame, a reset of the stream (_h2_reset_stream). With
+# max_sends_per_turn off there is no pacing to pay for, and the send extracts
+# at once.
+sub _h2_extract_soon {
+    my ($self) = @_;
+    my $server = $self->{server};
+    return $self->_h2_write_pending unless $server && $server->{max_sends_per_turn};
+    return if $self->{h2_extract_soon};
+    $self->{h2_extract_soon} = 1;
+    weaken(my $weak_self = $self);
+    $server->loop->later(sub {
+        # Nothing to do if something else has extracted since, or the
+        # connection has closed.
+        return unless $weak_self && delete $weak_self->{h2_extract_soon};
+        return if $weak_self->{closed};
+        eval { $weak_self->_h2_write_pending; 1 }
+            or $weak_self->_connection_handler_error('HTTP/2 output', $@);
+    });
+    return;
+}
+
 # =============================================================================
 # HTTP/2 Stream Callbacks
 # =============================================================================
@@ -2112,6 +2141,9 @@ sub _h2_reset_stream {
     my ($self, $stream_id, $code) = @_;
     return unless $self->_h2_stream_alive($stream_id);
     eval {
+        # Frames waiting for this pass's extraction belong to sends that have
+        # already resolved; the reset would discard them.
+        $self->_h2_write_pending if delete $self->{h2_extract_soon};
         $self->{h2_session}->submit_rst_stream($stream_id, $code);
         $self->_h2_write_pending;
     };
@@ -3017,7 +3049,7 @@ sub _h2_create_send {
                     # Synchronous — app send path, not nghttp2 extract.
                     $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->resume_stream($stream_id);
-                    $weak_self->_h2_write_pending;
+                    $weak_self->_h2_extract_soon;
                 }
             } else {
                 if ($streaming_started) {
@@ -3583,7 +3615,7 @@ sub _h2_create_websocket_send {
             # may fire here to tell the app to pause its source.
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket,
@@ -4108,7 +4140,7 @@ sub _h2_create_sse_send {
             # may fire here to tell the app to pause its source.
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
         }
         elsif ($type eq 'sse.comment') {
             return unless $ss->{response_started};
@@ -4119,7 +4151,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_enqueue($ss, $bytes);
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
         }
         elsif ($type eq 'sse.keepalive') {
             my $interval = $event->{interval} // 0;
