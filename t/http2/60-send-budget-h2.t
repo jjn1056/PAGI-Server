@@ -594,6 +594,57 @@ subtest 'websocket.send is paced and keeps its order' => sub {
     stop_server($pair->{server});
 };
 
+# A held send has given up its place among its stream's sends: the sends
+# behind it are written without waiting for it, whatever their type. (For
+# body sends that is 'sends stay in order and the last one is not held back'.)
+for my $case (
+    ['sse.send',       sub { +{ type => 'sse.send', data => $_[0] } }],
+    ['sse.comment',    sub { +{ type => 'sse.comment', comment => $_[0] } }],
+    ['websocket.send', sub { +{ type => 'websocket.send', text => $_[0] } }],
+) {
+    my ($type, $event) = @$case;
+    subtest "$type: the sends behind a held one are written without waiting for it" => sub {
+        my (@futures, $issued);
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            die "unsupported scope type\n" unless $scope->{type} =~ /\A(?:sse|websocket)\z/;
+            my $sse = $scope->{type} eq 'sse';
+            await $receive->() unless $sse;
+            await $send->({ type => $sse ? 'sse.start' : 'websocket.accept' });
+            @futures = map { $send->($event->(sprintf 'N%05d', $_)) } 1 .. 200;
+            $issued = grep { !$_->is_ready } @futures;
+            await Future->wait_all(@futures);
+            if ($sse) { await $send->({ type => 'sse.close' }); return }
+            await $send->({ type => 'websocket.close', code => 1000 });
+            while (1) { last if (await $receive->())->{type} eq 'websocket.disconnect' }
+        };
+        my $pair = h2_pair($app, max_sends_per_turn => 1);
+        my $sid = $type eq 'websocket.send'
+            ? submit($pair, method => 'CONNECT', path => '/ws',
+                headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+                body => sub { return undef })   # the request stream stays open
+            : submit($pair, @SSE);
+        my $turns = 0;
+        exchange($pair) until defined $issued || ++$turns > 200;
+        cmp_ok($issued, '>=', 190, "$issued of the 200 sends were pending once all were issued");
+        exchange($pair) for 1 .. 10;
+        is([($pair->{seen}{body}{$sid} // '') =~ /N(\d{5})/g], [map { sprintf '%05d', $_ } 1 .. 200],
+            'ten loop turns later the client has every one, in the order issued');
+        $turns = 0;
+        exchange($pair) until !(grep { !$_->is_ready } @futures) || ++$turns > 2000;
+        is(scalar(grep { !$_->is_done } @futures), 0, 'and every Future resolves');
+        if ($type eq 'websocket.send') {
+            $pair->{client}->submit_rst_stream($sid, 8);
+            $pair->{sock}->syswrite($pair->{client}->mem_send);
+            exchange($pair) for 1 .. 5;
+        }
+        else {
+            pump_until(sub { exchange($pair); exists $pair->{seen}{closed}{$sid} }, 5);
+        }
+        stop_server($pair->{server});
+    };
+}
+
 is([map { "$_->{level}: $_->{message}" } @log], [], 'nothing else was logged');
 
 done_testing;

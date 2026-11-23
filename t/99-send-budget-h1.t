@@ -81,6 +81,8 @@ sub client {
 sub get { "GET $_[0] HTTP/1.1\r\nHost: x\r\n\r\n" }
 sub events { "GET $_[0] HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n" }
 my $ENDED = qr/\r\n0\r\n\r\n\z/;
+my $WS_UPGRADE = join "\r\n", 'GET /ws HTTP/1.1', 'Host: localhost', 'Upgrade: websocket',
+    'Connection: Upgrade', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '';
 
 # A raw non-blocking socket, for the cases that count loop turns themselves.
 sub raw_connect {
@@ -513,8 +515,7 @@ subtest 'websocket.send is paced and keeps its order' => sub {
     };
     my $server = start_server($app, max_sends_per_turn => 1);
     my $sock = raw_connect($server);
-    syswrite($sock, join "\r\n", 'GET /ws HTTP/1.1', 'Host: localhost', 'Upgrade: websocket',
-        'Connection: Upgrade', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '');
+    syswrite($sock, $WS_UPGRADE);
     my $parser = Protocol::WebSocket::Frame->new(max_payload_size => 1 << 20);
     my ($head, @texts, $closed) = ('');
     pump_until(sub {
@@ -534,6 +535,142 @@ subtest 'websocket.send is paced and keeps its order' => sub {
     is(\@texts, [map { "M$_" } 1 .. 2000], 'after all 2,000 messages, in order');
     cmp_ok($held, '>=', 300, "$held of the sends were held");
     close $sock;
+    stop_server($server);
+};
+
+# A held send has given up its place among its scope's sends: the sends behind
+# it are written without waiting for it, whatever their type. (For body sends
+# that is 'sends stay in order and the last one is not held back'.)
+for my $case (
+    ['sse.send',       sub { +{ type => 'sse.send', data => $_[0] } }],
+    ['sse.comment',    sub { +{ type => 'sse.comment', comment => $_[0] } }],
+    ['websocket.send', sub { +{ type => 'websocket.send', text => $_[0] } }],
+) {
+    my ($type, $event) = @$case;
+    subtest "$type: the sends behind a held one are written without waiting for it" => sub {
+        my (@futures, $issued);
+        my $app = async sub {
+            my ($scope, $receive, $send) = @_;
+            die "unsupported scope type\n" unless $scope->{type} =~ /\A(?:sse|websocket)\z/;
+            my $sse = $scope->{type} eq 'sse';
+            await $receive->();
+            await $send->({ type => $sse ? 'sse.start' : 'websocket.accept' });
+            @futures = map { $send->($event->(sprintf 'N%05d', $_)) } 1 .. 200;
+            $issued = grep { !$_->is_ready } @futures;
+            await Future->wait_all(@futures);
+            if ($sse) { await $send->({ type => 'sse.close' }); return }
+            await $send->({ type => 'websocket.close', code => 1000 });
+            while (1) { last if (await $receive->())->{type} eq 'websocket.disconnect' }
+        };
+        my $server = start_server($app, max_sends_per_turn => 1);
+        my $sock = raw_connect($server);
+        syswrite($sock, $type eq 'websocket.send' ? $WS_UPGRADE : events('/'));
+        pump_until(sub { defined $issued });
+        cmp_ok($issued, '>=', 190, "$issued of the 200 sends were pending once all were issued");
+        my $wire = '';
+        for my $turn (1 .. 10) {
+            $loop->loop_once(0.01);
+            $wire .= read_now($sock);
+        }
+        is([$wire =~ /N(\d{5})/g], [map { sprintf '%05d', $_ } 1 .. 200],
+            'ten loop turns later the client has every one, in the order issued');
+        ok(pump_until(sub { !grep { !$_->is_ready } @futures }), 'every Future settles');
+        is(scalar(grep { !$_->is_done } @futures), 0, 'successfully');
+        close $sock;
+        stop_server($server);
+    };
+}
+
+# Held sends are resolved after the loop's next poll for I/O, not before it:
+# served in the loop turn that held them, their application would run again
+# before the loop had looked at any other connection.
+subtest 'a held send stays pending until the loop has polled again' => sub {
+    my $sent;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        $sent = [map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 10];
+        await Future->wait_all(@$sent);
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    my $server = start_server($app, max_sends_per_turn => 1);
+    my $sock = raw_connect($server);
+    syswrite($sock, get('/'));
+    my $turns = 0;
+    $loop->loop_once(0.05) until $sent || ++$turns > 200;
+    my $held = grep { !$_->is_ready } @$sent;
+    cmp_ok($held, '>=', 1, "$held sends are still pending at the end of the loop turn that issued them");
+    $loop->loop_once(0.05);
+    is(scalar(grep { !$_->is_ready } @$sent), 0, 'and none at the end of the next');
+    my $wire = '';
+    pump_until(sub { $wire .= read_now($sock); $wire =~ $ENDED }, 10);
+    close $sock;
+    stop_server($server);
+};
+
+# One serving of the queue resumes a limit's worth of scopes, also when the
+# applications it resumes send nothing more for now: without that it would run
+# every held scope's application back to back, which is the stall again.
+subtest 'one serving resumes no more scopes than the limit' => sub {
+    my ($turn, $with_held, %resumed_in) = (0, 0);
+    my $release = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        if ($scope->{path} eq '/ping') {
+            await $send->({ type => 'http.response.body', body => "pong\n" });
+            return;
+        }
+        my ($id) = $scope->{query_string} =~ /id=(\d+)/;
+        my @sent = map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 10;
+        $with_held++ if grep { !$_->is_ready } @sent;
+        await Future->wait_all(@sent);
+        $resumed_in{$id} = $turn;
+        await $release;      # nothing more to send for now
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    my $server = start_server($app, max_sends_per_turn => 2);
+    my @clients = map { client($server) } 1 .. 10;
+    Future->wait_all(map { $_->{request}->(get('/ping'), qr/pong\n\r\n0\r\n\r\n\z/) } @clients)->get;
+    my @done = map { $clients[$_]{request}->(get("/?id=$_"), $ENDED) } 0 .. $#clients;
+    for my $n (1 .. 60) {
+        $turn = $n;
+        $loop->loop_once(0.01);
+        last if keys(%resumed_in) == @clients;
+    }
+    is($with_held, 10, 'ten responses each had sends held');
+    is(scalar(keys %resumed_in), 10, 'and all ten were resumed');
+    my %resumed_per_turn;
+    $resumed_per_turn{$_}++ for values %resumed_in;
+    is([grep { $_ > 2 } values %resumed_per_turn], [], 'no more than two of them in any one loop turn');
+    $release->done;
+    Future->wait_all(@done)->get;
+    $_->{leave}->() for @clients;
+    stop_server($server);
+};
+
+# max_sends_per_turn can be changed while the server runs. Turned off, nothing
+# is held any more, and what was being held is served, all of it.
+subtest 'turning the limit off serves the sends it was holding' => sub {
+    my ($server, $held);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        my @sent = map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 10;
+        $held = grep { !$_->is_ready } @sent;
+        $server->configure(max_sends_per_turn => 0);
+        await Future->wait_all(@sent);
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    $server = start_server($app, max_sends_per_turn => 1);
+    my $reader = client($server);
+    my $done = $reader->{request}->(get('/'), $ENDED);
+    ok(pump_until(sub { $done->is_ready }, 3), 'the response completes');
+    cmp_ok($held, '>=', 1, "$held of its sends were held when the limit was turned off");
+    $reader->{leave}->();
     stop_server($server);
 };
 
