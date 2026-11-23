@@ -2733,6 +2733,19 @@ sub _h2_create_send {
                 );
                 $weak_self->_h2_write_pending;
             }
+            # Nothing is sent for it, but an application that streams such a
+            # response sends as often and holds the loop as long: a body send
+            # with more is counted against the worker's max_sends_per_turn
+            # like any other. Written out here, not behind a call, as a
+            # performance optimization (see PAGI::Server's _budget_spent). A
+            # discarded send holds no place in the stream's order, so it has
+            # none to give up before it waits.
+            if ($type eq 'http.response.body' && $event->{more} and my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                my $paced;
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+                await $paced if $paced;
+            }
             return;
         }
 
@@ -6963,6 +6976,15 @@ async sub _send_http_event {
         # HEAD, 204 and 304 have headers but no body; still reach scope
         # completion below.
         $weak_self->_flush_pending_headers;
+        # Nothing is written for the send, but an application that streams
+        # such a response sends as often and holds the loop as long: counted
+        # against the worker's max_sends_per_turn like any body send with
+        # more. Written out here, not behind a call, as a performance
+        # optimization (see PAGI::Server's _budget_spent).
+        if ($event->{more} and my $server = $weak_self->{server}) {
+            my $limit = $server->{max_sends_per_turn};
+            $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+        }
     }
     elsif ($type eq 'http.response.body') {
         # --- BACKPRESSURE CHECK ---

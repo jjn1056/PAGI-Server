@@ -1529,7 +1529,9 @@ B<Example:>
 How many sends that leave their scope open a worker runs before it returns
 to the event loop for its other connections. The sends counted are
 C<http.response.body> with C<more>, C<sse.send>, C<sse.comment> and
-C<websocket.send>.
+C<websocket.send>. A body send is counted whether or not its bytes go out:
+a response to C<HEAD>, or with status 204 or 304, has no body on the wire,
+but an application that streams one sends as often.
 
 B<Default:> 384. C<0> turns it off.
 
@@ -4918,8 +4920,9 @@ sub _pause_accepting {
 # such a send has still done all its work; what waits is its Future, until the
 # loop has polled its other connections.
 #
-# The count itself is in PAGI::Server::Connection, at each of those eight
-# sends, once its bytes are written:
+# The count itself is in PAGI::Server::Connection, at each of those sends,
+# once its bytes are written (or discarded, for a response that has no body
+# on the wire: to HEAD, or with status 204 or 304):
 #
 #     ++$server->{_paced_sends} > $server->{max_sends_per_turn}
 #

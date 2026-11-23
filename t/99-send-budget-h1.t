@@ -106,10 +106,11 @@ sub read_now {
 }
 
 # The streaming application every bound case uses. /stream, /events and
-# /comments send 2,000 x 100 bytes, each send awaited and counted; /ping and
-# /three are the requests that must not wait for them.
+# /comments send 2,000 x 100 bytes, each send awaited and counted; /unchanged
+# and /empty do the same under a status that has no body (304, 204); /ping
+# and /three are the requests that must not wait for them.
 sub streaming_app {
-    my ($sends, $started) = @_;
+    my ($sends, $started, $finished) = @_;
     return async sub {
         my ($scope, $receive, $send) = @_;
         if ($scope->{type} eq 'sse') {
@@ -123,10 +124,13 @@ sub streaming_app {
                     : { type => 'sse.send', data => 'x' x 93 });
             }
             await $send->({ type => 'sse.close' });
+            $$finished++;
             return;
         }
         die "unsupported scope type\n" unless $scope->{type} eq 'http';
-        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        my $status = { '/unchanged' => 304, '/empty' => 204 }->{ $scope->{path} } // 200;
+        await $send->({ type => 'http.response.start', status => $status,
+            headers => $status == 200 ? [['content-type', 'text/plain']] : [] });
         if ($scope->{path} eq '/ping') {
             await $send->({ type => 'http.response.body', body => "pong\n" });
             return;
@@ -144,6 +148,7 @@ sub streaming_app {
             await $send->({ type => 'http.response.body', body => $LINE, more => 1 });
         }
         await $send->({ type => 'http.response.body', body => '' });
+        $$finished++;
     };
 }
 
@@ -153,14 +158,16 @@ sub streaming_app {
 # already open, as are the streams' own connections.
 sub sends_before_answer {
     my (%arg) = @_;
-    my ($sends, $started) = (0, undef);
-    my $server = start_server(streaming_app(\$sends, \$started), %{ $arg{server} // {} });
+    my ($sends, $started, $finished) = (0, undef, 0);
+    my $server = start_server(streaming_app(\$sends, \$started, \$finished), %{ $arg{server} // {} });
     my $probe = client($server);
     $probe->{request}->(get('/ping'), qr/pong\n/)->get;
     my @streams = map { client($server) } 1 .. $arg{k};
     Future->wait_all(map { $_->{request}->(get('/ping'), qr/pong\n/) } @streams)->get;
 
-    my $stream_head = ($arg{stream} // '/stream') eq '/stream' ? get('/stream') : events($arg{stream});
+    # head => a whole request head, for a response that has no body: on the
+    # wire it is complete with its headers, long before its application ends.
+    my $stream_head = $arg{head} // (($arg{stream} // '/stream') eq '/stream' ? get('/stream') : events($arg{stream}));
     my $probe_path  = $arg{probe} // '/ping';
     $started = $loop->new_future;
     my ($sends_at, $answered);
@@ -168,11 +175,12 @@ sub sends_before_answer {
         $sends_at = $sends;
         $answered = $probe->{request}->(get($probe_path), qr/pong\n\r\n0\r\n\r\n\z/);
     });
-    my @done = map { $_->{request}->($stream_head, $ENDED) } @streams;
+    my @done = map { $_->{request}->($stream_head, $arg{head} ? qr/\r\n\r\n\z/ : $ENDED) } @streams;
     $loop->loop_once until $answered;
     $answered->get;
     my $ran = $sends - $sends_at;
     Future->wait_all(@done)->get;
+    pump_until(sub { $finished >= $arg{k} }) or die "the streaming applications never all ran to their end\n";
     $_->{leave}->() for $probe, @streams;
     stop_server($server);
     return $ran;
@@ -202,6 +210,22 @@ subtest 'sse.send and sse.comment are bounded alike' => sub {
     for my $path ('/events', '/comments') {
         my $ran = sends_before_answer(k => 10, stream => $path);
         cmp_ok($ran, '<=', $BOUND, "$path: $ran sends ran before the ping was answered");
+    }
+};
+
+# A response to HEAD, or one with status 204 or 304, has no body: the server
+# writes nothing for its body sends. An application that streams one all the
+# same sends as often and holds the loop as long, so its sends are counted
+# like any others.
+subtest 'a stream whose body is not sent is bounded alike' => sub {
+    for my $case (
+        ['a response to HEAD',      "HEAD /stream HTTP/1.1\r\nHost: x\r\n\r\n"],
+        ['a response with status 304', get('/unchanged')],
+        ['a response with status 204', get('/empty')],
+    ) {
+        my ($what, $head) = @$case;
+        my $ran = sends_before_answer(k => 50, head => $head);
+        cmp_ok($ran, '<=', $BOUND, "$what: $ran streaming sends ran before the ping was answered");
     }
 };
 

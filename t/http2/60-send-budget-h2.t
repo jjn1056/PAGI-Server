@@ -284,7 +284,9 @@ sub sends_before_ping {
             return;
         }
         die "unsupported scope type\n" unless $scope->{type} eq 'http';
-        await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
+        my $status = { '/unchanged' => 304, '/empty' => 204 }->{ $scope->{path} } // 200;
+        await $send->({ type => 'http.response.start', status => $status,
+            headers => $status == 200 ? [['content-type', 'text/plain']] : [] });
         if ($scope->{path} eq '/ping') {
             await $send->({ type => 'http.response.body', body => "pong\n" });
             return;
@@ -344,8 +346,8 @@ sub sends_before_ping {
     my ($sends_at, $answered);
     $started->on_done(sub { $sends_at = $sends; $answered = $ping->() });
     my @done = map {
-        my $sid = $session->submit_request(method => 'GET', path => $path, scheme => 'http', authority => 'x',
-            ($path eq '/stream' ? () : (headers => [['accept', 'text/event-stream']])));
+        my $sid = $session->submit_request(method => $arg{method} // 'GET', path => $path, scheme => 'http', authority => 'x',
+            ($path =~ m{\A/(?:events|comments)\z} ? (headers => [['accept', 'text/event-stream']]) : ()));
         $closed{$sid} = $loop->new_future;
     } 1 .. $k;
     $flush->();
@@ -378,6 +380,22 @@ subtest 'sse.send and sse.comment are bounded alike' => sub {
     for my $path ('/events', '/comments') {
         my $ran = sends_before_ping(k => 10, stream => $path);
         cmp_ok($ran, '<=', $BOUND, "$path: $ran sends ran before the ping was answered");
+    }
+};
+
+# A response to HEAD, or one with status 204 or 304, has no body: the server
+# discards its body sends. An application that streams one all the same sends
+# as often and holds the loop as long, so its sends are counted like any
+# others.
+subtest 'a stream whose body is not sent is bounded alike' => sub {
+    for my $case (
+        ['a response to HEAD',         method => 'HEAD'],
+        ['a response with status 304', stream => '/unchanged'],
+        ['a response with status 204', stream => '/empty'],
+    ) {
+        my ($what, @arg) = @$case;
+        my $ran = sends_before_ping(k => 50, @arg);
+        cmp_ok($ran, '<=', $BOUND, "$what: $ran streaming sends ran before the ping was answered");
     }
 };
 

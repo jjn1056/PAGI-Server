@@ -74,8 +74,9 @@
     sends over HTTP/1.1 (33,451 over HTTP/2), 0.8 to 1.1 seconds. A worker
     now runs max_sends_per_turn (default 384; pagi-server
     --max-sends-per-turn; 0 turns it off) sends that leave their scope open
-    -- http.response.body with more, sse.send, sse.comment, websocket.send
-    -- and then returns to the loop. A send past that count, and past four
+    -- http.response.body with more (also when the response has no body on
+    the wire: HEAD, 204, 304), sse.send, sse.comment, websocket.send -- and
+    then returns to the loop. A send past that count, and past four
     more for its scope, has done its work and written its bytes; its Future
     resolves once the loop has polled again. The same request is now
     answered after 1,626 sends (1,234 over HTTP/2), in about 60 and 50 ms.
