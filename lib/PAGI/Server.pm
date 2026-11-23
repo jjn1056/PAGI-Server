@@ -4925,7 +4925,7 @@ sub _pause_accepting {
 #
 # It is written out at each site and not put behind one call as a performance
 # optimization: on a 100-byte send, about 23 us without any of this, the call
-# measured about 1 us more than the count written out. With the limit at 0
+# measured 0.5 to 1 us more than the count written out. With the limit at 0
 # nothing is counted.
 #
 # A paced send found the count spent. The scopes whose sends wait are served

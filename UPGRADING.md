@@ -123,8 +123,9 @@ resolves once the loop has polled again. What you may notice:
 - Over HTTP/2 these sends hand their frames to the connection once per loop
   pass, not inside each send.
 
-Set `max_sends_per_turn => 0` (or `--max-sends-per-turn 0`) to restore the
-old behaviour.
+Set `max_sends_per_turn => 0` (or `--max-sends-per-turn 0`) to turn it off:
+no send is held, and over HTTP/2 each send hands its frames over itself, as
+before.
 
 ### A client that stops reading is disconnected after 60 seconds
 
