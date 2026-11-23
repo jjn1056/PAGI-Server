@@ -1546,7 +1546,10 @@ held at all. The bytes of a held send are already on their way.
 What it does not do: a response with more than four such sends takes turns
 with the other streams, it is not served ahead of them; and the limit counts
 sends, so an application that works for long between sends still holds the
-loop for that long.
+loop for that long. The count starts again once it has been spent and the
+loop has polled, not on every turn of the loop, so a worker with little to
+do spends it now and then too: a scope that sends more than four times in
+that turn has a send held until the next.
 
 A held send is pending for a reason other than a slow client. Do not read
 C<< $future->is_ready >> after a send as a backpressure signal; use
@@ -4921,15 +4924,17 @@ sub _pause_accepting {
 #     ++$server->{_paced_sends} > $server->{max_sends_per_turn}
 #
 # It is written out at each site and not put behind one call as a performance
-# optimization. A send of 100 bytes takes about 23 us; a call per send to
-# count it added 1 to 1.5 us, which measured as 5-10% of HTTP/1.1 throughput
-# with 100 streaming connections. Inline, a send costs what it did without
-# the limit. With the limit at 0 nothing is counted.
+# optimization: on a 100-byte send, about 23 us without any of this, the call
+# measured about 1 us more than the count written out. With the limit at 0
+# nothing is counted.
 #
 # A paced send found the count spent. The scopes whose sends wait are served
 # after the loop's next poll whether or not this send becomes one of them, so
-# the count and every scope's unheld sends start afresh each turn the count
-# was spent, and a worker that is not stalling holds nothing. Returns nothing
+# the count and every scope's unheld sends start afresh after each turn in
+# which the count was spent. Until it is spent the count runs on from one
+# turn to the next, so a quiet worker spends it too, every max_sends_per_turn
+# sends, and a scope that sends more than UNHELD_SENDS_PER_SCOPE times in
+# that turn has a send held until the next. Returns nothing
 # for a scope's first UNHELD_SENDS_PER_SCOPE such sends since the last
 # serving; after that, the Future the send waits on. $owner is the scope's
 # state (a connection, or an HTTP/2 stream's state); it joins the queue once,

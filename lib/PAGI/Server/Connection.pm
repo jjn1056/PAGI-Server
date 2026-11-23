@@ -957,8 +957,8 @@ sub _h2_extract_soon {
     $self->{h2_extract_soon} = 1;
     weaken(my $weak_self = $self);
     $server->loop->later(sub {
-        # Nothing to do if something else has extracted since, or the
-        # connection has closed.
+        # Nothing to do if a reset has sent the frames already
+        # (_h2_reset_stream), or the connection has closed.
         return unless $weak_self && delete $weak_self->{h2_extract_soon};
         return if $weak_self->{closed};
         eval { $weak_self->_h2_write_pending; 1 }

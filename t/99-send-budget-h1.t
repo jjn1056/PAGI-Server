@@ -205,7 +205,11 @@ subtest 'sse.send and sse.comment are bounded alike' => sub {
     }
 };
 
-subtest 'a worker that is not stalling holds nothing' => sub {
+# The count runs on from one loop turn to the next until it is spent, so even
+# a worker with little to do spends it. Scopes that send up to four times in
+# a turn are still never held; one that sends more in the turn that spends
+# the count has a send held until the next (PAGI::Server's _budget_spent).
+subtest 'sends spread over the loop\'s turns are not held' => sub {
     my ($held, $sends, $started) = (0, 0, 0);
     my @tick;
     my $app = async sub {

@@ -80,7 +80,7 @@
     resolves once the loop has polled again. The same request is now
     answered after 1,626 sends (1,234 over HTTP/2), in about 60 and 50 ms.
     Over HTTP/2 these sends hand their frames to the connection once per
-    loop pass, not once each: a 100-byte send takes 26-28 us (was 31-32).
+    loop pass, not once each: a 100-byte send takes about 26 us (was 31).
     What an application can notice: on_high_water and on_drain now fire on
     every drain cycle for an application that awaits its sends (it got one
     on_high_water and no on_drain); and a send whose Future the application

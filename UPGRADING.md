@@ -99,6 +99,33 @@ leave send ordering to the server. What you may notice:
 - A burst of unawaited sends waits its turn in the server rather than piling
   into the write buffer.
 
+### Many streaming responses take turns
+
+Awaiting a `$send` returned to the event loop only when the send had to
+wait, so a response sent in small pieces ran until its buffer was full, and
+many such responses ran back to back while every other connection on the
+worker waited (about a second behind 50 of them). A worker now runs
+`max_sends_per_turn` (default 384) sends that leave their scope open --
+`http.response.body` with `more`, `sse.send`, `sse.comment`,
+`websocket.send` -- and then returns to the loop. A send past that count,
+and past four more for its scope, has written its bytes; its Future
+resolves once the loop has polled again. What you may notice:
+
+- A send's Future can be pending when the client is not slow. Do not read
+  `is_ready` after a send as backpressure; use `pagi.transport`.
+- `on_high_water` and `on_drain` now fire on every drain cycle for an
+  application that awaits its sends (it got one `on_high_water` and no
+  `on_drain`).
+- A send whose Future was dropped without being awaited still delivers its
+  bytes if it is one that is held, but Future::AsyncAwait warns that a
+  suspended sub `lost its returning future` when it resumes. Await every
+  send, or keep its Future.
+- Over HTTP/2 these sends hand their frames to the connection once per loop
+  pass, not inside each send.
+
+Set `max_sends_per_turn => 0` (or `--max-sends-per-turn 0`) to restore the
+old behaviour.
+
 ### A client that stops reading is disconnected after 60 seconds
 
 While bytes wait to be written to a client, a client that takes none of

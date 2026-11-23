@@ -613,7 +613,10 @@ subtest 'on_high_water fires as soon as waiting sends take buffered_amount to th
     syswrite($sock, "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n");
     my ($wire) = read_until($sock, sub { $_[0] =~ /\r\n0\r\n\r\n/ }, 30);
     like($wire, qr/\r\n0\r\n\r\n/, 'the stream completed');
-    is($seen{fired_by_comment}, 0, 'the comment alone did not fire on_high_water');
+    # Setup, not a requirement: over HTTP/1.1 an sse.comment does not report
+    # its bytes to the transport handle, which is what lets this case fill the
+    # buffer unseen. If that changes, the case needs another way to do it.
+    is($seen{fired_by_comment}, 0, 'setup: the comment filled the buffer without firing on_high_water');
     is($seen{pending}, 3, 'three events queued unawaited behind it');
     is(scalar @high, 1, 'on_high_water fired once');
     is($high[0]{resolved}, 0, 'before the first waiting event had resolved');
