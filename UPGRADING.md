@@ -106,10 +106,11 @@ wait, so a response sent in small pieces ran until its buffer was full, and
 many such responses ran back to back while every other connection on the
 worker waited (about a second behind 50 of them). A worker now runs
 `max_sends_per_turn` (default 384) sends that leave their scope open --
-`http.response.body` with `more`, `sse.send`, `sse.comment`,
-`websocket.send` -- and then returns to the loop. A send past that count,
-and past four more for its scope, has written its bytes; its Future
-resolves once the loop has polled again. What you may notice:
+`http.response.body` with `more` (also for a response that has no body on
+the wire: `HEAD`, 204, 304), `sse.send`, `sse.comment`, `websocket.send` --
+and then returns to the loop. A send past that count, and past four more
+for its scope, has done its work; its Future resolves when its scope's
+turn comes round, no sooner than the loop's next poll. What you may notice:
 
 - A send's Future can be pending when the client is not slow. Do not read
   `is_ready` after a send as backpressure; use `pagi.transport`.

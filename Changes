@@ -77,15 +77,16 @@
     -- http.response.body with more (also when the response has no body on
     the wire: HEAD, 204, 304), sse.send, sse.comment, websocket.send -- and
     then returns to the loop. A send past that count, and past four
-    more for its scope, has done its work and written its bytes; its Future
-    resolves once the loop has polled again. The same request is now
-    answered after 1,626 sends (1,234 over HTTP/2), in about 60 and 50 ms.
+    more for its scope, has done its work; its Future resolves when its
+    scope's turn comes round, no sooner than the loop's next poll. The same
+    request is now answered after fewer than 2,000 sends, in about 60 ms
+    (50 over HTTP/2).
     Over HTTP/2 these sends hand their frames to the connection once per
     loop pass, not once each: a 100-byte send takes about 26 us (was 31).
     What an application can notice: on_high_water and on_drain now fire on
     every drain cycle for an application that awaits its sends (it got one
     on_high_water and no on_drain); and a send whose Future the application
-    dropped without awaiting, if it is one that waits, still delivers its
+    dropped without awaiting, if it is one that is held, still delivers its
     bytes but draws Future::AsyncAwait's "lost its returning future"
     warning. See "max_sends_per_turn" in PAGI::Server.
   - A burst of output reaches IO::Async as one write generator rather than

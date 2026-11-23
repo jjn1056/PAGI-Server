@@ -2736,11 +2736,15 @@ sub _h2_create_send {
             # Nothing is sent for it, but an application that streams such a
             # response sends as often and holds the loop as long: a body send
             # with more is counted against the worker's max_sends_per_turn
-            # like any other. Written out here, not behind a call, as a
-            # performance optimization (see PAGI::Server's _budget_spent). A
-            # discarded send holds no place in the stream's order, so it has
-            # none to give up before it waits.
-            if ($type eq 'http.response.body' && $event->{more} and my $server = $weak_self->{server}) {
+            # like any other. (A file or fh body ends the response whatever
+            # its more says, and a response's last send is not counted.)
+            # Written out here, not behind a call, as a performance
+            # optimization (see PAGI::Server's _budget_spent). A discarded
+            # send holds no place in the stream's order, so it has none to
+            # give up before it waits.
+            if ($type eq 'http.response.body' && $event->{more}
+                    && !defined $event->{file} && !defined $event->{fh}
+                    and my $server = $weak_self->{server}) {
                 my $limit = $server->{max_sends_per_turn};
                 my $paced;
                 $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
@@ -5248,19 +5252,26 @@ sub _transport_log_sink {
 # one case in which its check does anything: measuring through the handle on
 # every send costs more than the rest of a small send once the buffer drains
 # between sends.
+#
+# The buffered amount is the sum _buffered_amount returns, written out here
+# and not read through it as a performance optimization: this runs on every
+# send of every scope, and the calls measured about 2% of HTTP/1.1
+# throughput. Keep the two the same sum.
 sub _notify_transport_write {
     my ($self) = @_;
     my $ts = $self->{current_transport_state} or return;
-    return if $self->_buffered_amount < $self->{write_high_watermark};
+    return if ($self->{stream} ? $self->{_queued_bytes} // 0 : 0) + ($self->{_held_bytes} // 0)
+        < $self->{write_high_watermark};
     $ts->_check_watermarks;
     return;
 }
 
-# The HTTP/2 twin, for one stream's handle and that stream's buffered amount.
+# The HTTP/2 twin, for one stream's handle and that stream's buffered amount:
+# the sum _h2_buffered_amount returns, written out for the same reason.
 sub _h2_notify_transport_write {
     my ($self, $ss) = @_;
     my $ts = $ss->{transport_state} or return;
-    return if _h2_buffered_amount($ss) < $self->{write_high_watermark};
+    return if ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $self->{write_high_watermark};
     $ts->_check_watermarks;
     return;
 }
@@ -6979,9 +6990,12 @@ async sub _send_http_event {
         # Nothing is written for the send, but an application that streams
         # such a response sends as often and holds the loop as long: counted
         # against the worker's max_sends_per_turn like any body send with
-        # more. Written out here, not behind a call, as a performance
-        # optimization (see PAGI::Server's _budget_spent).
-        if ($event->{more} and my $server = $weak_self->{server}) {
+        # more. (A file or fh body ends the response whatever its more says,
+        # and a response's last send is not counted.) Written out here, not
+        # behind a call, as a performance optimization (see PAGI::Server's
+        # _budget_spent).
+        if ($event->{more} && !defined $event->{file} && !defined $event->{fh}
+                and my $server = $weak_self->{server}) {
             my $limit = $server->{max_sends_per_turn};
             $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
         }

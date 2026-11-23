@@ -180,7 +180,8 @@ sub sends_before_answer {
     $answered->get;
     my $ran = $sends - $sends_at;
     Future->wait_all(@done)->get;
-    pump_until(sub { $finished >= $arg{k} }) or die "the streaming applications never all ran to their end\n";
+    # Not a bound: a stream with no body on the wire still has all its sends to run.
+    pump_until(sub { $finished >= $arg{k} }, 120) or die "the streaming applications never all ran to their end\n";
     $_->{leave}->() for $probe, @streams;
     stop_server($server);
     return $ran;
@@ -227,6 +228,35 @@ subtest 'a stream whose body is not sent is bounded alike' => sub {
         my $ran = sends_before_answer(k => 50, head => $head);
         cmp_ok($ran, '<=', $BOUND, "$what: $ran streaming sends ran before the ping was answered");
     }
+};
+
+# A file or filehandle body ends its response whatever `more` says
+# (PAGI::Spec::Www), and a response's last send is never counted -- also when
+# the response has no body on the wire and the file is never opened. With a
+# limit of three, three such responses must leave a stream after them the
+# whole count: three sends, four more, and the eighth is its first held.
+subtest 'a file body that ends a response without a body is not counted' => sub {
+    my $first_held;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        if ($scope->{method} eq 'HEAD') {
+            await $send->({ type => 'http.response.body', file => $0, more => 1 });
+            return;
+        }
+        my @sent = map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 10;
+        ($first_held) = grep { !$sent[$_ - 1]->is_ready } 1 .. @sent;
+        await Future->wait_all(@sent);
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    my $server = start_server($app, max_sends_per_turn => 3);
+    my $reader = client($server);
+    $reader->{request}->("HEAD /file HTTP/1.1\r\nHost: x\r\n\r\n", qr/\r\n\r\n\z/)->get for 1 .. 3;
+    $reader->{request}->(get('/stream'), $ENDED)->get;
+    is($first_held, 8, "the stream's first held send is its eighth");
+    $reader->{leave}->();
+    stop_server($server);
 };
 
 # The count runs on from one loop turn to the next until it is spent, so even

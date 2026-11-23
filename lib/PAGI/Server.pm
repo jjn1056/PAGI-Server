@@ -4918,7 +4918,7 @@ sub _pause_accepting {
 # data and leave their scope open -- a body send with more, an SSE event or
 # comment, a WebSocket message -- on HTTP/1.1 and HTTP/2 alike. Past the count
 # such a send has still done all its work; what waits is its Future, until the
-# loop has polled its other connections.
+# loop has polled its other connections and its scope's turn has come.
 #
 # The count itself is in PAGI::Server::Connection, at each of those sends,
 # once its bytes are written (or discarded, for a response that has no body
@@ -4927,9 +4927,8 @@ sub _pause_accepting {
 #     ++$server->{_paced_sends} > $server->{max_sends_per_turn}
 #
 # It is written out at each site and not put behind one call as a performance
-# optimization: on a 100-byte send, about 23 us without any of this, the call
-# measured 0.5 to 1 us more than the count written out. With the limit at 0
-# nothing is counted.
+# optimization: it is on the path of every streamed send, where a method call
+# costs more than the count itself. With the limit at 0 nothing is counted.
 #
 # A paced send found the count spent. The scopes whose sends wait are served
 # after the loop's next poll whether or not this send becomes one of them, so

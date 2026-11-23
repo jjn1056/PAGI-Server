@@ -176,15 +176,12 @@ subtest 'an event sent just before the server resets the stream arrives first' =
     stop_server($pair->{server});
 };
 
-# The streaming sends that run between the first of $k streams on one HTTP/2
-# connection starting and a ping on another connection being answered. Real
-# sockets, clients on the test's own loop, as stall-repro.pl has it.
 # A reset first sends the frames that were waiting for this pass's extraction
 # (the case above). Those can end the very stream being reset: here an earlier
 # reset of it was waiting behind held output. nghttp2 must not then be handed
 # a reset for a stream it has released (PAGI::Server::Connection's
-# _h2_reset_stream says why). None of this shows on the wire -- nghttp2 drops
-# the late frame -- so the case watches the server's own calls: the session's
+# _h2_reset_stream says why). None of this shows on the wire -- the late reset
+# never reaches the client -- so the case watches the server's own calls: the session's
 # submit_rst_stream is wrapped, calling through, and notes whether the
 # connection still had the stream. The resets are write_timeout's, and its
 # sweep is called here as the server's timer calls it, with a clock of the
@@ -217,7 +214,7 @@ subtest 'a reset is not submitted for a stream the waiting frames have just ende
     # The marks are far enough apart that what the client reads below makes
     # room for more than one whole DATA frame (part of one may be waiting
     # ahead of the resets) without reaching the low mark.
-    my $pair = h2_pair($app, write_high_watermark => 40_000, write_low_watermark => 5_000, socket_buffer => 4096);
+    my $pair = h2_pair($app, write_high_watermark => 40_000, write_low_watermark => 5_000, socket_buffer => 2048);
     my $conn = $pair->{conn};
     my $submit = \&PAGI::Server::Protocol::HTTP2::Session::submit_rst_stream;
     no warnings 'redefine';
@@ -265,6 +262,9 @@ subtest 'a reset is not submitted for a stream the waiting frames have just ende
     stop_server($pair->{server});
 };
 
+# The streaming sends that run between the first of $k streams on one HTTP/2
+# connection starting and a ping on another connection being answered. Real
+# sockets, clients on the test's own loop, as stall-repro.pl has it.
 sub sends_before_ping {
     my (%arg) = @_;
     my ($k, $path) = ($arg{k}, $arg{stream} // '/stream');
@@ -482,6 +482,13 @@ subtest 'a callback that dies on a held send when the client resets its stream d
     is($escaped, undef, 'the death does not reach the event loop');
     is(scalar(grep { !$_->is_done } @held), 0, 'five loop turns after the reset, every held send has resolved');
     is($state{burst_event}{type}, 'http.disconnect', 'and its application was told the stream ended');
+    # The connection itself is unharmed. What was already on its way to the
+    # client is read first, so that only what the server sends from here on
+    # counts.
+    exchange($pair) for 1 .. 20;
+    my $received = length($pair->{seen}{body}{ $sids[1] } // '');
+    exchange($pair) for 1 .. 100;
+    cmp_ok(length($pair->{seen}{body}{ $sids[1] } // ''), '>', $received, "the connection's other streams carry on");
     is([map { "$_->{level}: $_->{message}" } grep { $_->{message} =~ /callback boom/ } @log],
         ["error: PAGI application error in a callback on a send's Future: callback boom"],
         'the death was logged once, as an error');
@@ -609,6 +616,37 @@ subtest 'websocket.send is paced and keeps its order' => sub {
     $pair->{client}->submit_rst_stream($sid, 8);
     $pair->{sock}->syswrite($pair->{client}->mem_send);
     exchange($pair) for 1 .. 5;
+    stop_server($pair->{server});
+};
+
+# A file or filehandle body ends its response whatever `more` says
+# (PAGI::Spec::Www), and a response's last send is never counted -- also when
+# the response has no body on the wire and the file is never opened. With a
+# limit of three, three such responses must leave a stream after them the
+# whole count: three sends, four more, and the eighth is its first held.
+subtest 'a file body that ends a response without a body is not counted' => sub {
+    my $first_held;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        if ($scope->{method} eq 'HEAD') {
+            await $send->({ type => 'http.response.body', file => $0, more => 1 });
+            return;
+        }
+        my @sent = map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 10;
+        ($first_held) = grep { !$sent[$_ - 1]->is_ready } 1 .. @sent;
+        await Future->wait_all(@sent);
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    my $pair = h2_pair($app, max_sends_per_turn => 3);
+    for my $n (1 .. 3) {
+        my $sid = submit($pair, method => 'HEAD', path => '/file');
+        pump_until(sub { exchange($pair); exists $pair->{seen}{closed}{$sid} }, 5) or die "HEAD $n never ended\n";
+    }
+    my $sid = submit($pair, path => '/stream');
+    pump_until(sub { exchange($pair); exists $pair->{seen}{closed}{$sid} }, 5);
+    is($first_held, 8, "the stream's first held send is its eighth");
     stop_server($pair->{server});
 };
 
