@@ -33,6 +33,7 @@ use PAGI::Server;
 use PAGI::Server::Protocol::HTTP1;
 use PAGI::Server::Protocol::HTTP2;
 use Net::HTTP2::nghttp2::Session;
+use Protocol::WebSocket::Frame;
 
 my $loop = IO::Async::Loop->new;
 my $protocol = PAGI::Server::Protocol::HTTP1->new;
@@ -171,10 +172,23 @@ subtest 'an event sent just before the server resets the stream arrives first' =
 # connection starting and a ping on another connection being answered. Real
 # sockets, clients on the test's own loop, as stall-repro.pl has it.
 sub sends_before_ping {
-    my ($k, %opts) = @_;
+    my (%arg) = @_;
+    my ($k, $path) = ($arg{k}, $arg{stream} // '/stream');
     my ($sends, $started) = (0, undef);
     my $app = async sub {
         my ($scope, $receive, $send) = @_;
+        if ($scope->{type} eq 'sse') {
+            await $send->({ type => 'sse.start' });
+            $started->done if $started && !$started->is_ready;
+            for my $n (1 .. 2000) {
+                $sends++;
+                await $send->($scope->{path} eq '/comments'
+                    ? { type => 'sse.comment', comment => 'x' x 96 }
+                    : { type => 'sse.send', data => 'x' x 93 });
+            }
+            await $send->({ type => 'sse.close' });
+            return;
+        }
         die "unsupported scope type\n" unless $scope->{type} eq 'http';
         await $send->({ type => 'http.response.start', status => 200, headers => [['content-type', 'text/plain']] });
         if ($scope->{path} eq '/ping') {
@@ -188,7 +202,7 @@ sub sends_before_ping {
         }
         await $send->({ type => 'http.response.body', body => '' });
     };
-    my $server = new_server($app, %opts);
+    my $server = new_server($app, %{ $arg{server} // {} });
     $server->listen->get;
     my $port = $server->port;
 
@@ -236,7 +250,8 @@ sub sends_before_ping {
     my ($sends_at, $answered);
     $started->on_done(sub { $sends_at = $sends; $answered = $ping->() });
     my @done = map {
-        my $sid = $session->submit_request(method => 'GET', path => '/stream', scheme => 'http', authority => 'x');
+        my $sid = $session->submit_request(method => 'GET', path => $path, scheme => 'http', authority => 'x',
+            ($path eq '/stream' ? () : (headers => [['accept', 'text/event-stream']])));
         $closed{$sid} = $loop->new_future;
     } 1 .. $k;
     $flush->();
@@ -254,8 +269,193 @@ subtest 'max_sends_per_turn => 0 is the server without the limit: frames are ext
     # The first stream's sends fill the connection's 64 KiB buffer as well as
     # its own queue (1,258 sends of 100 bytes); with the buffer full, every
     # other stream fills its queue alone (657).
-    is(sends_before_ping(10, max_sends_per_turn => 0), 1258 + 9 * 657,
+    is(sends_before_ping(k => 10, server => { max_sends_per_turn => 0 }), 1258 + 9 * 657,
         '10 streams run 1,258 + 9 x 657 sends before the ping is answered');
+};
+
+subtest 'a ping is answered within a bounded number of streaming sends' => sub {
+    for my $k (10, 50) {
+        my $ran = sends_before_ping(k => $k);
+        cmp_ok($ran, '<=', $BOUND, "$k streams on one connection: $ran streaming sends ran before the ping was answered");
+    }
+};
+
+subtest 'sse.send and sse.comment are bounded alike' => sub {
+    for my $path ('/events', '/comments') {
+        my $ran = sends_before_ping(k => 10, stream => $path);
+        cmp_ok($ran, '<=', $BOUND, "$path: $ran sends ran before the ping was answered");
+    }
+};
+
+# With a budget of 1 and thirty streams on one connection, a stream's send is
+# held almost all the time and its turn comes round every thirty-odd loop turns.
+sub endless_streams {
+    my ($count, $state) = @_;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        my ($id) = $scope->{query_string} =~ /id=(\d+)/;
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        until ($state->{stop}) {
+            $state->{current}{$id} = $send->({ type => 'http.response.body', body => $LINE, more => 1 });
+            $state->{count}{$id}++;
+            await $state->{current}{$id};
+        }
+        $state->{finished}++;
+        await $send->({ type => 'http.response.body', body => '' });
+    };
+    my $pair = h2_pair($app, max_sends_per_turn => 1);
+    my @sids = map { submit($pair, path => "/?id=$_") } 0 .. $count - 1;
+    my $turns = 0;
+    until ($count == grep { $_ && !$_->is_ready } values %{ $state->{current} }) {
+        die "the streams never all had a send held\n" if ++$turns > 5000;
+        exchange($pair);
+    }
+    # Stream 0 has just had its turn: its next send is held with the others ahead of it.
+    my $was = $state->{count}{0};
+    $turns = 0;
+    until ($state->{count}{0} > $was) {
+        die "stream 0 never had another turn\n" if ++$turns > 5000;
+        exchange($pair);
+    }
+    return ($pair, @sids);
+}
+
+subtest 'a held send resolves when the client resets its stream' => sub {
+    my %state;
+    my ($pair, @sids) = endless_streams(30, \%state);
+    my $held = $state{current}{0};
+    ok(!$held->is_ready, 'the send is held');
+    $pair->{client}->submit_rst_stream($sids[0], 8);   # CANCEL
+    $pair->{sock}->syswrite($pair->{client}->mem_send);
+    $loop->loop_once(0.01) for 1 .. 5;
+    ok($held->is_done, 'five loop turns after the reset, it has resolved, not failed');
+    # Every application runs to its end before the server stops, the reset
+    # stream's included (its sends are no-ops now).
+    $state{stop} = 1;
+    my $turns = 0;
+    exchange($pair) until ($state{finished} // 0) >= 30 || ++$turns > 5000;
+    is($state{finished}, 30, 'and every application ran to its end');
+    stop_server($pair->{server});
+};
+
+subtest 'a held send resolves when the connection closes' => sub {
+    my %state;
+    my ($pair, @sids) = endless_streams(30, \%state);
+    my @held = grep { !$_->is_ready } values %{ $state{current} };
+    cmp_ok(scalar @held, '>=', 29, scalar(@held) . ' sends are held');
+    close $pair->{sock};
+    $loop->loop_once(0.01) for 1 .. 5;
+    is(scalar(grep { !$_->is_done } @held), 0, 'five loop turns after the client closed, every one has resolved');
+    $state{stop} = 1;
+    pump_until(sub { ($state{finished} // 0) >= 30 }, 10);
+    is($state{finished}, 30, 'and every application ran to its end');
+    stop_server($pair->{server});
+};
+
+subtest 'sends stay in order and the last one is not held back' => sub {
+    my (@futures, $issued);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        @futures = map { $send->({ type => 'http.response.body', body => sprintf("N%05d\n", $_), more => 1 }) } 1 .. 200;
+        # Counted before the last send: it ends the stream, and the stream's
+        # end resolves whatever is still held.
+        $issued = grep { !$_->is_ready } @futures;
+        push @futures, $send->({ type => 'http.response.body', body => "END\n" });
+        await Future->wait_all(@futures);
+    };
+    my $pair = h2_pair($app, max_sends_per_turn => 1);
+    my $sid = submit($pair);
+    my $turns = 0;
+    exchange($pair) until defined $issued || ++$turns > 200;
+    cmp_ok($issued, '>=', 190, "$issued of the 200 sends before the last were pending when it was issued");
+    exchange($pair) for 1 .. 10;
+    my $body = $pair->{seen}{body}{$sid} // '';
+    is($pair->{seen}{closed}{$sid}, 0, 'ten loop turns later the stream has ended cleanly');
+    like($body, qr/END\n\z/, 'with the last send');
+    is([$body =~ /N(\d{5})\n/g], [map { sprintf '%05d', $_ } 1 .. 200], 'after every send, in the order issued');
+    $turns = 0;
+    exchange($pair) until !(grep { !$_->is_ready } @futures) || ++$turns > 2000;
+    is(scalar(grep { !$_->is_done } @futures), 0, 'and every Future resolves');
+    stop_server($pair->{server});
+};
+
+# As over HTTP/1.1 (Ruled by John 2026-11-22): a held send whose Future the
+# application dropped has written its bytes and given up its place; when it
+# resumes, Future::AsyncAwait warns that its Future was lost.
+subtest 'a held send whose Future the application dropped still delivers, and warns' => sub {
+    my (@warnings, $finished, $release);
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    $release = $loop->new_future;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        $send->({ type => 'http.response.body', body => sprintf("N%05d\n", $_), more => 1 }) for 1 .. 50;
+        # The stream stays open over a serving of the queue, so it is the
+        # serving, not the stream's end, that resolves the dropped sends.
+        await $release;
+        await $send->({ type => 'http.response.body', body => "END\n" });
+        $finished = 1;
+    };
+    my $pair = h2_pair($app, max_sends_per_turn => 1);
+    my $sid = submit($pair);
+    exchange($pair) for 1 .. 10;
+    is([($pair->{seen}{body}{$sid} // '') =~ /N(\d{5})\n/g], [map { sprintf '%05d', $_ } 1 .. 50],
+        'every send arrived, in order, while the stream is still open');
+    # One counted, four unheld, forty-five held.
+    is(scalar(grep { /\ASuspended async sub .+? lost its returning future/ } @warnings), 45,
+        'each of the 45 held sends warns that its Future was lost');
+    is(scalar @warnings, 45, 'and nothing else warns');
+    $release->done;
+    my $turns = 0;
+    exchange($pair) until exists $pair->{seen}{closed}{$sid} || ++$turns > 200;
+    ok($finished, 'the application ran to its end');
+    is($pair->{seen}{closed}{$sid}, 0, 'and the stream ended cleanly');
+    stop_server($pair->{server});
+};
+
+subtest 'websocket.send is paced and keeps its order' => sub {
+    my $held = 0;
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'websocket';
+        await $receive->();
+        await $send->({ type => 'websocket.accept' });
+        for my $n (1 .. 2000) {
+            my $f = $send->({ type => 'websocket.send', text => "M$n" });
+            $held++ unless $f->is_ready;
+            await $f;
+        }
+        await $send->({ type => 'websocket.close', code => 1000 });
+        while (1) { last if (await $receive->())->{type} eq 'websocket.disconnect' }
+    };
+    my $pair = h2_pair($app, max_sends_per_turn => 1);
+    my $sid = submit($pair, method => 'CONNECT', path => '/ws',
+        headers => [[':protocol', 'websocket'], ['sec-websocket-version', '13']],
+        body => sub { return undef });   # the request stream stays open
+    my $parser = Protocol::WebSocket::Frame->new(max_payload_size => 1 << 20);
+    my ($fed, @texts, $closed, $turns) = (0);
+    until ($closed || ++$turns > 5000) {
+        exchange($pair);
+        my $body = $pair->{seen}{body}{$sid} // '';
+        next unless length($body) > $fed;
+        my $new = substr($body, $fed);   # a copy: append empties what it is given
+        $fed = length $body;
+        $parser->append($new);
+        while (defined(my $payload = $parser->next_bytes)) {
+            if ($parser->opcode == 8) { $closed = 1 } else { push @texts, $payload }
+        }
+    }
+    ok($closed, 'the Close arrived');
+    is(\@texts, [map { "M$_" } 1 .. 2000], 'after all 2,000 messages, in order');
+    cmp_ok($held, '>=', 300, "$held of the sends were held");
+    $pair->{client}->submit_rst_stream($sid, 8);
+    $pair->{sock}->syswrite($pair->{client}->mem_send);
+    exchange($pair) for 1 .. 5;
+    stop_server($pair->{server});
 };
 
 is([map { "$_->{level}: $_->{message}" } @log], [], 'nothing else was logged');

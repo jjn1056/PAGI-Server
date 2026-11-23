@@ -1552,6 +1552,11 @@ A held send is pending for a reason other than a slow client. Do not read
 C<< $future->is_ready >> after a send as a backpressure signal; use
 C<pagi.transport> for that.
 
+Await every send, or keep its Future. A held send has written its bytes
+before it waits, so one whose Future was dropped still delivers; but when
+it resumes L<Future::AsyncAwait> warns that a suspended sub C<lost its
+returning future>, as it does for any dropped send that had to wait.
+
 B<When to adjust:> raise it when one worker serves many hundreds of
 connections at once and throughput matters more than the wait: every
 return to the loop costs more the more connections it watches. Lower it

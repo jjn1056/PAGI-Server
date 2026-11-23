@@ -362,6 +362,39 @@ subtest 'cancelling a held send does not stall the sends behind it' => sub {
     stop_server($server);
 };
 
+# An application is to await every send. One that drops a send's Future
+# instead (Ruled by John 2026-11-22): a held send has written its bytes before
+# it waits and gives up its place, so nothing is lost and the sends behind it
+# go out; when it resumes, Future::AsyncAwait says its Future was lost, as it
+# does for any dropped send that had to wait.
+subtest 'a held send whose Future the application dropped still delivers, and warns' => sub {
+    my (@warnings, $finished);
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        $send->({ type => 'http.response.body', body => sprintf("N%05d\n", $_), more => 1 }) for 1 .. 50;
+        await $send->({ type => 'http.response.body', body => "END\n" });
+        $finished = 1;
+    };
+    my $server = start_server($app, max_sends_per_turn => 1);
+    my $sock = raw_connect($server);
+    syswrite($sock, get('/'));
+    my $wire = '';
+    pump_until(sub { $wire .= read_now($sock); $wire =~ /END\n\r\n0\r\n\r\n\z/ }, 10);
+    is([$wire =~ /N(\d{5})\n/g], [map { sprintf '%05d', $_ } 1 .. 50], 'every send arrived, in order');
+    ok($finished, 'the application ran to its end');
+    $loop->loop_once(0.01) for 1 .. 5;     # the queue is served meanwhile
+    # One counted, four unheld, forty-five held.
+    is(scalar(grep { /\ASuspended async sub .+? lost its returning future/ } @warnings), 45,
+        'each of the 45 held sends warns that its Future was lost');
+    is(scalar @warnings, 45, 'and nothing else warns');
+    is($server->{_paced_scopes} // [], [], 'nothing is left waiting on the server');
+    close $sock;
+    stop_server($server);
+};
+
 subtest 'a callback that dies on a held send does not strand the others' => sub {
     my %futures;
     my $app = async sub {

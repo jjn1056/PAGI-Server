@@ -2992,6 +2992,7 @@ sub _h2_create_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -3051,6 +3052,7 @@ sub _h2_create_send {
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_extract_soon;
                 }
+                $paced = $weak_self->_paced_send($ss);
             } else {
                 if ($streaming_started) {
                     # Final chunk on an already-streaming response. Bound on THIS
@@ -3106,6 +3108,14 @@ sub _h2_create_send {
             # Hand any pending frames to the session's write path (design §8.4).
             $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
             $weak_self->_h2_write_pending;
+        }
+
+        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
         }
     };
 
@@ -3493,6 +3503,7 @@ sub _h2_create_websocket_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -3616,6 +3627,7 @@ sub _h2_create_websocket_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
+            $paced = $weak_self->_paced_send($ss);
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket,
@@ -3653,6 +3665,13 @@ sub _h2_create_websocket_send {
             }
         }
 
+        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -4043,6 +4062,7 @@ sub _h2_create_sse_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -4141,6 +4161,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
+            $paced = $weak_self->_paced_send($ss);
         }
         elsif ($type eq 'sse.comment') {
             return unless $ss->{response_started};
@@ -4152,6 +4173,7 @@ sub _h2_create_sse_send {
             $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
             $weak_self->_h2_extract_soon;
+            $paced = $weak_self->_paced_send($ss);
         }
         elsif ($type eq 'sse.keepalive') {
             my $interval = $event->{interval} // 0;
@@ -4199,6 +4221,13 @@ sub _h2_create_sse_send {
             $weak_self->_h2_write_pending;
         }
 
+        # Paced, and past the worker's count (see _paced_send): the send's work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -5361,6 +5390,7 @@ sub _h2_wait_for_stream_drain {
 # recheck and stops without reaching nghttp2.
 sub _h2_resolve_stream_drain_waiters {
     my ($self, $ss) = @_;
+    $self->_settle_paced_sends($ss) if $ss;
     return unless $ss && $ss->{stream_drain_waiters};
     $_->done for grep { !$_->is_ready } splice @{$ss->{stream_drain_waiters}};
 }
