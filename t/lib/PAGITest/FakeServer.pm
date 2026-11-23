@@ -15,7 +15,7 @@ sub new {
 
 sub run {
     my ($self) = @_;
-    for my $opt (qw(http2 write_high_watermark write_low_watermark read_buffer_size write_buffer_size)) {
+    for my $opt (qw(http2 write_high_watermark write_low_watermark max_sends_per_turn read_buffer_size write_buffer_size)) {
         my $val = $self->{options}{$opt};
         print "FAKESERVER $opt=" . (defined $val ? $val : 'unset') . "\n";
     }

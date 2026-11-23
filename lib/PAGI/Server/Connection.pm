@@ -938,6 +938,35 @@ sub _h2_write_pending {
     return;
 }
 
+# For a send that carries data and leaves its stream open (a paced send):
+# it has queued its bytes on the stream and resumed it, and nghttp2 is asked
+# for the frames once per loop pass, however many such sends ran in it. Asking
+# on every send costs more than the rest of a small send, and a connection
+# whose buffer has room -- as it always has when its sends take turns with
+# other connections' -- would pay that every time. Until the pass ends the
+# frames wait where held output already waits, in nghttp2 and the streams'
+# queues, and whatever else extracts takes them along: a scope's last send, a
+# control frame, a reset of the stream (_h2_reset_stream). With
+# max_sends_per_turn off there is no pacing to pay for, and the send extracts
+# at once.
+sub _h2_extract_soon {
+    my ($self) = @_;
+    my $server = $self->{server};
+    return $self->_h2_write_pending unless $server && $server->{max_sends_per_turn};
+    return if $self->{h2_extract_soon};
+    $self->{h2_extract_soon} = 1;
+    weaken(my $weak_self = $self);
+    $server->loop->later(sub {
+        # Nothing to do if a reset has sent the frames already
+        # (_h2_reset_stream), or the connection has closed.
+        return unless $weak_self && delete $weak_self->{h2_extract_soon};
+        return if $weak_self->{closed};
+        eval { $weak_self->_h2_write_pending; 1 }
+            or $weak_self->_connection_handler_error('HTTP/2 output', $@);
+    });
+    return;
+}
+
 # =============================================================================
 # HTTP/2 Stream Callbacks
 # =============================================================================
@@ -2112,6 +2141,14 @@ sub _h2_reset_stream {
     my ($self, $stream_id, $code) = @_;
     return unless $self->_h2_stream_alive($stream_id);
     eval {
+        # Frames waiting for this pass's extraction belong to sends that have
+        # already resolved; the reset would discard them. Sending them can end
+        # this very stream -- an earlier reset of it, or its END_STREAM, was
+        # waiting behind them -- so its liveness is read again.
+        if (delete $self->{h2_extract_soon}) {
+            $self->_h2_write_pending;
+            return unless $self->_h2_stream_alive($stream_id);
+        }
         $self->{h2_session}->submit_rst_stream($stream_id, $code);
         $self->_h2_write_pending;
     };
@@ -2567,7 +2604,7 @@ sub _h2_create_send {
             die $STREAM_GONE unless $ss && !$ss->{h2_closed} && !$weak_self->{closed};
         }
         $weak_self->_h2_enqueue($ss, $chunk) if length $chunk;
-        $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+        $weak_self->_h2_notify_transport_write($ss);
         $weak_self->{h2_session}->resume_stream($stream_id);
         $weak_self->_h2_write_pending;
         return;
@@ -2695,6 +2732,23 @@ sub _h2_create_send {
                     body    => '',
                 );
                 $weak_self->_h2_write_pending;
+            }
+            # Nothing is sent for it, but an application that streams such a
+            # response sends as often and holds the loop as long: a body send
+            # with more is counted against the worker's max_sends_per_turn
+            # like any other. (A file or fh body ends the response whatever
+            # its more says, and a response's last send is not counted.)
+            # Written out here, not behind a call, as a performance
+            # optimization (see PAGI::Server's _budget_spent). A discarded
+            # send holds no place in the stream's order, so it has none to
+            # give up before it waits.
+            if ($type eq 'http.response.body' && $event->{more}
+                    && !defined $event->{file} && !defined $event->{fh}
+                    and my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                my $paced;
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+                await $paced if $paced;
             }
             return;
         }
@@ -2960,6 +3014,7 @@ sub _h2_create_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'http.response.start') {
             $ss->{response_started} = 1;
@@ -2994,7 +3049,7 @@ sub _h2_create_send {
                     # Synchronous: we're in the app's send path (not nghttp2's
                     # extract), so on_high_water can fire here to tell the app to
                     # pause its source.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -3015,9 +3070,16 @@ sub _h2_create_send {
                     }
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->resume_stream($stream_id);
-                    $weak_self->_h2_write_pending;
+                    $weak_self->_h2_extract_soon;
+                }
+                # Counted against the worker's max_sends_per_turn. Written out here, not
+                # behind a call, as a performance optimization: PAGI::Server's
+                # _budget_spent says what the count is for and what a call would cost.
+                if (my $server = $weak_self->{server}) {
+                    my $limit = $server->{max_sends_per_turn};
+                    $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
                 }
             } else {
                 if ($streaming_started) {
@@ -3032,7 +3094,7 @@ sub _h2_create_send {
                     $eof_pending = 1;
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
                     # Synchronous — app send path, not nghttp2 extract.
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->resume_stream($stream_id);
                     $weak_self->_h2_write_pending;
                 } elsif ($seq eq 'awaiting_trailers') {
@@ -3050,7 +3112,7 @@ sub _h2_create_send {
                     $ss->{send_queue_bytes} //= 0;
                     $eof_pending = 1;
                     $weak_self->_h2_enqueue($ss, $body) if length $body;
-                    $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+                    $weak_self->_h2_notify_transport_write($ss);
                     $weak_self->{h2_session}->submit_response_streaming(
                         $stream_id,
                         status        => $status,
@@ -3074,6 +3136,14 @@ sub _h2_create_send {
             # Hand any pending frames to the session's write path (design §8.4).
             $weak_self->{h2_session}->resume_stream($stream_id) if $streaming_started;
             $weak_self->_h2_write_pending;
+        }
+
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
         }
     };
 
@@ -3461,6 +3531,7 @@ sub _h2_create_websocket_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -3581,9 +3652,16 @@ sub _h2_create_websocket_send {
             $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket,
@@ -3621,6 +3699,13 @@ sub _h2_create_websocket_send {
             }
         }
 
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -4011,6 +4096,7 @@ sub _h2_create_sse_send {
             await $wait;
             return unless $weak_self && $weak_self->_h2_stream_open($stream_id, $ss);
         }
+        my $paced;
 
         if ($type eq 'sse.start') {
             return if $ss->{response_started};
@@ -4106,9 +4192,16 @@ sub _h2_create_sse_send {
             $weak_self->_h2_enqueue($ss, $bytes);
             # Synchronous — app send path, not nghttp2 extract — so on_high_water
             # may fire here to tell the app to pause its source.
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.comment') {
             return unless $ss->{response_started};
@@ -4117,9 +4210,16 @@ sub _h2_create_sse_send {
             my $bytes = eval { Encode::encode('UTF-8', $comment, Encode::FB_CROAK) };
             die "sse payload is not encodable as UTF-8: $@" unless defined $bytes;
             $weak_self->_h2_enqueue($ss, $bytes);
-            $ss->{transport_state}->_check_watermarks if $ss->{transport_state};
+            $weak_self->_h2_notify_transport_write($ss);
             $weak_self->{h2_session}->resume_stream($stream_id);
-            $weak_self->_h2_write_pending;
+            $weak_self->_h2_extract_soon;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($ss) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.keepalive') {
             my $interval = $event->{interval} // 0;
@@ -4167,6 +4267,13 @@ sub _h2_create_sse_send {
             $weak_self->_h2_write_pending;
         }
 
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+        # done. It gives up its place in the stream's order, so the sends behind
+        # it are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -5097,6 +5204,13 @@ sub _h1_transport_state {
     );
 }
 
+# What buffered_amount reports for an HTTP/2 stream: its queued bytes and the
+# payloads of its sends still waiting their turn.
+sub _h2_buffered_amount {
+    my ($ss) = @_;
+    return ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0);
+}
+
 # HTTP/2: the transport handle reads this stream's send queue, not the shared
 # TCP write buffer — under h2, N streams multiplex one connection, so that
 # buffer is the whole connection's backlog (meaningless per stream). $ss is the
@@ -5110,7 +5224,7 @@ sub _h2_transport_state {
     my ($self, $ss) = @_;
     weaken(my $w = $self);
     return PAGI::Server::TransportState->new(
-        measure   => sub { ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) },
+        measure   => sub { _h2_buffered_amount($ss) },
         high      => sub { $w ? $w->{write_high_watermark} : undef },
         low       => sub { $w ? $w->{write_low_watermark}  : undef },
         arm_drain => sub { my $fire = shift; push @{$ss->{transport_drain_fires}}, $fire },
@@ -5134,10 +5248,32 @@ sub _transport_log_sink {
 
 # Notify the current transport-state handle after an application write so its
 # backpressure callbacks (on_high_water/on_drain) can fire on a watermark cross.
+# The handle is asked only when the buffered amount is at the high mark, the
+# one case in which its check does anything: measuring through the handle on
+# every send costs more than the rest of a small send once the buffer drains
+# between sends.
+#
+# The buffered amount is the sum _buffered_amount returns, written out here
+# and not read through it as a performance optimization: this runs on every
+# send of every scope, and the calls measured about 2% of HTTP/1.1
+# throughput. Keep the two the same sum.
 sub _notify_transport_write {
     my ($self) = @_;
-    my $ts = $self->{current_transport_state};
-    $ts->_check_watermarks if $ts;
+    my $ts = $self->{current_transport_state} or return;
+    return if ($self->{stream} ? $self->{_queued_bytes} // 0 : 0) + ($self->{_held_bytes} // 0)
+        < $self->{write_high_watermark};
+    $ts->_check_watermarks;
+    return;
+}
+
+# The HTTP/2 twin, for one stream's handle and that stream's buffered amount:
+# the sum _h2_buffered_amount returns, written out for the same reason.
+sub _h2_notify_transport_write {
+    my ($self, $ss) = @_;
+    my $ts = $ss->{transport_state} or return;
+    return if ($ss->{send_queue_bytes} // 0) + ($ss->{_held_bytes} // 0) < $self->{write_high_watermark};
+    $ts->_check_watermarks;
+    return;
 }
 
 sub _check_drain_waiters {
@@ -5251,6 +5387,33 @@ sub _cancel_drain_waiters {
     # actually fell back below the low mark, which never happened here.
     $self->{_drain_fires} = [];
     $self->{_drain_check_active} = 0;
+    $self->_settle_paced_sends($self);
+}
+
+# A paced send still waiting when its connection or stream ends resolves with
+# the sends waiting on backpressure, as part of the disconnect (PAGI::Spec
+# "Send Completion Contract"): never failed, never cancelled.
+sub _settle_paced_sends {
+    my ($self, $owner) = @_;
+    my $waits = delete $owner->{_paced_waits} or return;
+    _resolve_paced_sends($self, $waits);
+    return;
+}
+
+# Resolves the held sends in $waits; one the application cancelled ignores it.
+# Resolving a send runs, here and now, the callbacks the application put on
+# its Future. One that dies is reported through $reporter's _log (the server
+# serving its queue, or the connection that is ending) and must not strand the
+# sends still to resolve, nor stop what the caller does next.
+sub _resolve_paced_sends {
+    my ($reporter, $waits) = @_;
+    for my $wait (@$waits) {
+        next if eval { $wait->done; 1 };
+        my $error = $@;
+        chomp $error;
+        $reporter->_log(error => "PAGI application error in a callback on a send's Future: $error");
+    }
+    return;
 }
 
 # HTTP/2 per-stream backpressure: the h2 analogue of _wait_for_drain. Resolves
@@ -5282,6 +5445,7 @@ sub _h2_wait_for_stream_drain {
 # recheck and stops without reaching nghttp2.
 sub _h2_resolve_stream_drain_waiters {
     my ($self, $ss) = @_;
+    $self->_settle_paced_sends($ss) if $ss;
     return unless $ss && $ss->{stream_drain_waiters};
     $_->done for grep { !$_->is_ready } splice @{$ss->{stream_drain_waiters}};
 }
@@ -6734,6 +6898,7 @@ async sub _send_http_event {
     await $turn->{waiting} if $turn->{waiting};
     return Future->done unless $weak_self;
     return Future->done if $weak_self->{closed};
+    my $paced;
 
     if ($type eq 'http.response.start') {
         $weak_self->{response_started} = 1;
@@ -6822,6 +6987,18 @@ async sub _send_http_event {
         # HEAD, 204 and 304 have headers but no body; still reach scope
         # completion below.
         $weak_self->_flush_pending_headers;
+        # Nothing is written for the send, but an application that streams
+        # such a response sends as often and holds the loop as long: counted
+        # against the worker's max_sends_per_turn like any body send with
+        # more. (A file or fh body ends the response whatever its more says,
+        # and a response's last send is not counted.) Written out here, not
+        # behind a call, as a performance optimization (see PAGI::Server's
+        # _budget_spent).
+        if ($event->{more} && !defined $event->{file} && !defined $event->{fh}
+                and my $server = $weak_self->{server}) {
+            my $limit = $server->{max_sends_per_turn};
+            $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+        }
     }
     elsif ($type eq 'http.response.body') {
         # --- BACKPRESSURE CHECK ---
@@ -6920,6 +7097,13 @@ async sub _send_http_event {
 
             $weak_self->_write_out($out) if length $out;
             $weak_self->_notify_transport_write;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if ($more and my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
     }
     # A response with no body accepts and discards trailers after advancing
@@ -6993,6 +7177,14 @@ async sub _send_http_event {
     $weak_self->_h1_end_scope_output
         if $weak_self
         && PAGI::Server::EventValidator::scope_send_clean('http', $state->{seq});
+
+    # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+    # done. It gives up its place in the scope's order, so the sends behind it
+    # are not kept waiting, and resolves once the loop has polled again.
+    if ($paced) {
+        undef $turn;
+        await $paced;
+    }
     return;
 }
 
@@ -8441,6 +8633,7 @@ sub _create_sse_send {
         await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
+        my $paced;
 
         if ($type eq 'sse.start') {
             $weak_self->{response_started} = 1;
@@ -8520,6 +8713,13 @@ sub _create_sse_send {
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
             $weak_self->_notify_transport_write;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.comment') {
             my $comment = _format_sse_comment($event);
@@ -8528,6 +8728,13 @@ sub _create_sse_send {
 
             my $len = sprintf("%x", length($bytes));
             $weak_self->_write_out("$len\r\n$bytes\r\n");
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'sse.keepalive') {
             # SSE keepalive - starts/stops periodic comment timer
@@ -8569,6 +8776,13 @@ sub _create_sse_send {
             }
         }
 
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+        # done. It gives up its place in the scope's order, so the sends behind it
+        # are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }
@@ -9016,6 +9230,7 @@ sub _create_websocket_send {
         await $turn->{waiting} if $turn->{waiting};
         return Future->done unless $weak_self;
         return Future->done if $weak_self->{closed} && !$already_closed;
+        my $paced;
 
         if ($type eq 'websocket.accept') {
             # A duplicate accept is already rejected by advance_websocket.
@@ -9150,6 +9365,13 @@ sub _create_websocket_send {
             my $bytes = $frame->to_bytes;
             $weak_self->_write_out($bytes);
             $weak_self->_notify_transport_write;
+            # Counted against the worker's max_sends_per_turn. Written out here, not
+            # behind a call, as a performance optimization: PAGI::Server's
+            # _budget_spent says what the count is for and what a call would cost.
+            if (my $server = $weak_self->{server}) {
+                my $limit = $server->{max_sends_per_turn};
+                $paced = $server->_budget_spent($weak_self) if $limit && ++$server->{_paced_sends} > $limit;
+            }
         }
         elsif ($type eq 'websocket.close') {
             # A close before accept is already rejected by advance_websocket
@@ -9234,6 +9456,13 @@ sub _create_websocket_send {
             }
         }
 
+        # Paced, and past the worker's count (PAGI::Server's _budget_spent): its work is
+        # done. It gives up its place in the scope's order, so the sends behind it
+        # are not kept waiting, and resolves once the loop has polled again.
+        if ($paced) {
+            undef $turn;
+            await $paced;
+        }
         return;
     };
 }

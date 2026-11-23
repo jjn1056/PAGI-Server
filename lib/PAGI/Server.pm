@@ -86,6 +86,11 @@ sub has_http2 { return $HTTP2_AVAILABLE }
 # Windows doesn't support Unix signals - signal handling is conditional
 use constant WIN32 => $^O eq 'MSWin32';
 
+# Sends a scope may still run once the worker's max_sends_per_turn is spent,
+# before one of its sends waits for the loop: a short response, or a chat
+# connection's one message, does not queue behind the streams that spent it.
+use constant UNHELD_SENDS_PER_SCOPE => 4;
+
 =encoding utf8
 
 =head1 NAME
@@ -1519,6 +1524,51 @@ B<Example:>
         write_low_watermark  => 16384,   # 16KB (8:1 ratio)
     );
 
+=item max_sends_per_turn => $count
+
+How many sends that leave their scope open a worker runs before it returns
+to the event loop for its other connections. The sends counted are
+C<http.response.body> with C<more>, C<sse.send>, C<sse.comment> and
+C<websocket.send>. A body send is counted whether or not its bytes go out:
+a response to C<HEAD>, or with status 204 or 304, has no body on the wire,
+but an application that streams one sends as often.
+
+B<Default:> 384. C<0> turns it off.
+
+Awaiting C<$send> gives the loop a chance to run only when the send has to
+wait, and below C<write_high_watermark> it does not: a response streamed in
+small sends runs until its buffer is full. Without a limit, many such
+responses starting together hold every other connection on the worker for
+a second or more. With it, once the worker has run that many such sends,
+further ones are held: their Futures stay pending until the loop has
+looked at its other connections. A scope's next four still go through, so
+a short response is not held, and a request that never streams is not
+held at all. The bytes of a held send are already on their way.
+
+What it does not do: a response with more than four such sends takes turns
+with the other streams, it is not served ahead of them; and the limit counts
+sends, so an application that works for long between sends still holds the
+loop for that long. The count starts again once it has been spent and the
+loop has polled, not on every turn of the loop, so a worker with little to
+do spends it now and then too: a scope that sends more than four times in
+that turn has a send held until the next.
+
+A held send is pending for a reason other than a slow client. Do not read
+C<< $future->is_ready >> after a send as a backpressure signal; use
+C<pagi.transport> for that.
+
+Await every send, or keep its Future. A held send has written its bytes
+before it waits, so one whose Future was dropped still delivers; but when
+it resumes L<Future::AsyncAwait> warns that a suspended sub C<lost its
+returning future>, as it does for any dropped send that had to wait.
+
+B<When to adjust:> raise it when one worker serves many hundreds of
+connections at once and throughput matters more than the wait: every
+return to the loop costs more the more connections it watches. Lower it
+for a shorter wait.
+
+B<CLI:> C<--max-sends-per-turn 384>
+
 =item max_body_size => $bytes
 
 Maximum request body size in bytes. Default: 10,000,000 (10MB).
@@ -2751,6 +2801,14 @@ sub _validate_io_buffer_size {
     return $value;
 }
 
+# max_sends_per_turn is a whole number of sends; 0 turns the limit off.
+sub _validate_max_sends_per_turn {
+    my ($count) = @_;
+    die "Invalid max_sends_per_turn '" . ($count // 'undef') . "' - must be 0 (off) or a positive count\n"
+        unless defined($count) && !ref($count) && $count =~ /\A(?:0|[1-9][0-9]*)\z/;
+    return $count + 0;
+}
+
 sub _init {
     my ($self, $params) = @_;
 
@@ -2939,6 +2997,7 @@ sub _init {
         'write_buffer_size', delete $params->{write_buffer_size} // 8192);
     $self->{write_high_watermark} = delete $params->{write_high_watermark} // 65536;   # 64KB - pause sending above this
     $self->{write_low_watermark}  = delete $params->{write_low_watermark}  // 16384;   # 16KB - resume sending below this
+    $self->{max_sends_per_turn} = _validate_max_sends_per_turn(delete $params->{max_sends_per_turn} // 384);  # 0 = off
     $self->{loop_type}           = delete $params->{loop_type};  # Optional loop backend (EPoll, EV, Poll, etc.)
     if (my $lt = $self->{loop_type}) {
         die "Invalid loop_type '$lt': must contain only letters, digits, and ::\n"
@@ -3110,6 +3169,9 @@ sub configure {
     }
     if (exists $params{max_receive_queue}) {
         $self->{max_receive_queue} = delete $params{max_receive_queue};
+    }
+    if (exists $params{max_sends_per_turn}) {
+        $self->{max_sends_per_turn} = _validate_max_sends_per_turn(delete $params{max_sends_per_turn});
     }
     if (exists $params{max_disconnect_receives}) {
         my $cap = delete $params{max_disconnect_receives};
@@ -4523,6 +4585,7 @@ sub _run_as_worker {
         write_buffer_size => $self->{write_buffer_size},
         write_high_watermark => $self->{write_high_watermark},
         write_low_watermark  => $self->{write_low_watermark},
+        max_sends_per_turn   => $self->{max_sends_per_turn},
         max_connections   => $self->{max_connections},
         heartbeat_timeout => $self->{heartbeat_timeout},
         lifespan_mode            => $self->{lifespan_mode},
@@ -4846,6 +4909,95 @@ sub _pause_accepting {
     });
 
     $self->{_accept_pause_timer} = $timer_id;
+}
+
+# max_sends_per_turn. Awaiting a send returns to the loop only when the send
+# has to wait, so a response streamed in small sends runs until its buffer is
+# full, and many of them, runnable together, run back to back while every
+# other connection waits. The server therefore counts the sends that carry
+# data and leave their scope open -- a body send with more, an SSE event or
+# comment, a WebSocket message -- on HTTP/1.1 and HTTP/2 alike. Past the count
+# such a send has still done all its work; what waits is its Future, until the
+# loop has polled its other connections and its scope's turn has come.
+#
+# The count itself is in PAGI::Server::Connection, at each of those sends,
+# once its bytes are written (or discarded, for a response that has no body
+# on the wire: to HEAD, or with status 204 or 304):
+#
+#     ++$server->{_paced_sends} > $server->{max_sends_per_turn}
+#
+# It is written out at each site and not put behind one call as a performance
+# optimization: it is on the path of every streamed send, where a method call
+# costs more than the count itself. With the limit at 0 nothing is counted.
+#
+# A paced send found the count spent. The scopes whose sends wait are served
+# after the loop's next poll whether or not this send becomes one of them, so
+# the count and every scope's unheld sends start afresh after each turn in
+# which the count was spent. Until it is spent the count runs on from one
+# turn to the next, so a quiet worker spends it too, every max_sends_per_turn
+# sends, and a scope that sends more than UNHELD_SENDS_PER_SCOPE times in
+# that turn has a send held until the next. Returns nothing
+# for a scope's first UNHELD_SENDS_PER_SCOPE such sends since the last
+# serving; after that, the Future the send waits on. $owner is the scope's
+# state (a connection, or an HTTP/2 stream's state); it joins the queue once,
+# however many of its sends wait.
+sub _budget_spent {
+    my ($self, $owner) = @_;
+    $self->_serve_paced_sends_soon;
+    my $round = $self->{_paced_round} //= 0;
+    if (($owner->{_paced_round} // -1) != $round) {
+        $owner->{_paced_round}  = $round;
+        $owner->{_paced_unheld} = 0;
+    }
+    return if ++$owner->{_paced_unheld} <= UNHELD_SENDS_PER_SCOPE;
+    my $waits = $owner->{_paced_waits} //= [];
+    if (!@$waits) {
+        my $scopes = $self->{_paced_scopes} //= [];
+        push @$scopes, $owner;
+        weaken($scopes->[-1]);   # a scope that has gone frees its place
+    }
+    push @$waits, my $wait = $self->loop->new_future;
+    return $wait;
+}
+
+# Arranges one serving after the loop's next poll. A later queued from an I/O
+# callback runs in that same turn, before the loop polls again, so it takes a
+# second one, queued from the first, to get past the poll; from inside a
+# serving one is enough.
+sub _serve_paced_sends_soon {
+    my ($self) = @_;
+    return if $self->{_paced_serving_soon};
+    $self->{_paced_serving_soon} = 1;
+    weaken(my $weak_self = $self);
+    my $serve = sub { $weak_self->_serve_paced_sends if $weak_self };
+    my $loop = $self->loop;
+    return $loop->later($serve) if $self->{_paced_serving};
+    $loop->later(sub { $loop->later($serve) });
+    return;
+}
+
+# One serving: the count starts again from zero, and the waiting scopes are
+# taken first in, first out. Resolving a scope's sends runs its application at
+# once, and what it sends counts, so the scope at the head may use the whole
+# count; each scope served counts as one even if it sends nothing more. The
+# scopes not reached wait for the serving after the next poll.
+sub _serve_paced_sends {
+    my ($self) = @_;
+    $self->{_paced_serving_soon} = 0;
+    $self->{_paced_sends} = 0;
+    $self->{_paced_round}++;
+    my $scopes = $self->{_paced_scopes} or return;
+    local $self->{_paced_serving} = 1;
+    my $limit = $self->{max_sends_per_turn};
+    # With the limit turned off since they were held, every scope is served.
+    while (@$scopes && (!$limit || $self->{_paced_sends} < $limit)) {
+        my $owner = shift @$scopes or next;              # the scope has gone
+        my $waits = delete $owner->{_paced_waits} or next;   # settled when it ended
+        $self->{_paced_sends}++;
+        PAGI::Server::Connection::_resolve_paced_sends($self, $waits);
+    }
+    $self->_serve_paced_sends_soon if @$scopes;
+    return;
 }
 
 # Called when a request completes (for max_requests tracking)
