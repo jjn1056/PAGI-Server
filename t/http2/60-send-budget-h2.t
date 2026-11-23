@@ -8,7 +8,7 @@ use Future::AsyncAwait;
 use FindBin;
 use lib "$FindBin::Bin/../../lib";
 use IO::Socket::INET;
-use Socket qw(AF_UNIX SOCK_STREAM);
+use Socket qw(AF_UNIX SOCK_STREAM SOL_SOCKET SO_SNDBUF SO_RCVBUF);
 use Time::HiRes qw(time);
 
 plan skip_all => "Server integration tests not supported on Windows" if $^O eq 'MSWin32';
@@ -67,15 +67,23 @@ sub pump_until {
 # One HTTP/2 connection over a socket pair, driven by hand: the test decides
 # when the client reads. Returns the client's socket, its nghttp2 session, what
 # it has seen, and the server and connection (which the caller keeps alive).
+# socket_buffer => $bytes makes the pair hold that little, so that output the
+# client does not read backs up in the server on any platform.
 sub h2_pair {
     my ($app, %opts) = @_;
+    my $socket_buffer = delete $opts{socket_buffer};
     socketpair(my $sock_a, my $sock_b, AF_UNIX, SOCK_STREAM, 0) or die "socketpair: $!";
     $_->blocking(0) for $sock_a, $sock_b;
+    if ($socket_buffer) {
+        setsockopt($sock_a, SOL_SOCKET, SO_SNDBUF, $socket_buffer) or die "SO_SNDBUF: $!";
+        setsockopt($sock_b, SOL_SOCKET, SO_RCVBUF, $socket_buffer) or die "SO_RCVBUF: $!";
+    }
     my $server = new_server($app, %opts);
     my $stream = IO::Async::Stream->new(read_handle => $sock_a, write_handle => $sock_a, on_read => sub { 0 });
     my $conn = PAGI::Server::Connection->new(
         stream => $stream, app => $app, protocol => $protocol, server => $server,
         h2_protocol => $server->{http2_protocol}, alpn_protocol => 'h2',
+        (map { exists $opts{$_} ? ($_ => $opts{$_}) : () } qw(write_high_watermark write_low_watermark)),
     );
     $server->add_child($stream);
     $conn->start;
@@ -171,6 +179,92 @@ subtest 'an event sent just before the server resets the stream arrives first' =
 # The streaming sends that run between the first of $k streams on one HTTP/2
 # connection starting and a ping on another connection being answered. Real
 # sockets, clients on the test's own loop, as stall-repro.pl has it.
+# A reset first sends the frames that were waiting for this pass's extraction
+# (the case above). Those can end the very stream being reset: here an earlier
+# reset of it was waiting behind held output. nghttp2 must not then be handed
+# a reset for a stream it has released (PAGI::Server::Connection's
+# _h2_reset_stream says why). None of this shows on the wire -- nghttp2 drops
+# the late frame -- so the case watches the server's own calls: the session's
+# submit_rst_stream is wrapped, calling through, and notes whether the
+# connection still had the stream. The resets are write_timeout's, and its
+# sweep is called here as the server's timer calls it, with a clock of the
+# test's own: the second reset has to come in the same loop pass as a paced
+# send, before that pass's extraction.
+subtest 'a reset is not submitted for a stream the waiting frames have just ended' => sub {
+    my (%go, %ran, @resets);
+    $go{$_} = $loop->new_future for qw(tick finish);
+    my $app = async sub {
+        my ($scope, $receive, $send) = @_;
+        if ($scope->{type} eq 'sse') {
+            await $send->({ type => 'sse.start' });
+            await $go{tick};
+            await $send->({ type => 'sse.send', data => 'tick' });   # its frames wait for this pass's extraction
+            $ran{tick} = 1;
+            await $go{finish};
+            await $send->({ type => 'sse.close' });
+            $ran{events} = 1;
+            return;
+        }
+        die "unsupported scope type\n" unless $scope->{type} eq 'http';
+        await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        # /fill sends more than the connection's buffer takes, so its output
+        # is held from here on; /slow's bytes then wait in its stream.
+        await $send->({ type => 'http.response.body', more => 1,
+            body => $scope->{path} eq '/fill' ? 'f' x 60_000 : 'x' x 1000 });
+        await $go{finish};
+        $ran{ $scope->{path} } = 1;
+    };
+    # The marks are far enough apart that what the client reads below makes
+    # room for more than one whole DATA frame (part of one may be waiting
+    # ahead of the resets) without reaching the low mark.
+    my $pair = h2_pair($app, write_high_watermark => 40_000, write_low_watermark => 5_000, socket_buffer => 4096);
+    my $conn = $pair->{conn};
+    my $submit = \&PAGI::Server::Protocol::HTTP2::Session::submit_rst_stream;
+    no warnings 'redefine';
+    local *PAGI::Server::Protocol::HTTP2::Session::submit_rst_stream = sub {
+        push @resets, [$_[1], $conn->_h2_stream_alive($_[1]) ? 'held by nghttp2' : 'released'];
+        goto &$submit;
+    };
+    submit($pair, path => '/events', @SSE);
+    exchange($pair) for 1 .. 3;
+    my @stalled = (submit($pair, path => '/fill'));
+    $loop->loop_once(0.01) for 1 .. 10;      # the client reads nothing
+    push @stalled, submit($pair, path => '/slow');
+    $loop->loop_once(0.01) for 1 .. 5;
+
+    my $now = time;
+    $conn->_h2_reset_write_stalled_streams($now, 1);          # the streams' clocks start
+    $conn->_h2_reset_write_stalled_streams($now + 100, 1);    # a hundred seconds on: both are reset
+    is([sort { $a->[0] <=> $b->[0] } @resets], [map { [$_, 'held by nghttp2'] } @stalled],
+        'write_timeout reset the two streams the client was not reading');
+    # The client takes some of what is waiting: the connection's buffer has
+    # room again, but is not yet low enough for the server to carry on by
+    # itself, so the two resets still wait in nghttp2.
+    my ($got, $tries) = (0, 0);
+    while ($got < 25_000 && ++$tries < 500) {
+        my $n = $pair->{sock}->sysread(my $buf, 25_000 - $got);
+        if ($n) { $got += $n; $pair->{client}->mem_recv($buf) }
+        $loop->loop_once(0.01);
+    }
+    is([grep { $conn->_h2_stream_alive($_) } @stalled], \@stalled,
+        "after the client read $got bytes both resets are still waiting");
+
+    # One pass: a paced send on the third stream, then the sweep again. Its
+    # reset sends the waiting frames first, the two earlier resets among them.
+    @resets = ();
+    $go{tick}->done;
+    ok($ran{tick}, 'the event was sent');
+    $conn->_h2_reset_write_stalled_streams($now + 200, 1);
+    is([grep { $conn->_h2_stream_alive($_) } @stalled], [], 'the sweep went to reset a stream again, which ended both');
+    is(\@resets, [], 'and no reset was submitted for a stream nghttp2 had released');
+
+    $go{finish}->done;
+    my $turns = 0;
+    exchange($pair) until ($ran{events} && $ran{'/fill'} && $ran{'/slow'}) || ++$turns > 5000;
+    ok($ran{events} && $ran{'/fill'} && $ran{'/slow'}, 'every application ran to its end');
+    stop_server($pair->{server});
+};
+
 sub sends_before_ping {
     my (%arg) = @_;
     my ($k, $path) = ($arg{k}, $arg{stream} // '/stream');
@@ -296,6 +390,15 @@ sub endless_streams {
         die "unsupported scope type\n" unless $scope->{type} eq 'http';
         my ($id) = $scope->{query_string} =~ /id=(\d+)/;
         await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        if ($scope->{path} eq '/burst') {
+            # Twelve sends at once: with the count spent, four go through and eight are held.
+            $state->{burst} = [map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 12];
+            await $receive->();                              # the request
+            $state->{burst_event} = await $receive->();      # parked until the stream ends
+            await $send->({ type => 'http.response.body', body => '' });
+            $state->{burst_finished} = 1;
+            return;
+        }
         until ($state->{stop}) {
             $state->{current}{$id} = $send->({ type => 'http.response.body', body => $LINE, more => 1 });
             $state->{count}{$id}++;
@@ -335,6 +438,39 @@ subtest 'a held send resolves when the client resets its stream' => sub {
     $state{stop} = 1;
     my $turns = 0;
     exchange($pair) until ($state{finished} // 0) >= 30 || ++$turns > 5000;
+    is($state{finished}, 30, 'and every application ran to its end');
+    stop_server($pair->{server});
+};
+
+# A callback the application put on a held send runs when the stream's end
+# resolves it. One that dies must not strand the stream's other held sends,
+# nor stop the rest of the stream's ending.
+subtest 'a callback that dies on a held send when the client resets its stream does not strand the others' => sub {
+    my %state;
+    my ($pair, @sids) = endless_streams(30, \%state);
+    my $burst = submit($pair, path => '/burst');
+    my $turns = 0;
+    until ($state{burst}) {
+        die "the burst never ran\n" if ++$turns > 5000;
+        exchange($pair);
+    }
+    my @held = grep { !$_->is_ready } @{ $state{burst} };
+    cmp_ok(scalar @held, '>=', 2, scalar(@held) . ' of its twelve sends are held');
+    $held[0]->on_done(sub { die "callback boom\n" });
+    $pair->{client}->submit_rst_stream($burst, 8);   # CANCEL
+    $pair->{sock}->syswrite($pair->{client}->mem_send);
+    my $escaped;
+    for my $turn (1 .. 5) { eval { $loop->loop_once(0.01); 1 } or $escaped = $@ }
+    is($escaped, undef, 'the death does not reach the event loop');
+    is(scalar(grep { !$_->is_done } @held), 0, 'five loop turns after the reset, every held send has resolved');
+    is($state{burst_event}{type}, 'http.disconnect', 'and its application was told the stream ended');
+    is([map { "$_->{level}: $_->{message}" } grep { $_->{message} =~ /callback boom/ } @log],
+        ["error: PAGI application error in a callback on a send's Future: callback boom"],
+        'the death was logged once, as an error');
+    @log = grep { $_->{message} !~ /callback boom/ } @log;
+    $state{stop} = 1;
+    $turns = 0;
+    exchange($pair) until (($state{finished} // 0) >= 30 && $state{burst_finished}) || ++$turns > 5000;
     is($state{finished}, 30, 'and every application ran to its end');
     stop_server($pair->{server});
 };

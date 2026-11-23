@@ -4987,15 +4987,7 @@ sub _serve_paced_sends {
         my $owner = shift @$scopes or next;              # the scope has gone
         my $waits = delete $owner->{_paced_waits} or next;   # settled when it ended
         $self->{_paced_sends}++;
-        for my $wait (@$waits) {
-            # Resolving runs the application's callbacks on the send; one
-            # that dies must not strand the scopes still waiting. A send
-            # the application cancelled ignores it.
-            next if eval { $wait->done; 1 };
-            my $error = $@;
-            chomp $error;
-            $self->_log(error => "PAGI application error in a callback on a send's Future: $error");
-        }
+        PAGI::Server::Connection::_resolve_paced_sends($self, $waits);
     }
     $self->_serve_paced_sends_soon if @$scopes;
     return;

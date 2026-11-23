@@ -255,6 +255,13 @@ sub endless_streams {
         die "unsupported scope type\n" unless $scope->{type} eq 'http';
         my ($id) = $scope->{query_string} =~ /id=(\d+)/;
         await $send->({ type => 'http.response.start', status => 200, headers => [] });
+        if ($scope->{path} eq '/burst') {
+            # Twelve sends at once: with the count spent, four go through and eight are held.
+            $state->{burst} = [map { $send->({ type => 'http.response.body', body => $LINE, more => 1 }) } 1 .. 12];
+            await($state->{parked} = $loop->new_future);
+            await $send->({ type => 'http.response.body', body => '' });
+            return;
+        }
         until ($state->{stop}) {
             $state->{current}{$id} = $send->({ type => 'http.response.body', body => $LINE, more => 1 });
             $state->{count}{$id}++;
@@ -426,6 +433,33 @@ subtest 'a callback that dies on a held send does not strand the others' => sub 
         ["error: PAGI application error in a callback on a send's Future: callback boom"],
         'and the death was logged once, as an error');
     @log = grep { $_->{message} !~ /callback boom/ } @log;
+    $_->{leave}->() for @clients;
+    stop_server($server);
+};
+
+# The same death when the held sends are resolved by their client leaving, not
+# by the queue being served.
+subtest 'a callback that dies on a held send when its client leaves does not strand the others' => sub {
+    my %state;
+    my ($server, @clients) = endless_streams(50, \%state);
+    my $burst = client($server);
+    $burst->{request}->(get('/burst'), $ENDED);
+    pump_until(sub { $state{burst} }) or die "the burst never ran\n";
+    my @held = grep { !$_->is_ready } @{ $state{burst} };
+    cmp_ok(scalar @held, '>=', 2, scalar(@held) . ' of its twelve sends are held');
+    $held[0]->on_done(sub { die "callback boom\n" });
+    $burst->{leave}->();
+    my $escaped;
+    for my $turn (1 .. 5) { eval { $loop->loop_once(0.01); 1 } or $escaped = $@ }
+    is($escaped, undef, 'the death does not reach the event loop');
+    is(scalar(grep { !$_->is_done } @held), 0, 'five loop turns after its client left, every held send has resolved');
+    is([map { "$_->{level}: $_->{message}" } grep { $_->{message} =~ /callback boom/ } @log],
+        ["error: PAGI application error in a callback on a send's Future: callback boom"],
+        'and the death was logged once, as an error');
+    @log = grep { $_->{message} !~ /callback boom/ } @log;
+    $state{stop} = 1;
+    $state{parked}->done;
+    pump_until(sub { ($state{finished} // 0) >= 50 });
     $_->{leave}->() for @clients;
     stop_server($server);
 };

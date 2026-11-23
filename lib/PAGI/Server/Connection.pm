@@ -2142,8 +2142,13 @@ sub _h2_reset_stream {
     return unless $self->_h2_stream_alive($stream_id);
     eval {
         # Frames waiting for this pass's extraction belong to sends that have
-        # already resolved; the reset would discard them.
-        $self->_h2_write_pending if delete $self->{h2_extract_soon};
+        # already resolved; the reset would discard them. Sending them can end
+        # this very stream -- an earlier reset of it, or its END_STREAM, was
+        # waiting behind them -- so its liveness is read again.
+        if (delete $self->{h2_extract_soon}) {
+            $self->_h2_write_pending;
+            return unless $self->_h2_stream_alive($stream_id);
+        }
         $self->{h2_session}->submit_rst_stream($stream_id, $code);
         $self->_h2_write_pending;
     };
@@ -5367,7 +5372,23 @@ sub _cancel_drain_waiters {
 sub _settle_paced_sends {
     my ($self, $owner) = @_;
     my $waits = delete $owner->{_paced_waits} or return;
-    $_->done for @$waits;   # one the application cancelled ignores it
+    _resolve_paced_sends($self, $waits);
+    return;
+}
+
+# Resolves the held sends in $waits; one the application cancelled ignores it.
+# Resolving a send runs, here and now, the callbacks the application put on
+# its Future. One that dies is reported through $reporter's _log (the server
+# serving its queue, or the connection that is ending) and must not strand the
+# sends still to resolve, nor stop what the caller does next.
+sub _resolve_paced_sends {
+    my ($reporter, $waits) = @_;
+    for my $wait (@$waits) {
+        next if eval { $wait->done; 1 };
+        my $error = $@;
+        chomp $error;
+        $reporter->_log(error => "PAGI application error in a callback on a send's Future: $error");
+    }
     return;
 }
 
