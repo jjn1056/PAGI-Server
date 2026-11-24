@@ -77,6 +77,13 @@ other connections; after `max_disconnect_receives` (default 100) such
 receives now fail. Check for the end event, or set
 `--max-disconnect-receives 0` to restore unbounded re-delivery.
 
+### PAGI Www 0.8: `run_until_end` on the connection object
+
+Scopes report `spec_version` `'0.8'`, and `$scope->{'pagi.connection'}`
+has `run_until_end($code)`: run work that should stop when the client leaves
+in it, and send the terminal event only when the work finished. See
+PAGI::Upgrading, "0.7 TO 0.8", in PAGI.
+
 ### PAGI Www 0.7: sends go out in the order they were called
 
 An application may now issue a `$send` before an earlier one has resolved,
