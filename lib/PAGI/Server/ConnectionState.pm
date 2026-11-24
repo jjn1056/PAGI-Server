@@ -553,6 +553,24 @@ sub _until_end_outcome {
     return Future->done($work->get);
 }
 
+# Resolves the cancelled calls with an empty list. Application code on a call
+# (an on_done) may die; the others must still resolve.
+sub _until_end_resolve {
+    my ($self, @results) = @_;
+    for my $result (@results) {
+        eval { $result->done; 1 }
+            or $self->_log(error => "run_until_end callback error: " . _until_end_error($@));
+    }
+    return;
+}
+
+# An exception as one log sentence: its first line, without the newline.
+sub _until_end_error {
+    my ($error) = @_;
+    my ($first) = split /\n/, ($error // '');
+    return $first // '';
+}
+
 # A Future that resolves with an empty list on a later turn of the loop. The
 # server is held directly: once the scope has ended (inside an on_end
 # callback, say) the weakly held connection may already be gone.
@@ -571,7 +589,12 @@ sub _end_until_end_calls {
     my ($self) = @_;
     my @calls = values %{ $self->{_until_end} };
     $self->{_until_end} = {};
-    $_->{work}->cancel for @calls;
+    for my $call (@calls) {
+        # Application code (an on_cancel on the work) may die; the other calls
+        # and the end's callbacks must still be delivered.
+        eval { $call->{work}->cancel; 1 }
+            or $self->_log(error => "run_until_end work cancel error: " . _until_end_error($@));
+    }
     return map { $_->{result} } @calls;
 }
 
@@ -809,7 +832,7 @@ sub _mark_disconnected {
         $self->{_on_abort}           = undef;
 
         # The cancelled calls resolve with an empty list.
-        $_->done for @until_end;
+        $self->_until_end_resolve(@until_end);
     }, $sync);
 }
 
@@ -893,7 +916,7 @@ sub _mark_complete {
         $self->{_on_abort}           = undef;
 
         # The cancelled calls resolve with an empty list.
-        $_->done for @until_end;
+        $self->_until_end_resolve(@until_end);
     });
 }
 

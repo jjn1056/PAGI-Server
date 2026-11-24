@@ -176,6 +176,28 @@ $case{release} = async sub {
     await finish($send);
 };
 
+# Application code that dies while the end is delivered -- a work's
+# on_cancel, a call's on_done -- must not keep the other calls, on_end or
+# end_future from settling.
+$case{'callback-dies'} = async sub {
+    my ($conn, $send) = @_;
+    await start($send);
+    await $send->({ type => 'http.response.body', body => "started\n", more => 1 });
+    my %seen;
+    $conn->on_end(sub { $seen{on_end} = 1 });
+    $conn->end_future->on_done(sub { $seen{end_future} = 1 })->retain;
+    my $exploding_work = pause(30);
+    $exploding_work->on_cancel(sub { die "on_cancel exploded\n" });
+    my $first  = $conn->run_until_end(sub { $exploding_work });
+    my $second = $conn->run_until_end(sub { pause(30) });
+    $second->on_done(sub { die "on_done exploded\n" });
+    my @third = await $conn->run_until_end(sub { pause(30) });
+    await pause(0.05);
+    $obs{'callback-dies'} = { %seen, third => \@third,
+        first  => [ $first->is_done ? $first->get : 'not done' ],
+        second => [ $second->is_done ? $second->get : 'not done' ] };
+};
+
 my $app = async sub {
     my ($scope, $receive, $send) = @_;
     die "unsupported scope type: $scope->{type}\n" unless $scope->{type} eq 'http';
@@ -282,8 +304,19 @@ subtest 'many calls on one open scope hold nothing once settled' => sub {
     is $obs{release}, { held => 0, connected => 1 }, 'no $code or work kept, while the scope is open';
 };
 
+subtest 'application code dying in the end delivery strands nothing' => sub {
+    request('callback-dies', 1);
+    ok pump_until(sub { $obs{'callback-dies'} }), 'the last call returned';
+    is $obs{'callback-dies'},
+        { first => [], second => [], third => [], on_end => 1, end_future => 1 },
+        'every call resolved empty; on_end ran; end_future resolved';
+};
+
 $server->shutdown->get;
 $loop->remove($server);
-is [ grep { !/\A(?:listening|Using default max_connections)/ } map { $_->{message} // '' } @log ], [],
-    'nothing logged';
+my @messages = map { $_->{message} // '' } @log;
+my @exploded = grep { /\Arun_until_end .*exploded\z/ } @messages;
+is scalar(@exploded), 2, 'each death in the delivery was logged' or diag join "\n", @messages;
+is [ grep { !/\A(?:listening|Using default max_connections)/ && !/\Arun_until_end .*exploded\z/ } @messages ], [],
+    'nothing else logged';
 done_testing;
