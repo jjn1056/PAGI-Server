@@ -19,7 +19,7 @@ BEGIN {
 
 # PAGI::Spec::Www 0.7, run_until_end, over HTTP/2: the end of an http or an
 # sse scope reaches a pending call. The client resets its stream while the
-# work waits; the call returns an empty list, and the work is already
+# work waits; the call resolves with 0, and the work is already
 # cancelled on the first line after the await. The contract itself is
 # t/run-until-end-contract.t; this file checks only that the protocol
 # delivers its end to the method.
@@ -136,7 +136,7 @@ for my $type ('http', 'sse') {
 
         ok(pump_until(sub { $obs{seen} }), 'the call returned');
         is($obs{seen}, { result => [0], cancelled => 1, connected => 0, reason => 'client_closed' },
-            'empty list; the work cancelled on the first line after await; the end reported');
+            '0; the work cancelled on the first line after await; the end reported');
         stop_server($server);
     };
 }

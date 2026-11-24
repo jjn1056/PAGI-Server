@@ -267,14 +267,14 @@ subtest 'the client leaves: the work is cancelled before the call resolves' => s
     request('end-cancels', 1);
     ok pump_until(sub { $obs{'end-cancels'} }), 'the call returned';
     is $obs{'end-cancels'}, { result => [0], cancelled => 1, connected => 0, reason => 'client_closed' },
-        'empty list; the work already cancelled on the first line after await; the end reported';
+        '0; the work already cancelled on the first line after await; the end reported';
 };
 
 subtest 'a clean end cancels pending work too' => sub {
     like request('clean-end-cancels'), qr/last/, 'the terminal body went';
     ok pump_until(sub { $obs{'clean-end-cancels'} }), 'the call returned';
     is $obs{'clean-end-cancels'}, { result => [0], cancelled => 1, connected => 0, reason => undef },
-        'empty list; cancelled on the first line after await; a clean end';
+        '0; cancelled on the first line after await; a clean end';
 };
 
 subtest 'failures keep their error' => sub {

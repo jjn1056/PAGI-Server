@@ -81,7 +81,7 @@ receives now fail. Check for the end event, or set
 
 `$scope->{'pagi.connection'}` has `run_until_end($code)`: run work that should
 stop when the client leaves in it, and send the terminal event only when the
-work finished. See PAGI::Upgrading, "0.6 TO 0.7", in PAGI.
+call resolves with `1`. See PAGI::Upgrading, "0.6 TO 0.7", in PAGI.
 
 ### PAGI Www 0.7: sends go out in the order they were called
 

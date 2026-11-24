@@ -103,7 +103,7 @@ for my $type (qw(http sse websocket)) {
         # client_closed, or read_error when the close resets the connection over
         # bytes the client never read: either way an abnormal end.
         is($obs{seen}, { result => [0], cancelled => 1, connected => 0, reason => match(qr/\A(?:client_closed|read_error)\z/) },
-            'empty list; the work cancelled on the first line after await; an abnormal end');
+            '0; the work cancelled on the first line after await; an abnormal end');
         stop_server($server);
     };
 }
@@ -117,7 +117,7 @@ subtest 'websocket: a polite Close from the client is a clean end the call sees'
         type => 'close', buffer => pack('n', 1000), masked => 1)->to_bytes);
     ok(pump_until(sub { $obs{seen} }), 'the call returned');
     is($obs{seen}, { result => [0], cancelled => 1, connected => 0, reason => undef },
-        'empty list; the work cancelled; a clean end');
+        '0; the work cancelled; a clean end');
     close $sock;
     stop_server($server);
 };
@@ -156,7 +156,7 @@ subtest 'http: a server shutdown ends the scope, and the call sees it' => sub {
     my $down = $server->shutdown;          # shutdown_timeout => 1: the stream is cut then
     ok(pump_until(sub { $obs{seen} }, 10), 'the call returned');
     is($obs{seen}, { result => [0], cancelled => 1, connected => 0, reason => 'server_shutdown' },
-        'empty list; the work cancelled; server_shutdown');
+        '0; the work cancelled; server_shutdown');
     $down->get;
     $loop->remove($server);
     close $sock;
