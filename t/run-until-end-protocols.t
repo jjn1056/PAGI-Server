@@ -126,8 +126,11 @@ subtest 'http: the work is parked in a send held by backpressure when the client
     my %obs = (sent => 0);
     my $flood = sub {
         my ($send) = @_;
+        # Stops when the test says so: a server that never cancels it must fail
+        # this subtest, not hang the file (once the server leaves the loop,
+        # these sends no longer wait).
         return (async sub {
-            while (1) { $obs{sent}++; await $send->({ type => 'http.response.body', body => 'x' x 1024, more => 1 }) }
+            until ($obs{stop}) { $obs{sent}++; await $send->({ type => 'http.response.body', body => 'x' x 1024, more => 1 }) }
         })->();
     };
     my $server = start_server(app_running('http', \%obs, $flood));
@@ -141,6 +144,7 @@ subtest 'http: the work is parked in a send held by backpressure when the client
     ok(pump_until(sub { $obs{seen} }), 'the call returned');
     is($obs{seen}{result}, [], 'empty list');
     is($obs{seen}{cancelled}, 1, 'the work cancelled');
+    $obs{stop} = 1;
     stop_server($server);
 };
 
