@@ -135,7 +135,7 @@ for my $type ('http', 'sse') {
         reset_stream($client, $client_sock, $stream_id);
 
         ok(pump_until(sub { $obs{seen} }), 'the call returned');
-        is($obs{seen}, { result => [], cancelled => 1, connected => 0, reason => 'client_closed' },
+        is($obs{seen}, { result => [0], cancelled => 1, connected => 0, reason => 'client_closed' },
             'empty list; the work cancelled on the first line after await; the end reported');
         stop_server($server);
     };
