@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# PAGI::Spec::Www 0.8, run_until_end, over HTTP/1.1: each scope type's end
+# PAGI::Spec::Www 0.7, run_until_end, over HTTP/1.1: each scope type's end
 # reaches a pending call. The contract itself is t/run-until-end-contract.t;
 # this file checks only that the protocol delivers its end to the method:
 # the client leaving (http, sse, websocket), a WebSocket client's polite

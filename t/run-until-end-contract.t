@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# PAGI::Spec::Www 0.8, "Connection Object Interface": run_until_end($code).
+# PAGI::Spec::Www 0.7, "Connection Object Interface": run_until_end($code).
 # Each case asserts only what the spec promises, through the public
 # connection object and real requests to a real server, so the file can move
 # into a conformance suite for any PAGI server.

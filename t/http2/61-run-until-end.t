@@ -17,7 +17,7 @@ BEGIN {
         or plan(skip_all => 'HTTP/2 not available (Net::HTTP2::nghttp2 0.014+ required)');
 }
 
-# PAGI::Spec::Www 0.8, run_until_end, over HTTP/2: the end of an http or an
+# PAGI::Spec::Www 0.7, run_until_end, over HTTP/2: the end of an http or an
 # sse scope reaches a pending call. The client resets its stream while the
 # work waits; the call returns an empty list, and the work is already
 # cancelled on the first line after the await. The contract itself is
