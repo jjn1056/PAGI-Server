@@ -78,7 +78,7 @@ L<IO::Async::Listener>, L<PAGI::Server>
 
 =head1 AUTHOR
 
-John Napiorkowski E<lt>jjnapiork@cpan.orgE<gt>
+John Napiorkowski E<lt>jjn1056@gmail.comE<gt>
 
 =head1 LICENSE
 

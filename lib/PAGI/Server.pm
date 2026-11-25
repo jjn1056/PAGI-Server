@@ -5977,7 +5977,7 @@ L<Net::HTTP2::nghttp2>, L<Future::IO>
 
 =head1 AUTHOR
 
-John Napiorkowski E<lt>jjnapiork@cpan.orgE<gt>
+John Napiorkowski E<lt>jjn1056@gmail.comE<gt>
 
 =head1 LICENSE
 
