@@ -144,6 +144,7 @@ subtest 'http: the work is parked in a send held by backpressure when the client
     ok(pump_until(sub { $obs{seen} }), 'the call returned');
     is($obs{seen}{result}, [], 'no value');
     is($obs{seen}{cancelled}, 1, 'the work cancelled');
+    is($obs{seen}{connected}, 0, 'the scope has ended');
     $obs{stop} = 1;
     stop_server($server);
 };
