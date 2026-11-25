@@ -33,13 +33,13 @@ my $streaming_app = async sub {
     my $conn = $scope->{'pagi.connection'};
     await $send->({ type => 'http.response.start', status => 200,
         headers => [['content-type', 'text/plain']], trailers => 1 });
-    my $completed = await $conn->run_until_end(async sub {
+    await $conn->run_until_end(async sub {
         for my $n (1 .. 3) {
             await $loop->delay_future(after => 0.3) if $n > 1;
             await $send->({ type => 'http.response.body', body => "Chunk $n\n", more => 1 });
         }
     });
-    return unless $completed;
+    return unless $conn->is_connected;
     await $send->({ type => 'http.response.body', body => '', more => 0 });
     await $send->({ type => 'http.response.trailers', headers => [['x-stream-complete', '1']] });
 };

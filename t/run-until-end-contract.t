@@ -35,10 +35,11 @@ my %case;
 $case{results} = async sub {
     my ($conn, $send) = @_;
     await start($send);
-    # The work's own values are discarded: only the status comes back.
+    # The call resolves with no value; the work's own values are not passed on.
     $obs{results} = {
-        values => [ await $conn->run_until_end(async sub { (7, 'seven') }) ],
-        false  => [ await $conn->run_until_end(sub { Future->done(0) }) ],
+        values    => [ await $conn->run_until_end(async sub { (7, 'seven') }) ],
+        false     => [ await $conn->run_until_end(sub { Future->done(0) }) ],
+        connected => $conn->is_connected,
     };
     await finish($send);
 };
@@ -130,7 +131,10 @@ $case{'already-ended'} = async sub {
 $case{'abort-done'} = async sub {
     my ($conn, $send) = @_;
     await start($send);
-    $obs{'abort-done'} = [ await $conn->run_until_end(sub { $conn->abort('stopping'); Future->done(42) }) ];
+    $obs{'abort-done'} = {
+        result    => [ await $conn->run_until_end(sub { $conn->abort('stopping'); Future->done(42) }) ],
+        connected => $conn->is_connected,
+    };
 };
 
 $case{'abort-fail'} = async sub {
@@ -214,7 +218,7 @@ $case{'finished-after-leave'} = async sub {
             return 'saw the disconnect' if $event->{type} eq 'http.disconnect';
         }
     });
-    $obs{'finished-after-leave'} = { result => \@r, reason => $conn->disconnect_reason };
+    $obs{'finished-after-leave'} = { result => \@r, connected => $conn->is_connected, reason => $conn->disconnect_reason };
 };
 
 my $app = async sub {
@@ -257,23 +261,23 @@ sub request {
     return $got;
 }
 
-subtest 'the work finishes on an open scope: 1' => sub {
+subtest 'the work finishes on an open scope: no value, still connected' => sub {
     like request('results'), qr/done/, 'response completed';
     pump_until(sub { $obs{results} });
-    is $obs{results}, { values => [1], false => [1] }, 'exactly 1, whatever the work returned';
+    is $obs{results}, { values => [], false => [], connected => 1 }, 'no value, whatever the work returned; the client is there';
 };
 
 subtest 'the client leaves: the work is cancelled before the call resolves' => sub {
     request('end-cancels', 1);
     ok pump_until(sub { $obs{'end-cancels'} }), 'the call returned';
-    is $obs{'end-cancels'}, { result => [0], cancelled => 1, connected => 0, reason => 'client_closed' },
+    is $obs{'end-cancels'}, { result => [], cancelled => 1, connected => 0, reason => 'client_closed' },
         '0; the work already cancelled on the first line after await; the end reported';
 };
 
 subtest 'a clean end cancels pending work too' => sub {
     like request('clean-end-cancels'), qr/last/, 'the terminal body went';
     ok pump_until(sub { $obs{'clean-end-cancels'} }), 'the call returned';
-    is $obs{'clean-end-cancels'}, { result => [0], cancelled => 1, connected => 0, reason => undef },
+    is $obs{'clean-end-cancels'}, { result => [], cancelled => 1, connected => 0, reason => undef },
         '0; cancelled on the first line after await; a clean end';
 };
 
@@ -300,21 +304,21 @@ subtest 'the caller cancels: the work is cancelled, the scope stays open' => sub
 subtest 'a call on an ended scope skips $code and resolves on a later turn' => sub {
     request('already-ended');
     pump_until(sub { $obs{'already-ended'} });
-    is $obs{'already-ended'}, { ran => 0, ready_in_call => 0, result => [0] }, 'skipped; later; 0';
+    is $obs{'already-ended'}, { ran => 0, ready_in_call => 0, result => [] }, 'skipped; later; no value';
 };
 
 subtest '$code ends its own scope' => sub {
     request($_) for qw(abort-done abort-fail abort-pending);
     pump_until(sub { $obs{'abort-pending'} });
-    is $obs{'abort-done'}, [0], 'a settled Future: the scope has ended, so 0';
+    is $obs{'abort-done'}, { result => [], connected => 0 }, 'a settled Future: no value, and the scope has ended';
     is $obs{'abort-fail'}, "database failed\n", 'a settled failure keeps its error';
-    is $obs{'abort-pending'}, { result => [0], cancelled => 1 }, 'a pending Future is cancelled by the end';
+    is $obs{'abort-pending'}, { result => [], cancelled => 1 }, 'a pending Future is cancelled by the end';
 };
 
 subtest 'a call from an on_end callback' => sub {
     request('from-on-end');
     ok pump_until(sub { $obs{'from-on-end'} }), 'it resolved';
-    is $obs{'from-on-end'}, { ran => 0, ready_in_call => 0, result => [0] }, 'skipped; later; 0';
+    is $obs{'from-on-end'}, { ran => 0, ready_in_call => 0, result => [] }, 'skipped; later; no value';
 };
 
 subtest 'many calls on one open scope hold nothing once settled' => sub {
@@ -323,18 +327,18 @@ subtest 'many calls on one open scope hold nothing once settled' => sub {
     is $obs{release}, { held => 0, connected => 1 }, 'no $code or work kept, while the scope is open';
 };
 
-subtest 'work that finishes after the client left: 0' => sub {
+subtest 'work that finishes after the client left: not connected' => sub {
     request('finished-after-leave', 1);
     ok pump_until(sub { $obs{'finished-after-leave'} }), 'the call returned';
-    is $obs{'finished-after-leave'}, { result => [0], reason => 'client_closed' },
-        'the work returned on its own, but the scope had ended: 0';
+    is $obs{'finished-after-leave'}, { result => [], connected => 0, reason => 'client_closed' },
+        'the work returned on its own, but the scope had ended: no ending to send';
 };
 
 subtest 'application code dying in the end delivery strands nothing' => sub {
     request('callback-dies', 1);
     ok pump_until(sub { $obs{'callback-dies'} }), 'the last call returned';
     is $obs{'callback-dies'},
-        { first => [0], second => [0], third => [0], on_end => 1, end_future => 1 },
+        { first => [], second => [], third => [], on_end => 1, end_future => 1 },
         'every call resolved empty; on_end ran; end_future resolved';
 };
 

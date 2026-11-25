@@ -80,8 +80,8 @@ receives now fail. Check for the end event, or set
 ### PAGI Www 0.7: `run_until_end` on the connection object
 
 `$scope->{'pagi.connection'}` has `run_until_end($code)`: run work that should
-stop when the client leaves in it, and send the terminal event only when the
-call resolves with `1`. See PAGI::Upgrading, "0.6 TO 0.7", in PAGI.
+stop when the client leaves in it, and send the terminal event after it only
+if `$conn->is_connected`. See PAGI::Upgrading, "0.6 TO 0.7", in PAGI.
 
 ### PAGI Www 0.7: sends go out in the order they were called
 

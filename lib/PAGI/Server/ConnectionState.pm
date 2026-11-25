@@ -461,13 +461,13 @@ sub end_future {
 
 =head2 run_until_end
 
-    my $completed = await $conn->run_until_end(async sub {
+    await $conn->run_until_end(async sub {
         for my $n (1 .. 5) {
             await $send->({ type => 'http.response.body', body => "$n\n", more => 1 });
             await Future::IO->sleep(1);
         }
     });
-    return unless $completed;    # the scope ended first
+    return unless $conn->is_connected;    # the scope ended first
     await $send->({ type => 'http.response.body', body => "done\n", more => 0 });
 
 Runs one operation while the scope is active; if the scope ends while the
@@ -477,13 +477,10 @@ Future standing for the work. The returned Future:
 
 =over 4
 
-=item * resolves with C<1> when the work finishes while the scope is still
-active;
-
-=item * resolves with C<0> when the scope has ended: the end arrived while the
-work was pending (the work is cancelled before this Future resolves, so code
-after an C<await> on it never runs alongside the work), or the work finished
-only after the scope had ended;
+=item * resolves, with no value, when the work finishes, and when the scope's
+end arrives while the work is pending. In the second case the work is
+cancelled before this Future resolves, so code after an C<await> on it never
+runs alongside the work, and the scope already reports its end;
 
 =item * fails with the work's failure, with the exception when C<$code> dies,
 when C<$code> returns something that is not a Future, and when something other
@@ -491,15 +488,15 @@ than the scope's end cancels the work while the scope is open.
 
 =back
 
-The work's own values are not passed back; keep them in a variable the work
-closes over. Why the scope ended is read from the connection afterwards:
-C<disconnect_reason>, C<disconnect_detail>, C<close_code>. On a scope that has
-already ended, C<$code> is not called and the Future resolves with C<0> on a
-later turn of the event loop. If C<$code> itself ends the scope, a Future it
-returns already failed keeps its failure; any other gives C<0>, the work
-cancelled if still pending. Cancelling the returned Future cancels the work and
-leaves the scope alone. Each call is released when it settles, so a scope that
-stays open can make many calls.
+Send data inside the work and the ending after the call, only if
+C<is_connected> is still true; C<disconnect_reason>, C<disconnect_detail> and
+C<close_code> say why a scope ended. The work's own values are not passed
+back; keep them in a variable the work closes over. On a scope that has
+already ended, C<$code> is not called and the Future resolves on a later turn
+of the event loop. If C<$code> itself ends the scope, a Future it returns
+already failed keeps its failure; one still pending is cancelled. Cancelling
+the returned Future cancels the work and leaves the scope alone. Each call is
+released when it settles, so a scope that stays open can make many calls.
 
 =cut
 
@@ -518,7 +515,7 @@ sub run_until_end {
         unless blessed($work) && $work->isa('Future');
 
     # Work already settled keeps its outcome, even when $code ended the scope.
-    return $self->_until_end_outcome($work) if $work->is_ready;
+    return _until_end_outcome($work) if $work->is_ready;
 
     # $code ended the scope and left the work pending: the end cancels it.
     unless ($self->{_connected}) {
@@ -534,7 +531,7 @@ sub run_until_end {
     weaken(my $weak_self = $self);
     $work->on_ready(sub {
         return unless $weak_self && delete $weak_self->{_until_end}{$id};
-        $weak_self->_until_end_outcome($work)->on_ready($result);
+        _until_end_outcome($work)->on_ready($result);
     });
     $result->on_cancel(sub {
         return unless $weak_self && delete $weak_self->{_until_end}{$id};
@@ -543,22 +540,22 @@ sub run_until_end {
     return $result;
 }
 
-# A settled work Future as run_until_end's outcome: 1 when it finished while
-# the scope was active, 0 when the scope had already ended, its failure, or a
-# failure naming the cancellation. The work's own values are not passed back.
+# A settled work Future as run_until_end's outcome: no value when it
+# finished, its failure, or a failure naming the cancellation. The work's own
+# values are not passed back.
 sub _until_end_outcome {
-    my ($self, $work) = @_;
+    my ($work) = @_;
     return Future->fail($UNTIL_END_CANCELLED) if $work->is_cancelled;
     return Future->fail($work->failure)        if $work->is_failed;
-    return Future->done($self->{_connected} ? 1 : 0);
+    return Future->done;
 }
 
-# Resolves the cancelled calls with 0. Application code on a call
+# Resolves the cancelled calls, with no value. Application code on a call
 # (an on_done) may die; the others must still resolve.
 sub _until_end_resolve {
     my ($self, @results) = @_;
     for my $result (@results) {
-        eval { $result->done(0); 1 }
+        eval { $result->done; 1 }
             or $self->_log(error => "run_until_end callback error: " . _until_end_error($@));
     }
     return;
@@ -571,7 +568,7 @@ sub _until_end_error {
     return $first // '';
 }
 
-# A Future that resolves with 0 on a later turn of the loop. The
+# A Future that resolves, with no value, on a later turn of the loop. The
 # server is held directly: once the scope has ended (inside an on_end
 # callback, say) the weakly held connection may already be gone.
 sub _until_end_later {
@@ -579,8 +576,8 @@ sub _until_end_later {
     my $conn   = $self->{_connection};
     my $server = $self->{_server} // ($conn ? $conn->{server} : undef);
     my $loop   = $server ? $server->loop : undef;
-    return Future->done(0) unless $loop;    # no event loop to defer to
-    return $loop->later->then(sub { Future->done(0) });
+    return Future->done unless $loop;    # no event loop to defer to
+    return $loop->later->then(sub { Future->done });
 }
 
 # Takes every pending call, cancels its work, and returns the calls' Futures
@@ -831,7 +828,7 @@ sub _mark_disconnected {
         $self->{_end_callbacks}      = [];
         $self->{_on_abort}           = undef;
 
-        # The cancelled calls resolve with 0.
+        # The cancelled calls resolve, with no value.
         $self->_until_end_resolve(@until_end);
     }, $sync);
 }
@@ -915,7 +912,7 @@ sub _mark_complete {
         $self->{_end_callbacks}      = [];
         $self->{_on_abort}           = undef;
 
-        # The cancelled calls resolve with 0.
+        # The cancelled calls resolve, with no value.
         $self->_until_end_resolve(@until_end);
     });
 }
