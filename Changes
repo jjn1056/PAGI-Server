@@ -50,6 +50,11 @@
     application's send failed, not inside PAGI::Server::Connection.
 
   [New]
+  - run_until_end($code) on pagi.connection (PAGI::Spec::Www 0.7): runs the
+    work $code returns while the scope is open and cancels it if the scope
+    ends first; the work is cancelled before the call resolves, which it
+    does with no value, and a call holds nothing once it settles. The
+    application sends the ending after the call if is_connected.
   - body_min_rate (default 500 bytes/s) and body_rate_grace (default 20s):
     once a request has waited body_rate_grace seconds for its body, the
     client must keep up body_min_rate on average or get 408 and a closed

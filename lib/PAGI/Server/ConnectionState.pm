@@ -5,7 +5,7 @@ use warnings;
 
 our $VERSION = '0.003000';
 
-use Scalar::Util qw(weaken);
+use Scalar::Util qw(weaken blessed refaddr);
 
 =encoding utf8
 
@@ -108,6 +108,10 @@ sub new {
 
         # Callbacks registered via on_end()
         _end_callbacks => [],
+
+        # run_until_end calls whose work is still pending, by refaddr; each
+        # removes itself when it settles, so the scope holds only live calls.
+        _until_end => {},
     }, $class;
 
     # Weaken to avoid circular reference: Connection -> ConnectionState -> Connection
@@ -455,6 +459,142 @@ sub end_future {
     return $self->{_end_future}->without_cancel;
 }
 
+=head2 run_until_end
+
+    await $conn->run_until_end(async sub {
+        for my $n (1 .. 5) {
+            await $send->({ type => 'http.response.body', body => "$n\n", more => 1 });
+            await Future::IO->sleep(1);
+        }
+    });
+    return unless $conn->is_connected;    # the scope ended first
+    await $send->({ type => 'http.response.body', body => "done\n", more => 0 });
+
+Runs one operation while the scope is active; if the scope ends while the
+operation is pending, the server cancels it (L<PAGI::Spec::Www/"Connection
+Object Interface">). C<$code> is called once, with no arguments, and returns a
+Future standing for the work. The returned Future:
+
+=over 4
+
+=item * resolves, with no value, when the work finishes, and when the scope's
+end arrives while the work is pending. In the second case the work is
+cancelled before this Future resolves, so code after an C<await> on it never
+runs alongside the work, and the scope already reports its end;
+
+=item * fails with the work's failure, with the exception when C<$code> dies,
+when C<$code> returns something that is not a Future, and when something other
+than the scope's end cancels the work while the scope is open.
+
+=back
+
+Send data inside the work and the ending after the call, only if
+C<is_connected> is still true; C<disconnect_reason>, C<disconnect_detail> and
+C<close_code> say why a scope ended. The work's own values are not passed
+back; keep them in a variable the work closes over. On a scope that has
+already ended, C<$code> is not called and the Future resolves on a later turn
+of the event loop. If C<$code> itself ends the scope, a Future it returns
+already failed keeps its failure; one still pending is cancelled. Cancelling
+the returned Future cancels the work and leaves the scope alone. Each call is
+released when it settles, so a scope that stays open can make many calls.
+
+=cut
+
+my $UNTIL_END_NOT_A_FUTURE = "run_until_end's callback must return a Future, the work to stop when the scope ends (an async sub returns one)\n";
+my $UNTIL_END_CANCELLED    = "the work given to run_until_end was cancelled while the scope was still open\n";
+
+sub run_until_end {
+    my ($self, $code) = @_;
+    require Future;   # loaded lazily, as end_future does: PAGI::Server picks XS or PP first
+
+    return $self->_until_end_later unless $self->{_connected};
+
+    my $work;
+    eval { $work = $code->(); 1 } or return Future->fail($@);
+    return Future->fail($UNTIL_END_NOT_A_FUTURE)
+        unless blessed($work) && $work->isa('Future');
+
+    # Work already settled keeps its outcome, even when $code ended the scope.
+    return _until_end_outcome($work) if $work->is_ready;
+
+    # $code ended the scope and left the work pending: the end cancels it.
+    unless ($self->{_connected}) {
+        $work->cancel;
+        return $self->_until_end_later;
+    }
+
+    my $result = Future->new;
+    my $call   = { work => $work, result => $result };
+    my $id     = refaddr $call;
+    $self->{_until_end}{$id} = $call;
+
+    weaken(my $weak_self = $self);
+    $work->on_ready(sub {
+        return unless $weak_self && delete $weak_self->{_until_end}{$id};
+        _until_end_outcome($work)->on_ready($result);
+    });
+    $result->on_cancel(sub {
+        return unless $weak_self && delete $weak_self->{_until_end}{$id};
+        $work->cancel;
+    });
+    return $result;
+}
+
+# A settled work Future as run_until_end's outcome: no value when it
+# finished, its failure, or a failure naming the cancellation. The work's own
+# values are not passed back.
+sub _until_end_outcome {
+    my ($work) = @_;
+    return Future->fail($UNTIL_END_CANCELLED) if $work->is_cancelled;
+    return Future->fail($work->failure)        if $work->is_failed;
+    return Future->done;
+}
+
+# Resolves the cancelled calls, with no value. Application code on a call
+# (an on_done) may die; the others must still resolve.
+sub _until_end_resolve {
+    my ($self, @results) = @_;
+    for my $result (@results) {
+        eval { $result->done; 1 }
+            or $self->_log(error => "run_until_end callback error: " . _until_end_error($@));
+    }
+    return;
+}
+
+# An exception as one log sentence: its first line, without the newline.
+sub _until_end_error {
+    my ($error) = @_;
+    my ($first) = split /\n/, ($error // '');
+    return $first // '';
+}
+
+# A Future that resolves, with no value, on a later turn of the loop. The
+# server is held directly: once the scope has ended (inside an on_end
+# callback, say) the weakly held connection may already be gone.
+sub _until_end_later {
+    my ($self) = @_;
+    my $conn   = $self->{_connection};
+    my $server = $self->{_server} // ($conn ? $conn->{server} : undef);
+    my $loop   = $server ? $server->loop : undef;
+    return Future->done unless $loop;    # no event loop to defer to
+    return $loop->later->then(sub { Future->done });
+}
+
+# Takes every pending call, cancels its work, and returns the calls' Futures
+# for the end delivery to resolve once the terminal callbacks have run.
+sub _end_until_end_calls {
+    my ($self) = @_;
+    my @calls = values %{ $self->{_until_end} };
+    $self->{_until_end} = {};
+    for my $call (@calls) {
+        # Application code (an on_cancel on the work) may die; the other calls
+        # and the end's callbacks must still be delivered.
+        eval { $call->{work}->cancel; 1 }
+            or $self->_log(error => "run_until_end work cancel error: " . _until_end_error($@));
+    }
+    return map { $_->{result} } @calls;
+}
+
 =head2 on_disconnect
 
     $conn->on_disconnect(sub {
@@ -646,7 +786,7 @@ sub _mark_disconnected {
     # No abnormal-end observers: release unused hooks without scheduling an
     # empty delivery. Late observers read the terminal facts above.
     unless (@{$self->{_callbacks}} || @{$self->{_end_callbacks}}
-            || $self->{_future} || $self->{_end_future}) {
+            || $self->{_future} || $self->{_end_future} || %{$self->{_until_end}}) {
         $self->{_complete_callbacks} = [];
         $self->{_on_abort} = undef;
         return;
@@ -658,6 +798,9 @@ sub _mark_disconnected {
     # immediately in its own registering call (the spec's one exception); it is
     # handled by on_disconnect/on_end, not by these lists.
     $self->_deliver_terminal(sub {
+        # Pending run_until_end work is cancelled before anyone resumes.
+        my @until_end = $self->_end_until_end_calls;
+
         # Resolve futures if they exist (lazy - may not have been created).
         # end_future is the all-outcome sibling; on this path it carries the reason.
         if ($self->{_future} && !$self->{_future}->is_ready) {
@@ -684,6 +827,9 @@ sub _mark_disconnected {
         $self->{_complete_callbacks} = [];
         $self->{_end_callbacks}      = [];
         $self->{_on_abort}           = undef;
+
+        # The cancelled calls resolve, with no value.
+        $self->_until_end_resolve(@until_end);
     }, $sync);
 }
 
@@ -730,7 +876,7 @@ sub _mark_complete {
     # No completion observers: release unused hooks without scheduling an
     # empty delivery. Late observers read the terminal facts above.
     unless (@{$self->{_complete_callbacks}} || @{$self->{_end_callbacks}}
-            || $self->{_end_future}) {
+            || $self->{_end_future} || %{$self->{_until_end}}) {
         $self->{_callbacks} = [];
         $self->{_on_abort}  = undef;
         return;
@@ -739,6 +885,9 @@ sub _mark_complete {
     # Deliver the signal on the event loop, never synchronously inside the
     # application's terminal $send (Www.pod "Callback invocation context").
     $self->_deliver_terminal(sub {
+        # Pending run_until_end work is cancelled before anyone resumes.
+        my @until_end = $self->_end_until_end_calls;
+
         # Resolve end_future if it exists. _reason stays undef on the clean path,
         # so the all-outcome sibling resolves with undef here.
         if ($self->{_end_future} && !$self->{_end_future}->is_ready) {
@@ -762,6 +911,9 @@ sub _mark_complete {
         $self->{_callbacks}          = [];
         $self->{_end_callbacks}      = [];
         $self->{_on_abort}           = undef;
+
+        # The cancelled calls resolve, with no value.
+        $self->_until_end_resolve(@until_end);
     });
 }
 
